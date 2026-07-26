@@ -61,8 +61,18 @@ struct DelegateInput {
     title: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     role: Option<AgentRole>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    model: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    provider: Option<String>,
     #[serde(default)]
     context: DelegateContext,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    worktree: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    tool_allow: Option<Vec<String>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    output_schema: Option<serde_json::Value>,
 }
 
 #[derive(Debug, Deserialize, Serialize)]
@@ -109,16 +119,76 @@ struct SwarmInput {
 }
 
 impl DelegateInput {
-    fn canonical_request(&self) -> DelegateRequest {
-        DelegateRequest {
+    fn parse_worktree(&self) -> Result<ChildWorktreePolicy, String> {
+        match self
+            .worktree
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+        {
+            None | Some("shared") => Ok(ChildWorktreePolicy::Shared),
+            Some("isolated") => Ok(ChildWorktreePolicy::Isolated),
+            Some(other) => Err(format!("worktree must be shared or isolated; got {other}")),
+        }
+    }
+
+    /// New-child vs resume union (design §28.1). Resume may only carry
+    /// `resume`, `task`, and `output_schema`.
+    fn validate_union(&self) -> Result<(), String> {
+        if self.resume.is_some() {
+            if self.role.is_some()
+                || self.model.is_some()
+                || self.provider.is_some()
+                || self.worktree.is_some()
+                || self.tool_allow.is_some()
+                || self.title.is_some()
+            {
+                return Err("resumed child accepts only resume, task, and output_schema".to_owned());
+            }
+            // context defaults to Inherit via serde; treat non-default as a policy field.
+            if self.context != DelegateContext::Inherit {
+                return Err("resumed child accepts only resume, task, and output_schema".to_owned());
+            }
+        }
+        Ok(())
+    }
+
+    fn to_isolation_request(&self) -> Result<crate::workflow::ChildIsolationRequest, String> {
+        self.validate_union()?;
+        let worktree = self.parse_worktree()?;
+        Ok(crate::workflow::ChildIsolationRequest {
+            item_id: "delegate".to_owned(),
+            context: if self.resume.is_some() {
+                // Resumed children keep original context; request carries none of the
+                // new-child policy fields.
+                DelegateContext::Inherit
+            } else {
+                self.context
+            },
+            worktree,
+            tool_allow: self.tool_allow.clone(),
+            model: self.model.clone(),
+            provider: self.provider.clone(),
+            permission_mode: None,
+        })
+    }
+
+    fn canonical_request(&self) -> Result<DelegateRequest, String> {
+        self.validate_union()?;
+        Ok(DelegateRequest {
             task: self.task.clone(),
             resume: self.resume.clone(),
             title: self.title.clone(),
             role: self.role,
             mode: AgentRunMode::Foreground,
-            context: self.context,
-            output_schema: None,
-        }
+            context: if self.resume.is_some() {
+                // Resumed children inherit original context from the agent snapshot.
+                DelegateContext::Inherit
+            } else {
+                self.context
+            },
+            output_schema: self.output_schema.clone(),
+        })
     }
 }
 
@@ -570,7 +640,14 @@ impl LuaWorkflowRunner {
                             "delegate title must be non-empty when present".to_owned(),
                         )));
                     }
-                    validate_delegate_request("Delegate", &input.canonical_request())
+                    let request = input.canonical_request().map_err(|message| {
+                        mlua::Error::external(WorkflowError::InvalidInput(message))
+                    })?;
+                    // Validate isolation fields (worktree grammar, resume union) before dispatch.
+                    let _isolation = input.to_isolation_request().map_err(|message| {
+                        mlua::Error::external(WorkflowError::InvalidInput(message))
+                    })?;
+                    validate_delegate_request("Delegate", &request)
                         .map_err(|error| invalid_tool_input(&error))?;
                     let input = canonical_input.clone();
                     let index = call_index.fetch_add(1, Ordering::Relaxed);

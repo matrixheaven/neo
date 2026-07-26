@@ -119,8 +119,12 @@ pub struct DelegateSwarmRequest {
     pub max_concurrency: Option<usize>,
 }
 
-/// Worktree policy carried on a child plan. Isolation semantics are owned by the
-/// worktree manager (Task 17); the default is shared workspace access.
+/// Worktree policy carried on a child plan.
+///
+/// Isolation is owned by [`crate::worktree::WorktreeManager`] and resolved through
+/// [`crate::workflow::runtime::lineage::resolve_child_isolation`] before child start.
+/// Default is shared workspace access. Unsupported isolated requests fail closed
+/// before any child agent is started; there is no auto-merge or dirty cleanup.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ChildWorktreePolicy {

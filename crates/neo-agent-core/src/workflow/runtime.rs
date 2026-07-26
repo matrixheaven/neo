@@ -47,10 +47,14 @@ pub mod lineage;
 #[path = "runtime_support.rs"]
 mod support;
 pub use lineage::{
-    LineageSeedInvocation, SeedArtifactRef, VerifiedPrefix, compute_prefix_digest_v1,
+    ChildIsolationRequest, LineageSeedInvocation, ParentChildAuthority, ResolvedChildContext,
+    ResolvedChildIsolation, ResolvedWorktreeBinding, SeedArtifactRef, VerifiedPrefix,
+    child_isolation_provenance, cleanup_isolated_worktree, compute_prefix_digest_v1,
     compute_prefix_digest_v2, extract_verified_prefix_v1, extract_verified_prefix_v2,
-    import_seed_artifact, latest_eligible_sequence_v1, latest_eligible_sequence_v2,
-    seed_pair_count_from_journal, split_usage_for_seed,
+    host_bounded_context_summary, import_seed_artifact, latest_eligible_sequence_v1,
+    latest_eligible_sequence_v2, permission_rank, resolve_child_context, resolve_child_isolation,
+    resolve_child_model, resolve_child_permission, resolve_child_tool_ceiling,
+    resolve_child_worktree, seed_pair_count_from_journal, split_usage_for_seed,
 };
 use support::{
     ReplayEntry, RunControl, add_usage, aggregate_usage, aggregate_usage_v2, bounded_summary,
@@ -1796,38 +1800,128 @@ impl WorkflowRuntime {
                     continue;
                 }
                 let item_id = plan.item_id.clone();
-                let invocation_id = format!("swarm_item_{}", uuid::Uuid::new_v4().as_simple());
-                self.append_swarm_item(
-                    run_id,
-                    JournalPayload::SwarmItemStarted {
-                        swarm_id: swarm_id.clone(),
-                        item_id: item_id.clone(),
-                        invocation_id: invocation_id.clone(),
+                // Resolve context/ceiling/worktree before any child start or
+                // SwarmItemStarted append (design §32). Unsupported isolation
+                // fails closed; tool_allow may only reduce; permission cannot escalate.
+                let workspace = deps
+                    .config
+                    .workspace_root
+                    .clone()
+                    .unwrap_or_else(|| PathBuf::from("."));
+                let parent_authority = lineage::ParentChildAuthority {
+                    permission_mode: deps.config.permission_mode,
+                    model: deps.config.model.clone(),
+                    model_aliases: std::collections::BTreeMap::new(),
+                    provider_ids: {
+                        let mut set = std::collections::HashSet::new();
+                        set.insert(deps.config.model.provider.0.clone());
+                        set
                     },
-                )
-                .await?;
-                let runtime = multi_agent.clone();
-                // Parent eligibility ∩ child tool_allow (ceiling may only reduce).
-                let child_role = plan.role.unwrap_or(role);
-                let mut deps = deps.clone().with_role(child_role);
-                deps.tools =
-                    std::sync::Arc::new(deps.tools.for_workflow_child(plan.tool_allow.as_deref()));
-                let swarm_id_run = swarm_id.clone();
-                let item_label = child.item.clone();
-                let child_context = plan.context;
-                in_flight.push(async move {
-                    let output = runtime
-                        .run_started_swarm_child_turn(
-                            deps,
-                            child.agent,
-                            &swarm_id_run,
-                            &item_label,
-                            child_context,
-                            |_| {},
+                    tools: deps.tools.for_workflow_child(None),
+                    workspace_root: workspace.clone(),
+                    parent_messages: Vec::new(),
+                };
+                // Prefer shared path without manager; isolated requires a configured manager later.
+                // Until a session-scoped WorktreeManager is injected, isolated fails before start.
+                let mut isolation_request = lineage::ChildIsolationRequest::from_child_plan(&plan);
+                // Model/provider aliases require a bound catalog. Until the host
+                // injects one, clear overrides so resolution does not invent
+                // providers — worktree/permission/tool ceilings still apply.
+                if parent_authority.model_aliases.is_empty() {
+                    isolation_request.model = None;
+                    isolation_request.provider = None;
+                }
+                let worktree_manager = None::<&crate::worktree::WorktreeManager>;
+                match lineage::resolve_child_isolation(
+                    &parent_authority,
+                    &isolation_request,
+                    worktree_manager,
+                ) {
+                    Ok(resolved) => {
+                        // Apply resolved permission/model/workspace to child deps.
+                        let mut deps = deps.clone().with_role(plan.role.unwrap_or(role));
+                        deps.config = deps.config.with_permission_mode(resolved.permission_mode);
+                        deps.config.model = resolved.model;
+                        if let Ok(cfg) = deps
+                            .config
+                            .clone()
+                            .with_workspace_root(resolved.worktree.workspace_root())
+                        {
+                            deps.config = cfg;
+                        }
+                        deps.config.instruction_inheritance =
+                            resolved.context.instruction_inheritance;
+                        deps.tools = std::sync::Arc::new(
+                            deps.tools.for_workflow_child(plan.tool_allow.as_deref()),
+                        );
+                        let invocation_id =
+                            format!("swarm_item_{}", uuid::Uuid::new_v4().as_simple());
+                        self.append_swarm_item(
+                            run_id,
+                            JournalPayload::SwarmItemStarted {
+                                swarm_id: swarm_id.clone(),
+                                item_id: item_id.clone(),
+                                invocation_id: invocation_id.clone(),
+                            },
                         )
-                        .await;
-                    (item_id, invocation_id, output)
-                });
+                        .await?;
+                        let runtime = multi_agent.clone();
+                        let swarm_id_run = swarm_id.clone();
+                        let item_label = child.item.clone();
+                        let child_context = resolved.context.mode;
+                        in_flight.push(async move {
+                            let output = runtime
+                                .run_started_swarm_child_turn(
+                                    deps,
+                                    child.agent,
+                                    &swarm_id_run,
+                                    &item_label,
+                                    child_context,
+                                    |_| {},
+                                )
+                                .await;
+                            (item_id, invocation_id, output)
+                        });
+                    }
+                    Err(error) => {
+                        // Fail before child start: durable item finish with isolation error.
+                        let invocation_id =
+                            format!("swarm_item_{}", uuid::Uuid::new_v4().as_simple());
+                        let outcome = WorkflowInvocationOutcome {
+                            ok: false,
+                            status: WorkflowOutcomeStatus::Failed,
+                            summary: error.to_string(),
+                            interruption: None,
+                            details: serde_json::json!({
+                                "error": error.to_string(),
+                                "error_code": error.code().as_str(),
+                                "isolation_failed_before_start": true,
+                            }),
+                            actual_usage: None,
+                            child_refs: Vec::new(),
+                        };
+                        self.append_swarm_item(
+                            run_id,
+                            JournalPayload::SwarmItemStarted {
+                                swarm_id: swarm_id.clone(),
+                                item_id: item_id.clone(),
+                                invocation_id: invocation_id.clone(),
+                            },
+                        )
+                        .await?;
+                        self.append_swarm_item(
+                            run_id,
+                            JournalPayload::SwarmItemFinished {
+                                swarm_id: swarm_id.clone(),
+                                item_id: item_id.clone(),
+                                invocation_id,
+                                outcome: outcome.clone(),
+                            },
+                        )
+                        .await?;
+                        item_outcomes.push((item_id, outcome));
+                    }
+                }
             }
 
             if in_flight.is_empty() {

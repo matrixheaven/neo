@@ -18,6 +18,7 @@ pub mod skills;
 pub mod tools;
 pub mod workflow;
 pub mod workspace_policy;
+pub mod worktree;
 mod xml_escape;
 
 pub use approval::{
