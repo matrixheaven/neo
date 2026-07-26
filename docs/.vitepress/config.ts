@@ -4,6 +4,16 @@ export default defineConfig({
   title: 'Neo',
   description: 'Neo — 交互式本地编程 Agent',
 
+  // Aegis internal design/work notes are not product docs; some contain bare
+  // angle-bracket placeholders that break the Vue markdown compiler.
+  srcExclude: ['aegis/**'],
+  // Product docs intentionally link into the monorepo (crates/, examples/);
+  // those paths are not VitePress routes.
+  ignoreDeadLinks: [
+    /\.\.\/\.\.\/\.\.\/crates\//,
+    /\.\.\/\.\.\/\.\.\/examples\//,
+  ],
+
   head: [
     ['meta', { name: 'theme-color', content: '#C678DD' }],
   ],
@@ -37,6 +47,7 @@ export default defineConfig({
                 { text: '会话与上下文', link: '/zh/guides/sessions' },
                 { text: '使用目标模式', link: '/zh/guides/goals' },
                 { text: '使用计划模式', link: '/zh/guides/plan-mode' },
+                { text: '本地 Workflow', link: '/zh/guides/workflows' },
                 { text: '常见使用案例', link: '/zh/guides/use-cases' },
               ],
             },
@@ -98,6 +109,7 @@ export default defineConfig({
                 { text: 'Sessions & Context', link: '/en/guides/sessions' },
                 { text: 'Using Goal Mode', link: '/en/guides/goals' },
                 { text: 'Using Plan Mode', link: '/en/guides/plan-mode' },
+                { text: 'Local Workflows', link: '/en/guides/workflows' },
                 { text: 'Common Use Cases', link: '/en/guides/use-cases' },
               ],
             },

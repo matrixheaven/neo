@@ -45,7 +45,8 @@ Typing `/` at the start of the prompt triggers command completion. Common comman
 | `/model [alias]` | Switch model (no arg opens the model picker) |
 | `/provider` | Show configured providers |
 | `/mcp` | View/manage MCP servers |
-| `/tasks` | View background tasks, including while a turn is running |
+| `/tasks` | View background tasks and workflow runs (phase, queue reason, awaiting input), including while a turn is running |
+| `/workflow` | Bare: one dynamic `RunWorkflow` capability. Named: `/workflow <name> [JSON]` host-direct launch |
 | `/plan [on\|off\|clear]` | Toggle plan mode |
 | `/goal <objective>` | Start/manage goal mode |
 | `/compact [instruction]` | Request a manual context compaction |

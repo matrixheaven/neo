@@ -171,32 +171,48 @@ max_background_log_bytes = 10485760
 
 ### `[runtime.workflow]` 子表
 
-`RunWorkflow` 的机器安全上限：
+本地 workflow 平台的宿主机器安全上限（Lua VM、存储与实际占用）。脚本、定义与模型工具输入不能设置或提高这些值。预测性未知键如 `token_cap`、`max_concurrency`、`projected_usage` 会被拒绝。
 
 ```toml
 [runtime.workflow]
 lua_source_bytes = 1048576
+manifest_bytes = 262144
 lua_vm_memory_bytes = 268435456
 pause_hook_interval = 10000
 max_uninterrupted_instructions = 100000000
 journal_record_bytes = 16777216
 journal_total_bytes = 4294967296
+artifact_record_bytes = 16777216
+artifact_total_bytes = 4294967296
+global_storage_bytes = 34359738368
+pending_record_bytes = 268435456
+task_output_page_bytes = 262144
+max_active_vms = 8
+max_active_workers = 8
+max_active_executors = 32
 swarm_concurrency = 4
-# token_cap = 0
 ```
 
 | 字段 | 类型 | 默认值 | 说明 |
 | --- | --- | --- | --- |
-| `lua_source_bytes` | u64 | `1048576`（1 MiB） | Lua source 大小上限 |
-| `lua_vm_memory_bytes` | u64 | `268435456`（256 MiB） | Lua VM 内存上限；还必须能转换为当前平台的 `usize` |
+| `lua_source_bytes` | u64 | `1048576`（1 MiB） | 每个定义/run 的 Lua source 上限 |
+| `manifest_bytes` | u64 | `262144`（256 KiB） | `.workflow.toml` 大小上限 |
+| `lua_vm_memory_bytes` | u64 | `268435456`（256 MiB） | 每个 VM 内存上限；须适配平台 `usize` |
 | `pause_hook_interval` | u64 | `10000` | pause/stop/resource 检查之间的 Lua 指令数（`1..=u32::MAX`） |
-| `max_uninterrupted_instructions` | u64 | `100000000` | 两次持久化 child invocation 之间允许的最大 Lua 指令数 |
-| `journal_record_bytes` | u64 | `16777216`（16 MiB） | 单条序列化 journal record 的大小上限 |
-| `journal_total_bytes` | u64 | `4294967296`（4 GiB） | 每个 workflow run 的 journal 总大小上限 |
-| `swarm_concurrency` | usize | `4` | workflow 创建 swarm 时的默认最大并发数 |
-| `token_cap` | u64 | 省略（`None`） | 按 provider 实际用量检查的可选上限；`0` 会阻止第一次 provider-backed 调用 |
+| `max_uninterrupted_instructions` | u64 | `100000000` | 两次持久化宿主 invocation 之间允许的最大 Lua 指令数 |
+| `journal_record_bytes` | u64 | `16777216`（16 MiB） | 单条序列化 journal record 上限 |
+| `journal_total_bytes` | u64 | `4294967296`（4 GiB） | 每个 run 的 journal 总上限 |
+| `artifact_record_bytes` | u64 | `16777216`（16 MiB） | 单个 artifact 载荷上限 |
+| `artifact_total_bytes` | u64 | `4294967296`（4 GiB） | 每个 run 的 artifact 字节上限 |
+| `global_storage_bytes` | u64 | `34359738368`（32 GiB） | 全局 workflow 存储上限（journal + artifact + metadata） |
+| `pending_record_bytes` | u64 | `268435456`（256 MiB） | 全局尚未 durable-sync 的 pending record 字节 |
+| `task_output_page_bytes` | u64 | `262144`（256 KiB） | TaskOutput 单页载荷上限 |
+| `max_active_vms` | usize | `8` | 同时活动的 Lua VM 数 |
+| `max_active_workers` | usize | `8` | 同时活动的 workflow worker 数 |
+| `max_active_executors` | usize | `32` | 同时活动的宿主 executor（child/tool 槽） |
+| `swarm_concurrency` | usize | `4` | workflow 创建 swarm 时的默认并发（不是总 child 数上限） |
 
-除 `token_cap` 外所有字段都必须为正；`pause_hook_interval` 还必须符合表中的范围。省略 `token_cap` 表示 workflow 不受 token 上限约束，并且 workflow 没有 wall-clock timeout。这些字段是机器安全控制，不是项目预算：Neo 不预测 token、成本、时间或 agent 用量，也不会基于预测自动暂停或降级 workflow。`RunWorkflow` 的模型 schema 不能设置这些上限或单独的并发值。
+所有字段必须为正；`pause_hook_interval` 还需符合上表范围。**没有** workflow token cap，也**没有** workflow wall-clock timeout。全局准入只看 **实际占用**：许可不可用时 run 保持持久化并排队。这些是机器安全控制，不是项目预算 — Neo 不会预测 token、成本、时间或 agent 数来暂停/降级。Swarm 规模由这些物理上限与背压约束，而不是硬编码 `MAX_SWARM_CHILDREN`。见 [Workflows](../guides/workflows.md)。
 
 ### `[runtime.compaction]` 子表
 

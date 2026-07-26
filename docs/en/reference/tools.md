@@ -123,11 +123,11 @@ Registered by `GoalManager`; available when goal mode is enabled.
 
 | Tool | Purpose |
 | --- | --- |
-| `TaskList` | List background tasks and their status. |
-| `TaskOutput` | Retrieve the output of a running or completed background task. Prefer `block=true` when waiting for a known task to finish. |
-| `TaskStop` | Stop a running background task. |
+| `TaskList` | List background tasks and their status. Workflow entries may include phase, admission wait reason, and awaiting-user metadata. Supports pagination cursors rather than a hard 50-item cut. |
+| `TaskOutput` | Retrieve output for a running or completed background task. Prefer `block=true` when waiting for a known task to finish. For **workflow** tasks, use explicit views (`summary`, `journal`, `result`, `artifacts`, `artifact_content`) with opaque cursors; Neo never loads a complete journal into one result. |
+| `TaskStop` | Stop a running background task or cancel a workflow run. |
 | `TaskPause` | Request that a running workflow pause at its next durable invocation boundary; the active child finishes first. |
-| `TaskResume` | Resume a paused workflow by replaying matching journaled invocations before continuing live work. |
+| `TaskResume` | Resume a paused workflow by replaying matching journaled invocations before continuing live work. Cannot answer `awaiting_user` without a typed answer. |
 
 ## Timing
 
@@ -144,13 +144,25 @@ Registered by `GoalManager`; available when goal mode is enabled.
 | `AskUserQuestion` | Ask the user a question with structured options during execution. |
 | `CreateSkill` | Create a new skill at `~/.neo/skills/<name>/SKILL.md`. |
 | `MoveSkill` | Move a skill directory into its parent bundle, automatically generating a timestamped backup. |
-| `RunWorkflow` | Start a reviewed Lua workflow in the background. Its model input is exactly `name`, `description`, `phases`, `script`, and `args`; machine limits are runtime configuration, not model input. |
+| `RunWorkflow` | Start a reviewed dynamic Lua workflow in the background. Model input is exactly `name`, `description`, `phases`, `script`, and `args`; machine limits and concurrency are runtime configuration, not model input. Named registry launches use `/workflow <name>` or `neo workflow run` instead of this tool. |
 | `ListSkills` | List all discoverable skills (user / extra / builtin). |
 | `SummarizeSessions` | Read and summarize a local session transcript, useful for distilling it into a skill. |
 
-`RunWorkflow` requires the exact `/workflow` command to grant one launch capability. The launch is always background and returns a `run_id`, which is also its task ID. Use `TaskOutput` to inspect journal-backed status/output, `TaskPause` and `TaskResume` for boundary-safe control, and `TaskStop` to cancel. A pause waits for the active child invocation to finish. Ask / Auto / Yolo govern each child effect through the ordinary tool permission path; launch approval never bypasses child approval.
+### Workflow tools and control
 
-Workflow token handling uses actual provider usage only. There is no default token cap or wall-clock timeout, and Neo never predicts project cost, token use, duration, or agent count to pause or degrade a workflow. Historical session workflow cards remain readable, but sessions without durable workflow files cannot be resumed as workflows.
+`RunWorkflow` requires a bare `/workflow` capability grant first. Named launches (`/workflow <name> [JSON_OBJECT]`) are host-direct and do not call the model. Every launch is background and returns a `run_id` (also the task ID).
+
+| Action | How |
+| --- | --- |
+| Inspect | `TaskOutput` with workflow views/cursors; summary never embeds full journals or large artifacts |
+| Pause / resume / stop | `TaskPause`, `TaskResume`, `TaskStop` at durable boundaries |
+| Answer `awaiting_user` | `neo workflow answer …` (typed JSON); resume alone is not enough |
+| Fork / linked run | `neo workflow fork … --checkpoint <seq>` |
+| Prune storage | `neo workflow prune` (dry-run by default; `--yes` deletes only terminal unreferenced unpinned data) |
+
+Child agents from workflow Lua use required per-child `output_schema` values. Invalid child JSON receives **exactly one** tools-disabled repair turn in the same child session; no fuzzy JSON extraction. Swarm fan-out is heterogeneous and has no hard-coded total child cap; host `swarm_concurrency` is default concurrency only. Ask / Auto / Yolo govern every child and tool effect; launch approval never bypasses them.
+
+Usage accounting is **actual provider usage only**. There is no predictive token budget, agent budget, or workflow wall-clock timeout used to pause or degrade a run. Global admission is actual occupancy (VMs, workers, executors, storage). Historical cards without durable `workflows/<run_id>/` files remain readable but cannot be resumed. Full authoring guide: [Workflows](../guides/workflows.md).
 
 ## Sub-agent Toolset
 

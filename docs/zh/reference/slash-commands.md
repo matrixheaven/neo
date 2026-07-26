@@ -12,14 +12,21 @@
 | `/clear` | `/new` | `/new` 的别名。 |
 | `/resume` | — | 打开 session 选择器，恢复某个本地会话。 |
 | `/compact` | — | 请求手动压缩上下文；可附加指令 `/compact <instruction>`。 |
-| `/tasks` | — | 查看当前活跃的后台任务。 |
-| `/workflow` | — | 为下一次已审查的 `RunWorkflow` launch 授予一个 capability；不接受参数。 |
-| `/fork` | — | 为当前会话创建一个新的分支并跳转 |
+| `/tasks` | — | 打开任务浏览器：后台任务与 workflow run（phase、准入等待、等待输入、用量）。 |
+| `/workflow` | — | 裸命令：为下一次已审查的动态 `RunWorkflow` 授予一次 capability。命名：`/workflow <name> [JSON_OBJECT]` 解析 registry 并由宿主直启（零次模型调用）。 |
+| `/fork` | — | 为当前会话创建一个新的分支并跳转。 |
 | `/init [instruction]` | — | 仅创建或刷新工作区根目录的 `AGENTS.md`；嵌套的 `AGENTS.md` 由用户自行编写，`/init` 绝不生成或修改。后续文本会作为自然语言指导传入 init 工作流。 |
 
-`/init` 仅支持 TUI 交互模式。`/init`、`/skill:self-evo`、`/skill:create-skill` 等交互型工作流在 Auto 模式下可能会在开始前打开本地预检。Neo 会根据已解析的 slash command 机械触发该预检；模型不能自行决定切换权限模式。
+`/init` 仅支持 TUI 交互模式。`/init`、`/skill:self-evo`、`/skill:create-skill` 等交互流在 Auto 模式下可能会在开始前打开本地预检。Neo 会根据已解析的 slash command 机械触发该预检；模型不能自行决定切换权限模式。
 
-`/workflow` 只授权一次 launch，不授权其中的 child effect。`RunWorkflow` 始终在后台启动；每个 Delegate、swarm 或 shell effect 仍遵循当前 Ask / Auto / Yolo 权限模式。使用 `TaskPause`、`TaskResume`、`TaskStop` 和 `TaskOutput` 控制或查看返回的 task ID。
+### `/workflow` 形态
+
+| 形态 | 行为 |
+| --- | --- |
+| `/workflow` | 为下一次模型 `RunWorkflow` 调用授予一次性 session capability（绑定精确 source/args）。 |
+| `/workflow <name> [JSON_OBJECT]` | 宿主按 effective 优先级（`builtin < user < trusted project`）解析 `<name>`，校验 args，并在后台启动，**无模型往返**。Ask 显示 launch 审阅；Auto/Yolo 仍需显式 slash。 |
+
+Slash 匹配是精确的：`/workflowish` 不会授予 capability。Launch 审批只授权编排；之后每个 child 或 tool effect 仍走 Ask / Auto / Yolo。用 `TaskPause`、`TaskResume`、`TaskStop`、`TaskOutput`（分页视图/cursor）以及 headless `neo workflow answer` / `fork` / `prune` 控制与检查。见 [Workflows](../guides/workflows.md)。
 
 ## 模式控制
 

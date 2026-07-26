@@ -109,11 +109,11 @@ Neo 通过 `ToolRegistry` 向模型暴露一组内置工具。本文按类别列
 
 | 工具 | 用途 |
 | --- | --- |
-| `TaskList` | 列出后台任务及其状态。 |
-| `TaskOutput` | 取回一个运行中或已完成后台任务的输出。等待已知任务完成时优先使用 `block=true`。 |
-| `TaskStop` | 停止运行中的后台任务。 |
+| `TaskList` | 列出后台任务及其状态。Workflow 条目可包含 phase、准入等待原因与 awaiting-user 元数据。支持分页 cursor，而不是硬截断 50 条。 |
+| `TaskOutput` | 取回运行中或已完成后台任务的输出。等待已知任务完成时优先 `block=true`。对 **workflow** 任务使用显式视图（`summary`、`journal`、`result`、`artifacts`、`artifact_content`）与不透明 cursor；Neo 绝不会把完整 journal 一次加载进结果。 |
+| `TaskStop` | 停止运行中的后台任务，或取消 workflow run。 |
 | `TaskPause` | 请求运行中的 workflow 在下一个持久化 invocation 边界暂停；当前 child 会先完成。 |
-| `TaskResume` | 恢复已暂停 workflow；先回放匹配的 journal invocation，再继续执行 live work。 |
+| `TaskResume` | 恢复已暂停 workflow；先回放匹配的 journal invocation，再继续 live work。不能在没有类型化 answer 时解除 `awaiting_user`。 |
 
 ## 计时
 
@@ -130,13 +130,25 @@ Neo 通过 `ToolRegistry` 向模型暴露一组内置工具。本文按类别列
 | `AskUserQuestion` | 执行中向用户提出带结构化选项的问题。 |
 | `CreateSkill` | 在 `~/.neo/skills/<name>/SKILL.md` 创建新 skill。 |
 | `MoveSkill` | 将 skill 目录移入父级 bundle，自动生成时间戳备份。 |
-| `RunWorkflow` | 在后台启动已审查的 Lua workflow。模型输入严格只有 `name`、`description`、`phases`、`script`、`args`；机器上限属于 runtime 配置，不属于模型输入。 |
+| `RunWorkflow` | 在后台启动已审查的**动态** Lua workflow。模型输入严格只有 `name`、`description`、`phases`、`script`、`args`；机器上限与并发属于 runtime 配置，不属于模型输入。命名 registry 启动请用 `/workflow <name>` 或 `neo workflow run`，不要走此工具。 |
 | `ListSkills` | 列出所有可发现 skill（user / extra / builtin）。 |
 | `SummarizeSessions` | 读取并总结本地 session transcript，便于沉淀为 skill。 |
 
-`RunWorkflow` 必须先通过精确的 `/workflow` 命令授予一次 launch capability。它始终在后台启动并返回 `run_id`，该 ID 同时也是 task ID。用 `TaskOutput` 查看 journal-backed 状态/输出，用 `TaskPause` 与 `TaskResume` 做边界安全控制，用 `TaskStop` 取消。暂停会等待当前 child invocation 完成。Ask / Auto / Yolo 通过普通工具权限路径控制每个 child effect；批准 launch 不会绕过 child 审批。
+### Workflow 工具与控制
 
-Workflow token 处理只使用 provider 实际用量。默认没有 token cap 或 wall-clock timeout；Neo 不会预测项目成本、token 用量、耗时或 agent 数量来暂停或降级 workflow。历史 session 中的 workflow 卡片仍可读取，但缺少持久化 workflow 文件的旧 session 不能作为 workflow 恢复执行。
+`RunWorkflow` 必须先通过裸 `/workflow` 授予 launch capability。命名启动（`/workflow <name> [JSON_OBJECT]`）由宿主直启，不调用模型。每次 launch 都在后台，返回 `run_id`（亦即 task ID）。
+
+| 动作 | 方式 |
+| --- | --- |
+| 检查 | `TaskOutput` 的 workflow 视图/cursor；summary 从不内嵌完整 journal 或大 artifact |
+| 暂停 / 恢复 / 停止 | `TaskPause`、`TaskResume`、`TaskStop`（持久化边界） |
+| 回答 `awaiting_user` | `neo workflow answer …`（类型化 JSON）；仅 resume 不够 |
+| 分叉 / linked run | `neo workflow fork … --checkpoint <seq>` |
+| 清理存储 | `neo workflow prune`（默认 dry-run；`--yes` 仅删除终态、无引用、未 pin 的数据） |
+
+Workflow Lua 创建的 child 必须带每 child 的 `output_schema`。无效 child JSON 在同一 child session 上获得 **恰好一次** 禁用工具的 repair 回合；无模糊 JSON 提取。Swarm 扇出支持异构且无硬编码总 child 上限；宿主 `swarm_concurrency` 只是默认并发。Ask / Auto / Yolo 控制每个 child 与 tool effect；launch 审批不能绕过它们。
+
+用量统计 **只计 provider 实际用量**。没有用于暂停/降级的预测 token budget、agent budget 或 workflow wall-clock timeout。全局准入只看实际占用（VM、worker、executor、存储）。缺少持久化 `workflows/<run_id>/` 的历史卡片仍可阅读但不能恢复。完整编写指南：[Workflows](../guides/workflows.md)。
 
 ## 子 agent 工具集
 

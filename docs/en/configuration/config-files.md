@@ -171,32 +171,48 @@ max_background_log_bytes = 10485760
 
 ### `[runtime.workflow]` Sub-Table
 
-Machine-safety limits for `RunWorkflow`:
+Host-owned machine-safety limits for the local workflow platform (Lua VMs, storage, and actual occupancy). Scripts, definitions, and model tool inputs cannot set or raise these values. Unknown predictive keys such as `token_cap`, `max_concurrency`, and `projected_usage` are rejected.
 
 ```toml
 [runtime.workflow]
 lua_source_bytes = 1048576
+manifest_bytes = 262144
 lua_vm_memory_bytes = 268435456
 pause_hook_interval = 10000
 max_uninterrupted_instructions = 100000000
 journal_record_bytes = 16777216
 journal_total_bytes = 4294967296
+artifact_record_bytes = 16777216
+artifact_total_bytes = 4294967296
+global_storage_bytes = 34359738368
+pending_record_bytes = 268435456
+task_output_page_bytes = 262144
+max_active_vms = 8
+max_active_workers = 8
+max_active_executors = 32
 swarm_concurrency = 4
-# token_cap = 0
 ```
 
 | Field | Type | Default | Description |
 | --- | --- | --- | --- |
-| `lua_source_bytes` | u64 | `1048576` (1 MiB) | Maximum Lua source size |
-| `lua_vm_memory_bytes` | u64 | `268435456` (256 MiB) | Lua VM memory limit; must also fit the platform `usize` |
+| `lua_source_bytes` | u64 | `1048576` (1 MiB) | Maximum Lua source size per definition/run |
+| `manifest_bytes` | u64 | `262144` (256 KiB) | Maximum `.workflow.toml` size |
+| `lua_vm_memory_bytes` | u64 | `268435456` (256 MiB) | Per-VM memory ceiling; must fit platform `usize` |
 | `pause_hook_interval` | u64 | `10000` | Lua instructions between pause/stop/resource checks (`1..=u32::MAX`) |
-| `max_uninterrupted_instructions` | u64 | `100000000` | Maximum Lua instructions without a durable child invocation |
+| `max_uninterrupted_instructions` | u64 | `100000000` | Maximum Lua instructions without a durable host invocation |
 | `journal_record_bytes` | u64 | `16777216` (16 MiB) | Maximum serialized journal record size |
-| `journal_total_bytes` | u64 | `4294967296` (4 GiB) | Maximum journal size per workflow run |
-| `swarm_concurrency` | usize | `4` | Default maximum concurrency for workflow-created swarms |
-| `token_cap` | u64 | omitted (`None`) | Optional cap checked against actual provider usage; `0` blocks the first provider-backed call |
+| `journal_total_bytes` | u64 | `4294967296` (4 GiB) | Maximum journal size per run |
+| `artifact_record_bytes` | u64 | `16777216` (16 MiB) | Maximum single artifact payload |
+| `artifact_total_bytes` | u64 | `4294967296` (4 GiB) | Maximum artifact bytes per run |
+| `global_storage_bytes` | u64 | `34359738368` (32 GiB) | Global workflow storage ceiling (journals + artifacts + metadata) |
+| `pending_record_bytes` | u64 | `268435456` (256 MiB) | Global pending (not yet durable-synced) record bytes |
+| `task_output_page_bytes` | u64 | `262144` (256 KiB) | Maximum TaskOutput page payload |
+| `max_active_vms` | usize | `8` | Simultaneously active Lua VMs |
+| `max_active_workers` | usize | `8` | Simultaneously active workflow worker tasks |
+| `max_active_executors` | usize | `32` | Simultaneously active host executors (child/tool slots) |
+| `swarm_concurrency` | usize | `4` | Default concurrency for workflow-created swarms (not a total child-count cap) |
 
-All fields except `token_cap` must be positive; `pause_hook_interval` also has the range shown above. Omitting `token_cap` leaves workflows unbounded by tokens, and there is no workflow wall-clock timeout. These are machine-safety controls, not project budgets: Neo does not predict token, cost, time, or agent usage and does not automatically pause or degrade a workflow from a prediction. The `RunWorkflow` model schema cannot set these limits or a separate concurrency value.
+All fields must be positive; `pause_hook_interval` also has the range above. There is **no** workflow token cap and **no** workflow wall-clock timeout. Global admission uses **actual occupancy** only: when a permit is unavailable the run stays durable and queued. These are machine-safety controls, not project budgets — Neo does not predict token, cost, time, or agent count to pause or degrade a workflow. Swarm scale is bounded by these physical limits and backpressure, not by a hard-coded `MAX_SWARM_CHILDREN`. See [Workflows](../guides/workflows.md).
 
 ### `[runtime.compaction]` Sub-Table
 

@@ -25,16 +25,19 @@ Any path relative to `~/.neo/` in the documentation can be replaced with `$NEO_H
 │   └── wd_<slug>_<hash12>/  # One bucket per workspace
 │       └── session_<uuid>/  # One directory per session
 │           ├── state.json   # Session state (model, timestamps, etc.)
-│           ├── workflows/   # Durable workflow runs
+│           ├── workflows/   # Durable workflow runs (V2)
 │           │   └── <run_id>/
 │           │       ├── run.json
-│           │       └── journal.jsonl
+│           │       ├── journal.jsonl
+│           │       ├── artifacts/
+│           │       └── recovery-quarantine/
 │           └── agents/
 │               └── main/    # Main agent records
 │                   ├── wire.jsonl
 │                   ├── plans/
 │                   ├── goals/
 │                   └── tasks/
+├── workflows/               # User-scoped workflow definitions (paired .lua + .workflow.toml)
 ├── prompts/                 # Global prompt templates
 ├── skills/                  # Built-in + user skills
 ├── themes/                  # Theme JSON files (e.g. magenta-dark.json)
@@ -68,11 +71,23 @@ Fixed files inside each session directory:
 | `agents/main/plans/` | Main agent's plan files |
 | `agents/main/goals/` | Main agent's goal files |
 | `agents/main/tasks/` | Main agent's background task artifacts |
-| `workflows/<run_id>/run.json` | Immutable launch metadata: workflow identity, reviewed source/args, phases, launch source, and journal format version |
-| `workflows/<run_id>/journal.jsonl` | Append-only workflow state, invocation intent/result, control, and actual usage records |
+| `workflows/<run_id>/run.json` | Immutable launch metadata: identity, pinned definition revision/source, args, phases, lineage parent/checkpoint when linked, launch actor/source, machine-limit snapshot |
+| `workflows/<run_id>/journal.jsonl` | Append-only state transitions, invocations, schema-repair markers, user requests/answers, artifact commits, final result, actual usage, recovery |
+| `workflows/<run_id>/artifacts/` | Content-addressed immutable payload bytes referenced by journal records |
+| `workflows/<run_id>/recovery-quarantine/` | Torn-tail journal suffix quarantine (content-hash named); not run state |
 | `agents/<agent_id>/...` | Corresponding records for subagents (e.g. produced by Delegate) |
 
-Workflow files live under the session directory, not under transcript or background-task projections. `run.json` is immutable launch metadata. Current state, control, and actual provider usage come only from append-only `journal.jsonl`, which supports `TaskOutput`, pause/resume/stop, and host-exit recovery. Historical sessions remain readable; old workflow cards without `workflows/<run_id>/` files are historical projections only and cannot be resumed.
+Workflow **runs** live under the session directory, not under transcript or background-task projections. `run.json` is immutable launch metadata. Current state, control, and actual provider usage come only from append-only `journal.jsonl`. Large results may be artifact-referenced. `TaskOutput` pages journal/artifacts via cursors and never loads a complete journal synchronously.
+
+**Definitions** (not runs) are paired files:
+
+| Path | Scope |
+| --- | --- |
+| Built into Neo | `builtin` (e.g. `code-review`, `deep-research`, `large-refactor`) |
+| `$NEO_HOME/workflows/<name>.{lua,workflow.toml}` | user |
+| `<trusted-workspace>/.neo/workflows/<name>.{lua,workflow.toml}` | project (trust-gated) |
+
+Precedence is `builtin < user < trusted project`. Historical sessions remain readable; cards without durable `workflows/<run_id>/` files are projections only and cannot be resumed. Prune with `neo workflow prune` (dry-run by default; `--yes` deletes only terminal, unreferenced, unpinned storage). See [Workflows](../guides/workflows.md).
 
 ## Other Configuration File Locations
 
@@ -86,6 +101,7 @@ Workflow files live under the session directory, not under transcript or backgro
 | `~/.neo/trust.json` | Project trust | Records whether each workspace is trusted by the user (triggered when inputs like `AGENTS.md` are present); gates project `AGENTS.md` instruction loading |
 | `~/.neo/prompts/` | Global prompt templates | Directory returned by `global_prompts_dir()` |
 | `~/.neo/skills/` | Skill directory | Plus extra directories declared via `skill_path` / `extra_skill_dirs` in `config.toml` |
+| `~/.neo/workflows/` | User workflow definitions | Paired `<name>.lua` + `<name>.workflow.toml`; project copies under trusted `.neo/workflows/` |
 | `~/.neo/themes/*.json` | Themes | e.g. `magenta-dark.json`, loaded at TUI startup |
 
 `sessions_dir` supports a custom location (with `~` expansion), letting you place sessions on an external disk or tmpfs:
@@ -133,6 +149,7 @@ rm -rf ~/.neo           # Wipe entirely
 
 ## Next Steps
 
+- [Workflows](../guides/workflows.md) — authoring, launch, prune
 - [Configuration Files](config-files.md) — definitions of fields like `sessions_dir`
 - [Permission Modes](permissions.md) — semantics of `approval_rules.json`
 - [Provider Configuration](providers.md) — API key and endpoint configuration

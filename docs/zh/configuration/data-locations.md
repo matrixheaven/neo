@@ -25,16 +25,19 @@ Neo 把所有持久化数据集中放在 `~/.neo/`（或 `$NEO_HOME`）下。会
 │   └── wd_<slug>_<hash12>/  # 每个 workspace 一个桶
 │       └── session_<uuid>/  # 每次会话一个目录
 │           ├── state.json   # 会话状态（模型、时间戳等）
-│           ├── workflows/   # 持久化 workflow run
+│           ├── workflows/   # 持久化 workflow run（V2）
 │           │   └── <run_id>/
 │           │       ├── run.json
-│           │       └── journal.jsonl
+│           │       ├── journal.jsonl
+│           │       ├── artifacts/
+│           │       └── recovery-quarantine/
 │           └── agents/
 │               └── main/    # 主 agent 记录
 │                   ├── wire.jsonl
 │                   ├── plans/
 │                   ├── goals/
 │                   └── tasks/
+├── workflows/               # 用户 scope workflow 定义（成对 .lua + .workflow.toml）
 ├── prompts/                 # 全局 prompt 模板
 ├── skills/                  # 内置 + 用户技能
 ├── themes/                  # 主题 JSON 文件（如 magenta-dark.json）
@@ -68,11 +71,23 @@ Neo 把所有持久化数据集中放在 `~/.neo/`（或 `$NEO_HOME`）下。会
 | `agents/main/plans/` | 主 agent 的计划文件 |
 | `agents/main/goals/` | 主 agent 的目标文件 |
 | `agents/main/tasks/` | 主 agent 的后台任务产物 |
-| `workflows/<run_id>/run.json` | 不可变 launch metadata：workflow identity、已审查 source/args、phases、launch source 与 journal format version |
-| `workflows/<run_id>/journal.jsonl` | Append-only workflow 状态、invocation intent/result、控制与实际用量记录 |
+| `workflows/<run_id>/run.json` | 不可变 launch metadata：identity、钉住的 definition revision/source、args、phases、linked 时的 parent/checkpoint、launch actor/source、机器上限快照 |
+| `workflows/<run_id>/journal.jsonl` | Append-only 状态迁移、invocation、schema-repair 标记、用户请求/回答、artifact 提交、最终结果、实际用量、recovery |
+| `workflows/<run_id>/artifacts/` | 由 journal 引用的内容寻址不可变载荷 |
+| `workflows/<run_id>/recovery-quarantine/` | torn-tail journal 后缀隔离（内容哈希命名）；不是 run 状态 |
 | `agents/<agent_id>/...` | 子 agent（如 Delegate 产生的）对应记录 |
 
-Workflow 文件位于 session 目录下，不属于 transcript 或 background-task 投影。`run.json` 是不可变 launch metadata。当前状态、控制与 provider 实际用量只来自 append-only `journal.jsonl`，后者支持 `TaskOutput`、pause/resume/stop 和 host-exit recovery。历史 session 仍可读取；没有 `workflows/<run_id>/` 文件的旧 workflow 卡片只是历史投影，不能恢复执行。
+Workflow **run** 位于 session 目录下，不属于 transcript 或 background-task 投影。`run.json` 是不可变 launch metadata。当前状态、控制与 provider 实际用量只来自 append-only `journal.jsonl`。过大结果可能以 artifact 引用。`TaskOutput` 通过 cursor 分页 journal/artifact，绝不同步加载完整 journal。
+
+**定义**（不是 run）为成对文件：
+
+| 路径 | Scope |
+| --- | --- |
+| 编译进 Neo | `builtin`（如 `code-review`、`deep-research`、`large-refactor`） |
+| `$NEO_HOME/workflows/<name>.{lua,workflow.toml}` | user |
+| `<trusted-workspace>/.neo/workflows/<name>.{lua,workflow.toml}` | project（信任门控） |
+
+优先级为 `builtin < user < trusted project`。历史 session 仍可读取；没有持久化 `workflows/<run_id>/` 的卡片只是投影，不能恢复。用 `neo workflow prune` 清理（默认 dry-run；`--yes` 仅删除终态、无引用、未 pin 的存储）。见 [Workflows](../guides/workflows.md)。
 
 ## 其他配置文件位置
 
@@ -86,6 +101,7 @@ Workflow 文件位于 session 目录下，不属于 transcript 或 background-ta
 | `~/.neo/trust.json` | 项目信任 | 记录每个 workspace 是否被用户信任（当存在 `AGENTS.md` 等输入时触发）；门控项目 `AGENTS.md` 指令加载 |
 | `~/.neo/prompts/` | 全局 prompt 模板 | `global_prompts_dir()` 返回的目录 |
 | `~/.neo/skills/` | 技能目录 | 加上 `config.toml` 中 `skill_path` / `extra_skill_dirs` 声明的额外目录 |
+| `~/.neo/workflows/` | 用户 workflow 定义 | 成对 `<name>.lua` + `<name>.workflow.toml`；项目副本在受信 `.neo/workflows/` |
 | `~/.neo/themes/*.json` | 主题 | 如 `magenta-dark.json`，TUI 启动时加载 |
 
 `sessions_dir` 支持自定义位置（接受 `~` 展开），便于把会话放到外置磁盘或 tmpfs：
