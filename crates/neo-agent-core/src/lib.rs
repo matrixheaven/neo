@@ -3,6 +3,7 @@ pub mod compaction;
 pub mod events;
 pub mod goal;
 pub mod harness;
+mod html_escape;
 pub mod instructions;
 pub mod messages;
 pub mod mode;
@@ -17,7 +18,6 @@ pub mod skills;
 pub mod tools;
 pub mod workflow;
 pub mod workspace_policy;
-mod html_escape;
 mod xml_escape;
 
 pub use approval::{
