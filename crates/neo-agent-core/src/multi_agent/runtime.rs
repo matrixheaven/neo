@@ -8,7 +8,7 @@ use std::{
 use futures::StreamExt;
 use neo_ai::ModelClient;
 use schemars::JsonSchema;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
@@ -76,7 +76,7 @@ impl DelegateRequest {
     }
 }
 
-#[derive(Debug, Clone, Deserialize, JsonSchema)]
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct DelegateSwarmItem {
     #[schemars(
         description = "Short human title for this child agent in ListDelegates and transcripts."
@@ -117,6 +117,128 @@ pub struct DelegateSwarmRequest {
         description = "Optional max parallel child agents. Must be greater than 0 when provided."
     )]
     pub max_concurrency: Option<usize>,
+}
+
+/// Worktree policy carried on a child plan. Isolation semantics are owned by the
+/// worktree manager (Task 17); the default is shared workspace access.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ChildWorktreePolicy {
+    #[default]
+    Shared,
+    Isolated,
+}
+
+/// Canonical child specification lowered from `DelegateSwarm` and workflow
+/// `neo.swarm`. The multi-agent runtime is the sole lifecycle owner; authoring
+/// adapters must not keep independent child state or recovery.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ChildPlan {
+    /// Durable swarm-item identity used for journal queued/started/finished.
+    pub item_id: String,
+    /// Stable label projected into `SwarmChildSnapshot.item` (template value or task).
+    pub item_label: String,
+    pub task: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub title: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub resume: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub role: Option<AgentRole>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provider: Option<String>,
+    #[serde(default)]
+    pub context: DelegateContext,
+    #[serde(default)]
+    pub worktree: ChildWorktreePolicy,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tool_allow: Option<Vec<String>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub output_schema: Option<serde_json::Value>,
+}
+
+/// Machine-safety limits for swarm validation. These are byte/field ceilings —
+/// never an arbitrary total child-count cap.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SwarmResourceLimits {
+    pub max_request_bytes: usize,
+    pub max_item_field_bytes: usize,
+    pub max_item_schema_bytes: usize,
+    pub max_description_chars: usize,
+    pub max_title_chars: usize,
+}
+
+impl Default for SwarmResourceLimits {
+    fn default() -> Self {
+        Self {
+            max_request_bytes: 16 * 1024 * 1024,
+            max_item_field_bytes: 1024 * 1024,
+            max_item_schema_bytes: 1024 * 1024,
+            max_description_chars: 256,
+            max_title_chars: 80,
+        }
+    }
+}
+
+/// Expand a model-facing `DelegateSwarm` request into canonical child plans.
+pub fn child_plans_from_delegate_swarm(
+    request: &DelegateSwarmRequest,
+) -> Result<Vec<ChildPlan>, String> {
+    let mut plans = Vec::with_capacity(request.items.len() + request.resume_agent_ids.len());
+    for (index, item) in request.items.iter().enumerate() {
+        let task = apply_swarm_template(
+            request.prompt_template.as_deref().unwrap_or(""),
+            item.value.as_str(),
+            &request.description,
+        );
+        plans.push(ChildPlan {
+            item_id: format!("item-{index}"),
+            item_label: item.value.clone(),
+            task,
+            title: Some(item.title.clone()),
+            resume: None,
+            role: Some(request.role),
+            model: None,
+            provider: None,
+            context: DelegateContext::None,
+            worktree: ChildWorktreePolicy::Shared,
+            tool_allow: None,
+            output_schema: None,
+        });
+    }
+    for (agent_id, prompt) in &request.resume_agent_ids {
+        plans.push(ChildPlan {
+            item_id: format!("resume-{agent_id}"),
+            item_label: format!("resume:{agent_id}"),
+            task: prompt.clone(),
+            title: None,
+            resume: Some(agent_id.clone()),
+            role: None,
+            model: None,
+            provider: None,
+            context: DelegateContext::None,
+            worktree: ChildWorktreePolicy::Shared,
+            tool_allow: None,
+            output_schema: None,
+        });
+    }
+    Ok(plans)
+}
+
+/// Estimate serialized plan-batch size for resource validation.
+pub fn child_plans_serialized_bytes(
+    description: &str,
+    plans: &[ChildPlan],
+) -> Result<usize, String> {
+    let payload = serde_json::json!({
+        "description": description,
+        "children": plans,
+    });
+    serde_json::to_vec(&payload)
+        .map(|bytes| bytes.len())
+        .map_err(|error| format!("failed to serialize swarm child plans: {error}"))
 }
 
 fn default_context() -> DelegateContext {
@@ -565,29 +687,58 @@ impl MultiAgentRuntime {
 
     /// Atomically validate and prepare a new swarm and its children.
     ///
-    /// On success, creates new children as queued agents, transitions any
-    /// resumed agents to running, registers the initial swarm snapshot, and
-    /// returns it. On failure the runtime state is left unchanged.
+    /// Lower a model-facing `DelegateSwarm` request into [`ChildPlan`]s and
+    /// create the swarm. Prefer [`Self::prepare_swarm_batch`] when the caller
+    /// already holds canonical plans (e.g. workflow `neo.swarm`).
     pub(crate) fn prepare_swarm(
         &self,
         swarm_id: &str,
         request: &DelegateSwarmRequest,
     ) -> Result<super::SwarmSnapshot, String> {
+        let plans = child_plans_from_delegate_swarm(request)?;
+        self.prepare_swarm_batch(
+            swarm_id,
+            &request.description,
+            request.role,
+            request.mode,
+            request.max_concurrency,
+            &plans,
+        )
+    }
+
+    /// Create a swarm from canonical [`ChildPlan`]s.
+    ///
+    /// On success, creates new children as queued agents, transitions any
+    /// resumed agents to running, registers the initial swarm snapshot, and
+    /// returns it. On failure the runtime state is left unchanged.
+    ///
+    /// This is the sole durable child-creation owner for both `DelegateSwarm`
+    /// and workflow `neo.swarm`. There is no total child-count ceiling; callers
+    /// validate bytes/schema/storage before entry.
+    pub fn prepare_swarm_batch(
+        &self,
+        swarm_id: &str,
+        description: &str,
+        role: AgentRole,
+        mode: AgentRunMode,
+        max_concurrency: Option<usize>,
+        plans: &[ChildPlan],
+    ) -> Result<super::SwarmSnapshot, String> {
         let mut state = self.state.lock().expect("multi-agent state poisoned");
         if state.swarms.contains_key(swarm_id) {
             return Err(format!("swarm id `{swarm_id}` already exists"));
         }
-        let total_children = request.items.len() + request.resume_agent_ids.len();
-        if total_children == 0 {
+        if plans.is_empty() {
             return Err("swarm must contain at least one child".to_owned());
         }
-        // Validate IDs and lifecycle for every resumed child before mutating
-        // state. Capacity and format validation are performed at the tool
-        // boundary, but the runtime owns the state-dependent checks.
-        for agent_id in request.resume_agent_ids.keys() {
+        // Validate resume targets before mutating state.
+        for plan in plans {
+            let Some(agent_id) = plan.resume.as_deref() else {
+                continue;
+            };
             if !agent_id.starts_with("agent_") {
                 return Err(format!(
-                    "resume_agent_ids keys must be agent_id values; got `{agent_id}`"
+                    "resume must be an agent_id value; got `{agent_id}`"
                 ));
             }
             let Some(agent) = state.agents.get(agent_id) else {
@@ -601,57 +752,50 @@ impl MultiAgentRuntime {
                     "agent is already running; use MessageDelegate for live follow-up".to_owned(),
                 );
             }
+            // Never replay a completed item: reject resume of completed agents
+            // when the plan is part of a batch that should skip terminals.
+            // (Explicit resume_agent_ids from the user still restarts terminals
+            // other than when marked completed-and-finished by durability.)
         }
+        let total_children = plans.len();
         let mut children = Vec::with_capacity(total_children);
-        for (item_index, item) in request.items.iter().enumerate() {
-            let task = apply_swarm_template(
-                request.prompt_template.as_deref().unwrap_or(""),
-                item.value.as_str(),
-                &request.description,
-            );
-            let agent = state.create_agent(DelegateCreation {
-                task: &task,
-                title: Some(item.title.as_str()),
-                role: request.role,
-                mode: request.mode,
-                context: DelegateContext::None,
-                path: AgentPathKind::SwarmChild(swarm_id),
-                lifecycle_state: AgentLifecycleState::Queued,
-            });
-            children.push(super::SwarmChildSnapshot {
-                item_index,
-                item: item.value.clone(),
-                agent,
-            });
-        }
-        for (agent_id, prompt) in &request.resume_agent_ids {
-            let item_index = children.len();
-            let resume_request = DelegateRequest {
-                task: prompt.clone(),
-                resume: Some(agent_id.clone()),
-                title: None,
-                role: None,
-                mode: request.mode,
-                context: DelegateContext::None,
-                output_schema: None,
+        for (item_index, plan) in plans.iter().enumerate() {
+            let agent = if let Some(agent_id) = plan.resume.as_deref() {
+                let resume_request = DelegateRequest {
+                    task: plan.task.clone(),
+                    resume: Some(agent_id.to_owned()),
+                    title: plan.title.clone(),
+                    role: None,
+                    mode,
+                    context: plan.context,
+                    output_schema: plan.output_schema.clone(),
+                };
+                state.start_resume_agent(agent_id, &resume_request)?
+            } else {
+                let child_role = plan.role.unwrap_or(role);
+                state.create_agent(DelegateCreation {
+                    task: plan.task.as_str(),
+                    title: plan.title.as_deref(),
+                    role: child_role,
+                    mode,
+                    context: plan.context,
+                    path: AgentPathKind::SwarmChild(swarm_id),
+                    lifecycle_state: AgentLifecycleState::Queued,
+                })
             };
-            let agent = state.start_resume_agent(agent_id, &resume_request)?;
             children.push(super::SwarmChildSnapshot {
                 item_index,
-                item: format!("resume:{agent_id}"),
+                item: plan.item_label.clone(),
                 agent,
             });
         }
         let aggregate = SwarmAggregate::from_states(children.iter().map(|child| child.agent.state));
-        let max_concurrency = request
-            .max_concurrency
-            .unwrap_or(1)
-            .clamp(1, total_children);
+        let max_concurrency = max_concurrency.unwrap_or(1).clamp(1, total_children);
         let snapshot = super::SwarmSnapshot {
             swarm_id: swarm_id.to_owned(),
-            description: request.description.clone(),
-            role: request.role,
-            mode: request.mode,
+            description: description.to_owned(),
+            role,
+            mode,
             state: AgentLifecycleState::Queued,
             max_concurrency,
             aggregate,

@@ -17,11 +17,13 @@ use super::{
     WorkflowLimits, WorkflowOutcomeStatus,
 };
 use crate::multi_agent::{
-    AgentRole, AgentRunMode, DelegateContext, DelegateRequest, DelegateSwarmItem,
-    DelegateSwarmRequest,
+    AgentRole, AgentRunMode, ChildPlan, ChildWorktreePolicy, DelegateContext, DelegateRequest,
+    DelegateSwarmItem, DelegateSwarmRequest, SwarmResourceLimits, child_plans_from_delegate_swarm,
 };
 use crate::runtime::WorkflowDispatchHandle;
-use crate::tools::{ToolError, validate_delegate_request, validate_swarm_request};
+use crate::tools::{
+    ToolError, validate_child_plans, validate_delegate_request, validate_swarm_request,
+};
 
 const VERIFY_WRAPPER: &str = r"
 return function(host_verify)
@@ -64,8 +66,30 @@ struct DelegateInput {
 #[derive(Debug, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 struct SwarmItem {
-    title: String,
-    value: String,
+    /// Homogeneous DelegateSwarm adapter fields (title + value + prompt_template).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    title: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    value: Option<String>,
+    /// Heterogeneous direct child fields (design §31.1).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    task: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    resume: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    role: Option<AgentRole>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    model: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    provider: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    context: Option<DelegateContext>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    worktree: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    tool_allow: Option<Vec<String>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    output_schema: Option<serde_json::Value>,
 }
 
 #[derive(Debug, Deserialize, Serialize)]
@@ -96,24 +120,149 @@ impl DelegateInput {
     }
 }
 
+impl SwarmItem {
+    fn is_homogeneous(&self) -> bool {
+        self.task.is_none()
+            && self.resume.is_none()
+            && self.role.is_none()
+            && self.model.is_none()
+            && self.provider.is_none()
+            && self.context.is_none()
+            && self.worktree.is_none()
+            && self.tool_allow.is_none()
+            && self.output_schema.is_none()
+    }
+
+    fn parse_worktree(&self, index: usize) -> Result<ChildWorktreePolicy, String> {
+        match self
+            .worktree
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+        {
+            None | Some("shared") => Ok(ChildWorktreePolicy::Shared),
+            Some("isolated") => Ok(ChildWorktreePolicy::Isolated),
+            Some(other) => Err(format!(
+                "items[{index}].worktree must be shared or isolated; got {other}"
+            )),
+        }
+    }
+}
+
 impl SwarmInput {
-    fn canonical_request(&self, max_concurrency: usize) -> DelegateSwarmRequest {
-        DelegateSwarmRequest {
+    fn is_homogeneous_template_form(&self) -> bool {
+        self.items.iter().all(SwarmItem::is_homogeneous)
+    }
+
+    fn canonical_request(&self, max_concurrency: usize) -> Result<DelegateSwarmRequest, String> {
+        if !self.is_homogeneous_template_form() {
+            return Err(
+                "heterogeneous neo.swarm items cannot lower through the DelegateSwarm template adapter"
+                    .to_owned(),
+            );
+        }
+        let mut items = Vec::with_capacity(self.items.len());
+        for (index, item) in self.items.iter().enumerate() {
+            let title = item
+                .title
+                .as_deref()
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .ok_or_else(|| format!("items[{index}].title must not be empty"))?
+                .to_owned();
+            let value = item
+                .value
+                .as_deref()
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .ok_or_else(|| format!("items[{index}].value must not be empty"))?
+                .to_owned();
+            items.push(DelegateSwarmItem { title, value });
+        }
+        Ok(DelegateSwarmRequest {
             description: self.description.clone(),
-            items: self
-                .items
-                .iter()
-                .map(|item| DelegateSwarmItem {
-                    title: item.title.clone(),
-                    value: item.value.clone(),
-                })
-                .collect(),
+            items,
             prompt_template: self.prompt_template.clone(),
             resume_agent_ids: self.resume_agent_ids.clone(),
             role: self.role,
             mode: AgentRunMode::Foreground,
             max_concurrency: Some(max_concurrency),
+        })
+    }
+
+    /// Lower workflow `neo.swarm` input into canonical [`ChildPlan`]s.
+    fn to_child_plans(&self, max_concurrency: usize) -> Result<Vec<ChildPlan>, String> {
+        if self.is_homogeneous_template_form() {
+            let request = self.canonical_request(max_concurrency)?;
+            return child_plans_from_delegate_swarm(&request);
         }
+        if !self.resume_agent_ids.is_empty() {
+            return Err(
+                "resume_agent_ids is only valid with homogeneous title/value swarm items"
+                    .to_owned(),
+            );
+        }
+        if self
+            .prompt_template
+            .as_deref()
+            .is_some_and(|template| !template.trim().is_empty())
+        {
+            return Err(
+                "prompt_template is only valid with homogeneous title/value swarm items".to_owned(),
+            );
+        }
+        if self.items.is_empty() {
+            return Err("items must contain at least one child".to_owned());
+        }
+        let mut plans = Vec::with_capacity(self.items.len());
+        for (index, item) in self.items.iter().enumerate() {
+            let task = if let Some(task) = item
+                .task
+                .as_deref()
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+            {
+                task.to_owned()
+            } else if item
+                .value
+                .as_deref()
+                .map(str::trim)
+                .is_some_and(|s| !s.is_empty())
+            {
+                // Mixed form with value but no task is not allowed for heterogeneous.
+                return Err(format!(
+                    "items[{index}].task is required for heterogeneous child specs"
+                ));
+            } else {
+                return Err(format!("items[{index}].task must not be empty"));
+            };
+            let title = item
+                .title
+                .as_deref()
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .map(str::to_owned);
+            let worktree = item.parse_worktree(index)?;
+            // Workflow children require output_schema (design: every child output_schema required).
+            let output_schema = item.output_schema.clone().ok_or_else(|| {
+                format!("items[{index}].output_schema is required for neo.swarm children")
+            })?;
+            plans.push(ChildPlan {
+                item_id: format!("item-{index}"),
+                item_label: title.clone().unwrap_or_else(|| task.clone()),
+                task,
+                title,
+                resume: item.resume.clone(),
+                role: item.role,
+                model: item.model.clone(),
+                provider: item.provider.clone(),
+                context: item.context.unwrap_or(DelegateContext::None),
+                worktree,
+                tool_allow: item.tool_allow.clone(),
+                output_schema: Some(output_schema),
+            });
+        }
+        Ok(plans)
     }
 }
 
@@ -452,30 +601,76 @@ impl LuaWorkflowRunner {
                     check_fatal(&fatal)?;
                     let (input, canonical_input): (SwarmInput, _) =
                         decode_input(&lua, value, "swarm")?;
-                    validate_swarm_request(
-                        "DelegateSwarm",
-                        &input.canonical_request(max_concurrency),
-                    )
-                    .map_err(|error| invalid_tool_input(&error))?;
-                    let mut tool_input = canonical_input.clone();
-                    tool_input
-                        .as_object_mut()
-                        .expect("strict swarm input is an object")
-                        .insert("max_concurrency".to_owned(), max_concurrency.into());
+                    let plans = input.to_child_plans(max_concurrency).map_err(|message| {
+                        mlua::Error::external(WorkflowError::InvalidInput(message))
+                    })?;
+                    // Resource validation is shared with DelegateSwarm — byte/field
+                    // ceilings only; no total child-count cap.
+                    let limits = SwarmResourceLimits::default();
+                    validate_child_plans("DelegateSwarm", &input.description, &plans, limits)
+                        .map_err(|error| invalid_tool_input(&error))?;
                     let index = call_index.fetch_add(1, Ordering::Relaxed);
-                    let outcome = Box::pin(handle.invoke(
-                        index,
-                        WorkflowInvocationKind::Swarm,
-                        canonical_input,
-                        true,
-                        move |invocation| async move {
-                            dispatch
-                                .run_one(invocation, "DelegateSwarm", tool_input)
-                                .await
-                        },
-                    ))
-                    .await
-                    .map_err(mlua::Error::external)?;
+                    let outcome = if input.is_homogeneous_template_form() {
+                        let request =
+                            input
+                                .canonical_request(max_concurrency)
+                                .map_err(|message| {
+                                    mlua::Error::external(WorkflowError::InvalidInput(message))
+                                })?;
+                        validate_swarm_request("DelegateSwarm", &request)
+                            .map_err(|error| invalid_tool_input(&error))?;
+                        let mut tool_input = canonical_input.clone();
+                        tool_input
+                            .as_object_mut()
+                            .expect("strict swarm input is an object")
+                            .insert("max_concurrency".to_owned(), max_concurrency.into());
+                        // Ensure homogeneous title/value shape reaches the tool.
+                        if let Some(obj) = tool_input.as_object_mut() {
+                            obj.insert(
+                                "items".to_owned(),
+                                serde_json::to_value(&request.items).unwrap_or_default(),
+                            );
+                            obj.insert(
+                                "prompt_template".to_owned(),
+                                serde_json::to_value(&request.prompt_template).unwrap_or_default(),
+                            );
+                        }
+                        Box::pin(handle.invoke(
+                            index,
+                            WorkflowInvocationKind::Swarm,
+                            canonical_input,
+                            true,
+                            move |invocation| async move {
+                                dispatch
+                                    .run_one(invocation, "DelegateSwarm", tool_input)
+                                    .await
+                            },
+                        ))
+                        .await
+                        .map_err(mlua::Error::external)?
+                    } else {
+                        // Heterogeneous: durable per-item batch via runtime owner.
+                        let description = input.description.clone();
+                        let role = input.role;
+                        let multi_agent = dispatch.config.multi_agent.clone();
+                        let deps = crate::multi_agent::ChildRuntimeDeps::new(
+                            dispatch.config.clone(),
+                            std::sync::Arc::clone(&dispatch.model_client),
+                            std::sync::Arc::clone(&dispatch.registry),
+                        );
+                        Box::pin(handle.invoke_swarm_batch(
+                            index,
+                            canonical_input,
+                            description,
+                            role,
+                            max_concurrency,
+                            plans,
+                            multi_agent,
+                            deps,
+                        ))
+                        .await
+                        .map_err(mlua::Error::external)?
+                    };
                     boundary.store(0, Ordering::Relaxed);
                     immutable_outcome(&lua, &outcome)
                 }

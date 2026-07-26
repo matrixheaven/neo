@@ -1,4 +1,6 @@
 use std::collections::HashMap;
+
+use futures::StreamExt;
 use std::future::Future;
 use std::path::{Path, PathBuf};
 use std::pin::Pin;
@@ -32,7 +34,8 @@ use super::state::{
 };
 use crate::AgentTokenUsage;
 use crate::multi_agent::{
-    AgentId, ChildRunOutput, ChildRuntimeDeps, MultiAgentRuntime, child_final_assistant_text,
+    AgentId, AgentRole, AgentRunMode, ChildPlan, ChildRunOutput, ChildRuntimeDeps,
+    MultiAgentRuntime, child_final_assistant_text,
 };
 use crate::runtime::{WorkflowNotification, WorkflowNotificationQueue};
 
@@ -1395,6 +1398,367 @@ impl WorkflowRuntime {
         guard.updated_at_ms = Some(timestamp_ms);
         self.emit_projection(&guard, WorkflowProjectionStage::Updated);
         Ok(())
+    }
+
+    /// Durable heterogeneous swarm batch: one outer Swarm invocation plus per-item
+    /// `SwarmItemQueued` / `SwarmItemStarted` / `SwarmItemFinished` records.
+    ///
+    /// Children are created solely through [`MultiAgentRuntime::prepare_swarm_batch`].
+    /// Completed items (durable finished) are never replayed; pause blocks new starts;
+    /// stop cancels active children through the multi-agent owner.
+    pub async fn invoke_swarm_batch(
+        &self,
+        run_id: &WorkflowId,
+        call_index: u64,
+        canonical_input: serde_json::Value,
+        description: String,
+        role: AgentRole,
+        max_concurrency: usize,
+        plans: Vec<ChildPlan>,
+        multi_agent: MultiAgentRuntime,
+        deps: ChildRuntimeDeps,
+    ) -> Result<WorkflowInvocationOutcome, WorkflowError> {
+        let plans_for_effect = plans;
+        let description_for_effect = description;
+        let multi_agent_for_effect = multi_agent;
+        let deps_for_effect = deps;
+        let role_for_effect = role;
+        let max_concurrency_for_effect = max_concurrency.max(1);
+        let runtime = self.clone();
+        let run_id_for_effect = run_id.clone();
+        self.invoke(
+            run_id,
+            call_index,
+            WorkflowInvocationKind::Swarm,
+            canonical_input,
+            true,
+            move |_invocation| {
+                let runtime = runtime;
+                let run_id = run_id_for_effect;
+                let plans = plans_for_effect;
+                let description = description_for_effect;
+                let multi_agent = multi_agent_for_effect;
+                let deps = deps_for_effect;
+                async move {
+                    match runtime
+                        .run_swarm_batch_effect(
+                            &run_id,
+                            description,
+                            role_for_effect,
+                            max_concurrency_for_effect,
+                            plans,
+                            multi_agent,
+                            deps,
+                        )
+                        .await
+                    {
+                        Ok(outcome) => outcome,
+                        Err(error) => WorkflowInvocationOutcome {
+                            ok: false,
+                            status: WorkflowOutcomeStatus::Failed,
+                            summary: error.to_string(),
+                            details: serde_json::json!({"error": error.to_string()}),
+                            actual_usage: None,
+                            child_refs: Vec::new(),
+                            interruption: None,
+                        },
+                    }
+                }
+            },
+        )
+        .await
+    }
+
+    async fn run_swarm_batch_effect(
+        &self,
+        run_id: &WorkflowId,
+        description: String,
+        role: AgentRole,
+        max_concurrency: usize,
+        plans: Vec<ChildPlan>,
+        multi_agent: MultiAgentRuntime,
+        deps: ChildRuntimeDeps,
+    ) -> Result<WorkflowInvocationOutcome, WorkflowError> {
+        let swarm_id = multi_agent.new_swarm_id();
+        // Queue all items durably before any dispatch.
+        for plan in &plans {
+            self.append_swarm_item(
+                run_id,
+                JournalPayload::SwarmItemQueued {
+                    swarm_id: swarm_id.clone(),
+                    item_id: plan.item_id.clone(),
+                    canonical_input: Some(serde_json::to_value(plan).unwrap_or_default()),
+                },
+            )
+            .await?;
+        }
+
+        // Skip items that already finished in the journal (never replay completed).
+        let finished = self.finished_swarm_item_ids(run_id, &swarm_id).await?;
+        let active_plans: Vec<ChildPlan> = plans
+            .iter()
+            .filter(|plan| !finished.contains(&plan.item_id))
+            .cloned()
+            .collect();
+
+        let snapshot = multi_agent
+            .prepare_swarm_batch(
+                &swarm_id,
+                &description,
+                role,
+                AgentRunMode::Foreground,
+                Some(max_concurrency),
+                &active_plans,
+            )
+            .map_err(|message| WorkflowError::InvalidInput(message))?;
+
+        // Map item_id -> child snapshot for ordered results.
+        let mut item_outcomes: Vec<(String, WorkflowInvocationOutcome)> = Vec::new();
+        // Run with bounded concurrency, pausing before new starts when requested.
+        let mut next = 0usize;
+        let mut in_flight = futures::stream::FuturesUnordered::new();
+        let children = snapshot.children.clone();
+
+        loop {
+            // Fill concurrency slots unless pause/stop requested.
+            while in_flight.len() < max_concurrency && next < children.len() {
+                if self.is_stop_requested(run_id).await {
+                    let _ = multi_agent.cancel_swarm(&swarm_id);
+                    break;
+                }
+                if self.is_pause_requested(run_id).await {
+                    break;
+                }
+                let child = children[next].clone();
+                let plan = active_plans.get(next).cloned();
+                next += 1;
+                let Some(plan) = plan else {
+                    continue;
+                };
+                // Skip already-terminal children (completed siblings never re-run).
+                if child.agent.state.is_terminal() {
+                    let outcome = child_agent_to_outcome(&child.agent);
+                    item_outcomes.push((plan.item_id.clone(), outcome));
+                    continue;
+                }
+                let item_id = plan.item_id.clone();
+                let invocation_id = format!("swarm_item_{}", uuid::Uuid::new_v4().as_simple());
+                self.append_swarm_item(
+                    run_id,
+                    JournalPayload::SwarmItemStarted {
+                        swarm_id: swarm_id.clone(),
+                        item_id: item_id.clone(),
+                        invocation_id: invocation_id.clone(),
+                    },
+                )
+                .await?;
+                let runtime = multi_agent.clone();
+                let deps = deps.clone();
+                let swarm_id_run = swarm_id.clone();
+                let item_label = child.item.clone();
+                in_flight.push(async move {
+                    let output = runtime
+                        .run_started_swarm_child_turn(
+                            deps,
+                            child.agent,
+                            &swarm_id_run,
+                            &item_label,
+                            crate::multi_agent::DelegateContext::None,
+                            |_| {},
+                        )
+                        .await;
+                    (item_id, invocation_id, output)
+                });
+            }
+
+            if in_flight.is_empty() {
+                break;
+            }
+
+            if let Some((item_id, invocation_id, output)) = in_flight.next().await {
+                let outcome = child_run_to_outcome(&output);
+                self.append_swarm_item(
+                    run_id,
+                    JournalPayload::SwarmItemFinished {
+                        swarm_id: swarm_id.clone(),
+                        item_id: item_id.clone(),
+                        invocation_id,
+                        outcome: outcome.clone(),
+                    },
+                )
+                .await?;
+                item_outcomes.push((item_id, outcome));
+            }
+
+            if self.is_stop_requested(run_id).await {
+                let _ = multi_agent.cancel_swarm(&swarm_id);
+                // Drain in-flight to terminal without starting new ones.
+                while let Some((item_id, invocation_id, output)) = in_flight.next().await {
+                    let outcome = child_run_to_outcome(&output);
+                    let _ = self
+                        .append_swarm_item(
+                            run_id,
+                            JournalPayload::SwarmItemFinished {
+                                swarm_id: swarm_id.clone(),
+                                item_id: item_id.clone(),
+                                invocation_id,
+                                outcome: outcome.clone(),
+                            },
+                        )
+                        .await;
+                    item_outcomes.push((item_id, outcome));
+                }
+                break;
+            }
+            if self.is_pause_requested(run_id).await && next < children.len() {
+                // Let active finish, then stop starting new ones.
+                while let Some((item_id, invocation_id, output)) = in_flight.next().await {
+                    let outcome = child_run_to_outcome(&output);
+                    let _ = self
+                        .append_swarm_item(
+                            run_id,
+                            JournalPayload::SwarmItemFinished {
+                                swarm_id: swarm_id.clone(),
+                                item_id: item_id.clone(),
+                                invocation_id,
+                                outcome: outcome.clone(),
+                            },
+                        )
+                        .await;
+                    item_outcomes.push((item_id, outcome));
+                }
+                break;
+            }
+        }
+
+        // Preserve input order in the aggregate result.
+        let mut ordered = Vec::with_capacity(plans.len());
+        for plan in &plans {
+            if let Some((_, outcome)) = item_outcomes.iter().find(|(id, _)| id == &plan.item_id) {
+                ordered.push(serde_json::json!({
+                    "item_id": plan.item_id,
+                    "ok": outcome.ok,
+                    "status": outcome.status,
+                    "summary": outcome.summary,
+                }));
+            } else if finished.contains(&plan.item_id) {
+                ordered.push(serde_json::json!({
+                    "item_id": plan.item_id,
+                    "ok": true,
+                    "status": "completed",
+                    "summary": "already finished; not replayed",
+                }));
+            } else {
+                ordered.push(serde_json::json!({
+                    "item_id": plan.item_id,
+                    "ok": false,
+                    "status": "queued",
+                    "summary": "not started",
+                }));
+            }
+        }
+
+        let final_snapshot = multi_agent.swarm_snapshot(&swarm_id);
+        let all_terminal = final_snapshot
+            .as_ref()
+            .is_some_and(|s| s.children.iter().all(|c| c.agent.state.is_terminal()));
+        let any_failed = item_outcomes.iter().any(|(_, o)| !o.ok);
+        Ok(WorkflowInvocationOutcome {
+            ok: all_terminal && !any_failed,
+            status: if all_terminal && !any_failed {
+                WorkflowOutcomeStatus::Completed
+            } else if any_failed {
+                WorkflowOutcomeStatus::Failed
+            } else {
+                WorkflowOutcomeStatus::Interrupted
+            },
+            summary: format!(
+                "swarm {} items={} finished={}",
+                swarm_id,
+                plans.len(),
+                item_outcomes.len()
+            ),
+            details: serde_json::json!({
+                "kind": "delegate_swarm",
+                "swarm_id": swarm_id,
+                "items": ordered,
+                "swarm": final_snapshot,
+            }),
+            actual_usage: None,
+            child_refs: Vec::new(),
+            interruption: None,
+        })
+    }
+
+    async fn append_swarm_item(
+        &self,
+        run_id: &WorkflowId,
+        payload: JournalPayload,
+    ) -> Result<(), WorkflowError> {
+        let state = self.run_state(run_id).await?;
+        let (journal, run_id_owned) = {
+            let guard = state.lock().await;
+            (
+                guard.journal.clone().ok_or_else(|| {
+                    WorkflowError::Journal("workflow journal is unavailable".to_owned())
+                })?,
+                guard.metadata.run_id.clone(),
+            )
+        };
+        let timestamp_ms = current_timestamp_ms();
+        let envelope = {
+            let writer = journal
+                .lock()
+                .map_err(|_| WorkflowError::Host("workflow journal lock poisoned".to_owned()))?;
+            JournalEnvelope::new(writer.next_seq(), timestamp_ms, run_id_owned, payload)
+        };
+        let sequence =
+            self.journal_io(&journal, |writer| writer.append(&envelope, &self.limits))?;
+        let mut guard = state.lock().await;
+        guard.projection_sequence = Some(sequence);
+        guard.updated_at_ms = Some(timestamp_ms);
+        self.emit_projection(&guard, WorkflowProjectionStage::Updated);
+        Ok(())
+    }
+
+    async fn finished_swarm_item_ids(
+        &self,
+        run_id: &WorkflowId,
+        swarm_id: &str,
+    ) -> Result<std::collections::HashSet<String>, WorkflowError> {
+        let state = self.run_state(run_id).await?;
+        let journal = {
+            let guard = state.lock().await;
+            guard.journal.clone().ok_or_else(|| {
+                WorkflowError::Journal("workflow journal is unavailable".to_owned())
+            })?
+        };
+        let writer = journal
+            .lock()
+            .map_err(|_| WorkflowError::Host("workflow journal lock poisoned".to_owned()))?;
+        let prefix = format!("{swarm_id}:");
+        Ok(writer
+            .index()
+            .finished_swarm_items
+            .iter()
+            .filter_map(|key| key.strip_prefix(&prefix).map(str::to_owned))
+            .collect())
+    }
+
+    async fn is_pause_requested(&self, run_id: &WorkflowId) -> bool {
+        let Ok(state) = self.run_state(run_id).await else {
+            return false;
+        };
+        let guard = state.lock().await;
+        guard.control.pause_requested.load(Ordering::Acquire)
+    }
+
+    async fn is_stop_requested(&self, run_id: &WorkflowId) -> bool {
+        let Ok(state) = self.run_state(run_id).await else {
+            return false;
+        };
+        let guard = state.lock().await;
+        guard.control.stop_token.is_cancelled()
     }
 
     /// Validate a child output against `schema`, with exactly one tools-disabled repair.
@@ -3152,6 +3516,34 @@ impl WorkflowHandle {
             .await
     }
 
+    /// Heterogeneous `neo.swarm` entry: lowers to [`ChildPlan`]s and runs through
+    /// the multi-agent batch owner with durable per-item journal records.
+    pub async fn invoke_swarm_batch(
+        &self,
+        call_index: u64,
+        canonical_input: serde_json::Value,
+        description: String,
+        role: AgentRole,
+        max_concurrency: usize,
+        plans: Vec<ChildPlan>,
+        multi_agent: MultiAgentRuntime,
+        deps: ChildRuntimeDeps,
+    ) -> Result<WorkflowInvocationOutcome, WorkflowError> {
+        self.runtime
+            .invoke_swarm_batch(
+                &self.run_id,
+                call_index,
+                canonical_input,
+                description,
+                role,
+                max_concurrency,
+                plans,
+                multi_agent,
+                deps,
+            )
+            .await
+    }
+
     #[must_use]
     pub fn is_pause_requested(&self) -> bool {
         self.control.pause_requested.load(Ordering::Acquire)
@@ -3165,6 +3557,42 @@ impl WorkflowHandle {
     #[must_use]
     pub fn stop_token(&self) -> &CancellationToken {
         &self.control.stop_token
+    }
+}
+
+fn child_run_to_outcome(output: &ChildRunOutput) -> WorkflowInvocationOutcome {
+    child_agent_to_outcome(&output.snapshot)
+}
+
+fn child_agent_to_outcome(agent: &crate::multi_agent::AgentSnapshot) -> WorkflowInvocationOutcome {
+    let summary = agent
+        .outcome
+        .as_ref()
+        .map(|outcome| outcome.summary.clone())
+        .unwrap_or_else(|| agent.state.as_str().to_owned());
+    let is_error = agent
+        .outcome
+        .as_ref()
+        .map(|outcome| outcome.is_error)
+        .unwrap_or_else(|| agent.state != crate::multi_agent::AgentLifecycleState::Completed);
+    WorkflowInvocationOutcome {
+        ok: !is_error && agent.state == crate::multi_agent::AgentLifecycleState::Completed,
+        status: match agent.state {
+            crate::multi_agent::AgentLifecycleState::Completed => WorkflowOutcomeStatus::Completed,
+            crate::multi_agent::AgentLifecycleState::Cancelled => WorkflowOutcomeStatus::Cancelled,
+            crate::multi_agent::AgentLifecycleState::Failed
+            | crate::multi_agent::AgentLifecycleState::TimedOut
+            | crate::multi_agent::AgentLifecycleState::Interrupted => WorkflowOutcomeStatus::Failed,
+            _ => WorkflowOutcomeStatus::Interrupted,
+        },
+        summary,
+        details: serde_json::json!({
+            "agent_id": agent.id.as_str(),
+            "status": agent.state.as_str(),
+        }),
+        actual_usage: None,
+        child_refs: Vec::new(),
+        interruption: None,
     }
 }
 

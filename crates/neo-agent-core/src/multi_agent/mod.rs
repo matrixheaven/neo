@@ -16,10 +16,11 @@ pub use progress::{
     SwarmProgressInput, estimate_swarm_progress,
 };
 pub use runtime::{
-    AgentPathKind, ChildRunOutput, ChildRuntimeDeps, DelegateRequest, DelegateSwarmItem,
-    DelegateSwarmRequest, MultiAgentRuntime, SchemaRepairTurnResult, apply_swarm_template,
-    child_final_assistant_text, schema_repair_correction_prompt, schema_repair_tool_attempted,
-    seed_child_instruction_baseline,
+    AgentPathKind, ChildPlan, ChildRunOutput, ChildRuntimeDeps, ChildWorktreePolicy,
+    DelegateRequest, DelegateSwarmItem, DelegateSwarmRequest, MultiAgentRuntime,
+    SchemaRepairTurnResult, SwarmResourceLimits, apply_swarm_template, child_final_assistant_text,
+    child_plans_from_delegate_swarm, child_plans_serialized_bytes, schema_repair_correction_prompt,
+    schema_repair_tool_attempted, seed_child_instruction_baseline,
 };
 pub use scheduler::{SwarmItemState, SwarmRetryState, SwarmScheduler, SwarmSchedulerConfig};
 pub use state::{

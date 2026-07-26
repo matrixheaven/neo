@@ -16,9 +16,10 @@ use super::{
 };
 use crate::AgentEvent;
 use crate::multi_agent::{
-    AgentLifecycleState, AgentProfile, AgentRunMode, ChildRuntimeDeps, DelegateContext,
+    AgentLifecycleState, AgentProfile, AgentRunMode, ChildPlan, ChildRuntimeDeps, DelegateContext,
     DelegateRequest, DelegateSwarmRequest, SwarmAggregate, SwarmChildProgress, SwarmChildSnapshot,
-    SwarmSnapshot, apply_agent_progress, apply_swarm_template,
+    SwarmResourceLimits, SwarmSnapshot, apply_agent_progress, child_plans_from_delegate_swarm,
+    child_plans_serialized_bytes,
 };
 use crate::workflow::{CompiledSchema, StructuredOutputSource, accept_structured_output};
 
@@ -927,9 +928,14 @@ pub(crate) fn validate_swarm_request(
     tool: &str,
     request: &DelegateSwarmRequest,
 ) -> Result<(), ToolError> {
-    const MAX_SWARM_CHILDREN: usize = 8;
-    const MAX_SWARM_DESCRIPTION_CHARS: usize = 256;
-    const MAX_SWARM_ITEM_TITLE_CHARS: usize = 80;
+    validate_swarm_request_with_limits(tool, request, SwarmResourceLimits::default())
+}
+
+pub(crate) fn validate_swarm_request_with_limits(
+    tool: &str,
+    request: &DelegateSwarmRequest,
+    limits: SwarmResourceLimits,
+) -> Result<(), ToolError> {
     if request.description.trim().is_empty() {
         return Err(ToolError::InvalidInput {
             tool: tool.to_owned(),
@@ -942,17 +948,12 @@ pub(crate) fn validate_swarm_request(
             message: "items or resume_agent_ids must contain at least one child".to_owned(),
         });
     }
-    if request.items.len() + request.resume_agent_ids.len() > MAX_SWARM_CHILDREN {
-        return Err(ToolError::InvalidInput {
-            tool: tool.to_owned(),
-            message: format!("swarm supports at most {MAX_SWARM_CHILDREN} children"),
-        });
-    }
-    if request.description.chars().count() > MAX_SWARM_DESCRIPTION_CHARS {
+    if request.description.chars().count() > limits.max_description_chars {
         return Err(ToolError::InvalidInput {
             tool: tool.to_owned(),
             message: format!(
-                "description must not exceed {MAX_SWARM_DESCRIPTION_CHARS} characters"
+                "description must not exceed {} characters",
+                limits.max_description_chars
             ),
         });
     }
@@ -977,34 +978,148 @@ pub(crate) fn validate_swarm_request(
             });
         }
         reject_unknown_placeholders(tool, template)?;
+        if template.len() > limits.max_item_field_bytes {
+            return Err(ToolError::InvalidInput {
+                tool: tool.to_owned(),
+                message: format!(
+                    "prompt_template exceeds resource limit of {} bytes",
+                    limits.max_item_field_bytes
+                ),
+            });
+        }
     }
-    validate_swarm_items(tool, &request.items, MAX_SWARM_ITEM_TITLE_CHARS)?;
-    validate_resume_agents(tool, &request.resume_agent_ids)?;
+    validate_swarm_items(
+        tool,
+        &request.items,
+        limits.max_title_chars,
+        limits.max_item_field_bytes,
+    )?;
+    validate_resume_agents(tool, &request.resume_agent_ids, limits.max_item_field_bytes)?;
     if request.max_concurrency == Some(0) {
         return Err(ToolError::InvalidInput {
             tool: tool.to_owned(),
             message: "max_concurrency must be greater than 0 when provided".to_owned(),
         });
     }
+    let plans =
+        child_plans_from_delegate_swarm(request).map_err(|message| ToolError::InvalidInput {
+            tool: tool.to_owned(),
+            message,
+        })?;
+    validate_child_plans(tool, &request.description, &plans, limits)?;
+    Ok(())
+}
+
+/// Validate canonical child plans against byte/field resource limits.
+///
+/// There is intentionally no total child-count ceiling. Oversized serialized
+/// batches and per-item fields fail; large but within-limit arrays succeed.
+pub(crate) fn validate_child_plans(
+    tool: &str,
+    description: &str,
+    plans: &[ChildPlan],
+    limits: SwarmResourceLimits,
+) -> Result<(), ToolError> {
+    if plans.is_empty() {
+        return Err(ToolError::InvalidInput {
+            tool: tool.to_owned(),
+            message: "items or resume_agent_ids must contain at least one child".to_owned(),
+        });
+    }
+    if description.trim().is_empty() {
+        return Err(ToolError::InvalidInput {
+            tool: tool.to_owned(),
+            message: "description must not be empty".to_owned(),
+        });
+    }
+    if description.chars().count() > limits.max_description_chars {
+        return Err(ToolError::InvalidInput {
+            tool: tool.to_owned(),
+            message: format!(
+                "description must not exceed {} characters",
+                limits.max_description_chars
+            ),
+        });
+    }
     let mut expanded = std::collections::HashSet::new();
-    if let Some(template) = request.prompt_template.as_deref() {
-        for item in &request.items {
-            let prompt = apply_swarm_template(template, item.value.as_str(), &request.description);
-            if !expanded.insert(prompt.clone()) {
+    for (index, plan) in plans.iter().enumerate() {
+        if plan.task.trim().is_empty() {
+            return Err(ToolError::InvalidInput {
+                tool: tool.to_owned(),
+                message: format!("children[{index}].task must not be empty"),
+            });
+        }
+        if plan.task.len() > limits.max_item_field_bytes {
+            return Err(ToolError::InvalidInput {
+                tool: tool.to_owned(),
+                message: format!(
+                    "children[{index}].task exceeds resource limit of {} bytes",
+                    limits.max_item_field_bytes
+                ),
+            });
+        }
+        if let Some(title) = plan.title.as_deref() {
+            if title.trim().is_empty() {
                 return Err(ToolError::InvalidInput {
                     tool: tool.to_owned(),
-                    message: format!("duplicate expanded child prompt: {prompt}"),
+                    message: format!("children[{index}].title must not be empty when present"),
+                });
+            }
+            if title.chars().count() > limits.max_title_chars {
+                return Err(ToolError::InvalidInput {
+                    tool: tool.to_owned(),
+                    message: format!(
+                        "children[{index}].title must not exceed {} characters",
+                        limits.max_title_chars
+                    ),
                 });
             }
         }
-    }
-    for prompt in request.resume_agent_ids.values() {
-        if !expanded.insert(prompt.clone()) {
+        if let Some(schema) = &plan.output_schema {
+            let schema_bytes =
+                serde_json::to_vec(schema).map_err(|error| ToolError::InvalidInput {
+                    tool: tool.to_owned(),
+                    message: format!("children[{index}].output_schema serialize failed: {error}"),
+                })?;
+            if schema_bytes.len() > limits.max_item_schema_bytes {
+                return Err(ToolError::InvalidInput {
+                    tool: tool.to_owned(),
+                    message: format!(
+                        "children[{index}].output_schema exceeds resource limit of {} bytes",
+                        limits.max_item_schema_bytes
+                    ),
+                });
+            }
+        }
+        if let Some(resume) = plan.resume.as_deref()
+            && !resume.starts_with("agent_")
+        {
             return Err(ToolError::InvalidInput {
                 tool: tool.to_owned(),
-                message: format!("duplicate expanded child prompt: {prompt}"),
+                message: format!("children[{index}].resume must be an agent_id value"),
             });
         }
+        if !expanded.insert(plan.task.clone()) {
+            return Err(ToolError::InvalidInput {
+                tool: tool.to_owned(),
+                message: format!("duplicate expanded child prompt: {}", plan.task),
+            });
+        }
+    }
+    let total_bytes = child_plans_serialized_bytes(description, plans).map_err(|message| {
+        ToolError::InvalidInput {
+            tool: tool.to_owned(),
+            message,
+        }
+    })?;
+    if total_bytes > limits.max_request_bytes {
+        return Err(ToolError::InvalidInput {
+            tool: tool.to_owned(),
+            message: format!(
+                "swarm request exceeds resource limit of {} bytes (observed {total_bytes})",
+                limits.max_request_bytes
+            ),
+        });
     }
     Ok(())
 }
@@ -1013,6 +1128,7 @@ fn validate_swarm_items(
     tool: &str,
     items: &[crate::multi_agent::DelegateSwarmItem],
     max_title_chars: usize,
+    max_field_bytes: usize,
 ) -> Result<(), ToolError> {
     for (index, item) in items.iter().enumerate() {
         let message = if item.title.trim().is_empty() {
@@ -1022,6 +1138,10 @@ fn validate_swarm_items(
         } else if item.title.chars().count() > max_title_chars {
             Some(format!(
                 "items[{index}].title must not exceed {max_title_chars} characters"
+            ))
+        } else if item.value.len() > max_field_bytes {
+            Some(format!(
+                "items[{index}].value exceeds resource limit of {max_field_bytes} bytes"
             ))
         } else {
             None
@@ -1039,12 +1159,17 @@ fn validate_swarm_items(
 fn validate_resume_agents(
     tool: &str,
     resume_agents: &std::collections::BTreeMap<String, String>,
+    max_field_bytes: usize,
 ) -> Result<(), ToolError> {
     for (agent_id, prompt) in resume_agents {
         let message = if !agent_id.starts_with("agent_") {
             Some("resume_agent_ids keys must be agent_id values".to_owned())
         } else if prompt.trim().is_empty() {
             Some(format!("resume_agent_ids[{agent_id}] must not be empty"))
+        } else if prompt.len() > max_field_bytes {
+            Some(format!(
+                "resume_agent_ids[{agent_id}] exceeds resource limit of {max_field_bytes} bytes"
+            ))
         } else {
             None
         };
@@ -1084,6 +1209,7 @@ fn reject_unknown_placeholders(tool: &str, template: &str) -> Result<(), ToolErr
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::multi_agent::apply_swarm_template;
 
     #[test]
     fn delegate_swarm_schema_describes_resume_agent_ids_as_object_map() {

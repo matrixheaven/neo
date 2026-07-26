@@ -3975,3 +3975,61 @@ async fn concurrent_children_singleflight_the_same_source_read() {
         "two concurrent child baselines share the session source cache"
     );
 }
+
+/// Golden card contract for DelegateSwarm tool results / details projection.
+/// Layout and field names must remain stable for TUI cards (Task 15).
+#[tokio::test]
+async fn delegate_swarm_golden_card_contract_is_unchanged() {
+    let (registry, ctx) = registry_with_multi_agent();
+    let result = registry
+        .run(
+            "DelegateSwarm",
+            &ctx,
+            serde_json::json!({
+                "description": "golden card swarm",
+                "items": [
+                    {"title": "alpha", "value": "A"},
+                    {"title": "beta", "value": "B"}
+                ],
+                "prompt_template": "process {{item}}",
+                "max_concurrency": 2
+            }),
+        )
+        .await
+        .expect("swarm runs");
+    assert!(!result.is_error, "{}", result.content);
+    let details = result.details.expect("details present");
+    assert_eq!(details["kind"], "delegate_swarm");
+    assert_eq!(details["summary_scope"], "swarm_items");
+    assert!(details.get("swarm_id").and_then(|v| v.as_str()).is_some());
+    assert!(details.get("id").and_then(|v| v.as_str()).is_some());
+    assert_eq!(details["mode"], "foreground");
+    assert!(details.get("role").is_some());
+    assert_eq!(details["description"], "golden card swarm");
+    assert!(details.get("aggregate").is_some());
+    assert!(details.get("items").and_then(|v| v.as_array()).is_some());
+    assert!(
+        details
+            .get("resume_hint")
+            .and_then(|v| v.as_str())
+            .is_some()
+    );
+    let items = details["items"].as_array().expect("items array");
+    assert_eq!(items.len(), 2);
+    for (index, item) in items.iter().enumerate() {
+        assert_eq!(item["index"], index);
+        assert!(item.get("item").is_some(), "{item}");
+        assert!(item.get("agent_id").is_some(), "{item}");
+        assert!(item.get("name").is_some(), "{item}");
+        assert!(item.get("status").is_some(), "{item}");
+        assert!(item.get("title").is_some(), "{item}");
+        assert!(item.get("elapsed_ms").is_some(), "{item}");
+        assert!(item.get("tool_count").is_some(), "{item}");
+        assert!(item.get("token_count").is_some(), "{item}");
+        // summary may be null or string — key must exist for card layout
+        assert!(item.as_object().unwrap().contains_key("summary"), "{item}");
+    }
+    // Ordered by input index
+    assert_eq!(items[0]["item"], "A");
+    assert_eq!(items[1]["item"], "B");
+}
