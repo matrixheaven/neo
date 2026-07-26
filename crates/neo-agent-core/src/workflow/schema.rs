@@ -2,7 +2,9 @@
 //!
 //! Provider-native structured-output hints are optional wire metadata. Both the
 //! provider-native path and the assistant-text fallback share this single host
-//! validator. Neo never accepts provider wire acceptance as proof of validity.
+//! validator. Definition-level input/output schema compilation in
+//! [`super::definition`] also uses [`CompiledSchema`] — there is no second
+//! schema engine. Neo never accepts provider wire acceptance as proof of validity.
 
 use std::error::Error as StdError;
 use std::fmt;

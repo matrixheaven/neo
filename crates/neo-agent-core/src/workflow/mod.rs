@@ -1,6 +1,7 @@
 pub mod admission;
 pub mod artifacts;
 pub mod capability;
+pub mod definition;
 mod error;
 pub mod journal;
 pub mod limits;
@@ -16,6 +17,13 @@ pub use capability::WorkflowCapability;
 pub use schema::{
     CompiledSchema, SchemaErrorCode, SchemaValidationError, StructuredOutputSource,
     accept_structured_output, attach_response_format_hint, parse_strict_json_value,
+};
+
+pub use definition::{
+    CanonicalWorkflowManifest, DEFINITION_FORMAT_VERSION, DEFINITION_REVISION_PREFIX,
+    DynamicWorkflowDefinitionInput, ResolvedWorkflowDefinition, build_definition_revision_frame,
+    compute_definition_revision, resolve_dynamic_definition, resolve_paired_definition,
+    serialize_canonical_manifest, source_sha256_hex,
 };
 
 pub use admission::{
