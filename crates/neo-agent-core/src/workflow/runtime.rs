@@ -32,8 +32,16 @@ use crate::runtime::{WorkflowNotification, WorkflowNotificationQueue};
 
 #[path = "effect.rs"]
 mod effect;
+#[path = "lineage.rs"]
+pub mod lineage;
 #[path = "runtime_support.rs"]
 mod support;
+pub use lineage::{
+    LineageSeedInvocation, SeedArtifactRef, VerifiedPrefix, compute_prefix_digest_v1,
+    compute_prefix_digest_v2, extract_verified_prefix_v1, extract_verified_prefix_v2,
+    import_seed_artifact, latest_eligible_sequence_v1, latest_eligible_sequence_v2,
+    seed_pair_count_from_journal, split_usage_for_seed,
+};
 use support::{
     ReplayEntry, RunControl, add_usage, aggregate_usage, aggregate_usage_v2, bounded_summary,
     compact_resource_limited_outcome, current_timestamp_ms, failure_count_v2, final_result_v2,
@@ -75,6 +83,16 @@ pub struct WorkflowLaunchRequest {
     pub parent_run_id: Option<WorkflowId>,
 }
 
+/// Explicit linked-run / V2-upgrade launch (design §34). Requires fresh authorization.
+#[derive(Debug, Clone)]
+pub struct LinkedRunRequest {
+    pub parent_run_id: WorkflowId,
+    /// When `None`, imports the latest eligible completed checkpoint.
+    pub checkpoint: Option<super::state::WorkflowCheckpoint>,
+    pub link_reason: String,
+    pub launch: WorkflowLaunchRequest,
+}
+
 fn metadata_for_request(run_id: WorkflowId, request: WorkflowLaunchRequest) -> WorkflowRunMetadata {
     use sha2::{Digest, Sha256};
 
@@ -102,6 +120,9 @@ pub struct WorkflowOutput {
     pub invocations: Vec<JournalRecord>,
     pub failure_count: u64,
     pub actual_usage: Option<AgentTokenUsage>,
+    /// Usage imported from lineage seed; never charged to actual_usage.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub inherited_usage: Option<AgentTokenUsage>,
     pub terminal_reason: Option<String>,
     pub reports: Vec<serde_json::Value>,
     /// Canonical final result (inline or artifact-backed). Never synthesized from reports.
@@ -119,6 +140,10 @@ struct RunState {
     invocation_count: u64,
     failure_count: u64,
     actual_usage: Option<AgentTokenUsage>,
+    /// Token usage inherited from lineage seed (display only).
+    inherited_usage: Option<AgentTokenUsage>,
+    /// Completed seed host-call pairs that must match before any new effect.
+    seed_entry_count: usize,
     projection_sequence: Option<u64>,
     started_at_ms: Option<u64>,
     updated_at_ms: Option<u64>,
@@ -424,6 +449,8 @@ impl WorkflowRuntime {
             invocation_count: 0,
             failure_count: 0,
             actual_usage: None,
+            inherited_usage: None,
+            seed_entry_count: 0,
             projection_sequence: Some(projection_sequence),
             started_at_ms: Some(started_at_ms),
             updated_at_ms: Some(started_at_ms),
@@ -438,6 +465,282 @@ impl WorkflowRuntime {
             worker_permit: None,
             current_invocation: None,
             replay_entries: Vec::new(),
+            replay_cursor: 0,
+            replay_live: false,
+            journal: Some(Arc::new(StdMutex::new(writer))),
+            final_result: None,
+            artifacts,
+            v1_read_only: false,
+        }));
+        self.runs
+            .lock()
+            .await
+            .insert(run_id.0.clone(), Arc::clone(&state));
+
+        Ok(WorkflowHandle {
+            run_id,
+            control,
+            runtime: self.clone(),
+        })
+    }
+
+    /// Create a linked V2 run from a verified parent checkpoint (design §34).
+    ///
+    /// Imports the completed invocation prefix and referenced artifacts into the
+    /// new journal. Requires a fresh capability reservation. Never mutates the
+    /// parent run (terminal or V1 read-only).
+    pub async fn create_linked_run(
+        &self,
+        session_dir: &Path,
+        request: LinkedRunRequest,
+        authorization: Option<super::capability::WorkflowCapabilityReservation>,
+    ) -> Result<WorkflowHandle, WorkflowError> {
+        let Some(authorization) = authorization else {
+            return Err(WorkflowError::coded(
+                super::error::WorkflowErrorCode::LaunchAuthorizationMissing,
+                "linked run requires fresh launch authorization",
+            ));
+        };
+
+        self.validate_launch_request(&request.launch)?;
+
+        let parent_run_dir = journal::run_dir(session_dir, &request.parent_run_id);
+        if !parent_run_dir.exists() {
+            return Err(WorkflowError::NotFound(format!(
+                "parent workflow run {} not found",
+                request.parent_run_id.as_str()
+            )));
+        }
+
+        // Snapshot parent durable bytes before any child work (immutability proof).
+        let parent_meta_path = parent_run_dir.join("run.json");
+        let parent_journal_path = parent_run_dir.join("journal.jsonl");
+        let parent_meta_before = std::fs::read(&parent_meta_path)
+            .map_err(|e| WorkflowError::Journal(format!("read parent run.json: {e}")))?;
+        let parent_journal_before = std::fs::read(&parent_journal_path)
+            .map_err(|e| WorkflowError::Journal(format!("read parent journal: {e}")))?;
+
+        let parent_meta = journal::read_run_metadata(&parent_run_dir)?;
+        if parent_meta.run_id != request.parent_run_id {
+            return Err(WorkflowError::coded(
+                super::error::WorkflowErrorCode::LineageMismatch,
+                "parent run.json id does not match request parent_run_id",
+            ));
+        }
+
+        let verified = if parent_meta.journal_format_version == journal::JOURNAL_FORMAT_V1 {
+            let records = journal::read_journal(&parent_journal_path)?;
+            lineage::extract_verified_prefix_v1(
+                &parent_meta,
+                &records,
+                request.checkpoint.as_ref(),
+                &request.link_reason,
+            )?
+        } else {
+            let envelopes =
+                journal::collect_journal_v2(&parent_journal_path, Some(&parent_meta.run_id))?;
+            lineage::extract_verified_prefix_v2(
+                &parent_meta,
+                &parent_run_dir,
+                &envelopes,
+                request.checkpoint.as_ref(),
+                &request.link_reason,
+            )?
+        };
+
+        // Parent bytes must still match the pre-import snapshot (no parent mutation).
+        let parent_meta_after = std::fs::read(&parent_meta_path)
+            .map_err(|e| WorkflowError::Journal(format!("re-read parent run.json: {e}")))?;
+        let parent_journal_after = std::fs::read(&parent_journal_path)
+            .map_err(|e| WorkflowError::Journal(format!("re-read parent journal: {e}")))?;
+        if parent_meta_before != parent_meta_after || parent_journal_before != parent_journal_after
+        {
+            return Err(WorkflowError::coded(
+                super::error::WorkflowErrorCode::LineageMismatch,
+                "parent run mutated during linked import",
+            ));
+        }
+
+        // Optionally verify in-memory parent state is unchanged when loaded.
+        if let Ok(parent_state) = self.run_state(&request.parent_run_id).await {
+            let guard = parent_state.lock().await;
+            let _parent_state_snapshot = (guard.state, guard.metadata.clone());
+            drop(guard);
+            // no writes to parent_state
+            let _ = _parent_state_snapshot;
+        }
+
+        let mut launch = request.launch;
+        launch.parent_run_id = Some(request.parent_run_id.clone());
+
+        let (run_id, run_dir) = loop {
+            let run_id = WorkflowId::generate();
+            let run_dir = journal::run_dir(session_dir, &run_id);
+            if !run_dir.exists() {
+                break (run_id, run_dir);
+            }
+        };
+        let metadata = metadata_for_request(run_id.clone(), launch);
+
+        let storage_reservation = self
+            .admission
+            .try_reserve_storage(run_id.as_str(), self.limits.run_storage_reservation_bytes())?;
+        storage_reservation.commit();
+
+        let seed_entry_count = verified.seed_invocations.len();
+        let inherited_usage = verified.inherited_usage;
+        let replay_entries: Vec<ReplayEntry> = verified
+            .seed_invocations
+            .iter()
+            .map(|seed| ReplayEntry {
+                invocation_id: seed.invocation_id.clone(),
+                call_index: seed.call_index,
+                kind: seed.kind,
+                canonical_input_hash: seed.canonical_input_hash.clone(),
+                outcome: seed.outcome.clone(),
+            })
+            .collect();
+
+        let durable_create = (|| {
+            journal::write_run_metadata(&run_dir, &metadata, &self.limits)?;
+            let mut writer = JournalV2Writer::open(&run_dir.join("journal.jsonl"), run_id.clone())?;
+            let timestamp_ms = current_timestamp_ms();
+            let created = effect::prepare_run_created(
+                &writer,
+                run_id.clone(),
+                metadata.name.clone(),
+                Some(metadata.description.clone()).filter(|s| !s.is_empty()),
+                Some(metadata.launch_source.clone()),
+                timestamp_ms,
+            );
+            writer.append(&created, &self.limits)?;
+
+            let seed_envelope = JournalEnvelope::new(
+                writer.next_seq(),
+                timestamp_ms,
+                run_id.clone(),
+                JournalPayload::LineageSeedImported {
+                    lineage: verified.lineage.clone(),
+                    prefix_digest: Some(verified.checkpoint.prefix_digest.clone()),
+                },
+            );
+            writer.append(&seed_envelope, &self.limits)?;
+
+            for seed in &verified.seed_invocations {
+                let mut started = JournalEnvelope::new(
+                    writer.next_seq(),
+                    timestamp_ms,
+                    run_id.clone(),
+                    JournalPayload::InvocationStarted {
+                        invocation_id: seed.invocation_id.clone(),
+                        call_index: seed.call_index,
+                        kind: seed.kind,
+                        canonical_input: seed.canonical_input.clone(),
+                    },
+                );
+                started = started.with_canonical_input_hash(seed.canonical_input_hash.clone());
+                writer.append(&started, &self.limits)?;
+
+                let finished = JournalEnvelope::new(
+                    writer.next_seq(),
+                    timestamp_ms,
+                    run_id.clone(),
+                    JournalPayload::InvocationFinished {
+                        invocation_id: seed.invocation_id.clone(),
+                        outcome: seed.outcome.clone(),
+                    },
+                );
+                writer.append(&finished, &self.limits)?;
+            }
+
+            let mut store = ArtifactStore::open(&run_dir, run_id.clone())?;
+            for artifact in &verified.artifacts {
+                let staged = lineage::import_seed_artifact(&store, &self.limits, artifact)?;
+                let commit = JournalEnvelope::new(
+                    writer.next_seq(),
+                    timestamp_ms,
+                    run_id.clone(),
+                    JournalPayload::ArtifactCommitted {
+                        artifact_id: staged.artifact_id.clone(),
+                        sha256: staged.sha256.clone(),
+                        byte_len: staged.byte_len,
+                        media_type: Some(staged.media_type.clone()),
+                        logical_name: Some(staged.logical_name.clone()),
+                    },
+                );
+                writer.append(&commit, &self.limits)?;
+                store.mark_committed(staged.metadata())?;
+            }
+
+            let sequence = writer.next_seq().saturating_sub(1);
+            Ok::<_, WorkflowError>((writer, store, sequence, timestamp_ms))
+        })();
+
+        let (writer, artifacts, projection_sequence, started_at_ms) = match durable_create {
+            Ok(durable) => durable,
+            Err(error) => {
+                self.admission.release_storage_owner(run_id.as_str());
+                let _ = std::fs::remove_dir_all(&run_dir);
+                return Err(error);
+            }
+        };
+
+        // Final parent immutability check after child durable write.
+        let parent_meta_final = std::fs::read(&parent_meta_path).unwrap_or_default();
+        let parent_journal_final = std::fs::read(&parent_journal_path).unwrap_or_default();
+        if parent_meta_before != parent_meta_final || parent_journal_before != parent_journal_final
+        {
+            self.admission.release_storage_owner(run_id.as_str());
+            let _ = std::fs::remove_dir_all(&run_dir);
+            return Err(WorkflowError::coded(
+                super::error::WorkflowErrorCode::LineageMismatch,
+                "parent run mutated during linked create",
+            ));
+        }
+
+        if !authorization.commit() {
+            self.admission.release_storage_owner(run_id.as_str());
+            let _ = std::fs::remove_dir_all(&run_dir);
+            return Err(WorkflowError::coded(
+                super::error::WorkflowErrorCode::LaunchAuthorizationMismatch,
+                "launch authorization was revoked or already consumed",
+            ));
+        }
+
+        let control = Arc::new(RunControl::new());
+        let reports = recovered_reports_v2(
+            &journal::collect_journal_v2(&run_dir.join("journal.jsonl"), Some(&run_id))
+                .unwrap_or_default(),
+        );
+        let state = Arc::new(Mutex::new(RunState {
+            metadata,
+            state: WorkflowState::Queued,
+            current_phase: recovered_phase_v2(
+                &journal::collect_journal_v2(&run_dir.join("journal.jsonl"), Some(&run_id))
+                    .unwrap_or_default(),
+            ),
+            invocation_count: seed_entry_count as u64,
+            failure_count: 0,
+            actual_usage: None,
+            inherited_usage,
+            seed_entry_count,
+            projection_sequence: Some(projection_sequence),
+            started_at_ms: Some(started_at_ms),
+            updated_at_ms: Some(started_at_ms),
+            latest_log_summary: latest_log_summary(&replay_entries),
+            latest_report_summary: latest_report_summary_v2(
+                &journal::collect_journal_v2(&run_dir.join("journal.jsonl"), Some(&run_id))
+                    .unwrap_or_default(),
+            ),
+            terminal_reason: None,
+            reports,
+            run_dir,
+            control: Arc::clone(&control),
+            worker_active: false,
+            worker_join: None,
+            worker_permit: None,
+            current_invocation: None,
+            replay_entries,
             replay_cursor: 0,
             replay_live: false,
             journal: Some(Arc::new(StdMutex::new(writer))),
@@ -646,6 +949,7 @@ impl WorkflowRuntime {
             invocations,
             failure_count: guard.failure_count,
             actual_usage: guard.actual_usage,
+            inherited_usage: guard.inherited_usage,
             terminal_reason: guard.terminal_reason.clone(),
             reports: guard.reports.clone(),
             final_result,
@@ -1326,14 +1630,34 @@ impl WorkflowRuntime {
                 ));
             }
             if !guard.replay_live {
-                if let Some(entry) = guard.replay_entries.get(guard.replay_cursor)
-                    && entry.call_index == call_index
-                    && entry.kind == kind
-                    && entry.canonical_input_hash == input_hash
-                {
-                    let outcome = entry.outcome.clone();
-                    guard.replay_cursor += 1;
-                    return Ok(outcome);
+                let within_seed = guard.replay_cursor < guard.seed_entry_count;
+                if let Some(entry) = guard.replay_entries.get(guard.replay_cursor) {
+                    if entry.call_index == call_index
+                        && entry.kind == kind
+                        && entry.canonical_input_hash == input_hash
+                    {
+                        let outcome = entry.outcome.clone();
+                        guard.replay_cursor += 1;
+                        return Ok(outcome);
+                    }
+                    // Seed prefix must match exactly before any new external effect.
+                    if within_seed {
+                        return Err(WorkflowError::coded(
+                            super::error::WorkflowErrorCode::LineageMismatch,
+                            format!(
+                                "lineage seed mismatch at call_index {call_index}: expected hash {}, got {input_hash}",
+                                entry.canonical_input_hash
+                            ),
+                        ));
+                    }
+                } else if within_seed {
+                    return Err(WorkflowError::coded(
+                        super::error::WorkflowErrorCode::LineageMismatch,
+                        format!(
+                            "lineage seed exhausted early at call_index {call_index} (seed_entry_count={})",
+                            guard.seed_entry_count
+                        ),
+                    ));
                 }
                 guard.replay_live = true;
             }
@@ -2042,6 +2366,8 @@ impl WorkflowRuntime {
                 .try_into()
                 .unwrap_or(u64::MAX),
             actual_usage: aggregate_usage(&records),
+            inherited_usage: None,
+            seed_entry_count: 0,
             projection_sequence,
             started_at_ms,
             updated_at_ms,
@@ -2099,7 +2425,23 @@ impl WorkflowRuntime {
             current_phase: recovered_phase_v2(&envelopes),
             invocation_count: invocation_count_v2(&envelopes),
             failure_count: failure_count_v2(&envelopes),
-            actual_usage: aggregate_usage_v2(&envelopes),
+            actual_usage: {
+                let seed_ids = lineage::seed_invocation_ids_from_journal(&envelopes);
+                if seed_ids.is_empty() {
+                    aggregate_usage_v2(&envelopes)
+                } else {
+                    lineage::split_usage_for_seed(&envelopes, &seed_ids).1
+                }
+            },
+            inherited_usage: {
+                let seed_ids = lineage::seed_invocation_ids_from_journal(&envelopes);
+                if seed_ids.is_empty() {
+                    None
+                } else {
+                    lineage::split_usage_for_seed(&envelopes, &seed_ids).0
+                }
+            },
+            seed_entry_count: lineage::seed_pair_count_from_journal(&envelopes),
             projection_sequence,
             started_at_ms,
             updated_at_ms,
@@ -2172,6 +2514,8 @@ impl WorkflowRuntime {
             invocation_count: 0,
             failure_count: 1,
             actual_usage: None,
+            inherited_usage: None,
+            seed_entry_count: 0,
             projection_sequence: None,
             started_at_ms: None,
             updated_at_ms: None,
