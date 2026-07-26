@@ -115,6 +115,21 @@ impl AppConfig {
         validate_runtime_config(&runtime)?;
         let workflow_runtime =
             neo_agent_core::workflow::WorkflowRuntime::new(runtime.workflow.clone());
+        let workflow_home = neo_home().unwrap_or_else(|| {
+            config_path
+                .parent()
+                .map(std::path::Path::to_path_buf)
+                .unwrap_or_else(|| project_dir.clone())
+        });
+        let workflow_definitions = neo_agent_core::workflow::WorkflowDefinitionRegistry::new(
+            neo_agent_core::workflow::WorkflowDefinitionRegistryConfig {
+                neo_home: workflow_home,
+                workspace: project_dir.clone(),
+                project_trusted,
+                limits: runtime.workflow.clone(),
+                builtins: Vec::new(),
+            },
+        );
         configure_shell_runtime(&mut runtime, &config_path)?;
         let tui = tui_from_file(file_config.tui);
         validate_tui_config(&tui)?;
@@ -140,6 +155,7 @@ impl AppConfig {
             background_tasks: BackgroundTaskManager::new(),
             workflow_capability: neo_agent_core::workflow::WorkflowCapability::default(),
             workflow_runtime,
+            workflow_definitions,
             workflow_dispatch_resolver: neo_agent_core::runtime::WorkflowDispatchResolver::default(
             ),
             multi_agent: MultiAgentRuntime::new(),

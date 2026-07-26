@@ -96,6 +96,9 @@ pub struct AppConfig {
     /// Session-shared durable workflow owner.
     #[serde(skip)]
     pub workflow_runtime: neo_agent_core::workflow::WorkflowRuntime,
+    /// Session-shared trusted definition registry (discovery/save only).
+    #[serde(skip)]
+    pub workflow_definitions: neo_agent_core::workflow::WorkflowDefinitionRegistry,
     /// Session-shared resolver for live workflow child dispatch dependencies.
     #[serde(skip)]
     pub workflow_dispatch_resolver: neo_agent_core::runtime::WorkflowDispatchResolver,
@@ -139,6 +142,7 @@ impl AppConfig {
         self.workflow_capability = current.workflow_capability.clone();
         self.workflow_runtime = current.workflow_runtime.clone();
         self.runtime.workflow = current.workflow_runtime.limits();
+        self.workflow_definitions = current.workflow_definitions.clone();
         self.workflow_dispatch_resolver = current.workflow_dispatch_resolver.clone();
         self.multi_agent = current.multi_agent.clone();
         self.runtime.shell = current.runtime.shell;

@@ -10824,6 +10824,7 @@ fn test_config(project_dir: &Path, sessions_dir: PathBuf) -> AppConfig {
         workflow_runtime: neo_agent_core::workflow::WorkflowRuntime::new(
             neo_agent_core::workflow::WorkflowLimits::default(),
         ),
+        workflow_definitions: neo_agent_core::workflow::WorkflowDefinitionRegistry::empty(),
         workflow_dispatch_resolver: neo_agent_core::runtime::WorkflowDispatchResolver::default(),
         multi_agent: neo_agent_core::multi_agent::MultiAgentRuntime::new(),
         tui: TuiConfig::default(),

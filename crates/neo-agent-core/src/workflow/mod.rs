@@ -8,6 +8,7 @@ pub mod limits;
 mod lua;
 pub mod output;
 pub mod recovery;
+pub mod registry;
 pub mod retention;
 pub mod runtime;
 pub mod schema;
@@ -24,6 +25,13 @@ pub use definition::{
     DynamicWorkflowDefinitionInput, ResolvedWorkflowDefinition, build_definition_revision_frame,
     compute_definition_revision, resolve_dynamic_definition, resolve_paired_definition,
     serialize_canonical_manifest, source_sha256_hex,
+};
+
+pub use registry::{
+    BuiltinWorkflowDefinition, MANIFEST_SUFFIX, PROJECT_WORKFLOWS_DIR, RegistryDefinitionSummary,
+    SOURCE_SUFFIX, USER_WORKFLOWS_DIR, WorkflowDefinitionRegistry,
+    WorkflowDefinitionRegistryConfig, WorkflowListScope, WorkflowSaveRequest, WorkflowSaveScope,
+    pin_resolved_source,
 };
 
 pub use admission::{
