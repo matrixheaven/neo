@@ -5,10 +5,13 @@ use std::sync::atomic::AtomicBool;
 use tokio_util::sync::CancellationToken;
 
 use super::super::error::WorkflowError;
-use super::super::journal::{self, IncompleteInvocation, JournalRecord, canonical_input_hash};
+use super::super::journal::{
+    self, IncompleteInvocation, JournalEnvelope, JournalPayload, JournalRecord,
+    canonical_input_hash,
+};
 use super::super::state::{
-    WorkflowActor, WorkflowInvocationKind, WorkflowInvocationOutcome, WorkflowOutcomeStatus,
-    WorkflowState,
+    WorkflowActor, WorkflowFinalResultMetadata, WorkflowInvocationKind, WorkflowInvocationOutcome,
+    WorkflowOutcomeStatus, WorkflowState,
 };
 use crate::AgentTokenUsage;
 
@@ -346,4 +349,176 @@ pub(super) fn current_timestamp_ms() -> u64 {
         .map_or(0, |duration| {
             u64::try_from(duration.as_millis()).unwrap_or(u64::MAX)
         })
+}
+
+pub(super) fn replay_entries_v2(envelopes: &[JournalEnvelope]) -> Vec<ReplayEntry> {
+    let finished: HashMap<_, _> = envelopes
+        .iter()
+        .filter_map(|envelope| match &envelope.payload {
+            JournalPayload::InvocationFinished {
+                invocation_id,
+                outcome,
+            } => Some((invocation_id.as_str(), outcome)),
+            _ => None,
+        })
+        .collect();
+    let mut replay = Vec::new();
+    for entry in envelopes
+        .iter()
+        .filter_map(|envelope| match &envelope.payload {
+            JournalPayload::InvocationStarted {
+                invocation_id,
+                call_index,
+                kind,
+                ..
+            } => {
+                let hash = envelope.canonical_input_hash.clone().unwrap_or_default();
+                finished
+                    .get(invocation_id.as_str())
+                    .map(|outcome| ReplayEntry {
+                        invocation_id: invocation_id.clone(),
+                        call_index: *call_index,
+                        kind: *kind,
+                        canonical_input_hash: hash,
+                        outcome: (*outcome).clone(),
+                    })
+            }
+            _ => None,
+        })
+    {
+        let Ok(index) = usize::try_from(entry.call_index) else {
+            continue;
+        };
+        if index > replay.len() {
+            continue;
+        }
+        replay.truncate(index);
+        replay.push(entry);
+    }
+    replay
+}
+
+pub(super) fn last_state_v2(envelopes: &[JournalEnvelope]) -> (WorkflowState, Option<String>) {
+    let mut state = WorkflowState::Queued;
+    let mut reason: Option<String> = None;
+    let mut saw_state = false;
+    for envelope in envelopes {
+        if let JournalPayload::StateChanged { new, reason: r, .. } = &envelope.payload {
+            state = *new;
+            reason = Some(r.clone());
+            saw_state = true;
+        }
+    }
+    if saw_state {
+        (state, reason)
+    } else if envelopes
+        .iter()
+        .any(|e| matches!(e.payload, JournalPayload::RunCreated { .. }))
+    {
+        (WorkflowState::Queued, Some("launch".to_owned()))
+    } else {
+        (
+            WorkflowState::Failed,
+            Some("missing workflow state".to_owned()),
+        )
+    }
+}
+
+pub(super) fn final_result_v2(
+    envelopes: &[JournalEnvelope],
+) -> Option<WorkflowFinalResultMetadata> {
+    envelopes
+        .iter()
+        .rev()
+        .find_map(|envelope| match &envelope.payload {
+            JournalPayload::FinalResultRecorded { metadata } => Some(metadata.clone()),
+            _ => None,
+        })
+}
+
+pub(super) fn aggregate_usage_v2(envelopes: &[JournalEnvelope]) -> Option<AgentTokenUsage> {
+    envelopes
+        .iter()
+        .fold(None, |total, envelope| match &envelope.payload {
+            JournalPayload::InvocationFinished {
+                outcome:
+                    WorkflowInvocationOutcome {
+                        actual_usage: Some(usage),
+                        ..
+                    },
+                ..
+            } => Some(add_usage(total, *usage)),
+            JournalPayload::UsageRecorded { usage, .. } => Some(add_usage(total, *usage)),
+            _ => total,
+        })
+}
+
+pub(super) fn recovered_phase_v2(envelopes: &[JournalEnvelope]) -> Option<String> {
+    envelopes
+        .iter()
+        .rev()
+        .find_map(|envelope| match &envelope.payload {
+            JournalPayload::InvocationFinished { outcome, .. } if outcome.ok => outcome
+                .details
+                .get("phase")
+                .and_then(serde_json::Value::as_str)
+                .map(str::to_owned),
+            _ => None,
+        })
+}
+
+pub(super) fn recovered_reports_v2(envelopes: &[JournalEnvelope]) -> Vec<serde_json::Value> {
+    envelopes
+        .iter()
+        .filter_map(|envelope| match &envelope.payload {
+            JournalPayload::InvocationFinished { outcome, .. } if outcome.ok => {
+                outcome.details.get("report").cloned()
+            }
+            _ => None,
+        })
+        .collect()
+}
+
+pub(super) fn latest_report_summary_v2(envelopes: &[JournalEnvelope]) -> Option<String> {
+    envelopes
+        .iter()
+        .rev()
+        .find_map(|envelope| match &envelope.payload {
+            JournalPayload::InvocationFinished { outcome, .. } if outcome.ok => {
+                outcome.details.get("report").and_then(report_summary)
+            }
+            _ => None,
+        })
+}
+
+pub(super) fn projection_timestamps_v2(
+    envelopes: &[JournalEnvelope],
+) -> (Option<u64>, Option<u64>) {
+    (
+        envelopes.first().map(|e| e.timestamp_ms),
+        envelopes.last().map(|e| e.timestamp_ms),
+    )
+}
+
+pub(super) fn invocation_count_v2(envelopes: &[JournalEnvelope]) -> u64 {
+    envelopes
+        .iter()
+        .filter(|e| matches!(e.payload, JournalPayload::InvocationStarted { .. }))
+        .count()
+        .try_into()
+        .unwrap_or(u64::MAX)
+}
+
+pub(super) fn failure_count_v2(envelopes: &[JournalEnvelope]) -> u64 {
+    envelopes
+        .iter()
+        .filter(|e| {
+            matches!(
+                &e.payload,
+                JournalPayload::InvocationFinished { outcome, .. } if !outcome.ok
+            )
+        })
+        .count()
+        .try_into()
+        .unwrap_or(u64::MAX)
 }

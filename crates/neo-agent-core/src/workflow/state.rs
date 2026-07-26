@@ -311,7 +311,7 @@ pub fn validate_portable_name(raw: &str, kind: &str) -> Result<(), WorkflowError
 }
 
 /// Canonical V2 lifecycle states (plus V1-compatible terminal set).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum WorkflowState {
     /// Admitted/created; waiting for a worker permit.
@@ -381,6 +381,80 @@ impl WorkflowState {
                 | (AwaitingUser, Queued | Cancelled | ResourceLimited)
                 | (Paused, Queued | Cancelled)
         )
+    }
+
+    /// Reject illegal and terminal self-transitions with a stable error.
+    pub fn require_transition_to(self, to: Self) -> Result<(), WorkflowError> {
+        if self == to {
+            return Err(WorkflowError::coded(
+                WorkflowErrorCode::InvalidOperation,
+                format!("workflow already in state {}", self.as_str()),
+            ));
+        }
+        if self.is_terminal() {
+            return Err(WorkflowError::coded(
+                WorkflowErrorCode::InvalidOperation,
+                format!(
+                    "terminal workflow state {} is immutable; cannot transition to {}",
+                    self.as_str(),
+                    to.as_str()
+                ),
+            ));
+        }
+        if !self.can_transition_to(to) {
+            return Err(WorkflowError::coded(
+                WorkflowErrorCode::InvalidOperation,
+                format!(
+                    "illegal workflow transition {} -> {}",
+                    self.as_str(),
+                    to.as_str()
+                ),
+            ));
+        }
+        Ok(())
+    }
+
+    /// Explicit V2 transition table entries as `(from, to)` pairs.
+    #[must_use]
+    pub fn allowed_transitions() -> &'static [(Self, Self)] {
+        use WorkflowState::{
+            AwaitingUser, Cancelled, Completed, Failed, Paused, Queued, ResourceLimited, Running,
+        };
+        &[
+            (Queued, Running),
+            (Queued, Paused),
+            (Queued, Cancelled),
+            (Queued, ResourceLimited),
+            (Running, AwaitingUser),
+            (Running, Paused),
+            (Running, Completed),
+            (Running, Failed),
+            (Running, Cancelled),
+            (Running, ResourceLimited),
+            (AwaitingUser, Queued),
+            (AwaitingUser, Cancelled),
+            (AwaitingUser, ResourceLimited),
+            (Paused, Queued),
+            (Paused, Cancelled),
+        ]
+    }
+
+    /// All lifecycle variants (for exhaustive illegal-transition scans).
+    #[must_use]
+    pub fn all_states() -> &'static [Self] {
+        use WorkflowState::{
+            AwaitingUser, Cancelled, Completed, Failed, Paused, Queued, ResourceLimited, Running,
+        };
+        &[
+            Queued,
+            Running,
+            AwaitingUser,
+            Paused,
+            Completed,
+            Failed,
+            Cancelled,
+            ResourceLimited,
+        ]
     }
 }
 

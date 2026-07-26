@@ -1,9 +1,19 @@
-//! V2 workflow identity, state, and error contract tests.
+//! V2 workflow identity, state, and transactional lifecycle tests (Tasks 1 + 4).
 
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::time::Duration;
+
+use neo_agent_core::workflow::journal::{
+    JournalEnvelope, JournalPayload, JournalV2Writer, collect_journal_v2, read_run_metadata,
+    run_dir,
+};
 use neo_agent_core::workflow::{
-    WORKFLOW_NAME_MAX_LEN, WorkflowArtifactId, WorkflowCheckpoint, WorkflowError,
-    WorkflowErrorCode, WorkflowHumanHandle, WorkflowInvocationId, WorkflowName, WorkflowRequestId,
-    WorkflowRevision, WorkflowRunId, WorkflowSourceOrigin, WorkflowState, validate_portable_name,
+    WORKFLOW_NAME_MAX_LEN, WorkflowActor, WorkflowArtifactId, WorkflowCheckpoint, WorkflowError,
+    WorkflowErrorCode, WorkflowFinalResultMetadata, WorkflowHumanHandle, WorkflowInvocationId,
+    WorkflowInvocationKind, WorkflowInvocationOutcome, WorkflowLaunchRequest, WorkflowLimits,
+    WorkflowName, WorkflowOutcomeStatus, WorkflowPhase, WorkflowRequestId, WorkflowRevision,
+    WorkflowRunId, WorkflowRuntime, WorkflowSourceOrigin, WorkflowState, validate_portable_name,
 };
 
 #[test]
@@ -108,4 +118,398 @@ fn workflow_v2_identity_rejects_invalid_names() {
     // Source origin labels are stable.
     assert_eq!(WorkflowSourceOrigin::Builtin.as_str(), "builtin");
     assert_eq!(WorkflowSourceOrigin::Project.as_str(), "project");
+}
+
+fn launch_request() -> WorkflowLaunchRequest {
+    WorkflowLaunchRequest {
+        name: "review".to_owned(),
+        description: "test run".to_owned(),
+        phases: vec![WorkflowPhase {
+            id: "inspect".to_owned(),
+            description: "inspect".to_owned(),
+        }],
+        script: "return { ok = true }".to_owned(),
+        args: serde_json::json!({}),
+        launch_source: "/workflow review".to_owned(),
+        parent_run_id: None,
+    }
+}
+
+fn completed(summary: &str) -> WorkflowInvocationOutcome {
+    WorkflowInvocationOutcome {
+        ok: true,
+        status: WorkflowOutcomeStatus::Completed,
+        summary: summary.to_owned(),
+        interruption: None,
+        details: serde_json::json!({}),
+        actual_usage: None,
+        child_refs: Vec::new(),
+    }
+}
+
+#[tokio::test]
+async fn v2_create_is_durable_and_queued_before_registration() {
+    let dir = tempfile::tempdir().unwrap();
+    let runtime = WorkflowRuntime::default();
+
+    let handle = runtime
+        .create_run(dir.path(), launch_request())
+        .await
+        .expect("create");
+
+    let snapshot = handle.snapshot().await;
+    assert_eq!(snapshot.state, WorkflowState::Queued);
+    assert!(!snapshot.recovery_failure);
+
+    let meta = read_run_metadata(&run_dir(dir.path(), &handle.run_id)).unwrap();
+    assert_eq!(meta.run_id, handle.run_id);
+    assert_eq!(meta.journal_format_version, 2);
+    assert_eq!(meta.name, "review");
+
+    let journal_path = run_dir(dir.path(), &handle.run_id).join("journal.jsonl");
+    let envelopes = collect_journal_v2(&journal_path, Some(&handle.run_id)).unwrap();
+    assert_eq!(envelopes.len(), 1);
+    assert!(matches!(
+        envelopes[0].payload,
+        JournalPayload::RunCreated { .. }
+    ));
+    match &envelopes[0].payload {
+        JournalPayload::RunCreated {
+            name,
+            description,
+            launch_source,
+        } => {
+            assert_eq!(name, "review");
+            assert_eq!(description.as_deref(), Some("test run"));
+            assert_eq!(launch_source.as_deref(), Some("/workflow review"));
+        }
+        _ => unreachable!(),
+    }
+
+    // Worker must not auto-start; registration is the caller's responsibility
+    // and create_run returns while still Queued with worker inactive.
+    let err = runtime
+        .start_worker(&handle.run_id)
+        .await
+        .expect_err("start_worker without runner must fail before activation");
+    assert!(
+        err.to_string().contains("runner is not bound"),
+        "unexpected: {err}"
+    );
+    assert_eq!(handle.snapshot().await.state, WorkflowState::Queued);
+
+    // Rollback only never-started Queued runs.
+    runtime
+        .rollback_created_run(&handle.run_id)
+        .await
+        .expect("rollback unstarted");
+    assert!(!run_dir(dir.path(), &handle.run_id).exists());
+}
+
+#[test]
+fn workflow_v2_rejects_all_illegal_and_terminal_transitions() {
+    let allowed: std::collections::HashSet<_> = WorkflowState::allowed_transitions()
+        .iter()
+        .copied()
+        .collect();
+
+    for &from in WorkflowState::all_states() {
+        for &to in WorkflowState::all_states() {
+            let legal = allowed.contains(&(from, to));
+            assert_eq!(
+                from.can_transition_to(to),
+                legal,
+                "can_transition_to mismatch for {} -> {}",
+                from.as_str(),
+                to.as_str()
+            );
+            if from == to {
+                assert!(from.require_transition_to(to).is_err());
+                continue;
+            }
+            if legal {
+                from.require_transition_to(to).unwrap_or_else(|e| {
+                    panic!("expected allow {} -> {}: {e}", from.as_str(), to.as_str())
+                });
+            } else {
+                let err = from.require_transition_to(to).expect_err("must reject");
+                assert_eq!(err.code(), WorkflowErrorCode::InvalidOperation);
+            }
+        }
+        if from.is_terminal() {
+            assert!(!from.allows_ordinary_resume());
+            for &to in WorkflowState::all_states() {
+                assert!(
+                    !from.can_transition_to(to),
+                    "terminal {} must be immutable",
+                    from.as_str()
+                );
+            }
+        }
+    }
+
+    // AwaitingUser is not an ordinary-resume source and cannot jump to Running.
+    assert!(!WorkflowState::AwaitingUser.allows_ordinary_resume());
+    assert!(!WorkflowState::AwaitingUser.can_transition_to(WorkflowState::Running));
+    assert!(!WorkflowState::AwaitingUser.can_transition_to(WorkflowState::Paused));
+    assert!(WorkflowState::AwaitingUser.can_transition_to(WorkflowState::Queued));
+}
+
+#[tokio::test]
+async fn external_effect_is_never_executed_before_durable_start() {
+    let dir = tempfile::tempdir().unwrap();
+    // Reservation = start + journal_record_bytes + 64 KiB terminal reserve.
+    // Create/start fit under 32 KiB; any InvocationStarted reservation does not.
+    let limits = WorkflowLimits {
+        journal_record_bytes: 16 * 1024,
+        journal_total_bytes: 32 * 1024,
+        ..WorkflowLimits::default()
+    };
+    let runtime = WorkflowRuntime::new(limits);
+    let effect_ran = Arc::new(AtomicBool::new(false));
+    let effect_ran_worker = Arc::clone(&effect_ran);
+
+    runtime
+        .bind_runner(move |handle, _metadata, _session_dir| {
+            let effect_ran_worker = Arc::clone(&effect_ran_worker);
+            async move {
+                let result = handle
+                    .invoke(
+                        0,
+                        WorkflowInvocationKind::Log,
+                        serde_json::json!({"message": "should not run"}),
+                        false,
+                        |_| {
+                            effect_ran_worker.store(true, Ordering::Release);
+                            async { completed("should not run") }
+                        },
+                    )
+                    .await;
+                // Reservation/start failure must surface without executing the effect.
+                assert!(result.is_err(), "expected start/reservation failure");
+                assert!(
+                    !effect_ran_worker.load(Ordering::Acquire),
+                    "external effect executed before durable InvocationStarted"
+                );
+                Err(WorkflowError::Failed("reservation denied".to_owned()))
+            }
+        })
+        .unwrap();
+
+    let handle = runtime
+        .create_run(dir.path(), launch_request())
+        .await
+        .expect("create must fit tiny journal");
+    assert_eq!(handle.snapshot().await.state, WorkflowState::Queued);
+
+    runtime.start_worker(&handle.run_id).await.unwrap();
+    tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            let snap = runtime.snapshot(&handle.run_id).await.unwrap();
+            if snap.state.is_terminal() {
+                return snap;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("workflow reached a terminal state");
+
+    assert!(
+        !effect_ran.load(Ordering::Acquire),
+        "effect must never run without durable start"
+    );
+
+    let journal_path = run_dir(dir.path(), &handle.run_id).join("journal.jsonl");
+    let envelopes = collect_journal_v2(&journal_path, Some(&handle.run_id)).unwrap();
+    let started = envelopes
+        .iter()
+        .any(|e| matches!(e.payload, JournalPayload::InvocationStarted { .. }));
+    assert!(
+        !started,
+        "InvocationStarted must not be durable when reservation fails"
+    );
+}
+
+#[tokio::test]
+async fn crash_after_final_result_appends_only_completed_state() {
+    let dir = tempfile::tempdir().unwrap();
+    let session = dir.path();
+    let run_id = WorkflowRunId::generate();
+    let run_path = run_dir(session, &run_id);
+    std::fs::create_dir_all(&run_path).unwrap();
+
+    // Synthesize a durable prefix that crashed after FinalResultRecorded.
+    let meta = neo_agent_core::workflow::WorkflowRunMetadata {
+        run_id: run_id.clone(),
+        parent_run_id: None,
+        name: "review".to_owned(),
+        description: "crash recovery".to_owned(),
+        phases: Vec::new(),
+        script: "return { ok = true }".to_owned(),
+        script_sha256: WorkflowRevision::from_bytes(b"return { ok = true }")
+            .as_str()
+            .to_owned(),
+        args: serde_json::json!({}),
+        launch_source: "/workflow".to_owned(),
+        journal_format_version: 2,
+    };
+    neo_agent_core::workflow::write_run_metadata(&run_path, &meta, &WorkflowLimits::default())
+        .unwrap();
+
+    let journal_path = run_path.join("journal.jsonl");
+    let mut writer = JournalV2Writer::open(&journal_path, run_id.clone()).unwrap();
+    let limits = WorkflowLimits::default();
+    let mut seq = 0u64;
+    let mut append = |payload: JournalPayload| {
+        let env = JournalEnvelope::new(seq, 1_000 + seq, run_id.clone(), payload);
+        writer.append(&env, &limits).unwrap();
+        seq += 1;
+    };
+    append(JournalPayload::RunCreated {
+        name: "review".to_owned(),
+        description: Some("crash recovery".to_owned()),
+        launch_source: Some("/workflow".to_owned()),
+    });
+    append(JournalPayload::StateChanged {
+        previous: WorkflowState::Queued,
+        new: WorkflowState::Running,
+        reason: "worker_start".to_owned(),
+        actor: WorkflowActor::Runtime,
+    });
+    append(JournalPayload::FinalResultRecorded {
+        metadata: WorkflowFinalResultMetadata {
+            value: Some(serde_json::json!({"ok": true})),
+            artifact_id: None,
+            schema_revision: None,
+        },
+    });
+    drop(writer);
+
+    let before = collect_journal_v2(&journal_path, Some(&run_id)).unwrap();
+    assert_eq!(before.len(), 3);
+    assert!(before.iter().all(|e| {
+        !matches!(
+            e.payload,
+            JournalPayload::StateChanged {
+                new: WorkflowState::Completed,
+                ..
+            }
+        )
+    }));
+
+    let runtime = WorkflowRuntime::default();
+    let handles = runtime.rehydrate(session).await.unwrap();
+    assert_eq!(handles.len(), 1);
+    let recovered = &handles[0];
+    assert_eq!(recovered.run_id, run_id);
+    assert_eq!(recovered.snapshot().await.state, WorkflowState::Completed);
+
+    let after = collect_journal_v2(&journal_path, Some(&run_id)).unwrap();
+    assert_eq!(
+        after.len(),
+        4,
+        "recovery must append only the missing Completed state"
+    );
+    match &after[3].payload {
+        JournalPayload::StateChanged {
+            previous,
+            new,
+            reason,
+            ..
+        } => {
+            assert_eq!(*previous, WorkflowState::Running);
+            assert_eq!(*new, WorkflowState::Completed);
+            assert_eq!(reason, "recover_final_result");
+        }
+        other => panic!("expected Completed transition, got {other:?}"),
+    }
+    let final_count = after
+        .iter()
+        .filter(|e| matches!(e.payload, JournalPayload::FinalResultRecorded { .. }))
+        .count();
+    assert_eq!(final_count, 1, "must not rewrite FinalResultRecorded");
+
+    // Second rehydrate is idempotent: no extra terminal append.
+    let runtime2 = WorkflowRuntime::default();
+    let handles2 = runtime2.rehydrate(session).await.unwrap();
+    assert_eq!(handles2[0].snapshot().await.state, WorkflowState::Completed);
+    let after2 = collect_journal_v2(&journal_path, Some(&run_id)).unwrap();
+    assert_eq!(after2.len(), 4);
+}
+
+#[tokio::test]
+async fn ordinary_resume_cannot_bypass_awaiting_user() {
+    // Runtime-level guard: only Paused allows ordinary resume.
+    let dir = tempfile::tempdir().unwrap();
+    let runtime = WorkflowRuntime::default();
+    // Build a rehydrated AwaitingUser projection by writing journal + rehydrate.
+    let run_id = WorkflowRunId::generate();
+    let run_path = run_dir(dir.path(), &run_id);
+    std::fs::create_dir_all(&run_path).unwrap();
+    let meta = neo_agent_core::workflow::WorkflowRunMetadata {
+        run_id: run_id.clone(),
+        parent_run_id: None,
+        name: "await".to_owned(),
+        description: String::new(),
+        phases: Vec::new(),
+        script: "return nil".to_owned(),
+        script_sha256: WorkflowRevision::from_bytes(b"return nil")
+            .as_str()
+            .to_owned(),
+        args: serde_json::json!({}),
+        launch_source: "/workflow".to_owned(),
+        journal_format_version: 2,
+    };
+    neo_agent_core::workflow::write_run_metadata(&run_path, &meta, &WorkflowLimits::default())
+        .unwrap();
+    let journal_path = run_path.join("journal.jsonl");
+    let mut writer = JournalV2Writer::open(&journal_path, run_id.clone()).unwrap();
+    let limits = WorkflowLimits::default();
+    for (seq, payload) in [
+        JournalPayload::RunCreated {
+            name: "await".to_owned(),
+            description: None,
+            launch_source: Some("/workflow".to_owned()),
+        },
+        JournalPayload::StateChanged {
+            previous: WorkflowState::Queued,
+            new: WorkflowState::Running,
+            reason: "worker_start".to_owned(),
+            actor: WorkflowActor::Runtime,
+        },
+        JournalPayload::UserInputRequested {
+            request_id: "req_1".to_owned(),
+            prompt: Some(serde_json::json!({"q": "continue?"})),
+        },
+        JournalPayload::StateChanged {
+            previous: WorkflowState::Running,
+            new: WorkflowState::AwaitingUser,
+            reason: "user_input".to_owned(),
+            actor: WorkflowActor::Runtime,
+        },
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let env = JournalEnvelope::new(seq as u64, 1_000 + seq as u64, run_id.clone(), payload);
+        writer.append(&env, &limits).unwrap();
+    }
+    drop(writer);
+
+    let handles = runtime.rehydrate(dir.path()).await.unwrap();
+    assert_eq!(
+        handles[0].snapshot().await.state,
+        WorkflowState::AwaitingUser
+    );
+    runtime.bind_runner(|_h, _m, _s| async { Ok(()) }).unwrap();
+    let err = handles[0]
+        .resume(WorkflowActor::Human)
+        .await
+        .expect_err("ordinary resume must not bypass awaiting_user");
+    assert_eq!(err.code(), WorkflowErrorCode::AwaitingUser);
+    assert_eq!(
+        handles[0].snapshot().await.state,
+        WorkflowState::AwaitingUser
+    );
 }
