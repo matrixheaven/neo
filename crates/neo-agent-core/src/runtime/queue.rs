@@ -194,14 +194,7 @@ pub(super) fn append_pending_workflow_notifications(
 }
 
 fn state_label(state: WorkflowState) -> &'static str {
-    match state {
-        WorkflowState::Running => "running",
-        WorkflowState::Paused => "paused",
-        WorkflowState::Completed => "completed",
-        WorkflowState::Failed => "failed",
-        WorkflowState::Cancelled => "cancelled",
-        WorkflowState::ResourceLimited => "resource_limited",
-    }
+    state.as_str()
 }
 
 /// Shared handle used to push live input into a running turn.

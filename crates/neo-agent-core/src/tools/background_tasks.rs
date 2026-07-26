@@ -1580,7 +1580,9 @@ fn task_kind_from_state(state: &BackgroundTaskState) -> BackgroundTaskKind {
 
 fn workflow_status(state: crate::workflow::WorkflowState) -> BackgroundTaskStatus {
     match state {
+        crate::workflow::WorkflowState::Queued => BackgroundTaskStatus::Running,
         crate::workflow::WorkflowState::Running => BackgroundTaskStatus::Running,
+        crate::workflow::WorkflowState::AwaitingUser => BackgroundTaskStatus::WaitingForUser,
         crate::workflow::WorkflowState::Paused => BackgroundTaskStatus::Paused,
         crate::workflow::WorkflowState::Completed => BackgroundTaskStatus::Completed,
         crate::workflow::WorkflowState::Failed => BackgroundTaskStatus::Failed,

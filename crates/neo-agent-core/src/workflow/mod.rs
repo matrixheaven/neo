@@ -8,7 +8,7 @@ mod state;
 
 pub use capability::WorkflowCapability;
 
-pub use error::WorkflowError;
+pub use error::{WorkflowError, WorkflowErrorCode};
 pub use journal::{
     JournalRecord, JournalWriter, canonical_input_hash, find_incomplete_invocations, journal_path,
     read_journal, read_run_metadata, run_dir, write_run_metadata,
@@ -20,7 +20,11 @@ pub use runtime::{
     WorkflowProjectionStage, WorkflowRuntime, compute_replay_prefix,
 };
 pub use state::{
-    WorkflowActor, WorkflowChildRef, WorkflowId, WorkflowInterruptionReason,
-    WorkflowInvocationKind, WorkflowInvocationOutcome, WorkflowOutcomeStatus, WorkflowPhase,
-    WorkflowRunMetadata, WorkflowSnapshot, WorkflowState, WorkflowStepRecord,
+    WORKFLOW_NAME_MAX_LEN, WorkflowActor, WorkflowArtifactId, WorkflowCheckpoint, WorkflowChildRef,
+    WorkflowFinalResultMetadata, WorkflowHumanHandle, WorkflowId, WorkflowInterruptionReason,
+    WorkflowInvocationId, WorkflowInvocationKind, WorkflowInvocationOutcome,
+    WorkflowLineageMetadata, WorkflowName, WorkflowOutcomeStatus, WorkflowPhase,
+    WorkflowPinnedSource, WorkflowRequestId, WorkflowRevision, WorkflowRunId, WorkflowRunMetadata,
+    WorkflowSnapshot, WorkflowSourceOrigin, WorkflowState, WorkflowStepRecord,
+    validate_portable_name,
 };
