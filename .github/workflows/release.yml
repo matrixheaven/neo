@@ -138,8 +138,21 @@ jobs:
           name: neo-${{ matrix.suffix }}
           path: dist/neo-${{ matrix.suffix }}*
 
+      - name: Resolve release notes
+        id: release-notes
+        shell: bash
+        run: |
+          notes_tag="${GITHUB_REF_NAME%%+*}"
+          notes_path="docs/releases/${notes_tag}.md"
+          if [ ! -f "$notes_path" ]; then
+            echo "missing release notes: $notes_path" >&2
+            exit 1
+          fi
+          echo "path=$notes_path" >> "$GITHUB_OUTPUT"
+
       - name: Release
         uses: softprops/action-gh-release@v2
         if: startsWith(github.ref, 'refs/tags/')
         with:
+          body_path: ${{ steps.release-notes.outputs.path }}
           files: dist/neo-${{ matrix.suffix }}*
