@@ -230,6 +230,26 @@ mod tests {
         );
         assert!(create_workflow.manifest.auto_invokable());
 
+        let description = &create_workflow.manifest.description;
+        for term in [
+            "reate",
+            "save",
+            "run",
+            "use",
+            "test",
+            "evaluate",
+            "inspect",
+            "black-box",
+            "Neo repository",
+            "Workflow tool",
+            "implementation",
+        ] {
+            assert!(
+                description.contains(term),
+                "create-workflow discovery description must cover {term:?}: {description}"
+            );
+        }
+
         for required in [
             "paired",
             "neo.delegate",
@@ -237,27 +257,31 @@ mod tests {
             "neo.tool",
             "neo.await_user",
             "output_schema",
-            "source_sha256",
-            "neo workflow check",
-            "WorkflowRuntime",
             "only** workflow language",
             "Do not author Rhai",
             "code-review",
             "deep-research",
             "large-refactor",
+            "Workflow(validate_inline)",
+            "Workflow(run_inline)",
+            "Workflow(run_saved)",
+            "Workflow(save)",
+            "Workflow(list)",
+            "TaskOutput",
+            "not** call `neo workflow ...` through Bash or Terminal",
+            "the host owns",
+            "escape hatch",
+            "Do **not** ask the user to run `/workflow` first",
         ] {
             assert!(
                 create_workflow.body.contains(required),
                 "create-workflow must contain host contract phrase {required:?}"
             );
         }
-        for forbidden in ["agent()", "parallel(", "let meta", "complete("] {
-            // Product dialect must not teach Grok Rhai host calls as valid Neo APIs.
-            // Mentions inside "do not" sentences are fine only if the banned call
-            // form is not presented as usage; keep the skill free of call-shaped
-            // Grok snippets outside explicit rejection lines.
-            let _ = forbidden;
-        }
+        assert!(
+            !create_workflow.body.contains("Compute `source_sha256`"),
+            "create-workflow must not teach manual hash computation"
+        );
         assert!(
             !create_workflow.body.contains("agent(prompt")
                 && !create_workflow.body.contains("parallel([")

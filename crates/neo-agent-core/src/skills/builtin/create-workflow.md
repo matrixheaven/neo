@@ -1,12 +1,15 @@
 ---
 name: create-workflow
 description: >
-  Create a Neo workflow: author a paired Lua script and .workflow.toml definition
-  (phases, neo.delegate / neo.swarm fan-out, schemas, human gates), validate with
-  `neo workflow check`, save under user or project scope, and offer a real run.
-  Also the complete Lua host API reference for workflow scripts. Use when the user
-  wants to create, author, or write a workflow, automate a multi-agent pipeline,
-  or runs /create-workflow.
+  Create, save, run, use, test, evaluate, inspect, or deeply assess a Neo
+  workflow, including black-box evaluation of workflow behavior while the
+  current directory is the Neo repository. Route every workflow lifecycle
+  step through the registered Workflow tool (validate_inline/run_inline for
+  one-off evaluation, save + run_saved for reusable definitions, list/show
+  for discovery) and inspect runs with TaskOutput. Also the complete Lua host
+  API reference for authoring workflow scripts. Use for any natural-language
+  workflow request or /create-workflow. Not for modifying or debugging Neo's
+  own workflow implementation or CLI — that is ordinary repository work.
 disableModelInvocation: false
 ---
 
@@ -15,121 +18,89 @@ disableModelInvocation: false
 Workflows are deterministic Lua scripts that orchestrate child agents and tools
 through the `neo.*` host table. Definitions are a **paired** `<name>.lua` +
 `<name>.workflow.toml` resolved by the definition registry. `WorkflowRuntime` is
-the sole durable owner of runs; this skill only authors and validates
-definitions.
+the sole durable owner of runs; this skill only authors definitions and routes
+their validation, save, and launch through the `Workflow` tool.
 
 When talking to the user, call these "workflows," not "Lua scripts."
 
 Lua is the **only** workflow language. Do not author Rhai, dual-engine, or
 Grok-style `agent()` / `parallel()` scripts for Neo.
 
-## Procedure
+## Routing: use the Workflow tool, never the CLI
+
+The registered `Workflow` tool is the canonical first-party interface for every
+workflow lifecycle step. Saved and inline execution are directly available and
+require **no slash command, no capability, and no CLI**.
+
+| User intent | Required procedure |
+|-------------|--------------------|
+| Create/save only | author -> `Workflow(save)` -> ask whether to run now |
+| Create and run/test | author -> `Workflow(save)` -> `Workflow(run_saved)` -> `TaskOutput` |
+| One-off run/test/evaluate | author -> `Workflow(validate_inline)` -> `Workflow(run_inline)` -> `TaskOutput` |
+| Run a known saved workflow | `Workflow(run_saved)` -> `TaskOutput` |
+| Discover saved workflows | `Workflow(list)` / `Workflow(show)` -> `Workflow(run_saved)` -> `TaskOutput` |
+| Modify/debug Neo's workflow implementation | leave this skill's route; use normal repository diagnosis |
+
+Rules when the user is using workflows as a **product feature** (even inside
+the Neo repository):
+
+- Do **not** call `neo workflow ...` through Bash or Terminal. The CLI is a
+  human/headless surface, never the assistant path.
+- Do **not** compute `source_sha256` or hand-write the `.workflow.toml`
+  manifest. Pass the Lua source and schemas to `Workflow(save)`; the host owns
+  hashing, manifest construction, pair paths, and atomic persistence.
+- Do **not** read Neo's workflow implementation source or run Cargo tests to
+  learn how to use, run, or black-box test workflows.
+- Do **not** ask the user to run `/workflow` first, and never claim validation
+  or execution from authored files alone.
+- Do not inspect the repository to decide whether a workflow feature request
+  applies: a workflow evaluation request is product use even when cwd is the
+  Neo repo.
+
+The one escape hatch: when the user **explicitly** asks to debug, modify, or
+test Neo's workflow implementation or CLI itself, ordinary source inspection,
+Cargo tests, and CLI invocation are allowed and this skill's routing rules do
+not apply.
+
+## Authoring procedure
 
 1. **Gather intent**, conversationally: what should it do, what fans out, what
    must be verified, what is the final structured result, and whether children
    are read-only or may mutate (isolated worktrees for mutation).
-2. **Pick a name and scope** (portable name grammar
-   `[a-z0-9][a-z0-9_-]{0,63}`):
-   - Project (default inside a trusted workspace):
-     `<workspace>/.neo/workflows/<name>.{lua,workflow.toml}`
-   - User (all workspaces): `$NEO_HOME/workflows/<name>.{lua,workflow.toml}`
-   - Project save requires workspace trust. Builtin scope is not writable.
-3. **Author the pair.** Start from the example below. Shape is: TOML manifest
-   (display metadata, phases, input/output schemas, `source_sha256`) + Lua body
-   that reads `neo.args`, calls host APIs, and **returns** one JSON-compatible
-   table matching `output_schema`. Keep child prompts imperative and
-   self-contained (see Pitfalls).
-4. **Compute `source_sha256`** as the lowercase hex SHA-256 of the **exact**
-   `.lua` file bytes (including trailing newline as written). Mismatch fails
-   resolution closed.
-5. **Validate without creating a run:**
-   ```bash
-   neo workflow check <name-or-path> --output json
-   ```
-   Path may be the `.lua` or `.workflow.toml` (or registry name after install).
-   Iterate until `ok` is true. Check compiles the definition and Lua; it does
-   not execute host effects or live children.
-6. **Optional fixture harness** (deterministic, no live providers):
-   ```bash
-   neo workflow test <name-or-path> --case <fixture.json>
-   ```
-7. **Offer a real run** with representative args:
-   - CLI: `neo workflow run <name> --args-json '...'`
-   - Interactive: exact `/workflow <name>` slash launch (host-direct; zero model
-     calls before execution)
-8. **Report**: pair paths, check output, how to run, scopes, and remaining risks
-   (e.g. live child quality, human gates).
+2. **Pick a name** (portable grammar `[a-z0-9][a-z0-9_-]{0,63}`) and, for
+   saves, a scope: `project` (trusted workspace only) or `user` (all
+   workspaces). Builtin scope is not writable.
+3. **Author the Lua source** from the example below. It reads `neo.args`,
+   calls host APIs, and **returns** one JSON-compatible table matching
+   `output_schema`. Keep child prompts imperative and self-contained (see
+   Pitfalls). Declare ordered phases and JSON Schemas alongside the source.
+4. **Validate**: `Workflow(validate_inline)` for inline definitions or
+   `Workflow(validate_saved)` for saved ones. Iterate until the structured
+   result reports valid. Validation compiles the definition and Lua; it
+   creates no files, runs, or tasks.
+5. **Route by intent** using the table above. `Workflow(save)` persists the
+   pair (use `replace: true` only when the user wants to overwrite an existing
+   definition). Run actions return a task ID; collect the terminal result with
+   `TaskOutput`.
+6. **Report**: workflow name, validation/save/run structured outcomes, task
+   terminal state, saved scope, and remaining risks (e.g. live child quality,
+   human gates).
 
-Prefer the smallest workflow that satisfies the request. Do not invent host APIs
-that are not listed below. Do not launch workflows from workflows.
+Prefer the smallest workflow that satisfies the request. Do not invent host
+APIs that are not listed below. Do not launch workflows from workflows.
 
-## Definition pair
+## Workflow tool arguments (for the definition fields)
 
-### `<name>.workflow.toml`
+`validate_inline`, `save`, and `run_inline` all take the same definition
+fields the host validates canonically:
 
-```toml
-definition_format_version = 2
-name = "review-scope"          # optional; when present must equal filename stem
-display_name = "Review Scope"
-description = "Read-only multi-domain review with structured findings."
-source_sha256 = "<lowercase-hex-sha256-of-exact-lua-bytes>"
-
-[[phases]]
-id = "scope"
-description = "Accept inputs"
-
-[[phases]]
-id = "review"
-description = "Dispatch review children"
-
-[[phases]]
-id = "finalize"
-description = "Assemble final output"
-
-[input_schema]
-type = "object"
-additionalProperties = false
-required = ["scope"]
-
-[input_schema.properties.scope]
-type = "string"
-minLength = 1
-
-[output_schema]
-type = "object"
-additionalProperties = false
-required = ["ok", "summary", "findings"]
-
-[output_schema.properties.ok]
-type = "boolean"
-
-[output_schema.properties.summary]
-type = "string"
-
-[output_schema.properties.findings]
-type = "array"
-items = { type = "object" }
-```
-
-Rules:
-
-- `definition_format_version` must be `2`.
-- `output_schema` is **required** on every definition (final return value).
-- `input_schema` is optional but preferred when `neo.args` fields are required.
-- Every `neo.phase("id")` call must use an `id` listed under `[[phases]]`.
-- Precedence when resolving names: `builtin < user < trusted project`.
-  Same-scope name conflicts invalidate the name; invalid higher-scope content
-  never silently falls back.
-- Revision framing is host-owned (manifest + source). Authors only need correct
-  paired files and matching `source_sha256`.
-
-### `<name>.lua`
-
-- Single chunk; final result is the **return value** (one table / scalar).
-- Zero returns or a single `nil` become JSON `null` (usually fails schema).
-- Multiple return values fail.
-- Exactly one tools-disabled schema repair is allowed for child structured
-  output; still require strong schemas and fail closed on evidence gates.
+- `name`, `description`, ordered `phases` (`{id, description}`), exact Lua
+  `script`, `input_schema` (object, optional-but-preferred), `output_schema`
+  (object, **required**).
+- `save` additionally requires `scope` (`user` | `project`) and accepts
+  `replace` (default `false`).
+- Run actions accept `args` (object, default `{}`).
+- Every `neo.phase("id")` call must use an `id` listed in `phases`.
 
 ## Example: read-only fan-out → assemble
 
@@ -217,9 +188,9 @@ return {
 }
 ```
 
-Ship the matching `.workflow.toml` with phases `scope` / `review` / `finalize`,
-required `args.scope`, and an `output_schema` that matches the return table.
-Recompute `source_sha256` after every Lua edit.
+Matching definition fields for the tool call: phases `scope` / `review` /
+`finalize`, required `args.scope` in `input_schema`, and an `output_schema`
+matching the return table.
 
 ## The dialect
 
@@ -233,6 +204,11 @@ Recompute `source_sha256` after every Lua edit.
   randomness is unavailable; pass any needed seed/time through args.
 - `neo.args` is **read-only**. Host outcomes are **read-only**.
 - Unknown fields on host input tables are rejected (`deny_unknown_fields`).
+- Single chunk; final result is the **return value** (one table / scalar).
+  Zero returns or a single `nil` become JSON `null` (usually fails schema).
+  Multiple return values fail.
+- Exactly one tools-disabled schema repair is allowed for child structured
+  output; still require strong schemas and fail closed on evidence gates.
 
 ## Host API
 
@@ -245,7 +221,7 @@ Recompute `source_sha256` after every Lua edit.
 
 | Call | Behavior |
 |------|----------|
-| `neo.phase(id)` | Select phase `id` declared in the TOML. Unknown id fails. |
+| `neo.phase(id)` | Select phase `id` declared in `phases`. Unknown id fails. |
 | `neo.log(message)` | Non-empty progress line for the user/dashboard. |
 | `neo.report(value)` | Record a JSON-compatible intermediate report. |
 | `neo.fail(message)` | Fatal abort; subsequent host calls fail. |
@@ -300,7 +276,7 @@ Recompute `source_sha256` after every Lua edit.
 | `neo.await_user({...})` | Durable human (or policy-allowed) gate; returns **answer value**. |
 
 **`neo.tool` deny list** (exact names; not eligible):  
-`RunWorkflow`, `Delegate`, `DelegateSwarm`, `TaskPause`, `TaskResume`,
+`Workflow`, `Delegate`, `DelegateSwarm`, `TaskPause`, `TaskResume`,
 `TaskStop`, `TaskAnswer`, `AskUserQuestion`, `EnterPlanMode`, `ExitPlanMode`,
 `StartGoal`, `ExitGoalMode`, `UpdateGoalStatus`, `GetGoalStatus`, `Todo`,
 `TodoList`, `ListDelegates`, `WaitDelegate`, `InterruptDelegate`,
@@ -359,27 +335,32 @@ Evidence gates must fail closed (`neo.verify` / `neo.fail`).
   shards.
 - **Adversarial verify:** independent reviewer children prompted to refute;
   require concrete evidence fields in schema.
-- **Copy shape from builtins:** `code-review`, `deep-research`, `large-refactor`
-  under the builtin workflow registry (paired sources in the product). Prefer
+- **Inspect builtins through the tool:** `Workflow(show)` on `code-review`,
+  `deep-research`, or `large-refactor` returns their paired sources. Prefer
   adapting those patterns over inventing new host APIs.
 
 ## Pitfalls (each maps to real failures)
 
 - **Wrong product dialect.** Rhai `agent()` / `parallel()` / `complete()` /
-  `let meta = #{...}` is not Neo. Use paired TOML + `neo.*` + `return`.
-- **Missing `output_schema`.** Final definition schema and every workflow child
-  require it. Homogeneous swarm items get schema via host child planning rules;
-  heterogeneous items must set per-item `output_schema`.
+  `let meta = #{...}` is not Neo. Use paired definition fields + `neo.*` +
+  `return`.
+- **CLI fallback.** `neo workflow check/run/save` through Bash is the human
+  surface. The assistant validates, saves, and runs through the `Workflow`
+  tool only.
+- **Hand-computed manifests.** `source_sha256` and the `.workflow.toml` pair
+  are host-owned by `Workflow(save)`; never author them yourself.
+- **Missing `output_schema`.** The final definition schema and every workflow
+  child require it. Heterogeneous swarm items must set per-item
+  `output_schema`.
 - **Terse child prompts.** Cold children return empty structured shells without
   tools. Command tool use and define what a valid empty answer requires.
 - **Unguarded outcomes.** Always check `outcome.ok` (or `neo.verify`) before
   trusting `details`.
-- **Phase id typos.** `neo.phase` only accepts ids declared in the TOML.
-- **Stale `source_sha256`.** Any Lua byte change requires a new hash.
-- **Project scope without trust.** Untrusted project definitions are absent and
-  cannot be saved.
+- **Phase id typos.** `neo.phase` only accepts ids declared in `phases`.
+- **Project scope without trust.** Untrusted project definitions cannot be
+  saved; use `user` scope or ask the user about trust.
 - **`neo.tool` control-plane bypass.** Denied tools stay denied; do not try
-  `RunWorkflow` / `Delegate` / plan-mode / goal tools from scripts.
+  `Workflow` / `Delegate` / plan-mode / goal tools from scripts.
 - **Silent truncation.** If you cap findings, `neo.log` what was dropped.
 - **Agents do not enforce invariants — scripts do.** Re-check paths, schemas,
   and counts in Lua after children return.
@@ -388,14 +369,17 @@ Evidence gates must fail closed (`neo.verify` / `neo.fail`).
 
 ## Built-in references
 
-Product ships three ordinary registry builtins (read them when shaping larger
-workflows):
+Product ships three ordinary registry builtins (inspect via `Workflow(show)`):
 
 - `code-review` — read-only multi-domain review, findings-first final output
 - `deep-research` — heterogeneous research children + structured report
 - `large-refactor` — isolated mutation slices + human merge gate
 
-## CLI quick reference
+## Human/headless CLI reference (not the assistant path)
+
+These commands remain supported for humans, scripts, and explicit CLI testing.
+**The assistant must use the registered `Workflow` tool unless the user
+explicitly asked for CLI operation.**
 
 ```bash
 neo workflow list
@@ -407,14 +391,26 @@ neo workflow save <run-or-pair-path> --scope user|project [--name <name>] [--for
 neo workflow answer <run> <request_id> --json '<answer>'
 ```
 
+Interactive users may also launch a saved definition host-direct with the exact
+`/workflow <name> [JSON_OBJECT]` slash command (zero model calls before
+execution). Never tell the user a slash command is required for the assistant
+to act; it is optional convenience only.
+
 ## Done criteria
 
-Report only after:
+Report only after the requested terminal state is real:
 
-1. Pair files exist at the chosen scope paths.
-2. `source_sha256` matches the Lua bytes.
-3. `neo workflow check` returns `ok: true`.
-4. User was offered a real run path (`/workflow` or `neo workflow run`).
-5. Any intentional limits (read-only, no auto-merge, schema caps) are stated.
+1. Create/save: a structured `Workflow(save)` success exists (ok, saved
+   status, resolved definition).
+2. Validate: a structured `Workflow(validate_inline)` or
+   `Workflow(validate_saved)` success exists.
+3. Run/test/evaluate: a real task was launched through `Workflow(run_inline)`
+   or `Workflow(run_saved)` **and** inspected to a terminal state through
+   `TaskOutput`, or a real typed failure is reported verbatim.
+4. No slash capability, CLI invocation, or manual hash/manifest step was used
+   or requested.
+5. Any intentional limits (read-only, no auto-merge, schema caps) and
+   remaining risks are stated accurately.
 
-If check fails, report diagnostics exactly; do not claim the workflow is ready.
+If validation or launch fails, report the structured error exactly; do not
+claim the workflow is ready.
