@@ -11765,16 +11765,12 @@ async fn workflowish_is_not_workflow() {
     assert!(controller.active_turn.is_none());
 }
 
-#[tokio::test]
-async fn named_workflow_slash_launches_without_model_call() {
+fn demo_named_workflow_config(temp: &tempfile::TempDir, mode: PermissionMode) -> AppConfig {
     use neo_agent_core::workflow::{
         BuiltinWorkflowDefinition, WorkflowDefinitionRegistry, WorkflowDefinitionRegistryConfig,
         WorkflowLimits, source_sha256_hex,
     };
 
-    let turn_count = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
-    let turn_count_clone = std::sync::Arc::clone(&turn_count);
-    let temp = tempfile::tempdir().expect("tempdir");
     let project_dir = temp.path().join("workspace");
     let neo_home = temp.path().join("neo_home");
     std::fs::create_dir_all(&project_dir).expect("workspace");
@@ -11804,8 +11800,8 @@ type = "boolean"
 "#
     );
     let mut config = test_config(&project_dir, temp.path().join("sessions"));
-    config.permission_mode = PermissionMode::Yolo;
-    config.live_permission_mode = std::sync::Arc::new(std::sync::RwLock::new(PermissionMode::Yolo));
+    config.permission_mode = mode;
+    config.live_permission_mode = std::sync::Arc::new(std::sync::RwLock::new(mode));
     config.workflow_definitions =
         WorkflowDefinitionRegistry::new(WorkflowDefinitionRegistryConfig {
             neo_home,
@@ -11822,6 +11818,16 @@ type = "boolean"
         .workflow_runtime
         .bind_runner(|_handle, _metadata, _session_dir| async move { Ok(()) })
         .expect("bind runner");
+    config
+}
+
+#[tokio::test]
+async fn named_workflow_slash_launches_without_model_call() {
+    let turn_count = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let turn_count_clone = std::sync::Arc::clone(&turn_count);
+    let temp = tempfile::tempdir().expect("tempdir");
+    let project_dir = temp.path().join("workspace");
+    let config = demo_named_workflow_config(&temp, PermissionMode::Yolo);
 
     let mut controller = InteractiveController::new_for_test(
         "neo",
@@ -11861,6 +11867,182 @@ type = "boolean"
     let tasks = config.background_tasks.list(false, 10).await;
     assert_eq!(tasks.len(), 1, "named launch registers one background task");
     assert_eq!(tasks[0].kind, neo_agent_core::BackgroundTaskKind::Workflow);
+}
+
+#[tokio::test]
+async fn named_workflow_slash_ask_review_supports_launch_revise_cancel() {
+    for (action, feedback, expect_task, expected_status) in [
+        (
+            ApprovalAction::LaunchWorkflow,
+            None,
+            true,
+            "launched as task",
+        ),
+        (
+            ApprovalAction::ReviseWorkflow {
+                preset_feedback: None,
+            },
+            Some("split the phases"),
+            false,
+            "Workflow launch revised",
+        ),
+        (
+            ApprovalAction::CancelWorkflow,
+            None,
+            false,
+            "Workflow launch cancelled",
+        ),
+    ] {
+        let turn_count = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let turn_count_clone = std::sync::Arc::clone(&turn_count);
+        let temp = tempfile::tempdir().expect("tempdir");
+        let project_dir = temp.path().join("workspace");
+        let config = demo_named_workflow_config(&temp, PermissionMode::Ask);
+
+        let mut controller = InteractiveController::new_for_test(
+            "neo",
+            "test-session",
+            "openai/gpt-4.1",
+            &project_dir,
+            move |_request| {
+                let turn_count = std::sync::Arc::clone(&turn_count_clone);
+                async move {
+                    turn_count.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                    Ok(Vec::<AgentEvent>::new())
+                }
+            },
+        );
+        controller.permission_mode = PermissionMode::Ask;
+        *controller
+            .live_permission_mode
+            .write()
+            .expect("permission lock") = PermissionMode::Ask;
+        controller.local_config = Some(config.clone());
+
+        controller.type_text("/workflow demo");
+        controller
+            .handle_input_event(InputEvent::Action(KeybindingAction::InputSubmit))
+            .await
+            .expect("named slash submits");
+
+        assert!(
+            controller.chrome().approval_is_pending(),
+            "Ask mode opens the typed launch review"
+        );
+        assert_eq!(
+            turn_count.load(std::sync::atomic::Ordering::SeqCst),
+            0,
+            "named slash review performs zero model calls"
+        );
+        let request_id = controller
+            .chrome()
+            .pending_approval()
+            .expect("pending approval request")
+            .request
+            .id
+            .clone();
+        controller
+            .resolve_approval_response(ApprovalResponse::Selected {
+                request_id,
+                action,
+                feedback: feedback.map(str::to_owned),
+            })
+            .await;
+
+        let tasks = config.background_tasks.list(false, 10).await;
+        assert_eq!(
+            tasks.is_empty(),
+            !expect_task,
+            "task expectation for {expected_status}"
+        );
+        assert!(
+            transcript_has_status(&controller, expected_status),
+            "transcript shows `{expected_status}`"
+        );
+        assert!(
+            controller.pending_approvals.is_empty(),
+            "review resolves after the decision"
+        );
+    }
+}
+
+#[tokio::test]
+async fn bare_workflow_slash_activates_create_workflow_and_starts_model_turn() {
+    let requests = std::sync::Arc::new(std::sync::Mutex::new(Vec::<TurnRequest>::new()));
+    let seen_requests = std::sync::Arc::clone(&requests);
+    let temp = tempfile::tempdir().expect("tempdir");
+    let mut controller = InteractiveController::new_for_test(
+        "neo",
+        "test-session",
+        "openai/gpt-4.1",
+        temp.path(),
+        move |request| {
+            let seen_requests = std::sync::Arc::clone(&seen_requests);
+            async move {
+                seen_requests.lock().expect("requests lock").push(request);
+                Ok(vec![AgentEvent::TurnFinished {
+                    turn: 1,
+                    stop_reason: StopReason::EndTurn,
+                }])
+            }
+        },
+    );
+    controller.skill_store = Some(SkillStore::load(
+        &[],
+        &[],
+        vec![LoadedSkill {
+            name: "create-workflow".to_owned(),
+            root: test_workspace_root().join("builtin/create-workflow"),
+            manifest: SkillManifest {
+                name: "create-workflow".to_owned(),
+                description: "Author Neo workflows".to_owned(),
+                when_to_use: None,
+                disable_model_invocation: false,
+                arguments: Vec::new(),
+            },
+            body: "CREATE: $ARGUMENTS".to_owned(),
+            source: SkillSource::Builtin,
+            host_metadata: SkillHostMetadata::default(),
+        }],
+    ));
+
+    controller.type_text("/workflow");
+    controller
+        .handle_input_event(InputEvent::Action(KeybindingAction::InputSubmit))
+        .await
+        .expect("bare /workflow submits");
+    controller
+        .wait_for_active_turn()
+        .await
+        .expect("authoring turn completes");
+
+    let requests = requests.lock().expect("requests lock");
+    assert_eq!(
+        requests.len(),
+        1,
+        "bare slash starts exactly one visible model turn"
+    );
+    assert_eq!(
+        requests[0].prompt,
+        vec![Content::text("Create a workflow.")]
+    );
+    let skill_context = requests[0].skill_context.as_deref().expect("skill context");
+    assert!(skill_context.contains("create-workflow"), "{skill_context}");
+
+    let entries = transcript_entries(&controller);
+    assert!(
+        entries.iter().any(|entry| matches!(
+            entry,
+            TranscriptEntry::SkillActivation { names, source, .. }
+                if names == &vec!["create-workflow".to_owned()]
+                    && *source == neo_agent_core::SkillInvocationSource::Manual
+        )),
+        "bare slash shows manual create-workflow activation"
+    );
+    assert!(
+        !controller.chrome().approval_is_pending(),
+        "bare slash creates no hidden approval or launch state"
+    );
 }
 
 #[tokio::test]

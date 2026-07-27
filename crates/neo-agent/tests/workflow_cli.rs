@@ -197,3 +197,17 @@ type = "boolean"
     );
     let _ = ok_bad;
 }
+
+/// `neo workflow run` launches headlessly through the shared coordinator and
+/// reaches a terminal state with no slash or model prerequisite.
+#[test]
+fn workflow_run_executes_headless_to_terminal() {
+    write_user_workflow("run-demo", "return { ok = true }\n");
+
+    let (ok, stdout, stderr) = run_args(&["workflow", "run", "run-demo"]);
+    assert!(
+        ok,
+        "headless run should succeed\nstdout:\n{stdout}\nstderr:\n{stderr}"
+    );
+    assert!(!stdout.trim().is_empty(), "run prints a result");
+}

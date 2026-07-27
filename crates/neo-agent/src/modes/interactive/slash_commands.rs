@@ -103,16 +103,23 @@ impl InteractiveController {
         true
     }
 
-    /// Bare `/workflow` is an authoring entry point. Named
+    /// Bare `/workflow` activates `create-workflow` through the canonical
+    /// manual skill path and submits a normal visible model turn. Named
     /// `/workflow <name> [JSON_OBJECT]` resolves the registry and launches via
-    /// the shared coordinator with zero model turns.
+    /// the shared coordinator with zero model turns. Neither path creates a
+    /// grant, nonce, reservation, or hidden launch entitlement.
     async fn handle_workflow_slash(&mut self, arg: &str) {
         if arg.is_empty() {
-            // Task 5 replaces this placeholder with canonical create-workflow
-            // activation plus a normal visible model turn.
-            self.push_status(
-                "Workflow authoring: use /workflow <name> to launch a saved workflow.".to_owned(),
-            );
+            let directives = InlineSkillDirectives {
+                invocations: vec![InlineSkillInvocation {
+                    name: "create-workflow".to_owned(),
+                    args: String::new(),
+                }],
+                body: "Create a workflow.".to_owned(),
+            };
+            if let Err(error) = self.submit_skill_directives(directives).await {
+                self.push_status(format!("Workflow authoring failed: {error}"));
+            }
             return;
         }
         if let Err(error) = self.launch_named_workflow_slash(arg).await {
