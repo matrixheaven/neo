@@ -35,6 +35,10 @@ fn launch_request() -> WorkflowLaunchRequest {
         launch_source: "test".to_owned(),
         parent_run_id: None,
         output_schema: None,
+        display_name: None,
+        input_schema: None,
+        definition_origin: None,
+        inline_unsaved: false,
     }
 }
 
@@ -156,6 +160,8 @@ async fn terminal_workflow_notification_waits_for_natural_turn() {
             handle.run_id.clone(),
             WorkflowState::Failed,
             notification.reason.clone(),
+            notification.display_name.clone(),
+            notification.purpose.clone(),
         )
         .id,
         "notification identity must be stable across processes"
@@ -441,4 +447,45 @@ async fn host_exit_recovery_does_not_start_model_turn() {
         harness.requests().is_empty(),
         "rehydration must not execute Lua or open a model turn"
     );
+}
+
+#[tokio::test]
+async fn completion_uses_pinned_display_name_purpose_and_task_handle() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let session_dir = temp.path().join("session_pinned_meta");
+    let workflow_runtime = WorkflowRuntime::new(WorkflowLimits::default());
+    workflow_runtime
+        .bind_runner(|_, _, _| async { Ok(()) })
+        .expect("bind runner");
+
+    let mut request = launch_request();
+    request.display_name = Some("pinned-display".to_owned());
+    request.inline_unsaved = true;
+
+    let handle = workflow_runtime
+        .create_run(&session_dir, request)
+        .await
+        .expect("create workflow");
+    workflow_runtime
+        .start_worker(&handle.run_id)
+        .await
+        .expect("start worker");
+    wait_for_terminal(&handle).await;
+
+    let notifications = workflow_runtime
+        .notification_queue()
+        .pending_for_session(&session_dir);
+    assert_eq!(notifications.len(), 1);
+    let notification = &notifications[0];
+    assert_eq!(notification.display_name, "pinned-display");
+    assert_eq!(
+        notification.purpose,
+        "prove natural-turn workflow notification delivery"
+    );
+    assert_eq!(notification.run_id, handle.run_id);
+    assert_eq!(notification.state, WorkflowState::Failed);
+
+    let snapshot = handle.snapshot().await;
+    assert_eq!(snapshot.display_name, "pinned-display");
+    assert!(!snapshot.purpose.is_empty());
 }

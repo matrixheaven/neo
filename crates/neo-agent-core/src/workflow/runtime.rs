@@ -32,7 +32,8 @@ use super::schema::{
 use super::state::{
     WorkflowActor, WorkflowExecutionOrigin, WorkflowFinalResultMetadata, WorkflowId,
     WorkflowInvocationKind, WorkflowInvocationOutcome, WorkflowOutcomeStatus, WorkflowPhase,
-    WorkflowRevision, WorkflowRunMetadata, WorkflowSnapshot, WorkflowState,
+    WorkflowRevision, WorkflowRunMetadata, WorkflowSnapshot, WorkflowSourceOrigin,
+    WorkflowState,
 };
 use super::user_input::{AwaitUserInput, PendingUserInput, request_id_for_call_index};
 use crate::AgentTokenUsage;
@@ -136,6 +137,14 @@ pub struct WorkflowLaunchRequest {
     /// Required for V2 definition-backed launches; optional only for legacy
     /// fixture/harness paths that attach schemas via [`LuaWorkflowRunner::with_final_schema`].
     pub output_schema: Option<serde_json::Value>,
+    /// Optional user-facing display name for the Operator and completion delivery.
+    pub display_name: Option<String>,
+    /// Input schema JSON pinned at launch for Operator display and Save reconstruction.
+    pub input_schema: Option<serde_json::Value>,
+    /// Pinned definition origin so completion and Save can show the source kind.
+    pub definition_origin: Option<WorkflowSourceOrigin>,
+    /// Whether this is an inline (unsaved) run eligible for contextual Save.
+    pub inline_unsaved: bool,
 }
 
 /// Explicit linked-run / V2-upgrade launch (design §34). Requires fresh authorization.
@@ -164,6 +173,10 @@ fn metadata_for_request(run_id: WorkflowId, request: WorkflowLaunchRequest) -> W
         launch_source: request.launch_source,
         journal_format_version: journal::JOURNAL_FORMAT_V2,
         output_schema: request.output_schema,
+        display_name: request.display_name,
+        input_schema: request.input_schema,
+        definition_origin: request.definition_origin,
+        inline_unsaved: request.inline_unsaved,
     }
 }
 
@@ -248,6 +261,12 @@ impl RunState {
             latest_report_summary: self.latest_report_summary.clone(),
             terminal_reason: self.terminal_reason.clone(),
             steps: Vec::new(),
+            display_name: self
+                .metadata
+                .display_name
+                .clone()
+                .unwrap_or_else(|| self.metadata.name.clone()),
+            purpose: self.metadata.description.clone(),
         }
     }
 
@@ -2855,6 +2874,8 @@ impl WorkflowRuntime {
                 || (snapshot.state == WorkflowState::Paused
                     && snapshot.terminal_reason.as_deref() == Some("host_exit"))
             {
+                let display_name = snapshot.display_name.clone();
+                let purpose = snapshot.purpose.clone();
                 let _ = self.notifications.enqueue(WorkflowNotification::new(
                     session_dir,
                     snapshot.id,
@@ -2862,6 +2883,8 @@ impl WorkflowRuntime {
                     snapshot
                         .terminal_reason
                         .unwrap_or_else(|| "terminal".to_owned()),
+                    display_name,
+                    purpose,
                 ));
             }
         }
@@ -3418,11 +3441,20 @@ impl WorkflowRuntime {
         state.journal = None;
         self.emit_projection(state, WorkflowProjectionStage::Finished);
         if let Some(session_dir) = state.run_dir.parent().and_then(Path::parent) {
+            let display_name = state
+                .metadata
+                .display_name
+                .as_deref()
+                .unwrap_or(&state.metadata.name)
+                .to_owned();
+            let purpose = state.metadata.description.clone();
             let _ = self.notifications.enqueue(WorkflowNotification::new(
                 session_dir,
                 state.metadata.run_id.clone(),
                 WorkflowState::Failed,
                 reason,
+                display_name,
+                purpose,
             ));
         }
     }
@@ -3520,11 +3552,20 @@ impl WorkflowRuntime {
             if new_state.is_terminal()
                 && let Some(session_dir) = guard.run_dir.parent().and_then(Path::parent)
             {
+                let display_name = guard
+                    .metadata
+                    .display_name
+                    .as_deref()
+                    .unwrap_or(&guard.metadata.name)
+                    .to_owned();
+                let purpose = guard.metadata.description.clone();
                 let _ = self.notifications.enqueue(WorkflowNotification::new(
                     session_dir,
                     guard.metadata.run_id.clone(),
                     new_state,
                     reason,
+                    display_name,
+                    purpose,
                 ));
             }
         }
@@ -3819,6 +3860,10 @@ impl WorkflowRuntime {
             launch_source: "rehydrate".to_owned(),
             journal_format_version: journal::JOURNAL_FORMAT_V1,
             output_schema: None,
+            display_name: None,
+            input_schema: None,
+            definition_origin: None,
+            inline_unsaved: false,
         };
         self.insert_failed_run(run_dir, metadata, format!("corrupt run metadata: {error}"))
             .await

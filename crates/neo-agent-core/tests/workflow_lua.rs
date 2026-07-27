@@ -69,6 +69,7 @@ async fn make_runner_with_config(
                 launch_source: "test".to_owned(),
                 parent_run_id: None,
                 output_schema: None,
+launch
             },
         )
         .await

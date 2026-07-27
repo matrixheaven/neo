@@ -283,6 +283,10 @@ impl InteractiveController {
             launch_source: format!("named:{}", prepared.definition.name.as_str()),
             parent_run_id: None,
             output_schema: Some(prepared.definition.output_schema.clone()),
+            display_name: Some(prepared.definition.display_name.clone()),
+            input_schema: prepared.definition.input_schema.clone(),
+            definition_origin: Some(prepared.definition.source_origin),
+            inline_unsaved: false,
         };
 
         let mut intent = neo_agent_core::workflow::WorkflowLaunchIntent::from_parts(

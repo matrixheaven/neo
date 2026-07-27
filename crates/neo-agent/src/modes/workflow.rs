@@ -389,6 +389,10 @@ async fn run(
         launch_source: format!("cli:workflow-run ({})", config.permission_mode.label()),
         parent_run_id: None,
         output_schema: Some(definition.output_schema.clone()),
+        display_name: Some(definition.display_name.clone()),
+        input_schema: definition.input_schema.clone(),
+        definition_origin: Some(definition.source_origin),
+        inline_unsaved: false,
     };
     let intent = WorkflowLaunchIntent::from_parts(
         request,
@@ -570,6 +574,10 @@ async fn fork(
         launch_source: format!("cli:workflow-fork ({})", config.permission_mode.label()),
         parent_run_id: Some(parent_id.clone()),
         output_schema: parent_meta.output_schema.clone(),
+        display_name: parent_meta.display_name.clone(),
+        input_schema: parent_meta.input_schema.clone(),
+        definition_origin: parent_meta.definition_origin,
+        inline_unsaved: false,
     };
     let handle = config
         .workflow_runtime

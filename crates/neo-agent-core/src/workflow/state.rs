@@ -609,6 +609,18 @@ pub struct WorkflowRunMetadata {
     /// Pinned final result schema for the production runner (absent on legacy V1).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub output_schema: Option<serde_json::Value>,
+    /// Optional user-facing display name pinned at creation.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub display_name: Option<String>,
+    /// Optional input schema JSON pinned at creation.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub input_schema: Option<serde_json::Value>,
+    /// Pinned definition origin captured at durable creation.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub definition_origin: Option<WorkflowSourceOrigin>,
+    /// Whether this run was created from an inline (unsaved) definition.
+    #[serde(default)]
+    pub inline_unsaved: bool,
 }
 
 fn default_args() -> serde_json::Value {
@@ -687,4 +699,10 @@ pub struct WorkflowSnapshot {
     pub terminal_reason: Option<String>,
     #[serde(default)]
     pub steps: Vec<WorkflowStepRecord>,
+    /// Pinned display name for notifications and the Operator.
+    #[serde(default)]
+    pub display_name: String,
+    /// Pinned purpose/description for notifications and the Operator.
+    #[serde(default)]
+    pub purpose: String,
 }

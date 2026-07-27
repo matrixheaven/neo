@@ -823,6 +823,10 @@ impl BackgroundTaskManager {
             launch_source: format!("tasks:fork ({})", parent.run_id.as_str()),
             parent_run_id: Some(parent.run_id.clone()),
             output_schema: None,
+            display_name: parent_output.metadata.display_name.clone(),
+            input_schema: parent_output.metadata.input_schema.clone(),
+            definition_origin: parent_output.metadata.definition_origin,
+            inline_unsaved: false,
         };
         let child = runtime
             .create_linked_run(

@@ -25,6 +25,7 @@ fn launch_request(name: &str) -> WorkflowLaunchRequest {
         launch_source: "/workflow".to_owned(),
         parent_run_id: None,
         output_schema: None,
+launch
     }
 }
 
@@ -691,7 +692,8 @@ fn child_context_and_capability_ceiling_are_explicit() {
         context: DelegateContext::Summary,
         worktree: ChildWorktreePolicy::Shared,
         tool_allow: Some(vec!["Read".to_owned()]),
-        output_schema: None,
+        output_schema: Nonemeta
+,
     };
     let from_plan = ChildIsolationRequest::from_child_plan(&plan);
     assert_eq!(from_plan.context, DelegateContext::Summary);

@@ -46,6 +46,14 @@ pub struct WorkflowLaunchIntent {
     pub compiled_input_schema: Option<CompiledSchema>,
     /// Final output schema JSON pinned onto the run for production validation.
     pub output_schema: Option<serde_json::Value>,
+    /// Optional user-facing display name for Operator and completion.
+    pub display_name: Option<String>,
+    /// Input schema JSON pinned at launch.
+    pub input_schema: Option<serde_json::Value>,
+    /// Pinned definition origin.
+    pub definition_origin: Option<super::state::WorkflowSourceOrigin>,
+    /// Whether this is an inline (unsaved) run.
+    pub inline_unsaved: bool,
 }
 
 /// Session/workspace binding fields for [`WorkflowLaunchIntent::from_parts`].
@@ -87,6 +95,10 @@ impl WorkflowLaunchIntent {
             parent_run_id: request.parent_run_id,
             compiled_input_schema: binding.compiled_input_schema,
             output_schema: request.output_schema,
+            display_name: request.display_name.clone(),
+            input_schema: request.input_schema.clone(),
+            definition_origin: request.definition_origin,
+            inline_unsaved: request.inline_unsaved,
         }
     }
 
@@ -102,6 +114,10 @@ impl WorkflowLaunchIntent {
             launch_source: self.launch_source.clone(),
             parent_run_id: self.parent_run_id.clone(),
             output_schema: self.output_schema.clone(),
+            display_name: self.display_name.clone(),
+            input_schema: self.input_schema.clone(),
+            definition_origin: self.definition_origin,
+            inline_unsaved: self.inline_unsaved,
         }
     }
 }
@@ -310,6 +326,10 @@ mod tests {
             launch_source: "test".to_owned(),
             parent_run_id: None,
             output_schema: None,
+            display_name: None,
+            input_schema: None,
+            definition_origin: None,
+            inline_unsaved: false,
         }
     }
 

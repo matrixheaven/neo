@@ -751,6 +751,10 @@ fn launch_intent_parts(
     permission_mode: crate::PermissionMode,
     validate_args: bool,
 ) -> WorkflowLaunchIntent {
+    let inline = matches!(
+        action,
+        WorkflowAction::RunInline | WorkflowAction::ValidateInline
+    );
     let request = WorkflowLaunchRequest {
         name: definition.name.as_str().to_owned(),
         description: definition.description.clone(),
@@ -760,6 +764,10 @@ fn launch_intent_parts(
         launch_source: format!("model:Workflow({})", action.as_str()),
         parent_run_id: None,
         output_schema: Some(definition.output_schema.clone()),
+        display_name: Some(definition.display_name.clone()),
+        input_schema: definition.input_schema.clone(),
+        definition_origin: Some(definition.source_origin),
+        inline_unsaved: inline,
     };
     let mut intent = WorkflowLaunchIntent::from_parts(
         request,

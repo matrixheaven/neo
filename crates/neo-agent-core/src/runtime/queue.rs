@@ -43,6 +43,8 @@ pub struct WorkflowNotification {
     pub state: WorkflowState,
     pub reason: String,
     pub session_dir: PathBuf,
+    pub display_name: String,
+    pub purpose: String,
 }
 
 impl WorkflowNotification {
@@ -52,6 +54,8 @@ impl WorkflowNotification {
         run_id: WorkflowId,
         state: WorkflowState,
         reason: impl Into<String>,
+        display_name: impl Into<String>,
+        purpose: impl Into<String>,
     ) -> Self {
         let reason = reason.into();
         let state_name = state_label(state);
@@ -66,6 +70,8 @@ impl WorkflowNotification {
             state,
             reason,
             session_dir: session_dir.as_ref().to_path_buf(),
+            display_name: display_name.into(),
+            purpose: purpose.into(),
         }
     }
 
@@ -73,11 +79,11 @@ impl WorkflowNotification {
     pub fn reminder_message(&self) -> AgentMessage {
         AgentMessage::system_reminder_with_origin(
             format!(
-                "Workflow {} is {} ({}). Call TaskOutput with task_id `{}` to inspect its current status and result; this reminder does not contain the workflow result.",
-                self.run_id,
+                "Workflow '{display}' is {} ({}). Call TaskOutput with task_id `{run_id}` to check its current status and result; this reminder does not contain the workflow result.",
                 state_label(self.state),
                 self.reason,
-                self.run_id
+                display = self.display_name,
+                run_id = self.run_id,
             ),
             self.id.clone(),
         )
