@@ -127,23 +127,27 @@ async fn bash_foreground_output_is_raw_terminal_text_with_structured_details() {
 }
 
 #[tokio::test]
-async fn bash_timeout_secs_enforces_supported_range() {
+async fn bash_timeout_secs_clamps_to_supported_range() {
     let workspace = tempfile::tempdir().expect("workspace");
     let context = ToolContext::new(workspace.path())
         .expect("context")
         .with_access(ToolAccess::all());
 
-    for timeout_secs in [299, 3_601] {
-        let error = execute_model_bash_for_runtime(
+    for (timeout_secs, effective_secs) in [(299, 300), (3_601, 3_600)] {
+        let result = execute_model_bash_for_runtime(
             &context,
             json!({"command": "printf ready", "timeout_secs": timeout_secs}),
         )
         .await
-        .expect_err("out-of-range timeout was accepted");
+        .expect("out-of-range timeout should be clamped");
+        assert!(!result.is_error, "{result:?}");
         assert!(
-            error.to_string().contains("between 300 and 3600"),
-            "{error}"
+            result.content.contains(&format!(
+                "received {timeout_secs}, so it was clamped to {effective_secs} seconds"
+            )),
+            "{result:?}"
         );
+        assert!(result.content.starts_with("ready\n"), "{result:?}");
     }
 
     for timeout_secs in [300, 3_600] {

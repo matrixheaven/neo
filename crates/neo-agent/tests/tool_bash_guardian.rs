@@ -314,33 +314,21 @@ async fn background_output_is_persisted_by_guardian_in_agent_task_log() {
 }
 
 #[tokio::test]
-async fn background_bash_enforces_supported_timeout_range() {
+async fn background_bash_clamps_unsupported_timeout() {
     let workspace = tempfile::tempdir().expect("workspace");
     let ctx = guarded_context(&workspace, ShellLimits::default());
-    let invalid = execute_model_bash_for_runtime(
-        &ctx,
-        serde_json::json!({
-            "command": "printf should-not-start",
-            "run_in_background": true,
-            "description": "invalid timeout",
-            "timeout_secs": 299
-        }),
-    )
-    .await
-    .expect_err("out-of-range background timeout must be rejected");
-    assert!(invalid.to_string().contains("between 300 and 3600"));
-
     let started = execute_model_bash_for_runtime(
         &ctx,
         serde_json::json!({
             "command": "printf completed",
             "run_in_background": true,
-            "description": "bounded background command",
-            "timeout_secs": 300
+            "description": "clamped background timeout",
+            "timeout_secs": 299
         }),
     )
     .await
-    .expect("start background bash");
+    .expect("start background bash with clamped timeout");
+    assert!(started.content.contains("clamped to 300 seconds"));
     let task_id = started
         .details
         .as_ref()

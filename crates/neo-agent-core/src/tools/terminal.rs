@@ -119,14 +119,14 @@ impl Tool for TerminalTool {
                 ctx.max_output_bytes,
                 &ctx.shell_runtime,
             )?;
-            match input.mode {
+            let result = match input.mode {
                 TerminalMode::Start => {
                     start_terminal(
                         ctx,
                         &required_field(self.name(), input.command, "command")?,
                         input.cwd.as_deref(),
                         (input.cols.unwrap_or(80), input.rows.unwrap_or(24)),
-                        timeout,
+                        timeout.duration(),
                         max_output_bytes,
                         yield_for,
                     )
@@ -172,7 +172,8 @@ impl Tool for TerminalTool {
                     )
                     .await
                 }
-            }
+            }?;
+            Ok(timeout.apply(result))
         })
     }
 }
@@ -182,7 +183,7 @@ fn validate_and_prepare_terminal(
     input: serde_json::Value,
     ctx_max_output_bytes: usize,
     shell_runtime: &ShellRuntime,
-) -> Result<(TerminalInput, Option<Duration>, usize, Duration), ToolError> {
+) -> Result<(TerminalInput, super::ShellTimeout, usize, Duration), ToolError> {
     let input: TerminalInput = parse_input(tool, input)?;
     if input.cwd.is_some() && input.mode != TerminalMode::Start {
         return Err(ToolError::InvalidInput {
@@ -219,7 +220,7 @@ fn validate_and_prepare_terminal(
             });
         }
     }
-    let timeout = parse_shell_timeout_secs(tool, input.timeout_secs)?;
+    let timeout = parse_shell_timeout_secs(input.timeout_secs);
     let max_output_bytes = input
         .max_output_bytes
         .unwrap_or(ctx_max_output_bytes)
@@ -812,7 +813,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn terminal_timeout_is_valid_only_for_start() {
+    async fn terminal_timeout_is_start_only_and_clamped() {
         let schema = TerminalTool.input_schema();
         let schema = schema.get("schema").unwrap_or(&schema);
         let properties = schema["properties"].as_object().expect("properties");
@@ -838,19 +839,29 @@ mod tests {
                 .to_string()
                 .contains("timeout_secs is valid only for start")
         );
-        for timeout_secs in [299, 3_601] {
-            let error = TerminalTool
-                .execute(
-                    &context,
-                    json!({
-                        "mode": "start",
-                        "command": "printf ready",
-                        "timeout_secs": timeout_secs,
-                    }),
-                )
-                .await
-                .expect_err("out-of-range start timeout was accepted");
-            assert!(error.to_string().contains("between 300 and 3600"));
+        for (timeout_secs, effective_secs) in [(299, 300), (3_601, 3_600)] {
+            let (_, timeout, _, _) = validate_and_prepare_terminal(
+                "Terminal",
+                json!({
+                    "mode": "start",
+                    "command": "printf ready",
+                    "timeout_secs": timeout_secs,
+                }),
+                context.max_output_bytes,
+                &context.shell_runtime,
+            )
+            .expect("out-of-range start timeout should be clamped");
+            assert_eq!(
+                timeout.duration(),
+                Some(Duration::from_secs(effective_secs))
+            );
+            let result = timeout.apply(ToolResult::ok("ready"));
+            assert!(
+                result.content.contains(&format!(
+                    "received {timeout_secs}, so it was clamped to {effective_secs} seconds"
+                )),
+                "{result:?}"
+            );
         }
     }
 }

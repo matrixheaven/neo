@@ -56,6 +56,27 @@ use crate::{AgentEvent, WorkspaceAccessError, WorkspaceAccessPolicy};
 const MIN_SHELL_TIMEOUT_SECS: u64 = 300;
 const MAX_SHELL_TIMEOUT_SECS: u64 = 3_600;
 
+struct ShellTimeout {
+    duration: Option<std::time::Duration>,
+    notice: Option<String>,
+}
+
+impl ShellTimeout {
+    const fn duration(&self) -> Option<std::time::Duration> {
+        self.duration
+    }
+
+    fn apply(self, mut result: ToolResult) -> ToolResult {
+        if let Some(notice) = self.notice {
+            if !result.content.ends_with('\n') && !result.content.is_empty() {
+                result.content.push('\n');
+            }
+            result.content.push_str(&notice);
+        }
+        result
+    }
+}
+
 /// Format the actionable next step for a shell command that reached its deadline.
 #[must_use]
 pub const fn format_command_timeout() -> &'static str {
@@ -1024,22 +1045,23 @@ where
     })
 }
 
-fn parse_shell_timeout_secs(
-    tool: &str,
-    timeout_secs: Option<u64>,
-) -> Result<Option<std::time::Duration>, ToolError> {
+fn parse_shell_timeout_secs(timeout_secs: Option<u64>) -> ShellTimeout {
     let Some(timeout_secs) = timeout_secs else {
-        return Ok(None);
+        return ShellTimeout {
+            duration: None,
+            notice: None,
+        };
     };
-    if !(MIN_SHELL_TIMEOUT_SECS..=MAX_SHELL_TIMEOUT_SECS).contains(&timeout_secs) {
-        return Err(ToolError::InvalidInput {
-            tool: tool.to_owned(),
-            message: format!(
-                "timeout_secs must be between {MIN_SHELL_TIMEOUT_SECS} and {MAX_SHELL_TIMEOUT_SECS} seconds inclusive; omit it for no execution timeout"
-            ),
-        });
+    let effective_secs = timeout_secs.clamp(MIN_SHELL_TIMEOUT_SECS, MAX_SHELL_TIMEOUT_SECS);
+    let notice = (effective_secs != timeout_secs).then(|| {
+        format!(
+            "Note: timeout_secs must be between {MIN_SHELL_TIMEOUT_SECS} and {MAX_SHELL_TIMEOUT_SECS} seconds inclusive; received {timeout_secs}, so it was clamped to {effective_secs} seconds. Omit it for no execution timeout."
+        )
+    });
+    ShellTimeout {
+        duration: Some(std::time::Duration::from_secs(effective_secs)),
+        notice,
     }
-    Ok(Some(std::time::Duration::from_secs(timeout_secs)))
 }
 
 fn schema<T>() -> serde_json::Value

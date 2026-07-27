@@ -5008,7 +5008,7 @@ async fn runtime_does_not_replay_partial_tool_arguments_to_followup_request() {
 }
 
 #[tokio::test]
-async fn runtime_returns_actionable_error_for_out_of_range_bash_timeout() {
+async fn runtime_clamps_out_of_range_bash_timeout_and_returns_notice() {
     let harness = FakeHarness::from_turns([vec![
         AiStreamEvent::MessageStart {
             id: "msg_1".to_owned(),
@@ -5020,7 +5020,7 @@ async fn runtime_returns_actionable_error_for_out_of_range_bash_timeout() {
         AiStreamEvent::ToolCallEnd {
             id: "tool_1".to_owned(),
             raw_arguments: json!({
-                "command": "printf should-not-run",
+                "command": "printf shell-ran",
                 "timeout_secs": 299
             })
             .to_string(),
@@ -5048,7 +5048,7 @@ async fn runtime_returns_actionable_error_for_out_of_range_bash_timeout() {
         .await
         .into_iter()
         .collect::<Result<Vec<_>, _>>()
-        .expect("turn should finish with tool error");
+        .expect("turn should finish after running the tool");
 
     assert!(events.iter().any(|event| matches!(
         event,
@@ -5057,8 +5057,10 @@ async fn runtime_returns_actionable_error_for_out_of_range_bash_timeout() {
             result,
             ..
         } if id == "tool_1"
-            && result.is_error
-            && result.content.contains("between 300 and 3600")
+            && !result.is_error
+            && result.content.starts_with("shell-ran\n")
+            && result.content.contains("timeout_secs must be between 300 and 3600")
+            && result.content.contains("clamped to 300 seconds")
     )));
 }
 

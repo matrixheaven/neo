@@ -187,7 +187,7 @@ async fn start_interactive_terminal(
 }
 
 #[tokio::test]
-async fn terminal_start_accepts_no_execution_deadline() {
+async fn terminal_start_accepts_omitted_and_clamped_execution_deadlines() {
     let _guard = serial_guard().await;
     let workspace = tempfile::tempdir().expect("workspace");
     let context = guarded_context(&workspace, ShellLimits::default());
@@ -208,6 +208,34 @@ async fn terminal_start_accepts_no_execution_deadline() {
         )
         .await
         .expect("stop no-deadline terminal");
+
+    let clamped = registry
+        .run(
+            "Terminal",
+            &context,
+            json!({
+                "mode": "start",
+                "command": interactive_shell_command(),
+                "timeout_secs": 1,
+                "yield_time_ms": 0
+            }),
+        )
+        .await
+        .expect("start terminal with clamped deadline");
+    assert!(clamped.content.contains("clamped to 300 seconds"));
+    let handle = clamped
+        .details
+        .as_ref()
+        .and_then(|details| details["handle"].as_str())
+        .expect("clamped terminal handle");
+    registry
+        .run(
+            "Terminal",
+            &context,
+            json!({ "mode": "stop", "handle": handle }),
+        )
+        .await
+        .expect("stop clamped-deadline terminal");
 }
 
 #[tokio::test]

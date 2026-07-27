@@ -206,7 +206,7 @@ impl Tool for BashTool {
         Box::pin(async move {
             ctx.ensure_shell_allowed()?;
             let input: BashInput = parse_input(self.name(), input)?;
-            let timeout = parse_shell_timeout_secs(self.name(), input.timeout_secs)?;
+            let timeout = parse_shell_timeout_secs(input.timeout_secs);
             let max_output_bytes = input.max_output_bytes.unwrap_or(ctx.max_output_bytes);
             if input.run_in_background == Some(true) {
                 if input.description.as_deref().unwrap_or("").trim().is_empty() {
@@ -216,26 +216,27 @@ impl Tool for BashTool {
                             .to_owned(),
                     });
                 }
-                return start_background_command(
+                let result = start_background_command(
                     ctx,
                     &input.command,
                     input.cwd.as_deref(),
                     input.description.unwrap_or_default(),
-                    timeout,
+                    timeout.duration(),
                     max_output_bytes,
                 )
-                .await;
+                .await?;
+                return Ok(timeout.apply(result));
             }
 
             let result = run_command(
                 ctx,
                 &input.command,
                 input.cwd.as_deref(),
-                timeout,
+                timeout.duration(),
                 max_output_bytes,
             )
             .await?;
-            Ok(shell_command_result(&result))
+            Ok(timeout.apply(shell_command_result(&result)))
         })
     }
 }
@@ -318,7 +319,7 @@ pub async fn execute_model_bash_for_runtime(
 ) -> Result<ToolResult, ToolError> {
     ctx.ensure_shell_allowed()?;
     let input: BashInput = parse_input("Bash", input)?;
-    let timeout = parse_shell_timeout_secs("Bash", input.timeout_secs)?;
+    let timeout = parse_shell_timeout_secs(input.timeout_secs);
     let max_output_bytes = input.max_output_bytes.unwrap_or(ctx.max_output_bytes);
     if input.run_in_background == Some(true) {
         if input.description.as_deref().unwrap_or("").trim().is_empty() {
@@ -327,26 +328,27 @@ pub async fn execute_model_bash_for_runtime(
                 message: "description is required when run_in_background is true".to_owned(),
             });
         }
-        return start_background_command(
+        let result = start_background_command(
             ctx,
             &input.command,
             input.cwd.as_deref(),
             input.description.unwrap_or_default(),
-            timeout,
+            timeout.duration(),
             max_output_bytes,
         )
-        .await;
+        .await?;
+        return Ok(timeout.apply(result));
     }
 
     let result = run_command_without_error_mapping(
         ctx,
         &input.command,
         input.cwd.as_deref(),
-        timeout,
+        timeout.duration(),
         max_output_bytes,
     )
     .await?;
-    Ok(shell_command_result(&result))
+    Ok(timeout.apply(shell_command_result(&result)))
 }
 
 async fn run_command(
