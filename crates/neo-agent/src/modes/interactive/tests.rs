@@ -1667,6 +1667,51 @@ async fn empty_async_polls_report_no_visible_change() {
     assert!(!controller.poll_pending_mcp_probe().await);
 }
 
+#[tokio::test]
+async fn pending_mcp_probe_is_not_reported_as_connected_with_zero_tools() {
+    let mut controller = InteractiveController::new_for_test(
+        "neo",
+        "test-session",
+        "openai/gpt-4.1",
+        test_workspace_root(),
+        |_request| async move { Ok(Vec::<AgentEvent>::new()) },
+    );
+    let project_dir = test_workspace_root();
+    controller.local_config = Some(test_config(&project_dir, project_dir.join(".neo/sessions")));
+    controller.pending_mcp_probe = Some(PendingMcpProbe {
+        server_id: "linear".to_owned(),
+        handle: tokio::spawn(async {
+            Ok(neo_agent_core::McpServerSnapshot {
+                id: "linear".to_owned(),
+                transport: "http".to_owned(),
+                status: neo_agent_core::McpServerStatus::Pending,
+                tool_count: 0,
+                tool_names: Vec::new(),
+                resource_count: None,
+                error: None,
+                reconnect_attempt: 0,
+                next_retry_ms: None,
+            })
+        }),
+    });
+    while !controller
+        .pending_mcp_probe
+        .as_ref()
+        .expect("pending probe")
+        .handle
+        .is_finished()
+    {
+        tokio::task::yield_now().await;
+    }
+
+    assert!(controller.poll_pending_mcp_probe().await);
+    assert!(transcript_has_status(
+        &controller,
+        "MCP server \"linear\" still connecting (http)"
+    ));
+    assert!(!transcript_has_status(&controller, "connected (0 tools)"));
+}
+
 #[test]
 fn blocking_dialog_events_request_an_immediate_frame() {
     let question = AgentEvent::QuestionRequested {

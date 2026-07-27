@@ -263,7 +263,18 @@ impl InteractiveController {
         let probe_id = id.clone();
         let handle = tokio::spawn(async move {
             if reconnect {
-                manager.reconnect_now(&probe_id).await
+                let mut snapshot = manager.reconnect_now(&probe_id).await?;
+                while matches!(
+                    snapshot.status,
+                    neo_agent_core::McpServerStatus::Pending
+                        | neo_agent_core::McpServerStatus::Reconnecting
+                ) {
+                    tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+                    snapshot = manager.snapshot(&probe_id).await.ok_or_else(|| {
+                        anyhow::anyhow!("MCP server '{probe_id}' disappeared during reconnect")
+                    })?;
+                }
+                Ok(snapshot)
             } else {
                 manager.refresh_tools(&probe_id).await
             }
@@ -285,10 +296,7 @@ impl InteractiveController {
         self.tui.chrome_mut().set_custom_working_label(None);
         match pending.handle.await {
             Ok(Ok(snapshot)) => {
-                self.push_status(format!(
-                    "MCP {} connected ({} tools)",
-                    pending.server_id, snapshot.tool_count
-                ));
+                self.push_status(mcp_ops::format_mcp_startup_message(&snapshot));
             }
             Ok(Err(err)) => {
                 self.push_status(format!("MCP {} connect failed: {err}", pending.server_id));
