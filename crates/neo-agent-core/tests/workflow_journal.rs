@@ -18,15 +18,19 @@ fn sample_metadata(run_id: &str) -> WorkflowRunMetadata {
         name: "test-workflow".to_owned(),
         description: "A test workflow".to_owned(),
         phases: vec![WorkflowPhase {
-            id: "inspect".to_owned(),
-            description: "Inspect things".to_owned(),
+            id: "review".to_owned(),
+            description: "Review things".to_owned(),
         }],
-        script: "neo.phase('inspect')".to_owned(),
+        script: "neo.phase('review')".to_owned(),
         script_sha256: "abc123".to_owned(),
         args: json!({}),
         launch_source: "/workflow".to_owned(),
         journal_format_version: 1,
         output_schema: None,
+        display_name: None,
+        input_schema: None,
+        definition_origin: None,
+        inline_unsaved: false,
     }
 }
 

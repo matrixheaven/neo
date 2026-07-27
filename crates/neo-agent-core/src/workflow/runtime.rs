@@ -171,7 +171,7 @@ fn metadata_for_request(run_id: WorkflowId, request: WorkflowLaunchRequest) -> W
         script_sha256,
         args: request.args,
         launch_source: request.launch_source,
-        journal_format_version: journal::JOURNAL_FORMAT_V2,
+        journal_format_version: journal::JOURNAL_FORMAT_V3,
         output_schema: request.output_schema,
         display_name: request.display_name,
         input_schema: request.input_schema,

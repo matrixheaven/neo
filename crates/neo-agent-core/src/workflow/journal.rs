@@ -17,6 +17,8 @@ use crate::session::atomic_file;
 pub const JOURNAL_FORMAT_V1: u32 = 1;
 /// Journal format version for versioned V2 envelopes.
 pub const JOURNAL_FORMAT_V2: u32 = 2;
+/// Journal format version for V3 with generic child lifecycle events.
+pub const JOURNAL_FORMAT_V3: u32 = 3;
 
 #[path = "journal_scan.rs"]
 pub mod journal_scan;
@@ -90,6 +92,32 @@ pub struct JournalPayloadRef {
     pub logical_name: Option<String>,
 }
 
+/// Stable child identity key (no random UUID).
+#[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord, serde::Serialize, serde::Deserialize)]
+pub enum WorkflowChildKey {
+    #[serde(rename = "direct_delegate")]
+    DirectDelegate { invocation_id: String },
+    #[serde(rename = "swarm_item")]
+    SwarmItem { swarm_id: String, item_id: String },
+}
+
+impl WorkflowChildKey {
+    #[must_use]
+    pub fn display_key(&self) -> String {
+        match self {
+            Self::DirectDelegate { invocation_id } => format!("delegate:{invocation_id}"),
+            Self::SwarmItem { swarm_id, item_id } => format!("swarm:{swarm_id}:{item_id}"),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WorkflowChildKind {
+    Delegate,
+    SwarmItem,
+}
+
 /// Versioned journal envelope (design §17).
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct JournalEnvelope {
@@ -124,6 +152,29 @@ impl JournalEnvelope {
         }
     }
 
+    /// Build a V3 envelope for `run_id` with the given payload.
+    #[must_use]
+    pub fn new_v3(
+        seq: u64,
+        timestamp_ms: u64,
+        run_id: WorkflowId,
+        payload: JournalPayload,
+    ) -> Self {
+        Self {
+            version: JOURNAL_FORMAT_V3,
+            seq,
+            timestamp_ms,
+            run_id,
+            payload,
+            canonical_input_hash: None,
+            payload_refs: Vec::new(),
+        }
+    }
+
+    /// Build a V3 envelope for `run_id` with the given payload.
+    #[must_use]
+    /// Build a V3 envelope for `run_id` with the given payload.
+    #[must_use]
     #[must_use]
     pub fn with_canonical_input_hash(mut self, hash: impl Into<String>) -> Self {
         self.canonical_input_hash = Some(hash.into());
@@ -251,11 +302,32 @@ pub enum JournalPayload {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         swarm_item_id: Option<String>,
     },
+    /// V3 generic child queued: spec is durable before dispatch.
+    ChildQueued {
+        child_key: WorkflowChildKey,
+        child_kind: WorkflowChildKind,
+        invocation_id: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        phase_id: Option<String>,
+        spec_payload_ref: JournalPayloadRef,
+    },
+    /// V3 generic child started: binds runtime agent_id before live work.
+    ChildStarted {
+        child_key: WorkflowChildKey,
+        agent_id: String,
+    },
+    /// V3 generic child finished: references the canonical outcome payload.
+    ChildFinished {
+        child_key: WorkflowChildKey,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        agent_id: Option<String>,
+        outcome_payload_ref: JournalPayloadRef,
+    },
 }
 
 /// Validate envelope-local invariants (version, hash vs inline input).
 pub fn validate_v2_envelope(envelope: &JournalEnvelope) -> Result<(), WorkflowError> {
-    if envelope.version != JOURNAL_FORMAT_V2 {
+    if envelope.version != JOURNAL_FORMAT_V2 && envelope.version != JOURNAL_FORMAT_V3 {
         return Err(WorkflowError::coded(
             WorkflowErrorCode::JournalCorrupt,
             format!("unknown journal format version {}", envelope.version),

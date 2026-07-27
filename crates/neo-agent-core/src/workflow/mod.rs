@@ -64,10 +64,13 @@ pub use artifacts::{
     ArtifactValue, StagedArtifact, artifacts_dir, serialize_artifact_bytes,
 };
 pub use error::{WorkflowError, WorkflowErrorCode};
+pub mod child_projection;
+
 pub use journal::{
-    JournalPayload, JournalRecord, JournalWriter, canonical_input_hash, collect_journal_v2,
-    find_incomplete_invocations, journal_path, read_journal, read_run_metadata, run_dir,
-    write_run_metadata,
+    JOURNAL_FORMAT_V1, JOURNAL_FORMAT_V2, JOURNAL_FORMAT_V3, JournalEnvelope, JournalPayload,
+    JournalPayloadRef, JournalRecord, JournalWriter, WorkflowChildKey, WorkflowChildKind,
+    canonical_input_hash, collect_journal_v2, find_incomplete_invocations, journal_path,
+    read_journal, read_run_metadata, run_dir, validate_v2_envelope, write_run_metadata,
 };
 pub use launch::{
     WorkflowLaunchBinding, WorkflowLaunchCoordinator, WorkflowLaunchHosts, WorkflowLaunchIntent,

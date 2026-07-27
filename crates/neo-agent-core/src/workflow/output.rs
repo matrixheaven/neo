@@ -607,6 +607,9 @@ fn payload_type_name(payload: &JournalPayload) -> &'static str {
         JournalPayload::RecoveryActionApplied { .. } => "recovery_action_applied",
         JournalPayload::UsageRecorded { .. } => "usage_recorded",
         JournalPayload::ProvenanceRecorded { .. } => "provenance_recorded",
+        JournalPayload::ChildQueued { .. } => "child_queued",
+        JournalPayload::ChildStarted { .. } => "child_started",
+        JournalPayload::ChildFinished { .. } => "child_finished",
     }
 }
 
@@ -625,6 +628,9 @@ fn envelope_invocation_id(payload: &JournalPayload) -> Option<String> {
             invocation_id: Some(invocation_id),
             ..
         } => Some(invocation_id.clone()),
+        JournalPayload::ChildQueued { .. }
+        | JournalPayload::ChildStarted { .. }
+        | JournalPayload::ChildFinished { .. } => None,
         _ => None,
     }
 }
