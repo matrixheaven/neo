@@ -745,7 +745,6 @@ impl BackgroundTaskManager {
         task_id: &str,
         session_dir: &Path,
         runtime: &crate::workflow::WorkflowRuntime,
-        capability: &crate::workflow::WorkflowCapability,
         checkpoint_seq: Option<u64>,
         actor: crate::workflow::WorkflowActor,
     ) -> Result<ToolResult, ToolError> {
@@ -782,18 +781,6 @@ impl BackgroundTaskManager {
                 })));
             }
         }
-
-        capability.grant();
-        let Some(reservation) = capability.reserve() else {
-            return Ok(ToolResult::error(
-                "failed to reserve launch authorization for workflow fork",
-            )
-            .with_details(json!({
-                "task_id": task_id,
-                "action": "TaskFork",
-                "outcome": "authorization_missing",
-            })));
-        };
 
         let checkpoint = if let Some(seq) = checkpoint_seq {
             let materials = runtime
@@ -846,7 +833,6 @@ impl BackgroundTaskManager {
                     link_reason: "tasks_fork".to_owned(),
                     launch,
                 },
-                Some(reservation),
             )
             .await
             .map_err(|error| ToolError::InvalidInput {

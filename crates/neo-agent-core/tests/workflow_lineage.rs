@@ -5,7 +5,6 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 use neo_agent_core::AgentTokenUsage;
-use neo_agent_core::workflow::capability::WorkflowCapability;
 use neo_agent_core::workflow::journal::{JournalPayload, collect_journal_v2};
 use neo_agent_core::workflow::{
     ArtifactKind, ArtifactValue, WorkflowActor, WorkflowErrorCode, WorkflowHandle,
@@ -62,16 +61,6 @@ async fn wait_terminal(handle: &WorkflowHandle) {
         tokio::time::sleep(Duration::from_millis(10)).await;
     }
     panic!("run did not become terminal");
-}
-
-fn grant_auth() -> (
-    WorkflowCapability,
-    neo_agent_core::workflow::capability::WorkflowCapabilityReservation,
-) {
-    let cap = WorkflowCapability::default();
-    cap.grant();
-    let reservation = cap.reserve().expect("reserve fresh authorization");
-    (cap, reservation)
 }
 
 /// Build a terminal parent with one completed host call + one committed artifact.
@@ -161,7 +150,6 @@ async fn linked_upgrade_imports_verified_prefix_and_artifacts() {
         std::fs::read(run_dir(dir.path(), &parent_id).join("run.json")).unwrap();
 
     let runtime = WorkflowRuntime::default();
-    let (_cap, auth) = grant_auth();
     let child = runtime
         .create_linked_run(
             dir.path(),
@@ -171,7 +159,6 @@ async fn linked_upgrade_imports_verified_prefix_and_artifacts() {
                 link_reason: "v2_upgrade".to_owned(),
                 launch: launch_request("child-lineage"),
             },
-            Some(auth),
         )
         .await
         .expect("linked create");
@@ -257,23 +244,42 @@ async fn linked_upgrade_imports_verified_prefix_and_artifacts() {
         std::fs::read(run_dir(dir.path(), &parent_id).join("run.json")).unwrap()
     );
 
-    let err = match runtime
+    // Independent linked runs from the same parent never contend on a global
+    // one-shot lock: a second fork succeeds immediately, concurrently.
+    let runtime_for_second = runtime.clone();
+    let session = dir.path().to_path_buf();
+    let parent_for_second = parent_id.clone();
+    let second = tokio::spawn(async move {
+        runtime_for_second
+            .create_linked_run(
+                &session,
+                neo_agent_core::workflow::runtime::LinkedRunRequest {
+                    parent_run_id: parent_for_second,
+                    checkpoint: None,
+                    link_reason: "independent_fork".to_owned(),
+                    launch: launch_request("second-child"),
+                },
+            )
+            .await
+    });
+    let third = runtime
         .create_linked_run(
             dir.path(),
             neo_agent_core::workflow::runtime::LinkedRunRequest {
                 parent_run_id: parent_id,
                 checkpoint: None,
-                link_reason: "no-auth".to_owned(),
-                launch: launch_request("no-auth-child"),
+                link_reason: "independent_fork".to_owned(),
+                launch: launch_request("third-child"),
             },
-            None,
         )
         .await
-    {
-        Ok(_) => panic!("missing authorization must fail"),
-        Err(err) => err,
-    };
-    assert_eq!(err.code(), WorkflowErrorCode::LaunchAuthorizationMissing);
+        .expect("concurrent independent linked create");
+    let second = second
+        .await
+        .expect("join second fork")
+        .expect("concurrent independent linked create");
+    assert_ne!(second.run_id, third.run_id);
+    assert_ne!(second.run_id, child.run_id);
 }
 
 #[tokio::test]
@@ -284,7 +290,6 @@ async fn mismatch_stops_before_new_effect() {
     drop(parent);
 
     let runtime = WorkflowRuntime::default();
-    let (_cap, auth) = grant_auth();
     let child = runtime
         .create_linked_run(
             dir.path(),
@@ -294,7 +299,6 @@ async fn mismatch_stops_before_new_effect() {
                 link_reason: "fork".to_owned(),
                 launch: launch_request("mismatch-child"),
             },
-            Some(auth),
         )
         .await
         .expect("linked create");
@@ -396,7 +400,6 @@ async fn terminal_parent_never_changes_state() {
     assert_eq!(parent_state, WorkflowState::Completed);
     let snap_before = parent.snapshot().await;
 
-    let (_cap, auth) = grant_auth();
     let child = runtime
         .create_linked_run(
             dir.path(),
@@ -406,7 +409,6 @@ async fn terminal_parent_never_changes_state() {
                 link_reason: "retry_terminal".to_owned(),
                 launch: launch_request("retry-child"),
             },
-            Some(auth),
         )
         .await
         .expect("linked create from terminal parent");

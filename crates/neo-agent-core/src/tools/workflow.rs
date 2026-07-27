@@ -2,11 +2,11 @@ use serde_json::{Value, json};
 
 use super::{Tool, ToolContext, ToolFuture, ToolResult, schema};
 use crate::workflow::{
-    DynamicWorkflowDefinitionInput, LaunchAuthorizationMode, ResolvedWorkflowDefinition,
-    WorkflowActor, WorkflowDefinitionRegistry, WorkflowError, WorkflowErrorCode,
-    WorkflowLaunchBinding, WorkflowLaunchCoordinator, WorkflowLaunchHosts, WorkflowLaunchIntent,
-    WorkflowLaunchRequest, WorkflowListScope, WorkflowPhase, WorkflowSaveRequest,
-    WorkflowSaveScope, canonical_input_hash, resolve_dynamic_definition,
+    DynamicWorkflowDefinitionInput, ResolvedWorkflowDefinition, WorkflowActor,
+    WorkflowDefinitionRegistry, WorkflowError, WorkflowErrorCode, WorkflowLaunchBinding,
+    WorkflowLaunchCoordinator, WorkflowLaunchHosts, WorkflowLaunchIntent, WorkflowLaunchRequest,
+    WorkflowListScope, WorkflowPhase, WorkflowSaveRequest, WorkflowSaveScope, canonical_input_hash,
+    resolve_dynamic_definition,
 };
 use crate::{WorkflowApprovalPresentation, WorkflowSaveApprovalPresentation};
 
@@ -764,7 +764,6 @@ fn launch_intent_parts(
         WorkflowLaunchBinding {
             session_identity,
             workspace_identity,
-            launch_nonce: String::new(),
             actor: WorkflowActor::Model,
             permission_mode,
             parent_lineage: None,
@@ -859,11 +858,9 @@ async fn launch_definition(
             &intent,
             WorkflowLaunchHosts {
                 runtime: &ctx.workflow_runtime,
-                capability: &ctx.workflow_capability,
                 background_tasks: &ctx.background_tasks,
                 session_dir,
             },
-            LaunchAuthorizationMode::Headless,
         )
         .await
     {

@@ -1866,7 +1866,6 @@ fn default_tool_context(seed: ToolContextSeed<'_>) -> Result<ToolContext, AgentR
                 .with_process_supervisor(process_supervisor)
                 .with_background_tasks(config.background_tasks.clone())
                 .with_shell_runtime(config.shell_runtime.clone())
-                .with_workflow_capability(config.workflow_capability.clone())
                 .with_workflow_runtime(config.workflow_runtime.clone())
                 .with_workflow_definitions(config.workflow_definitions.clone())
                 .with_multi_agent(multi_agent)

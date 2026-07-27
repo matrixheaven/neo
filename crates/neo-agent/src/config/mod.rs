@@ -90,9 +90,6 @@ pub struct AppConfig {
     /// `TaskList`/`TaskOutput` can observe them on later turns.
     #[serde(skip)]
     pub background_tasks: BackgroundTaskManager,
-    /// Session-scoped, non-serializable authority for one workflow launch.
-    #[serde(skip)]
-    pub workflow_capability: neo_agent_core::workflow::WorkflowCapability,
     /// Session-shared durable workflow owner.
     #[serde(skip)]
     pub workflow_runtime: neo_agent_core::workflow::WorkflowRuntime,
@@ -139,7 +136,6 @@ impl AppConfig {
         self.live_permission_mode = Arc::clone(&current.live_permission_mode);
         self.workspace_policy = Arc::clone(&current.workspace_policy);
         self.background_tasks = current.background_tasks.clone();
-        self.workflow_capability = current.workflow_capability.clone();
         self.workflow_runtime = current.workflow_runtime.clone();
         self.runtime.workflow = current.workflow_runtime.limits();
         self.workflow_definitions = current.workflow_definitions.clone();

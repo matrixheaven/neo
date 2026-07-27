@@ -372,7 +372,7 @@ impl WorkflowRuntime {
         &self.admission
     }
 
-    /// Validate every pure launch boundary before capability reservation.
+    /// Validate every pure launch boundary before durable creation.
     pub fn validate_launch_request(
         &self,
         request: &WorkflowLaunchRequest,
@@ -546,21 +546,12 @@ impl WorkflowRuntime {
     /// Create a linked V2 run from a verified parent checkpoint (design §34).
     ///
     /// Imports the completed invocation prefix and referenced artifacts into the
-    /// new journal. Requires a fresh capability reservation. Never mutates the
-    /// parent run (terminal or V1 read-only).
+    /// new journal. Never mutates the parent run (terminal or V1 read-only).
     pub async fn create_linked_run(
         &self,
         session_dir: &Path,
         request: LinkedRunRequest,
-        authorization: Option<super::capability::WorkflowCapabilityReservation>,
     ) -> Result<WorkflowHandle, WorkflowError> {
-        let Some(authorization) = authorization else {
-            return Err(WorkflowError::coded(
-                super::error::WorkflowErrorCode::LaunchAuthorizationMissing,
-                "linked run requires fresh launch authorization",
-            ));
-        };
-
         self.validate_launch_request(&request.launch)?;
 
         let parent_run_dir = journal::run_dir(session_dir, &request.parent_run_id);
@@ -757,15 +748,6 @@ impl WorkflowRuntime {
             ));
         }
 
-        if !authorization.commit() {
-            self.admission.release_storage_owner(run_id.as_str());
-            let _ = std::fs::remove_dir_all(&run_dir);
-            return Err(WorkflowError::coded(
-                super::error::WorkflowErrorCode::LaunchAuthorizationMismatch,
-                "launch authorization was revoked or already consumed",
-            ));
-        }
-
         let control = Arc::new(RunControl::new());
         let reports = recovered_reports_v2(
             &journal::collect_journal_v2(&run_dir.join("journal.jsonl"), Some(&run_id))
@@ -858,8 +840,8 @@ impl WorkflowRuntime {
         self.rollback_remove_failure.store(true, Ordering::Release);
     }
 
-    /// Persist a terminal failure if worker startup fails after capability
-    /// commit. The registered task remains inspectable through `TaskOutput`.
+    /// Persist a terminal failure if worker startup fails after durable
+    /// creation. The registered task remains inspectable through `TaskOutput`.
     pub async fn fail_worker_start(
         &self,
         run_id: &WorkflowId,

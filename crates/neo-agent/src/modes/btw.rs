@@ -318,7 +318,6 @@ mod tests {
                 ..RuntimeConfig::default()
             },
             background_tasks: neo_agent_core::BackgroundTaskManager::new(),
-            workflow_capability: neo_agent_core::workflow::WorkflowCapability::default(),
             workflow_runtime: neo_agent_core::workflow::WorkflowRuntime::new(
                 neo_agent_core::workflow::WorkflowLimits::default(),
             ),

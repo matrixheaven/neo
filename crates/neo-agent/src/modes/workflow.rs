@@ -15,8 +15,8 @@ use anyhow::{Context as _, bail};
 use neo_agent_core::workflow::journal::{JournalPayload, canonicalize_json, collect_journal_v2};
 use neo_agent_core::workflow::runtime::{LinkedRunRequest, compute_prefix_digest_v2};
 use neo_agent_core::workflow::{
-    LaunchAuthorizationMode, MANIFEST_SUFFIX, RetentionPolicy, RetentionSubject, SOURCE_SUFFIX,
-    WorkflowActor, WorkflowCheckpoint, WorkflowDefinitionRegistry, WorkflowError, WorkflowId,
+    MANIFEST_SUFFIX, RetentionPolicy, RetentionSubject, SOURCE_SUFFIX, WorkflowActor,
+    WorkflowCheckpoint, WorkflowDefinitionRegistry, WorkflowError, WorkflowId,
     WorkflowLaunchBinding, WorkflowLaunchCoordinator, WorkflowLaunchHosts, WorkflowLaunchIntent,
     WorkflowLaunchRequest, WorkflowListScope, WorkflowOutput, WorkflowRunMetadata,
     WorkflowSaveRequest, WorkflowSaveScope, WorkflowSourceOrigin, WorkflowState, check_definition,
@@ -395,7 +395,6 @@ async fn run(
         WorkflowLaunchBinding {
             session_identity: session_dir.display().to_string(),
             workspace_identity: config.project_dir.display().to_string(),
-            launch_nonce: uuid::Uuid::new_v4().to_string(),
             actor: WorkflowActor::Human,
             permission_mode: config.permission_mode,
             parent_lineage: None,
@@ -409,11 +408,9 @@ async fn run(
             &intent,
             WorkflowLaunchHosts {
                 runtime: &config.workflow_runtime,
-                capability: &config.workflow_capability,
                 background_tasks: &config.background_tasks,
                 session_dir: &session_dir,
             },
-            LaunchAuthorizationMode::Headless,
         )
         .await
         .map_err(map_workflow_error)?;
@@ -560,12 +557,6 @@ async fn fork(
     let checkpoint = WorkflowCheckpoint::new(parent_id.clone(), checkpoint_seq, digest)
         .map_err(map_workflow_error)?;
 
-    config.workflow_capability.grant();
-    let reservation = config
-        .workflow_capability
-        .reserve()
-        .ok_or_else(|| anyhow::anyhow!("failed to reserve launch authorization for linked run"))?;
-
     ensure_headless_runner(config);
 
     let launch = WorkflowLaunchRequest {
@@ -590,7 +581,6 @@ async fn fork(
                 link_reason: "cli_fork".to_owned(),
                 launch,
             },
-            Some(reservation),
         )
         .await
         .map_err(map_workflow_error)?;

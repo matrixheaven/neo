@@ -123,7 +123,6 @@ pub fn controller_for_config(config: &AppConfig) -> InteractiveController {
         .chrome_mut()
         .set_context_window(default_context_window);
     controller.set_current_reasoning(config.runtime.reasoning.clone());
-    controller.workflow_capability = config.workflow_capability.clone();
     controller.local_config = Some(config.clone());
     controller.configure_workflow_event_ingress(&config);
     let skill_store = resources::load_skill_store(

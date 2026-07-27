@@ -10897,7 +10897,6 @@ fn test_config(project_dir: &Path, sessions_dir: PathBuf) -> AppConfig {
         },
         runtime: RuntimeConfig::default(),
         background_tasks: neo_agent_core::BackgroundTaskManager::new(),
-        workflow_capability: neo_agent_core::workflow::WorkflowCapability::default(),
         workflow_runtime: neo_agent_core::workflow::WorkflowRuntime::new(
             neo_agent_core::workflow::WorkflowLimits::default(),
         ),
@@ -11728,57 +11727,7 @@ async fn slash_clear_alias_resets_to_unsaved_fresh_session() {
 }
 
 #[tokio::test]
-async fn workflow_capability_reaches_agent_config_and_clear_revokes_it() {
-    let temp = tempfile::tempdir().expect("tempdir");
-    let config = test_config(temp.path(), temp.path().join("sessions"));
-    let mut controller = controller_for_config(&config);
-
-    controller.type_text("/workflow");
-    controller
-        .handle_input_event(InputEvent::Action(KeybindingAction::InputSubmit))
-        .await
-        .expect("/workflow submits");
-    assert!(config.workflow_capability.is_available());
-
-    controller.refresh_config();
-    let refreshed = controller.local_config.as_ref().expect("refreshed config");
-    assert!(refreshed.workflow_capability.is_available());
-    assert!(
-        refreshed
-            .workflow_dispatch_resolver
-            .shares_state_with(&config.workflow_dispatch_resolver),
-        "config refresh must retain the session workflow resolver",
-    );
-    let agent_config = crate::modes::run::agent_config_for_app(
-        neo_ai::ModelSpec {
-            provider: neo_ai::ProviderId("test-provider".to_owned()),
-            model: "test-model".to_owned(),
-            api: neo_ai::ApiKind::Local,
-            capabilities: neo_ai::ModelCapabilities::tool_chat(),
-        },
-        refreshed,
-        None,
-        None,
-    )
-    .expect("agent config");
-    assert!(agent_config.workflow_capability.is_available());
-    assert!(
-        agent_config
-            .workflow_dispatch_resolver
-            .shares_state_with(&refreshed.workflow_dispatch_resolver),
-        "each fresh turn config must use the session workflow resolver",
-    );
-
-    controller.type_text("/clear");
-    controller
-        .handle_input_event(InputEvent::Action(KeybindingAction::InputSubmit))
-        .await
-        .expect("/clear submits");
-    assert!(!agent_config.workflow_capability.is_available());
-}
-
-#[tokio::test]
-async fn workflow_slash_arguments_do_not_grant_capability() {
+async fn workflow_slash_arguments_start_no_model_turn() {
     let temp = tempfile::tempdir().expect("tempdir");
     let config = test_config(temp.path(), temp.path().join("sessions"));
     let mut controller = controller_for_config(&config);
@@ -11789,7 +11738,6 @@ async fn workflow_slash_arguments_do_not_grant_capability() {
         .await
         .expect("slash submits");
 
-    assert!(!config.workflow_capability.is_available());
     assert!(
         controller.active_turn.is_none(),
         "named workflow slash must not enter a model turn"
@@ -11808,17 +11756,13 @@ async fn workflowish_is_not_workflow() {
         !handled,
         "/workflowish must not be consumed as a workflow slash command"
     );
-    assert!(
-        !config.workflow_capability.is_available(),
-        "/workflowish must not grant workflow capability"
-    );
 
-    // Ordinary text that only contains the word must not create authority either.
+    // Ordinary text that only contains the word is not a command either.
     let handled_text = controller
         .handle_slash_command("please run /workflow for me")
         .await;
     assert!(!handled_text);
-    assert!(!config.workflow_capability.is_available());
+    assert!(controller.active_turn.is_none());
 }
 
 #[tokio::test]
@@ -11897,7 +11841,6 @@ type = "boolean"
         .live_permission_mode
         .write()
         .expect("permission lock") = PermissionMode::Yolo;
-    controller.workflow_capability = config.workflow_capability.clone();
     controller.local_config = Some(config.clone());
 
     controller.type_text("/workflow demo");
@@ -11915,45 +11858,9 @@ type = "boolean"
         controller.active_turn.is_none(),
         "named slash must not start a model turn"
     );
-    assert!(
-        !config.workflow_capability.is_available(),
-        "successful named launch consumes capability"
-    );
     let tasks = config.background_tasks.list(false, 10).await;
     assert_eq!(tasks.len(), 1, "named launch registers one background task");
     assert_eq!(tasks[0].kind, neo_agent_core::BackgroundTaskKind::Workflow);
-}
-
-#[tokio::test]
-async fn workflow_capability_is_revoked_only_when_session_identity_changes() {
-    let temp = tempfile::tempdir().expect("tempdir");
-    let config = test_config(temp.path(), temp.path().join("sessions"));
-    let mut controller = controller_for_config(&config);
-    controller.set_active_session_id(SESSION_A.to_owned());
-
-    config.workflow_capability.grant();
-    controller.set_active_session_id(SESSION_A.to_owned());
-    assert!(config.workflow_capability.inspect());
-
-    controller.set_active_session_id(SESSION_B.to_owned());
-    assert!(!config.workflow_capability.inspect());
-
-    config.workflow_capability.grant();
-    controller.clear_active_session_id();
-    assert!(!config.workflow_capability.inspect());
-}
-
-#[tokio::test]
-async fn workflow_capability_survives_first_session_materialization() {
-    let temp = tempfile::tempdir().expect("tempdir");
-    let config = test_config(temp.path(), temp.path().join("sessions"));
-    let mut controller = controller_for_config(&config);
-    assert_eq!(controller.active_session_id(), None);
-
-    config.workflow_capability.grant();
-    controller.set_active_session_id(SESSION_A.to_owned());
-
-    assert!(config.workflow_capability.inspect());
 }
 
 #[tokio::test]
@@ -12556,7 +12463,7 @@ async fn command_palette_new_session_resets_to_fresh_session() {
 }
 
 #[tokio::test]
-async fn command_palette_new_session_revokes_capability_before_session_materialization() {
+async fn command_palette_new_session_works_before_session_materialization() {
     let mut controller = InteractiveController::new_for_test(
         "neo",
         "new",
@@ -12565,7 +12472,6 @@ async fn command_palette_new_session_revokes_capability_before_session_materiali
         |_request| async move { Ok(Vec::<AgentEvent>::new()) },
     );
     assert_eq!(controller.active_session_id(), None);
-    controller.workflow_capability.grant();
 
     controller
         .handle_input_event(InputEvent::Action(KeybindingAction::CommandPaletteOpen))
@@ -12598,7 +12504,6 @@ async fn command_palette_new_session_revokes_capability_before_session_materiali
         .await
         .expect("new session command runs");
 
-    assert!(!controller.workflow_capability.inspect());
     assert_eq!(controller.active_session_id(), None);
 }
 
@@ -17504,7 +17409,6 @@ async fn slash_fork_forks_current_session_and_enters_child() {
         },
     );
     controller.active_session_id = Some(SESSION_A.to_owned());
-    controller.workflow_capability.grant();
 
     let consumed = controller.handle_slash_command("/fork").await;
     assert!(consumed, "/fork should be consumed as a slash command");
@@ -17515,7 +17419,6 @@ async fn slash_fork_forks_current_session_and_enters_child() {
         "active session switched to fork child"
     );
     assert_eq!(controller.chrome().session_label(), SESSION_CHILD);
-    assert!(!controller.workflow_capability.inspect());
     assert!(
         transcript_has_status(&controller, &format!("fork from session {SESSION_A}")),
         "transcript shows fork-from notice"

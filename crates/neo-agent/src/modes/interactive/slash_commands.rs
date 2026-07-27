@@ -60,7 +60,7 @@ impl InteractiveController {
 
     pub(super) async fn handle_simple_slash_command(&mut self, prompt: &str) -> bool {
         // Strict slash_arg boundary: `/workflow` and `/workflow <args>` only.
-        // `/workflowish` does not match and must not grant capability.
+        // `/workflowish` does not match and must not start a launch or turn.
         if let Some(arg) = slash_arg(prompt, "/workflow") {
             self.clear_submitted_prompt();
             self.handle_workflow_slash(arg).await;
@@ -103,14 +103,15 @@ impl InteractiveController {
         true
     }
 
-    /// Bare `/workflow` grants one-shot dynamic capability. Named
+    /// Bare `/workflow` is an authoring entry point. Named
     /// `/workflow <name> [JSON_OBJECT]` resolves the registry and launches via
     /// the shared coordinator with zero model turns.
     async fn handle_workflow_slash(&mut self, arg: &str) {
         if arg.is_empty() {
-            self.workflow_capability.grant();
+            // Task 5 replaces this placeholder with canonical create-workflow
+            // activation plus a normal visible model turn.
             self.push_status(
-                "Workflow launch capability granted. Call RunWorkflow to use it.".to_owned(),
+                "Workflow authoring: use /workflow <name> to launch a saved workflow.".to_owned(),
             );
             return;
         }
@@ -161,9 +162,6 @@ impl InteractiveController {
     }
 
     fn open_named_workflow_launch_review(&mut self, prepared: PreparedNamedWorkflowLaunch) {
-        // Grant Available before review so Ask Revise preserves generation/nonce
-        // and Cancel can revoke the same capability instance.
-        self.workflow_capability.grant();
         let request_id = uuid::Uuid::new_v4().to_string();
         let workflow = named_workflow_approval_presentation(&prepared);
         let request = neo_agent_core::ApprovalRequest {
@@ -210,9 +208,6 @@ impl InteractiveController {
                 ..
             } => {
                 if let Err(error) = self.execute_named_workflow_launch(pending.prepared).await {
-                    // Launch failure after Approve must not leave a stale Available
-                    // capability that could authorize a different proposal.
-                    self.workflow_capability.revoke_now();
                     self.push_status(format!("Workflow launch failed: {error}"));
                 }
             }
@@ -221,18 +216,11 @@ impl InteractiveController {
                 feedback,
                 ..
             } => {
-                // Design §13: Revise returns the same generation to Available.
-                self.workflow_capability.unbind();
                 let feedback = feedback.unwrap_or_default();
                 if feedback.trim().is_empty() {
-                    self.push_status(
-                        "Workflow launch revised. Capability remains available for another launch."
-                            .to_owned(),
-                    );
+                    self.push_status("Workflow launch revised.".to_owned());
                 } else {
-                    self.push_status(format!(
-                        "Workflow launch revised. Capability remains available. Feedback: {feedback}"
-                    ));
+                    self.push_status(format!("Workflow launch revised. Feedback: {feedback}"));
                 }
             }
             neo_agent_core::ApprovalResponse::Selected {
@@ -240,11 +228,9 @@ impl InteractiveController {
                 ..
             }
             | neo_agent_core::ApprovalResponse::Cancelled { .. } => {
-                self.workflow_capability.revoke_now();
                 self.push_status("Workflow launch cancelled.".to_owned());
             }
             neo_agent_core::ApprovalResponse::Selected { .. } => {
-                self.workflow_capability.revoke_now();
                 self.push_status("Workflow launch cancelled.".to_owned());
             }
         }
@@ -274,16 +260,6 @@ impl InteractiveController {
             .bind_workflow_runtime(&config.workflow_runtime)
             .map_err(|error| error.to_string())?;
 
-        // Named slash authorizes via session capability with a Human actor.
-        // Grant only if Ask review did not already grant (Auto/Yolo path).
-        if !self.workflow_capability.inspect() {
-            self.workflow_capability.grant();
-        }
-        let launch_nonce = self
-            .workflow_capability
-            .launch_nonce()
-            .ok_or_else(|| "workflow launch capability missing".to_owned())?;
-
         let schema_sha256 = prepared
             .definition
             .input_schema
@@ -307,7 +283,6 @@ impl InteractiveController {
             neo_agent_core::workflow::WorkflowLaunchBinding {
                 session_identity: prepared.session_dir.display().to_string(),
                 workspace_identity: prepared.workspace.display().to_string(),
-                launch_nonce,
                 actor: neo_agent_core::workflow::WorkflowActor::Human,
                 permission_mode: prepared.permission_mode,
                 parent_lineage: None,
@@ -323,21 +298,14 @@ impl InteractiveController {
                 &intent,
                 neo_agent_core::workflow::WorkflowLaunchHosts {
                     runtime: &config.workflow_runtime,
-                    capability: &self.workflow_capability,
                     background_tasks: &config.background_tasks,
                     session_dir: &prepared.session_dir,
                 },
-                neo_agent_core::workflow::LaunchAuthorizationMode::SessionCapability,
             )
             .await
         {
             Ok(outcome) => outcome,
             Err(error) => {
-                // Preflight failures leave Available; do not leave a stale grant
-                // from the named slash host path.
-                if self.workflow_capability.is_unbound() {
-                    self.workflow_capability.revoke_now();
-                }
                 return Err(error.to_string());
             }
         };
@@ -810,14 +778,14 @@ fn named_workflow_approval_options() -> Vec<neo_agent_core::ApprovalOption> {
         },
         neo_agent_core::ApprovalOption {
             label: "Revise".to_owned(),
-            description: Some("Return feedback without consuming the capability.".to_owned()),
+            description: Some("Return feedback without creating a run.".to_owned()),
             action: neo_agent_core::ApprovalAction::ReviseWorkflow {
                 preset_feedback: None,
             },
         },
         neo_agent_core::ApprovalOption {
             label: "Cancel".to_owned(),
-            description: Some("Revoke the capability without creating a run.".to_owned()),
+            description: Some("Cancel without creating a run.".to_owned()),
             action: neo_agent_core::ApprovalAction::CancelWorkflow,
         },
     ]

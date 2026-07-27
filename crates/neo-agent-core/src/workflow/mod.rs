@@ -1,7 +1,6 @@
 pub mod admission;
 pub mod artifacts;
 pub mod builtins;
-pub mod capability;
 pub mod check;
 pub mod definition;
 mod error;
@@ -18,8 +17,6 @@ pub mod runtime;
 pub mod schema;
 mod state;
 pub mod user_input;
-
-pub use capability::WorkflowCapability;
 
 pub use builtins::{builtin_workflow_definition, builtin_workflow_definitions};
 
@@ -73,8 +70,8 @@ pub use journal::{
     write_run_metadata,
 };
 pub use launch::{
-    LaunchAuthorizationMode, WorkflowLaunchBinding, WorkflowLaunchCoordinator, WorkflowLaunchHosts,
-    WorkflowLaunchIntent, WorkflowLaunchOutcome, compile_lua_source,
+    WorkflowLaunchBinding, WorkflowLaunchCoordinator, WorkflowLaunchHosts, WorkflowLaunchIntent,
+    WorkflowLaunchOutcome, compile_lua_source,
 };
 pub use limits::WorkflowLimits;
 pub use lua::LuaWorkflowRunner;

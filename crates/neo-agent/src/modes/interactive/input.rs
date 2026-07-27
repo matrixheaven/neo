@@ -257,9 +257,7 @@ impl InteractiveController {
         // Interrupt rejects every visible approval (and any pending runtime
         // channels) instead of being swallowed by the dialog handler.
         if matches!(event, InputEvent::Interrupt) {
-            if self.pending_named_workflow_launch.take().is_some() {
-                self.workflow_capability.revoke_now();
-            }
+            self.pending_named_workflow_launch.take();
             self.reject_all_pending_approvals();
             if self.active_turn.is_some() {
                 self.cancel_active_turn().await?;
@@ -692,7 +690,6 @@ impl InteractiveController {
                 &task_id,
                 &session_dir,
                 &config.workflow_runtime,
-                &config.workflow_capability,
                 None,
                 neo_agent_core::workflow::WorkflowActor::Human,
             )

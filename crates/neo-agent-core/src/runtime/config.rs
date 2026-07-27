@@ -155,9 +155,6 @@ pub struct AgentConfig {
     #[serde(skip)]
     #[schemars(skip)]
     pub shell_runtime: ShellRuntime,
-    #[serde(skip)]
-    #[schemars(skip)]
-    pub workflow_capability: crate::workflow::WorkflowCapability,
     /// Session-shared durable workflow owner.
     #[serde(skip)]
     #[schemars(skip)]
@@ -286,7 +283,6 @@ impl AgentConfig {
             todos: Arc::new(Mutex::new(Vec::new())),
             background_tasks: BackgroundTaskManager::new(),
             shell_runtime: ShellRuntime::default(),
-            workflow_capability: crate::workflow::WorkflowCapability::default(),
             workflow_runtime: crate::workflow::WorkflowRuntime::new(
                 crate::workflow::WorkflowLimits::default(),
             ),
@@ -558,16 +554,6 @@ impl AgentConfig {
     #[must_use]
     pub fn with_background_tasks(mut self, background_tasks: BackgroundTaskManager) -> Self {
         self.background_tasks = background_tasks;
-        self
-    }
-
-    /// Replace the shared one-shot workflow launch capability.
-    #[must_use]
-    pub fn with_workflow_capability(
-        mut self,
-        workflow_capability: crate::workflow::WorkflowCapability,
-    ) -> Self {
-        self.workflow_capability = workflow_capability;
         self
     }
 

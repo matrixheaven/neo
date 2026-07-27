@@ -1,16 +1,14 @@
 //! Stateless workflow launch normalization and sequencing.
 //!
-//! All adapters (dynamic `RunWorkflow`, named slash, headless CLI) build one
+//! All adapters (model `Workflow` tool, named slash, headless CLI) build one
 //! immutable [`WorkflowLaunchIntent`] and call [`WorkflowLaunchCoordinator`].
-//! The coordinator never writes `run.json`/journal, never owns capability or
-//! admission state, and never registers tasks itself beyond calling the
-//! existing owners in the required order.
+//! The coordinator never writes `run.json`/journal, never owns admission
+//! state, and never registers tasks itself beyond calling the existing owners
+//! in the required order. Interactive human authorization lives in the normal
+//! permission/approval layer, never in launch state.
 
 use std::path::Path;
 
-use sha2::{Digest, Sha256};
-
-use super::capability::WorkflowCapability;
 use super::error::{WorkflowError, WorkflowErrorCode};
 use super::journal::canonical_input_hash;
 use super::runtime::{WorkflowHandle, WorkflowLaunchRequest, WorkflowRuntime};
@@ -22,19 +20,13 @@ use super::state::{
 use crate::PermissionMode;
 use crate::tools::BackgroundTaskManager;
 
-/// ASCII framing magic for the exact launch-intent digest (includes trailing NUL).
-pub const LAUNCH_INTENT_DIGEST_PREFIX: &[u8] = b"neo-workflow-launch-intent-v1\0";
-
 /// Immutable launch intent produced by every adapter before durable creation.
 ///
-/// Binding fields (session, workspace, nonce, source, revision, args/schema/
-/// lineage hashes, actor, parent lineage) participate in [`Self::digest`].
 /// Payload fields drive [`WorkflowLaunchRequest`] construction only.
 #[derive(Clone)]
 pub struct WorkflowLaunchIntent {
     pub session_identity: String,
     pub workspace_identity: String,
-    pub launch_nonce: String,
     pub launch_source: String,
     pub definition_revision: WorkflowRevision,
     pub source_sha256: String,
@@ -42,8 +34,6 @@ pub struct WorkflowLaunchIntent {
     pub args_sha256: String,
     /// SHA-256 of canonical schema material (empty when no schema binding).
     pub schema_sha256: String,
-    /// SHA-256 of canonical parent lineage material (empty when none).
-    pub lineage_digest: String,
     pub actor: WorkflowActor,
     pub permission_mode: PermissionMode,
     pub parent_lineage: Option<WorkflowLineageMetadata>,
@@ -63,7 +53,6 @@ pub struct WorkflowLaunchIntent {
 pub struct WorkflowLaunchBinding {
     pub session_identity: String,
     pub workspace_identity: String,
-    pub launch_nonce: String,
     pub actor: WorkflowActor,
     pub permission_mode: PermissionMode,
     pub parent_lineage: Option<WorkflowLineageMetadata>,
@@ -78,22 +67,16 @@ impl WorkflowLaunchIntent {
     pub fn from_parts(request: WorkflowLaunchRequest, binding: WorkflowLaunchBinding) -> Self {
         let source_sha256 = source_sha256_hex(request.script.as_bytes());
         let args_sha256 = canonical_input_hash(&request.args);
-        let lineage_digest = binding
-            .parent_lineage
-            .as_ref()
-            .map_or_else(String::new, lineage_digest_hex);
         let definition_revision = WorkflowRevision::from_bytes(request.script.as_bytes());
         Self {
             session_identity: binding.session_identity,
             workspace_identity: binding.workspace_identity,
-            launch_nonce: binding.launch_nonce,
             launch_source: request.launch_source.clone(),
             definition_revision,
             source_sha256,
             args: request.args.clone(),
             args_sha256,
             schema_sha256: binding.schema_sha256,
-            lineage_digest,
             actor: binding.actor,
             permission_mode: binding.permission_mode,
             parent_lineage: binding.parent_lineage,
@@ -105,31 +88,6 @@ impl WorkflowLaunchIntent {
             compiled_input_schema: binding.compiled_input_schema,
             output_schema: request.output_schema,
         }
-    }
-
-    /// Exact SHA-256 digest over length-prefixed binding fields.
-    #[must_use]
-    pub fn digest(&self) -> String {
-        let mut frame = Vec::new();
-        frame.extend_from_slice(LAUNCH_INTENT_DIGEST_PREFIX);
-        append_len_prefixed(&mut frame, self.session_identity.as_bytes());
-        append_len_prefixed(&mut frame, self.workspace_identity.as_bytes());
-        append_len_prefixed(&mut frame, self.launch_nonce.as_bytes());
-        append_len_prefixed(&mut frame, self.source_sha256.as_bytes());
-        append_len_prefixed(&mut frame, self.definition_revision.as_str().as_bytes());
-        append_len_prefixed(&mut frame, self.args_sha256.as_bytes());
-        append_len_prefixed(&mut frame, self.schema_sha256.as_bytes());
-        append_len_prefixed(&mut frame, self.lineage_digest.as_bytes());
-        append_len_prefixed(&mut frame, self.actor.as_str().as_bytes());
-        let parent = self.parent_run_id.as_ref().map_or("", WorkflowId::as_str);
-        append_len_prefixed(&mut frame, parent.as_bytes());
-        if let Some(lineage) = &self.parent_lineage {
-            let encoded = serde_json::to_vec(lineage).unwrap_or_default();
-            append_len_prefixed(&mut frame, &encoded);
-        } else {
-            append_len_prefixed(&mut frame, b"");
-        }
-        format!("{:x}", Sha256::digest(&frame))
     }
 
     /// Convert to the durable runtime create request.
@@ -148,17 +106,6 @@ impl WorkflowLaunchIntent {
     }
 }
 
-fn append_len_prefixed(frame: &mut Vec<u8>, bytes: &[u8]) {
-    let len = u64::try_from(bytes.len()).unwrap_or(u64::MAX);
-    frame.extend_from_slice(&len.to_be_bytes());
-    frame.extend_from_slice(bytes);
-}
-
-fn lineage_digest_hex(lineage: &WorkflowLineageMetadata) -> String {
-    let encoded = serde_json::to_vec(lineage).unwrap_or_default();
-    format!("{:x}", Sha256::digest(encoded))
-}
-
 impl WorkflowActor {
     #[must_use]
     pub fn as_str(self) -> &'static str {
@@ -168,16 +115,6 @@ impl WorkflowActor {
             Self::Runtime => "runtime",
         }
     }
-}
-
-/// How launch authorization is obtained.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum LaunchAuthorizationMode {
-    /// Session-scoped capability: bind exact intent digest then consume after
-    /// durable create + task registration.
-    SessionCapability,
-    /// Explicit human/headless launch: no session capability required.
-    Headless,
 }
 
 /// Successful launch outcome after registration and worker admission attempt.
@@ -199,7 +136,6 @@ impl std::fmt::Debug for WorkflowLaunchOutcome {
 /// Owners the coordinator sequences. The coordinator holds no durable state.
 pub struct WorkflowLaunchHosts<'a> {
     pub runtime: &'a WorkflowRuntime,
-    pub capability: &'a WorkflowCapability,
     pub background_tasks: &'a BackgroundTaskManager,
     pub session_dir: &'a Path,
 }
@@ -209,36 +145,22 @@ pub struct WorkflowLaunchHosts<'a> {
 pub struct WorkflowLaunchCoordinator;
 
 impl WorkflowLaunchCoordinator {
-    /// Preflight, authorize, durable-create, consume auth, register, admit/start.
+    /// Preflight, durable-create, register, emit started, admit/start.
     ///
     /// Order (design §12–§14):
-    /// 1. pure preflight (limits, Lua compile, input schema) — never consumes auth
-    /// 2. exact capability bind (session mode only)
-    /// 3. `WorkflowRuntime::create_run`
-    /// 4. task registration
-    /// 5. capability consume (session mode only)
-    /// 6. emit started + `start_worker` (admission may leave the run queued)
+    /// 1. pure preflight (limits, Lua compile, input schema)
+    /// 2. `WorkflowRuntime::create_run`
+    /// 3. task registration (failure rolls the durable run back)
+    /// 4. emit started + `start_worker` (admission may leave the run queued)
     pub async fn launch(
         self,
         intent: &WorkflowLaunchIntent,
         hosts: WorkflowLaunchHosts<'_>,
-        auth_mode: LaunchAuthorizationMode,
     ) -> Result<WorkflowLaunchOutcome, WorkflowError> {
         self.preflight(intent, hosts.runtime)?;
 
-        let intent_digest = intent.digest();
-        if auth_mode == LaunchAuthorizationMode::SessionCapability {
-            self.bind_authorization(intent, &intent_digest, hosts.capability)?;
-        }
-
         let request = intent.to_launch_request();
-        let handle = match hosts.runtime.create_run(hosts.session_dir, request).await {
-            Ok(handle) => handle,
-            Err(error) => {
-                // Bound authorization remains reusable for the same intent.
-                return Err(error);
-            }
-        };
+        let handle = hosts.runtime.create_run(hosts.session_dir, request).await?;
 
         let task_id = handle.run_id.0.clone();
         if let Err(register_error) = hosts
@@ -251,32 +173,6 @@ impl WorkflowLaunchCoordinator {
                 WorkflowErrorCode::LaunchFailedAfterCreate,
                 format!("workflow registration failed: {register_error}"),
             ));
-        }
-
-        if auth_mode == LaunchAuthorizationMode::SessionCapability
-            && !hosts.capability.consume_bound(&intent_digest)
-        {
-            hosts.background_tasks.remove_workflow(&task_id).await;
-            match hosts.runtime.rollback_created_run(&handle.run_id).await {
-                Ok(()) => {
-                    return Err(WorkflowError::coded(
-                        WorkflowErrorCode::LaunchFailedAfterCreate,
-                        "launch authorization changed during launch",
-                    ));
-                }
-                Err(rollback_error) => {
-                    let _ = hosts
-                        .runtime
-                        .fail_worker_start(&handle.run_id, &rollback_error)
-                        .await;
-                    return Err(WorkflowError::coded(
-                        WorkflowErrorCode::LaunchFailedAfterCreate,
-                        format!(
-                            "launch authorization changed during launch; rollback failed: {rollback_error}"
-                        ),
-                    ));
-                }
-            }
         }
 
         hosts
@@ -304,7 +200,7 @@ impl WorkflowLaunchCoordinator {
         Ok(WorkflowLaunchOutcome { handle, task_id })
     }
 
-    /// Pure validation before any capability mutation or durable create.
+    /// Pure validation before any durable create.
     pub fn preflight(
         &self,
         intent: &WorkflowLaunchIntent,
@@ -344,14 +240,14 @@ impl WorkflowLaunchCoordinator {
         let expected_source = source_sha256_hex(intent.script.as_bytes());
         if intent.source_sha256 != expected_source {
             return Err(WorkflowError::coded(
-                WorkflowErrorCode::LaunchAuthorizationMismatch,
+                WorkflowErrorCode::InvalidInput,
                 "source_sha256 does not match script bytes",
             ));
         }
         let expected_args = canonical_input_hash(&intent.args);
         if intent.args_sha256 != expected_args {
             return Err(WorkflowError::coded(
-                WorkflowErrorCode::LaunchAuthorizationMismatch,
+                WorkflowErrorCode::InvalidInput,
                 "args_sha256 does not match args",
             ));
         }
@@ -370,27 +266,6 @@ impl WorkflowLaunchCoordinator {
 
         compile_lua_source(&intent.script)?;
         Ok(())
-    }
-
-    fn bind_authorization(
-        &self,
-        intent: &WorkflowLaunchIntent,
-        intent_digest: &str,
-        capability: &WorkflowCapability,
-    ) -> Result<(), WorkflowError> {
-        let Some(nonce) = capability.launch_nonce() else {
-            return Err(WorkflowError::coded(
-                WorkflowErrorCode::LaunchAuthorizationMissing,
-                "RunWorkflow requires a launch capability. Use the exact /workflow slash command first.",
-            ));
-        };
-        if nonce != intent.launch_nonce {
-            return Err(WorkflowError::coded(
-                WorkflowErrorCode::LaunchAuthorizationMismatch,
-                "launch nonce does not match session capability",
-            ));
-        }
-        capability.bind(intent_digest)
     }
 }
 
@@ -442,23 +317,12 @@ mod tests {
         WorkflowLaunchBinding {
             session_identity: "session-a".to_owned(),
             workspace_identity: "workspace-a".to_owned(),
-            launch_nonce: "nonce-1".to_owned(),
             actor: WorkflowActor::Model,
             permission_mode: PermissionMode::Auto,
             parent_lineage: None,
             compiled_input_schema: None,
             schema_sha256: String::new(),
         }
-    }
-
-    #[test]
-    fn intent_digest_is_stable_and_args_sensitive() {
-        let a = WorkflowLaunchIntent::from_parts(sample_request(), sample_binding());
-        let mut request_b = sample_request();
-        request_b.args = json!({"target": "other"});
-        let b = WorkflowLaunchIntent::from_parts(request_b, sample_binding());
-        assert_eq!(a.digest(), a.digest());
-        assert_ne!(a.digest(), b.digest());
     }
 
     #[test]
