@@ -571,7 +571,27 @@ async fn handle_prompt(
 
     let (event_tx, mut event_rx) = mpsc::unbounded_channel();
     let prompt = vec![message.to_owned()];
-    let mut turn = std::pin::pin!(run::run_prompt_with_event_stream(&prompt, config, event_tx));
+    let session_id_param = request.params.get("session_id").and_then(Value::as_str);
+    let resolved_sid: Option<String> = match session_id_param {
+        Some(sid) => match sessions::resolve_session_id(sid, config) {
+            Ok(sid) => Some(sid),
+            Err(err) => {
+                return push_rpc_message(
+                    output,
+                    &RpcMessage::Response(RpcResponse::failure(
+                        request.id,
+                        RpcError::new(RpcErrorCode::InvalidParams, err.to_string(), None),
+                    )),
+                );
+            }
+        },
+        None => None,
+    };
+    let mut turn: std::pin::Pin<Box<dyn std::future::Future<Output = anyhow::Result<run::PromptTurn>> + '_>> = if let Some(ref sid) = resolved_sid {
+        Box::pin(run::run_prompt_in_session_with_event_stream(sid, &prompt, config, event_tx))
+    } else {
+        Box::pin(run::run_prompt_with_event_stream(&prompt, config, event_tx))
+    };
     let mut turn_result: Option<anyhow::Result<run::PromptTurn>> = None;
     loop {
         if let Some(result) = turn_result.take() {
