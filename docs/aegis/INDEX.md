@@ -5,6 +5,9 @@ Entries are workspace records, not authoritative runtime decisions.
 
 | Date | Kind | Path | Title |
 | --- | --- | --- | --- |
+| 2026-07-28 | handoff | docs/aegis/handoffs/2026-07-28-workflow-product-surface-redesign.md | Implement Neo Workflow Product Surface Redesign Handoff Prompt |
+| 2026-07-28 | plan | docs/aegis/plans/2026-07-28-workflow-product-surface-redesign.md | Neo Workflow Product Surface Redesign Implementation Plan |
+| 2026-07-27 | spec | docs/aegis/specs/2026-07-27-workflow-product-surface-redesign.md | Neo Workflow Product Surface Redesign |
 | 2026-07-27 | handoff | docs/aegis/handoffs/2026-07-27-assistant-native-workflow-tool.md | Finish Assistant-Native Workflow Tool Tasks 2-7 Handoff Prompt |
 | 2026-07-27 | plan | docs/aegis/plans/2026-07-27-assistant-native-workflow-tool.md | Assistant-Native Workflow Tool Implementation Plan |
 | 2026-07-27 | spec | docs/aegis/specs/2026-07-27-assistant-native-workflow-tool-design.md | Neo Assistant-Native Workflow Tool Design |
