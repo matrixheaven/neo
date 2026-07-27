@@ -151,7 +151,7 @@ pub(crate) mod workflow;
 pub use delegate_controls::{
     InterruptDelegateTool, ListDelegatesTool, MessageDelegateTool, WaitDelegateTool,
 };
-pub use workflow::RunWorkflowTool;
+pub use workflow::WorkflowTool;
 // Re-export Todo tool types.
 pub use todo::{TodoInput, TodoItem, TodoStatus, TodoTool};
 // Re-export Goal tool types.
@@ -234,6 +234,7 @@ pub struct ToolContext {
     pub shell_runtime: ShellRuntime,
     pub workflow_capability: crate::workflow::WorkflowCapability,
     pub workflow_runtime: crate::workflow::WorkflowRuntime,
+    pub workflow_definitions: crate::workflow::WorkflowDefinitionRegistry,
     /// Shared multi-agent runtime for Delegate and `DelegateSwarm` tools.
     pub multi_agent: MultiAgentRuntime,
     /// Parent runtime config used to construct real child `AgentRuntime` instances.
@@ -281,6 +282,7 @@ impl std::fmt::Debug for ToolContext {
             .field("shell_runtime", &self.shell_runtime)
             .field("workflow_capability", &self.workflow_capability)
             .field("workflow_runtime", &"_")
+            .field("workflow_definitions", &"_")
             .field("multi_agent", &self.multi_agent)
             .field("child_config", &self.child_config.is_some())
             .field("child_model", &self.child_model.is_some())
@@ -320,6 +322,7 @@ impl ToolContext {
             workflow_runtime: crate::workflow::WorkflowRuntime::new(
                 crate::workflow::WorkflowLimits::default(),
             ),
+            workflow_definitions: crate::workflow::WorkflowDefinitionRegistry::empty(),
             multi_agent: MultiAgentRuntime::new(),
             child_config: None,
             child_model: None,
@@ -394,6 +397,15 @@ impl ToolContext {
     #[must_use]
     pub fn with_workflow_runtime(mut self, runtime: crate::workflow::WorkflowRuntime) -> Self {
         self.workflow_runtime = runtime;
+        self
+    }
+
+    #[must_use]
+    pub fn with_workflow_definitions(
+        mut self,
+        definitions: crate::workflow::WorkflowDefinitionRegistry,
+    ) -> Self {
+        self.workflow_definitions = definitions;
         self
     }
 
@@ -705,7 +717,6 @@ impl ToolRegistry {
         registry.register(plan_mode::EnterPlanModeTool);
         registry.register(plan_mode::ExitPlanModeTool);
         registry.register(sleep::SleepTool);
-        registry.register(workflow::RunWorkflowTool);
         registry
     }
 
@@ -736,7 +747,7 @@ impl ToolRegistry {
         registry.register(delegate_controls::InterruptDelegateTool);
         registry.register(delegate_controls::MessageDelegateTool);
         registry.register(sleep::SleepTool);
-        registry.register(workflow::RunWorkflowTool);
+        registry.register(workflow::WorkflowTool);
         registry
     }
 
@@ -918,7 +929,7 @@ impl ToolRegistry {
 pub fn is_workflow_tool_denied(name: &str) -> bool {
     matches!(
         name,
-        "RunWorkflow"
+        "Workflow"
             | "Delegate"
             | "DelegateSwarm"
             | "TaskPause"
@@ -995,7 +1006,7 @@ fn is_builtin_tool_name(name: &str) -> bool {
             "WaitDelegate",
             "InterruptDelegate",
             "MessageDelegate",
-            "RunWorkflow",
+            "Workflow",
             "Sleep",
             "StartGoal",
             "ExitGoalMode",

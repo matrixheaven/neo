@@ -7,6 +7,7 @@ use thiserror::Error;
 pub enum WorkflowErrorCode {
     InvalidDefinition,
     DefinitionConflict,
+    DefinitionSavePartial,
     DefinitionNotFound,
     UntrustedProjectDefinition,
     InvalidManifest,
@@ -51,6 +52,7 @@ impl WorkflowErrorCode {
         match self {
             Self::InvalidDefinition => "invalid_definition",
             Self::DefinitionConflict => "definition_conflict",
+            Self::DefinitionSavePartial => "definition_save_partial",
             Self::DefinitionNotFound => "definition_not_found",
             Self::UntrustedProjectDefinition => "untrusted_project_definition",
             Self::InvalidManifest => "invalid_manifest",

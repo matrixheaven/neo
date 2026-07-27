@@ -353,7 +353,7 @@ impl WorkflowLaunchCoordinator {
         if let Some(schema) = &intent.compiled_input_schema {
             schema.validate_instance(&intent.args).map_err(|error| {
                 WorkflowError::coded(
-                    WorkflowErrorCode::InputSchemaInvalid,
+                    WorkflowErrorCode::InvalidInput,
                     format!("args failed input_schema validation: {error}"),
                 )
             })?;

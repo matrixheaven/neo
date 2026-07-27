@@ -93,7 +93,7 @@ pub struct WorkflowSaveRequest {
 }
 
 /// One successfully resolved, listable definition summary.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize)]
 pub struct RegistryDefinitionSummary {
     pub name: WorkflowName,
     pub display_name: String,
@@ -101,6 +101,22 @@ pub struct RegistryDefinitionSummary {
     pub revision: WorkflowRevision,
     pub source_origin: WorkflowSourceOrigin,
     pub source_locator: Option<String>,
+    pub schema: RegistryDefinitionSchemaSummary,
+}
+
+/// Compact schema metadata for list results; never clones the full schema.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct RegistryDefinitionSchemaSummary {
+    pub input: Option<RegistrySchemaSummary>,
+    pub output: RegistrySchemaSummary,
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct RegistrySchemaSummary {
+    #[serde(rename = "type")]
+    pub schema_type: Option<serde_json::Value>,
+    pub required: Vec<String>,
+    pub property_count: usize,
 }
 
 /// Session-shared trusted definition registry.
@@ -970,6 +986,7 @@ fn list_from_projection(
                             revision: resolved.revision.clone(),
                             source_origin: resolved.source_origin,
                             source_locator: resolved.source_locator.clone(),
+                            schema: definition_schema_summary(&resolved),
                         },
                     );
                 } else {
@@ -996,11 +1013,39 @@ fn list_scope(
                 revision: resolved.revision.clone(),
                 source_origin: resolved.source_origin,
                 source_locator: resolved.source_locator.clone(),
+                schema: definition_schema_summary(resolved),
             });
         }
     }
     out.sort_by(|a, b| a.name.as_str().cmp(b.name.as_str()));
     out
+}
+
+fn definition_schema_summary(
+    definition: &ResolvedWorkflowDefinition,
+) -> RegistryDefinitionSchemaSummary {
+    RegistryDefinitionSchemaSummary {
+        input: definition.input_schema.as_ref().map(schema_summary),
+        output: schema_summary(&definition.output_schema),
+    }
+}
+
+fn schema_summary(schema: &serde_json::Value) -> RegistrySchemaSummary {
+    RegistrySchemaSummary {
+        schema_type: schema.get("type").cloned(),
+        required: schema
+            .get("required")
+            .and_then(serde_json::Value::as_array)
+            .into_iter()
+            .flatten()
+            .filter_map(serde_json::Value::as_str)
+            .map(str::to_owned)
+            .collect(),
+        property_count: schema
+            .get("properties")
+            .and_then(serde_json::Value::as_object)
+            .map_or(0, serde_json::Map::len),
+    }
 }
 
 enum NoClobberDecision {
@@ -1149,9 +1194,18 @@ fn write_pair_atomic(
     // Source first.
     write_one_atomic(source_path, source_bytes, force)?;
     // Manifest last (content hash gate for discovery).
-    // Best-effort: leave source in place; discovery will reject incomplete
-    // or hash-mismatched pairs. Do not roll back via destructive delete.
-    write_one_atomic(manifest_path, manifest_bytes, force)
+    // Leave the source in place on failure; discovery rejects incomplete or
+    // hash-mismatched pairs, and destructive rollback would be unsafe.
+    write_one_atomic(manifest_path, manifest_bytes, force).map_err(|error| {
+        WorkflowError::coded(
+            WorkflowErrorCode::DefinitionSavePartial,
+            format!(
+                "workflow source was saved at {}, but manifest save failed at {}: {error}",
+                source_path.display(),
+                manifest_path.display()
+            ),
+        )
+    })
 }
 
 fn write_one_atomic(path: &Path, bytes: &[u8], force: bool) -> Result<(), WorkflowError> {
