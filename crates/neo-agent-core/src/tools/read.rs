@@ -218,6 +218,43 @@ struct ReadRenderResult {
     line_ending_style: LineEndingStyle,
 }
 
+pub(super) struct TextSnapshot {
+    pub output: String,
+    pub lines_read: usize,
+    pub total_lines: usize,
+}
+
+#[must_use]
+pub(super) fn render_text_snapshot(path: &std::path::Path, text: &str) -> Option<TextSnapshot> {
+    if is_sensitive_path(path) || contains_nul(text) {
+        return None;
+    }
+
+    let total_lines = text.split_inclusive('\n').count();
+    let mut flags = LineEndingFlags::default();
+    flags.update(text);
+    let entries = text
+        .split_inclusive('\n')
+        .take(MAX_LINES)
+        .enumerate()
+        .map(|(index, line)| (index + 1, strip_trailing_lf(line).to_owned()))
+        .collect();
+    let rendered = render_entries(
+        entries,
+        flags,
+        total_lines > MAX_LINES,
+        false,
+        total_lines,
+        MAX_LINES,
+    )
+    .expect("rendering an in-memory UTF-8 snapshot cannot fail");
+    Some(TextSnapshot {
+        lines_read: rendered.rendered_lines.len(),
+        total_lines,
+        output: rendered.finish_output(),
+    })
+}
+
 impl ReadRenderResult {
     fn finish_output(&self) -> String {
         let rendered = self.rendered_lines.join("\n");

@@ -10,6 +10,7 @@ use sha2::{Digest, Sha256};
 use tokio_util::sync::CancellationToken;
 
 use super::diff::{diff_stats, unified_diff};
+use super::read::render_text_snapshot;
 use super::{Tool, ToolContext, ToolFuture, ToolResult, schema};
 use crate::approval::{EditApprovalChange, EditApprovalPresentation};
 use crate::permissions::{FileWriteApprovalOperation, SessionApprovalKey, SessionApprovalScope};
@@ -92,7 +93,7 @@ fn prepare_file_plan(
             "Edit only supports existing UTF-8 regular files.",
         )
     })?;
-    let staged = apply_edit_plan(file_index, plan, &original)?;
+    let staged = apply_edit_plan(file_index, plan, &resolved, &original)?;
 
     if staged == original {
         return Err(prepare_failed(
@@ -226,10 +227,11 @@ fn read_edit_bytes(file_index: usize, path: &Path, resolved: &Path) -> Result<Ve
 fn apply_edit_plan(
     file_index: usize,
     plan: &EditFilePlan,
+    resolved_path: &Path,
     original: &str,
 ) -> Result<String, ToolResult> {
     let mut staged = original.to_owned();
-    for (edit_index, edit) in &plan.edits {
+    for (staged_count, (edit_index, edit)) in plan.edits.iter().enumerate() {
         let actual = count_non_overlapping(&staged, &edit.old);
         if actual != edit.expected_matches {
             let lines = match_line_numbers(&staged, &edit.old);
@@ -242,7 +244,16 @@ fn apply_edit_plan(
                     .collect::<Vec<_>>()
                     .join(", ")
             };
-            return Err(prepare_failed(
+            let guidance = if actual == 0 {
+                format!(
+                    "Correct edits[{edit_index}].old from the comparison evidence, then resubmit the complete Edit call."
+                )
+            } else {
+                format!(
+                    "Use the comparison evidence to make edits[{edit_index}].old more specific, or set edits[{edit_index}].expected_matches to {actual} only if every match is intended; then resubmit the complete Edit call."
+                )
+            };
+            let mut failure = prepare_failed(
                 None,
                 Some(*edit_index),
                 Some(plan.path.display().to_string()),
@@ -250,10 +261,17 @@ fn apply_edit_plan(
                     "expected {} exact matches · found {actual}; matches at lines {line_list}",
                     edit.expected_matches
                 ),
-                &format!(
-                    "Use a more specific edits[{edit_index}].old, or set edits[{edit_index}].expected_matches to {actual} only if every match is intended."
-                ),
-            ));
+                &guidance,
+            );
+            append_match_snapshot(
+                &mut failure,
+                &plan.path,
+                resolved_path,
+                &staged,
+                original,
+                staged_count,
+            );
+            return Err(failure);
         }
         staged = replace_non_overlapping(&staged, &edit.old, &edit.new);
     }
@@ -270,6 +288,71 @@ fn apply_edit_plan(
         ));
     }
     Ok(staged)
+}
+
+fn append_match_snapshot(
+    failure: &mut ToolResult,
+    requested_path: &Path,
+    resolved_path: &Path,
+    staged: &str,
+    original: &str,
+    staged_count: usize,
+) {
+    failure
+        .content
+        .push_str("\n\nComparison snapshot used for this match check");
+    if staged_count == 0 {
+        failure.content.push_str(" from the current file state");
+    } else {
+        let _ = write!(
+            failure.content,
+            " after {staged_count} earlier edits were staged in this call"
+        );
+    }
+    failure.content.push_str("; zero writes were committed:\n");
+
+    let Some(staged_snapshot) = render_text_snapshot(resolved_path, staged) else {
+        failure.content.push_str(
+            "Snapshot omitted because Read safety rules reject this path or content. No file content was returned.",
+        );
+        return;
+    };
+    failure.content.push_str(&staged_snapshot.output);
+
+    if staged_snapshot.lines_read < staged_snapshot.total_lines {
+        let staged_remaining = staged_snapshot.total_lines - staged_snapshot.lines_read;
+        let _ = write!(
+            failure.content,
+            "\nStaged snapshot incomplete: this result includes only lines 1-{} of {}; {staged_remaining} staged lines remain unshown.",
+            staged_snapshot.lines_read, staged_snapshot.total_lines,
+        );
+
+        let Some(disk_snapshot) = render_text_snapshot(resolved_path, original) else {
+            failure.content.push_str(
+                " The unchanged on-disk file is refused by Read safety rules, so no continuation Read is available.",
+            );
+            return;
+        };
+        if disk_snapshot.lines_read >= disk_snapshot.total_lines {
+            failure.content.push_str(
+                " The unchanged on-disk file fits in one Read result; the omitted staged lines come from earlier edit payloads already present in this call.",
+            );
+            return;
+        }
+
+        let disk_remaining = disk_snapshot.total_lines - disk_snapshot.lines_read;
+        let next_line = disk_snapshot.lines_read + 1;
+        let _ = write!(
+            failure.content,
+            " The file on disk is unchanged, so Read will see the original state. Its first bounded page includes lines 1-{} of {}; {disk_remaining} on-disk lines remain unread. Continue with Read using {}, then resubmit the complete Edit call.",
+            disk_snapshot.lines_read,
+            disk_snapshot.total_lines,
+            json!({
+                "path": requested_path.display().to_string(),
+                "line_offset": next_line,
+            })
+        );
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
