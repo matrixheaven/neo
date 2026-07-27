@@ -337,13 +337,19 @@ fn render_failure(
     theme: &TuiTheme,
     accent: crate::primitive::Color,
 ) -> Vec<Line> {
+    const MAX_DIAGNOSTIC_ROWS: usize = 3;
+
     let muted = Style::default().fg(theme.text_muted);
     let mut rows = styled_wrapped(label, width, Style::default().fg(accent));
-    let diagnostics = details
+    let mut diagnostics = details
         .get("message")
         .and_then(Value::as_str)
         .map(|message| styled_wrapped(message, framed_content_width(width), muted))
         .unwrap_or_default();
+    if diagnostics.len() > MAX_DIAGNOSTIC_ROWS {
+        diagnostics.truncate(MAX_DIAGNOSTIC_ROWS);
+        diagnostics.push(Line::styled("... error details omitted", muted));
+    }
     if !diagnostics.is_empty() {
         let header = details
             .get("path")
@@ -356,11 +362,6 @@ fn render_failure(
             Some(theme),
         ));
     }
-    rows.extend(styled_wrapped(
-        "Re-read affected files and submit a new Write call.",
-        width,
-        muted,
-    ));
     render_created_directories(details, width, theme, rows)
 }
 

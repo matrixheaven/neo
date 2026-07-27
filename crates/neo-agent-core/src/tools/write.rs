@@ -870,12 +870,19 @@ fn default_install(file: &PreparedWriteFile) -> WriteInstallOutcome {
 fn parse_write_input(arguments: &serde_json::Value) -> Result<WriteInput, ToolResult> {
     match serde_json::from_value::<WriteInput>(arguments.clone()) {
         Ok(input) => Ok(input),
-        Err(error) => Err(prepare_failed(
-            None,
-            None,
-            &format!("invalid Write arguments: {error}"),
-            "Submit a fresh Write call using the files[] contract.",
-        )),
+        Err(_) => {
+            let message = if arguments.is_string() {
+                "invalid Write arguments: received a JSON string instead of an object"
+            } else {
+                "invalid Write arguments: input does not match the files[] contract"
+            };
+            Err(prepare_failed(
+                None,
+                None,
+                message,
+                "Submit a fresh Write call using the files[] contract.",
+            ))
+        }
     }
 }
 
@@ -1132,6 +1139,16 @@ mod tests {
         ToolContext::new(root)
             .expect("context")
             .with_access(ToolAccess::all())
+    }
+
+    #[test]
+    fn invalid_write_arguments_do_not_echo_string_payload() {
+        let payload = format!("{}TAIL_SENTINEL", "large file content ".repeat(1_000));
+        let result = parse_write_input(&json!(payload)).expect_err("string input is rejected");
+
+        assert!(result.content.contains("received a JSON string"));
+        assert!(!result.content.contains("TAIL_SENTINEL"));
+        assert!(result.content.len() < 256, "{}", result.content.len());
     }
 
     #[tokio::test]

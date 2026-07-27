@@ -2434,6 +2434,34 @@ fn batch_write_card_renders_created_content_and_overwrite_diff() {
 }
 
 #[test]
+fn write_prepare_failure_bounds_diagnostics_and_omits_recovery_prompt() {
+    let message = format!(
+        "invalid Write arguments: {}TAIL_SENTINEL",
+        "payload ".repeat(1_000)
+    );
+    let mut card = ToolCallComponent::new(ToolCallState {
+        id: "write-invalid-arguments".to_owned(),
+        name: "Write".to_owned(),
+        arguments: None,
+        result: Some(message.clone()),
+        details: Some(json!({
+            "kind": "write",
+            "status": "prepare_failed",
+            "message": message
+        })),
+        status: ToolStatusKind::Failed,
+        exit_code: None,
+    });
+
+    let rendered = plain(card.render(80)).join("\n");
+
+    assert!(rendered.contains("invalid Write arguments"), "{rendered}");
+    assert!(rendered.contains("error details omitted"), "{rendered}");
+    assert!(!rendered.contains("TAIL_SENTINEL"), "{rendered}");
+    assert!(!rendered.contains("Re-read affected files"), "{rendered}");
+}
+
+#[test]
 fn batch_write_partial_header_uses_committed_totals_only() {
     let theme = TuiTheme::default();
     let state = ToolCallState {
