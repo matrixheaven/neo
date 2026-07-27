@@ -1,7 +1,7 @@
 //! Typed workflow definitions and canonical content-revision hashing.
 //!
-//! Every source adapter (file pair, builtin bytes, dynamic `RunWorkflow` input)
-//! produces one [`ResolvedWorkflowDefinition`]. The content revision is SHA-256
+//! Every source adapter (file pair, builtin bytes, dynamic `Workflow` tool
+//! input) produces one [`ResolvedWorkflowDefinition`]. The content revision is SHA-256
 //! over exact length-prefixed framing of the canonical manifest JSON and Lua
 //! source bytes. Path, mtime, registry scope, and precedence are never hash
 //! inputs. Schema compilation reuses the single host [`CompiledSchema`] owner.
@@ -93,7 +93,7 @@ impl std::fmt::Debug for ResolvedWorkflowDefinition {
     }
 }
 
-/// Model-facing dynamic definition adapter (`RunWorkflow` V2 shape).
+/// Model-facing dynamic definition adapter (`Workflow` tool inline shape).
 ///
 /// Unknown fields are rejected. Runtime limits, concurrency, budgets, output
 /// parsing modes, and execution backends are not accepted.

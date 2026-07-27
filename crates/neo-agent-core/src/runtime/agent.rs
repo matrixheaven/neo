@@ -207,7 +207,7 @@ impl AgentRuntime {
     ) -> Result<(), AgentRuntimeError> {
         let tools = self.tools.as_ref().ok_or_else(|| {
             AgentRuntimeError::Tool(crate::ToolError::InvalidInput {
-                tool: "RunWorkflow".to_owned(),
+                tool: "Workflow".to_owned(),
                 message: "workflow dispatch requires a configured tool registry".to_owned(),
             })
         })?;

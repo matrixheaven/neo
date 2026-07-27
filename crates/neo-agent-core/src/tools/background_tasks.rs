@@ -580,7 +580,7 @@ impl BackgroundTaskManager {
         let mut tasks = self.inner.lock().await;
         if tasks.contains_key(&task_id) {
             return Err(ToolError::InvalidInput {
-                tool: "RunWorkflow".to_owned(),
+                tool: "Workflow".to_owned(),
                 message: format!("background task `{task_id}` already exists"),
             });
         }
