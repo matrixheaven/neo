@@ -1227,6 +1227,96 @@ mod tests {
     }
 
     #[test]
+    fn agent_config_for_app_shares_session_workflow_registry() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let neo_home = temp.path().join("neo_home");
+        let workspace = temp.path().join("workspace");
+        std::fs::create_dir_all(&neo_home).expect("neo home");
+        std::fs::create_dir_all(&workspace).expect("workspace");
+        let registry = neo_agent_core::workflow::WorkflowDefinitionRegistry::new(
+            neo_agent_core::workflow::WorkflowDefinitionRegistryConfig {
+                neo_home,
+                workspace: workspace.clone(),
+                project_trusted: true,
+                limits: neo_agent_core::workflow::WorkflowLimits::default(),
+                builtins: Vec::new(),
+            },
+        );
+        registry
+            .save(
+                neo_agent_core::workflow::WorkflowSaveScope::User,
+                &neo_agent_core::workflow::WorkflowSaveRequest {
+                    display_name: "saved-probe".to_owned(),
+                    name: "saved-probe".to_owned(),
+                    description: "registry wiring probe".to_owned(),
+                    phases: vec![neo_agent_core::workflow::WorkflowPhase {
+                        id: "work".to_owned(),
+                        description: "work".to_owned(),
+                    }],
+                    lua_source: "return { ok = true }".to_owned(),
+                    input_schema: Some(serde_json::json!({"type": "object"})),
+                    output_schema: serde_json::json!({"type": "object"}),
+                },
+                false,
+            )
+            .expect("save definition");
+        let config = AppConfig {
+            default_model: "test-model".to_owned(),
+            default_provider: "openai".to_owned(),
+            providers: BTreeMap::new(),
+            models: BTreeMap::new(),
+            model_scope: Vec::new(),
+            sessions_dir: temp.path().join("sessions"),
+            permission_mode: PermissionMode::default(),
+            live_permission_mode: std::sync::Arc::new(std::sync::RwLock::new(
+                PermissionMode::default(),
+            )),
+            workspace_policy: std::sync::Arc::new(std::sync::RwLock::new(None)),
+            defaults: Defaults {
+                mode: "events".to_owned(),
+            },
+            runtime: RuntimeConfig::default(),
+            background_tasks: neo_agent_core::BackgroundTaskManager::new(),
+            workflow_runtime: neo_agent_core::workflow::WorkflowRuntime::new(
+                neo_agent_core::workflow::WorkflowLimits::default(),
+            ),
+            workflow_definitions: registry,
+            workflow_dispatch_resolver: neo_agent_core::runtime::WorkflowDispatchResolver::default(
+            ),
+            multi_agent: neo_agent_core::multi_agent::MultiAgentRuntime::new(),
+            tui: TuiConfig::default(),
+            theme: crate::themes::ResolvedTheme::default(),
+            mcp: McpConfig::default(),
+            prompt_templates: Vec::new(),
+            system_prompt_file: None,
+            extra_skill_dirs: Vec::new(),
+            skill_path: Vec::new(),
+            project_trusted: true,
+            project_trust: crate::trust::ProjectTrustState::NotRequired,
+            project_dir: workspace,
+            config_path: temp.path().join("config.toml"),
+            config_file_exists: true,
+        };
+        let model = ModelSpec {
+            provider: ProviderId("openai".to_owned()),
+            model: "test-model".to_owned(),
+            api: ApiKind::OpenAiResponse,
+            capabilities: ModelCapabilities::tool_chat(),
+        };
+
+        let agent_config = agent_config_for_app(model, &config, None, None).expect("agent config");
+
+        // The production root Workflow tool must receive the session-shared
+        // registry: an empty default registry would fail this resolve even
+        // though the definition pair exists on disk.
+        let resolved = agent_config
+            .workflow_definitions
+            .resolve("saved-probe")
+            .expect("saved definition must be visible through production agent config");
+        assert_eq!(resolved.name.as_str(), "saved-probe");
+    }
+
+    #[test]
     fn agent_config_for_app_falls_back_to_model_max_output_tokens() {
         let temp = tempfile::tempdir().expect("tempdir");
         let config = AppConfig {

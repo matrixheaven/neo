@@ -83,7 +83,7 @@ fn workflow_dialog_goal_plan_and_child_tools_are_denied() {
     let registry = ToolRegistry::with_builtin_tools();
 
     let denied = [
-        "RunWorkflow",
+        "Workflow",
         "Delegate",
         "DelegateSwarm",
         "TaskPause",
@@ -134,7 +134,7 @@ fn child_tool_allow_only_reduces_parent_capability() {
     assert!(parent.contains("Bash"));
     // Denied control tools never appear in parent eligibility.
     assert!(!parent.contains("Delegate"));
-    assert!(!parent.contains("RunWorkflow"));
+    assert!(!parent.contains("Workflow"));
     assert!(!parent.contains("TodoList"));
 
     // Ceiling reduces to exact names only.
@@ -151,12 +151,12 @@ fn child_tool_allow_only_reduces_parent_capability() {
         Some(&[
             "Read".to_owned(),
             "Delegate".to_owned(),
-            "RunWorkflow".to_owned(),
+            "Workflow".to_owned(),
         ]),
     );
     assert!(cannot_elevate.contains("Read"));
     assert!(!cannot_elevate.contains("Delegate"));
-    assert!(!cannot_elevate.contains("RunWorkflow"));
+    assert!(!cannot_elevate.contains("Workflow"));
 
     // Exact match only — wrong case does not grant tools.
     let exact = intersect_child_tool_allow(&parent, Some(&["read".to_owned()]));
@@ -172,6 +172,39 @@ fn child_tool_allow_only_reduces_parent_capability() {
         .for_workflow_child(Some(&["Read".to_owned(), "Delegate".to_owned()]));
     assert!(combined.contains("Read"));
     assert!(!combined.contains("Delegate"));
+}
+
+/// `Workflow` is root-only: child, restricted, and schema-repair tool sets
+/// never receive it, and no model-visible `RunWorkflow` remains.
+#[test]
+fn workflow_tool_is_root_only_and_run_workflow_is_gone() {
+    let root = ToolRegistry::with_builtin_tools();
+    assert!(root.contains("Workflow"), "root registry owns Workflow");
+    assert!(
+        !root.contains("RunWorkflow"),
+        "retired model tool must stay absent from the root registry"
+    );
+
+    let child = ToolRegistry::with_builtin_child_tools();
+    assert!(!child.contains("Workflow"));
+    assert!(!child.contains("RunWorkflow"));
+
+    // Schema-repair turns run tools-disabled: no workflow launch surface.
+    let repair = ToolRegistry::new();
+    assert!(!repair.contains("Workflow"));
+
+    // The canonical deny classifier keeps workflow launch unreachable from
+    // workflow scripts (neo.tool), even though the root registers it.
+    assert!(is_workflow_tool_denied("Workflow"));
+    assert!(!is_workflow_tool_eligible(&root, "Workflow"));
+    assert!(!root.is_workflow_eligible("Workflow"));
+
+    // The model-visible description keeps the mandatory routing statements.
+    let description = neo_agent_core::tools::WorkflowTool.description();
+    assert!(description.contains("create-workflow"));
+    assert!(description.contains("TaskOutput"));
+    assert!(description.contains("do not inspect Neo source"));
+    assert!(description.contains("no slash capability"));
 }
 
 /// Workflow provenance is typed on approvals and tool events.
