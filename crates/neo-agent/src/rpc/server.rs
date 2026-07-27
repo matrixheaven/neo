@@ -3,13 +3,15 @@ use std::io::{self, BufRead, Write};
 use std::sync::{Arc, Mutex};
 
 use anyhow::Context;
+use futures::future::FutureExt;
 use neo_agent_core::rpc::{
     RpcError, RpcErrorCode, RpcMessage, RpcNotification, RpcRequest, RpcResponse, codec::JsonlCodec,
 };
+use neo_agent_core::runtime::AsyncApprovalHandler;
 use neo_agent_core::session::{
     JsonlSessionReader, SessionMetadataStore, SessionRecord, SessionSummarySource,
 };
-use neo_agent_core::{AgentEvent, ApprovalAction, ApprovalResponse};
+use neo_agent_core::{ApprovalAction, ApprovalCancelReason, ApprovalRequest, ApprovalResponse};
 use serde_json::{Value, json};
 use tokio::sync::{mpsc, oneshot};
 
@@ -87,47 +89,30 @@ async fn handle_request(
         "set_session_name" => handle_set_session_name(config, request, output),
         "prompt" => handle_prompt(config, request, output, approval_channels).await,
         "approve_tool" => {
-            let Some(session_id) =
-                request.params.get("session_id").and_then(Value::as_str)
-            else {
+            let Some(session_id) = request.params.get("session_id").and_then(Value::as_str) else {
                 return push_rpc_message(
                     output,
                     &RpcMessage::Response(RpcResponse::failure(
                         request.id,
-                        RpcError::new(
-                            RpcErrorCode::InvalidParams,
-                            "session_id required",
-                            None,
-                        ),
+                        RpcError::new(RpcErrorCode::InvalidParams, "session_id required", None),
                     )),
                 );
             };
-            let Some(approval_id) =
-                request.params.get("request_id").and_then(Value::as_str)
-            else {
+            let Some(approval_id) = request.params.get("request_id").and_then(Value::as_str) else {
                 return push_rpc_message(
                     output,
                     &RpcMessage::Response(RpcResponse::failure(
                         request.id,
-                        RpcError::new(
-                            RpcErrorCode::InvalidParams,
-                            "request_id required",
-                            None,
-                        ),
+                        RpcError::new(RpcErrorCode::InvalidParams, "request_id required", None),
                     )),
                 );
             };
-            let Some(action_str) = request.params.get("action").and_then(Value::as_str)
-            else {
+            let Some(action_str) = request.params.get("action").and_then(Value::as_str) else {
                 return push_rpc_message(
                     output,
                     &RpcMessage::Response(RpcResponse::failure(
                         request.id,
-                        RpcError::new(
-                            RpcErrorCode::InvalidParams,
-                            "action required",
-                            None,
-                        ),
+                        RpcError::new(RpcErrorCode::InvalidParams, "action required", None),
                     )),
                 );
             };
@@ -680,19 +665,54 @@ async fn handle_prompt(
         None => None,
     };
     let sid = resolved_sid.clone().unwrap_or_default();
-    let channels = Arc::clone(approval_channels);
 
-    let mut turn: std::pin::Pin<Box<dyn std::future::Future<Output = anyhow::Result<run::PromptTurn>> + '_>> = if let Some(ref sid) = resolved_sid {
-        Box::pin(run::run_prompt_in_session_with_event_stream(sid, &prompt, config, event_tx))
+    let approval_handler: Option<AsyncApprovalHandler> = {
+        let channels = Arc::clone(approval_channels);
+        let sid = sid.clone();
+        Some(Arc::new(move |request: ApprovalRequest| {
+            let channels = Arc::clone(&channels);
+            let sid = sid.clone();
+            async move {
+                let (response_tx, response_rx) = oneshot::channel();
+                {
+                    let mut channels = channels.lock().unwrap();
+                    channels
+                        .entry(sid.clone())
+                        .or_default()
+                        .insert(request.id.clone(), response_tx);
+                }
+                response_rx.await.unwrap_or(ApprovalResponse::Cancelled {
+                    request_id: request.id,
+                    reason: ApprovalCancelReason::SessionEnded,
+                })
+            }
+            .boxed()
+        }) as AsyncApprovalHandler)
+    };
+
+    let mut turn: std::pin::Pin<
+        Box<dyn std::future::Future<Output = anyhow::Result<run::PromptTurn>> + '_>,
+    > = if let Some(ref sid) = resolved_sid {
+        Box::pin(run::run_prompt_in_session_with_event_stream(
+            sid,
+            &prompt,
+            config,
+            event_tx,
+            approval_handler,
+        ))
     } else {
-        Box::pin(run::run_prompt_with_event_stream(&prompt, config, event_tx))
+        Box::pin(run::run_prompt_with_event_stream(
+            &prompt,
+            config,
+            event_tx,
+            approval_handler,
+        ))
     };
     let mut turn_result: Option<anyhow::Result<run::PromptTurn>> = None;
     loop {
         if let Some(result) = turn_result.take() {
             match event_rx.recv().await {
                 Some(Ok(event)) => {
-                    handle_approval_event(&event, &sid, &channels);
                     push_rpc_message(
                         output,
                         &RpcMessage::Notification(RpcNotification::new(
@@ -737,7 +757,6 @@ async fn handle_prompt(
             result = event_rx.recv() => {
                 match result {
                     Some(Ok(event)) => {
-                        handle_approval_event(&event, &sid, &channels);
                         push_rpc_message(
                             output,
                             &RpcMessage::Notification(RpcNotification::new(
@@ -754,26 +773,6 @@ async fn handle_prompt(
                 turn_result = Some(result);
             }
         }
-    }
-}
-
-fn handle_approval_event(
-    event: &AgentEvent,
-    sid: &str,
-    approval_channels: &ApprovalChannelMap,
-) {
-    if let AgentEvent::ApprovalRequested { request } = event {
-        let (tx, rx) = oneshot::channel();
-        {
-            let mut channels = approval_channels.lock().unwrap();
-            channels
-                .entry(sid.to_owned())
-                .or_default()
-                .insert(request.id.clone(), tx);
-        }
-        tokio::spawn(async move {
-            let _ = rx.await;
-        });
     }
 }
 
