@@ -248,7 +248,7 @@ impl WorkflowLaunchCoordinator {
         {
             let _ = hosts.runtime.rollback_created_run(&handle.run_id).await;
             return Err(WorkflowError::coded(
-                WorkflowErrorCode::Host,
+                WorkflowErrorCode::LaunchFailedAfterCreate,
                 format!("workflow registration failed: {register_error}"),
             ));
         }
@@ -260,7 +260,7 @@ impl WorkflowLaunchCoordinator {
             match hosts.runtime.rollback_created_run(&handle.run_id).await {
                 Ok(()) => {
                     return Err(WorkflowError::coded(
-                        WorkflowErrorCode::LaunchAuthorizationMismatch,
+                        WorkflowErrorCode::LaunchFailedAfterCreate,
                         "launch authorization changed during launch",
                     ));
                 }
@@ -270,7 +270,7 @@ impl WorkflowLaunchCoordinator {
                         .fail_worker_start(&handle.run_id, &rollback_error)
                         .await;
                     return Err(WorkflowError::coded(
-                        WorkflowErrorCode::LaunchAuthorizationMismatch,
+                        WorkflowErrorCode::LaunchFailedAfterCreate,
                         format!(
                             "launch authorization changed during launch; rollback failed: {rollback_error}"
                         ),
@@ -279,7 +279,16 @@ impl WorkflowLaunchCoordinator {
             }
         }
 
-        hosts.runtime.emit_started(&handle.run_id).await?;
+        hosts
+            .runtime
+            .emit_started(&handle.run_id)
+            .await
+            .map_err(|error| {
+                WorkflowError::coded(
+                    WorkflowErrorCode::LaunchFailedAfterCreate,
+                    format!("workflow start event failed: {error}"),
+                )
+            })?;
 
         if let Err(error) = hosts.runtime.start_worker(&handle.run_id).await {
             let _ = hosts
@@ -287,7 +296,7 @@ impl WorkflowLaunchCoordinator {
                 .fail_worker_start(&handle.run_id, &error)
                 .await;
             return Err(WorkflowError::coded(
-                WorkflowErrorCode::Failed,
+                WorkflowErrorCode::LaunchFailedAfterCreate,
                 format!("worker startup failed: {error}"),
             ));
         }

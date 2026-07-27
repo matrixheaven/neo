@@ -744,7 +744,7 @@ async fn compile_schema_and_storage_failure_preserve_reusable_capability() {
             )
             .await
             .expect_err("schema failure");
-        assert_eq!(err.code(), WorkflowErrorCode::InputSchemaInvalid);
+        assert_eq!(err.code(), WorkflowErrorCode::InvalidInput);
         assert!(capability.inspect(), "schema failure must not consume");
         assert!(background_tasks.list(false, 10).await.is_empty());
     }

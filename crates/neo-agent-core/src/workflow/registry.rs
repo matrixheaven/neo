@@ -1191,21 +1191,146 @@ fn write_pair_atomic(
     manifest_bytes: &[u8],
     force: bool,
 ) -> Result<(), WorkflowError> {
-    // Source first.
-    write_one_atomic(source_path, source_bytes, force)?;
-    // Manifest last (content hash gate for discovery).
-    // Leave the source in place on failure; discovery rejects incomplete or
-    // hash-mismatched pairs, and destructive rollback would be unsafe.
-    write_one_atomic(manifest_path, manifest_bytes, force).map_err(|error| {
+    write_pair_atomic_with(
+        source_path,
+        source_bytes,
+        manifest_path,
+        manifest_bytes,
+        force,
+        write_one_atomic,
+    )
+}
+
+fn write_pair_atomic_with(
+    source_path: &Path,
+    source_bytes: &[u8],
+    manifest_path: &Path,
+    manifest_bytes: &[u8],
+    force: bool,
+    mut write: impl FnMut(&Path, &[u8], bool) -> Result<(), WorkflowError>,
+) -> Result<(), WorkflowError> {
+    let source_before = snapshot_file(source_path)?;
+    let manifest_before = snapshot_file(manifest_path)?;
+
+    write(source_path, source_bytes, force)?;
+    let Err(write_error) = write(manifest_path, manifest_bytes, force) else {
+        return Ok(());
+    };
+
+    let mut rollback_errors = Vec::new();
+    if let Err(error) = restore_file(manifest_path, &manifest_before) {
+        rollback_errors.push(error.to_string());
+    }
+    if let Err(error) = restore_file(source_path, &source_before) {
+        rollback_errors.push(error.to_string());
+    }
+    if rollback_errors.is_empty() {
+        return Err(write_error);
+    }
+
+    Err(WorkflowError::coded(
+        WorkflowErrorCode::DefinitionSavePartial,
+        format!(
+            "manifest save failed ({write_error}); pair rollback failed: {}",
+            rollback_errors.join("; ")
+        ),
+    ))
+}
+
+enum FileSnapshot {
+    Absent,
+    Regular(Vec<u8>),
+    Other,
+}
+
+fn snapshot_file(path: &Path) -> Result<FileSnapshot, WorkflowError> {
+    let metadata = match fs::symlink_metadata(path) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            return Ok(FileSnapshot::Absent);
+        }
+        Err(error) => {
+            return Err(WorkflowError::coded(
+                WorkflowErrorCode::Host,
+                format!("cannot snapshot {}: {error}", path.display()),
+            ));
+        }
+    };
+    if atomic_file::is_reparse_or_symlink(&metadata) || !metadata.is_file() {
+        return Ok(FileSnapshot::Other);
+    }
+    fs::read(path).map(FileSnapshot::Regular).map_err(|error| {
         WorkflowError::coded(
-            WorkflowErrorCode::DefinitionSavePartial,
-            format!(
-                "workflow source was saved at {}, but manifest save failed at {}: {error}",
-                source_path.display(),
-                manifest_path.display()
-            ),
+            WorkflowErrorCode::Host,
+            format!("cannot snapshot {}: {error}", path.display()),
         )
     })
+}
+
+fn restore_file(path: &Path, snapshot: &FileSnapshot) -> Result<(), WorkflowError> {
+    match snapshot {
+        FileSnapshot::Absent => remove_regular_file_durable(path),
+        FileSnapshot::Regular(bytes) => restore_regular_file(path, bytes),
+        FileSnapshot::Other => Ok(()),
+    }
+}
+
+fn restore_regular_file(path: &Path, bytes: &[u8]) -> Result<(), WorkflowError> {
+    let status = match fs::symlink_metadata(path) {
+        Ok(metadata) if !atomic_file::is_reparse_or_symlink(&metadata) && metadata.is_file() => {
+            atomic_file::replace_existing_file_atomic_status(path, bytes)
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            atomic_file::write_file_atomic_create_new(path, bytes)
+        }
+        Ok(_) => {
+            return Err(WorkflowError::coded(
+                WorkflowErrorCode::Host,
+                format!("cannot restore non-regular path {}", path.display()),
+            ));
+        }
+        Err(error) => return Err(rollback_host_error(path, error)),
+    }
+    .map_err(|error| rollback_host_error(path, error))?;
+
+    match status {
+        atomic_file::AtomicWriteStatus::Durable => Ok(()),
+        atomic_file::AtomicWriteStatus::CommittedUnsynced(error) => {
+            Err(rollback_host_error(path, error))
+        }
+    }
+}
+
+fn remove_regular_file_durable(path: &Path) -> Result<(), WorkflowError> {
+    match fs::symlink_metadata(path) {
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => return Err(rollback_host_error(path, error)),
+        Ok(metadata) if atomic_file::is_reparse_or_symlink(&metadata) || !metadata.is_file() => {
+            return Err(WorkflowError::coded(
+                WorkflowErrorCode::Host,
+                format!("cannot remove non-regular rollback path {}", path.display()),
+            ));
+        }
+        Ok(_) => {}
+    }
+    fs::remove_file(path).map_err(|error| rollback_host_error(path, error))?;
+    let parent = path.parent().ok_or_else(|| {
+        WorkflowError::coded(
+            WorkflowErrorCode::Host,
+            format!("rollback path has no parent: {}", path.display()),
+        )
+    })?;
+    atomic_file::sync_directory(parent).map_err(|error| rollback_host_error(path, error))
+}
+
+fn rollback_host_error(path: &Path, error: std::io::Error) -> WorkflowError {
+    WorkflowError::coded(
+        WorkflowErrorCode::Host,
+        format!(
+            "workflow pair rollback failed for {}: {error}",
+            path.display()
+        ),
+    )
 }
 
 fn write_one_atomic(path: &Path, bytes: &[u8], force: bool) -> Result<(), WorkflowError> {
@@ -1352,5 +1477,72 @@ fn json_to_toml_value(value: &serde_json::Value) -> Result<toml::Value, Workflow
             }
             Ok(toml::Value::Table(table))
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn fail_manifest_write(
+        call: &mut usize,
+        path: &Path,
+        bytes: &[u8],
+        force: bool,
+    ) -> Result<(), WorkflowError> {
+        *call += 1;
+        if *call == 2 {
+            return Err(WorkflowError::coded(
+                WorkflowErrorCode::Host,
+                "injected manifest write failure",
+            ));
+        }
+        write_one_atomic(path, bytes, force)
+    }
+
+    #[test]
+    fn manifest_failure_removes_new_source() {
+        let root = tempfile::tempdir().expect("root");
+        let source = root.path().join("demo.lua");
+        let manifest = root.path().join("demo.workflow.toml");
+        let mut call = 0;
+
+        let error = write_pair_atomic_with(
+            &source,
+            b"new source",
+            &manifest,
+            b"new manifest",
+            false,
+            |path, bytes, force| fail_manifest_write(&mut call, path, bytes, force),
+        )
+        .expect_err("manifest failure");
+
+        assert_eq!(error.code(), WorkflowErrorCode::Host);
+        assert!(!source.exists());
+        assert!(!manifest.exists());
+    }
+
+    #[test]
+    fn manifest_failure_restores_replaced_pair() {
+        let root = tempfile::tempdir().expect("root");
+        let source = root.path().join("demo.lua");
+        let manifest = root.path().join("demo.workflow.toml");
+        fs::write(&source, b"old source").expect("seed source");
+        fs::write(&manifest, b"old manifest").expect("seed manifest");
+        let mut call = 0;
+
+        let error = write_pair_atomic_with(
+            &source,
+            b"new source",
+            &manifest,
+            b"new manifest",
+            true,
+            |path, bytes, force| fail_manifest_write(&mut call, path, bytes, force),
+        )
+        .expect_err("manifest failure");
+
+        assert_eq!(error.code(), WorkflowErrorCode::Host);
+        assert_eq!(fs::read(&source).expect("source"), b"old source");
+        assert_eq!(fs::read(&manifest).expect("manifest"), b"old manifest");
     }
 }

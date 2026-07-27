@@ -826,7 +826,14 @@ async fn launch_definition(
     {
         Ok(outcome) => outcome,
         Err(error) => {
-            return workflow_error_result_with_context(action, error, None, true, None);
+            let side_effect_occurred = error.code() == WorkflowErrorCode::LaunchFailedAfterCreate;
+            return workflow_error_result_with_context(
+                action,
+                error,
+                None,
+                side_effect_occurred,
+                None,
+            );
         }
     };
     let task_id = outcome.task_id;

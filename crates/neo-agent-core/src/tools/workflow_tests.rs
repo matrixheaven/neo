@@ -248,6 +248,57 @@ async fn invalid_run_args_are_input_errors_without_side_effects() {
     assert!(ctx.background_tasks.list(false, 100).await.is_empty());
 }
 
+#[tokio::test]
+async fn launch_errors_report_side_effects_from_the_coordinator_stage() {
+    let workspace = tempfile::tempdir().expect("workspace");
+    let neo_home = tempfile::tempdir().expect("neo home");
+    let session = tempfile::tempdir().expect("session");
+
+    let mut limits = WorkflowLimits::default();
+    limits.global_storage_bytes = 1;
+    let blocked_runtime = crate::workflow::WorkflowRuntime::new(limits);
+    let blocked_registry = WorkflowDefinitionRegistry::new(WorkflowDefinitionRegistryConfig {
+        neo_home: neo_home.path().to_path_buf(),
+        workspace: workspace.path().to_path_buf(),
+        project_trusted: true,
+        limits: blocked_runtime.limits(),
+        builtins: Vec::new(),
+    });
+    let blocked = ToolContext::new(workspace.path())
+        .expect("blocked context")
+        .with_workflow_runtime(blocked_runtime)
+        .with_workflow_definitions(blocked_registry)
+        .with_agent_session_context(session.path(), "main");
+    let before_create = WorkflowTool
+        .execute(&blocked, inline_input("run_inline"))
+        .await
+        .expect("blocked launch")
+        .details
+        .expect("blocked details");
+    assert_eq!(before_create["error"]["side_effect_occurred"], false);
+
+    let unbound_runtime = crate::workflow::WorkflowRuntime::default();
+    let unbound_registry = WorkflowDefinitionRegistry::new(WorkflowDefinitionRegistryConfig {
+        neo_home: neo_home.path().to_path_buf(),
+        workspace: workspace.path().to_path_buf(),
+        project_trusted: true,
+        limits: unbound_runtime.limits(),
+        builtins: Vec::new(),
+    });
+    let unbound = ToolContext::new(workspace.path())
+        .expect("unbound context")
+        .with_workflow_runtime(unbound_runtime)
+        .with_workflow_definitions(unbound_registry)
+        .with_agent_session_context(session.path(), "main");
+    let after_create = WorkflowTool
+        .execute(&unbound, inline_input("run_inline"))
+        .await
+        .expect("unbound launch")
+        .details
+        .expect("unbound details");
+    assert_eq!(after_create["error"]["side_effect_occurred"], true);
+}
+
 #[test]
 fn non_save_conflicts_preserve_registry_error_without_replace_recovery() {
     let result = workflow_error_result(
