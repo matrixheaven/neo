@@ -1349,6 +1349,65 @@ async fn controller_submits_prompt_reduces_turn_events_and_renders_snapshot() {
 }
 
 #[tokio::test]
+async fn active_turn_event_drain_leaves_backlog_for_input_fairness() {
+    const BACKLOG: usize = 513;
+
+    let run_turn: TurnDriver = Arc::new(|_request, channels| {
+        Box::pin(async move {
+            for _ in 0..BACKLOG {
+                channels.send_event(AgentEvent::TextDelta {
+                    turn: 1,
+                    text: "x".to_owned(),
+                });
+            }
+            channels.cancel_token.cancelled().await;
+            Ok(TurnOutcome::default())
+        })
+    });
+    let mut controller = InteractiveController::new(
+        "neo",
+        "test-session",
+        "openai/gpt-4.1",
+        test_workspace_root(),
+        PickerCatalogs::default(),
+        ControllerCallbacks {
+            run_turn,
+            load_session: Arc::new(|session_id| Box::pin(empty_session_loader(session_id))),
+            fork_session: Arc::new(|session_id| Box::pin(empty_session_forker(session_id))),
+        },
+    );
+
+    controller.type_text("stream");
+    controller
+        .handle_input_event(InputEvent::Submit)
+        .await
+        .expect("start turn");
+    tokio::task::yield_now().await;
+    controller
+        .drain_active_turn()
+        .await
+        .expect("drain streaming events");
+
+    let received = transcript_entries(&controller)
+        .iter()
+        .find_map(|entry| match entry {
+            TranscriptEntry::AssistantMessage { content } => Some(content.len()),
+            _ => None,
+        })
+        .expect("streaming assistant entry");
+    assert_eq!(
+        received,
+        super::turn::MAX_TURN_EVENTS_PER_TICK,
+        "one tick must leave a bounded backlog so terminal input gets another poll"
+    );
+
+    controller
+        .cancel_active_turn()
+        .await
+        .expect("cancel streaming turn");
+}
+
+#[tokio::test]
 async fn image_prompt_submit_renders_user_transcript_with_attachment() {
     let png = b"\x89PNG\r\n\x1a\n\x00\x00\x00\rIHDR\x00\x00\x00\x01\x00\x00\x00\x01\x08\x02\x00\x00\x00\x90wS\xde"
         .to_vec();

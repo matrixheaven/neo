@@ -14,6 +14,8 @@ use tokio_util::sync::CancellationToken;
 use super::InteractiveController;
 use super::{FrameRequest, RunningTurn, TurnChannels, TurnRequest};
 
+pub(super) const MAX_TURN_EVENTS_PER_TICK: usize = 256;
+
 impl InteractiveController {
     pub(super) fn start_turn_with_prompt_display(
         &mut self,
@@ -259,7 +261,10 @@ impl InteractiveController {
             self.register_pending_question(pending);
             frame_request = frame_request.merge(FrameRequest::Immediate);
         }
-        while let Ok(event) = turn.events.try_recv() {
+        for _ in 0..MAX_TURN_EVENTS_PER_TICK {
+            let Ok(event) = turn.events.try_recv() else {
+                break;
+            };
             match event {
                 Ok(event) => {
                     self.notify_for_event(&event);
