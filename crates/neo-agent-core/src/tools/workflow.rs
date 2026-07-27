@@ -19,13 +19,13 @@ const LIST_CURSOR_PREFIX: &str = "workflow-list-v1:";
 )]
 #[serde(rename_all = "snake_case")]
 pub(crate) enum WorkflowAction {
-    List,
-    Show,
     ValidateInline,
-    ValidateSaved,
-    Save,
     RunInline,
+    Save,
     RunSaved,
+    ValidateSaved,
+    Show,
+    List,
 }
 
 impl WorkflowAction {
@@ -65,7 +65,9 @@ enum WorkflowScope {
 #[derive(Debug, Clone, serde::Deserialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct WorkflowInput {
-    #[schemars(description = "Workflow action to perform.")]
+    #[schemars(
+        description = "Workflow action. For a one-off run, test, evaluation, or black-box assessment, start with validate_inline, then submit the same definition with run_inline. Use list/show only when the user explicitly asks to discover or inspect saved workflows."
+    )]
     action: WorkflowAction,
     #[serde(default)]
     #[schemars(description = "Saved or inline workflow name.")]
@@ -917,7 +919,7 @@ impl Tool for WorkflowTool {
     }
 
     fn description(&self) -> &'static str {
-        "Canonical first-party tool to list, show, validate, save, run, use, test, or evaluate Neo workflows. Activate create-workflow before inline authoring unless it is already active. For assistant-native workflow use, do not inspect Neo source, run Cargo, or invoke `neo workflow` through Bash/Terminal. Saved and inline runs require no slash capability, return a task ID, and should be inspected with TaskOutput. Child tool effects remain independently authorized."
+        "Canonical first-party tool to validate and run Neo workflows, and to save, inspect, or run saved definitions. For inline authoring, creation, or one-off evaluation, call Skill(create-workflow) first unless it is already active; do not call it again after manual activation. A known saved workflow may use list/show/run_saved directly. After activation, a one-off evaluation MUST call Workflow(validate_inline), then Workflow(run_inline), then TaskOutput. For assistant-native workflow use, do not inspect Neo source, run Cargo, or invoke `neo workflow` through Bash/Terminal. Saved and inline runs require no slash capability, return a task ID, and should be inspected with TaskOutput. Child tool effects remain independently authorized."
     }
 
     fn input_schema(&self) -> Value {
@@ -1252,18 +1254,6 @@ pub(crate) fn launch_approval_presentation_from_prepared(
     }
 }
 
-/// Deprecated: kept for backward compatibility. Use
-/// [`launch_approval_presentation_from_prepared`] instead.
-pub(crate) fn launch_approval_presentation(
-    input: &Value,
-    registry: &WorkflowDefinitionRegistry,
-) -> Result<WorkflowApprovalPresentation, ToolResult> {
-    launch_approval_presentation_from_prepared(
-        &prepare_action(input).map_err(input_error_result)?,
-        registry,
-    )
-}
-
 /// Typed Ask-mode save review for `save`: scope, exact pair paths, and
 /// create/replace state resolved through the registry owner. Uses the
 /// already-parsed prepared action; `replace` comes from the parsed input, not
@@ -1316,18 +1306,6 @@ pub(crate) fn save_approval_presentation_from_prepared(
         output_schema: pretty(&request.output_schema),
         warning: "Saving persists the definition pair only; it does not launch a run.".to_owned(),
     })
-}
-
-/// Deprecated: kept for backward compatibility. Use
-/// [`save_approval_presentation_from_prepared`] instead.
-pub(crate) fn save_approval_presentation(
-    input: &Value,
-    registry: &WorkflowDefinitionRegistry,
-) -> Result<WorkflowSaveApprovalPresentation, ToolResult> {
-    save_approval_presentation_from_prepared(
-        &prepare_action(input).map_err(input_error_result)?,
-        registry,
-    )
 }
 
 #[cfg(test)]

@@ -1,15 +1,15 @@
 ---
 name: create-workflow
 description: >
-  Create, save, run, use, test, evaluate, inspect, or deeply assess a Neo
-  workflow, including black-box evaluation of workflow behavior while the
-  current directory is the Neo repository. Route every workflow lifecycle
-  step through the registered Workflow tool (validate_inline/run_inline for
-  one-off evaluation, save + run_saved for reusable definitions, list/show
-  for discovery) and inspect runs with TaskOutput. Also the complete Lua host
-  API reference for authoring workflow scripts. Use for any natural-language
-  workflow request or /create-workflow. Not for modifying or debugging Neo's
-  own workflow implementation or CLI — that is ordinary repository work.
+  REQUIRED FIRST ACTION when a request needs to create or author an inline
+  workflow, save a new definition, or test or evaluate a one-off workflow, including black-box evaluation
+  while the current directory is the Neo repository. Invoke before TodoList,
+  source inspection, shell/CLI commands, or Workflow(list/show), unless this
+  skill is already active. Do not invoke it for direct discovery or execution
+  of a known saved workflow. For one-off evaluation, the first business tool
+  after activation is Workflow(validate_inline), then Workflow(run_inline),
+  then TaskOutput. Not for modifying or debugging Neo's own workflow
+  implementation or CLI — that is ordinary repository work.
 disableModelInvocation: false
 ---
 
@@ -31,6 +31,17 @@ Grok-style `agent()` / `parallel()` scripts for Neo.
 The registered `Workflow` tool is the canonical first-party interface for every
 workflow lifecycle step. Saved and inline execution are directly available and
 require **no slash command, no capability, and no CLI**.
+
+### One-off evaluation is an immediate execution path
+
+Once this skill is active for a one-off run, test, or evaluation, the **first business tool call** must be
+`Workflow(validate_inline)`, followed by `Workflow(run_inline)` and
+`TaskOutput`. Do not insert `TodoList`, `Workflow(list)`, `Workflow(show)`,
+`Read`, `Glob`, `Grep`, `Find`, `Bash`, `Terminal`, Cargo, source inspection,
+or a CLI command before `Workflow(validate_inline)`. This applies even when
+the current directory is the Neo repository. The only exception is an explicit
+request to inspect or run a named saved workflow, or to debug Neo's
+implementation/CLI.
 
 | User intent | Required procedure |
 |-------------|--------------------|
@@ -162,7 +173,8 @@ neo.verify(correctness.ok, "correctness failed: " .. tostring(correctness.summar
 
 local findings = {}
 local function append(outcome)
-  local list = outcome.details and outcome.details.findings
+  local structured = outcome.details and outcome.details.structured_output
+  local list = structured and structured.findings
   if type(list) ~= "table" then
     return
   end
@@ -181,6 +193,7 @@ append(security)
 append(correctness)
 
 neo.phase("finalize")
+findings = neo.json_array(findings)
 return {
   ok = true,
   summary = "review complete for " .. scope,
@@ -233,7 +246,7 @@ matching the return table.
 | Call | Behavior |
 |------|----------|
 | `neo.delegate({...})` | One child agent. Returns outcome table. |
-| `neo.swarm({...})` | Fan-out. Homogeneous template **or** heterogeneous items. |
+| `neo.swarm({...})` | Fan-out through direct child specs with one schema per item. |
 
 **`neo.delegate` fields** (new child):
 
@@ -255,14 +268,16 @@ matching the return table.
 **`neo.swarm` fields:**
 
 - `description` (required)
-- `role` (swarm default role)
 - `items` (required, non-empty)
-- Homogeneous form: each item is `{ title, value }`; optional
-  `prompt_template`, `resume_agent_ids`. Per-item task/role/worktree/schema
-  must be absent.
-- Heterogeneous form: each item uses delegate-like fields with **required**
-  `task` and **required** `output_schema`. `prompt_template` and
-  `resume_agent_ids` are invalid in this form.
+- Direct form only: every item uses delegate-like fields with **required**
+  `task` and **required** `output_schema`; optional `title`, `resume`, `role`,
+  `model`, `provider`, `context`, `worktree`, and `tool_allow` follow the
+  `neo.delegate` rules above.
+- Even when every child performs the same kind of work, emit direct items with
+  per-item `task` and `output_schema`. Do not use `title`/`value`,
+  `prompt_template`, `resume_agent_ids`, or a top-level `output_schema`; those
+  belong to the separate model-facing `DelegateSwarm` adapter, not the workflow
+  DSL.
 - There is **no** hard-coded total child cap. Active concurrency is host-limited
   (`swarm_concurrency`); excess work stays queued. Scripts must not invent
   predictive token budgets.
@@ -301,7 +316,8 @@ Successful/failed host effects that return outcomes expose a read-only table:
 - `status`: `completed` \| `failed` \| `denied` \| `cancelled` \|
   `resource_limited` \| `interrupted`
 - `summary` (string)
-- `details` (JSON value; structured child output often lives here)
+- `details` (JSON value); schema-valid child JSON is at
+  `details.structured_output`
 - `actual_usage` (optional)
 - `agent_id` / `swarm_id` / `task_id` when child refs are present
 
@@ -314,8 +330,10 @@ Evidence gates must fail closed (`neo.verify` / `neo.fail`).
   completion is uncertain after host exit (`interrupted(host_exit)`).
 - Make effectful steps idempotent or re-check state before repeating work after
   resume/answer.
-- `AwaitingUser` is durable and independent of the worker loop; answers go
-  through `neo workflow answer` / TUI, not ad-hoc files.
+- `AwaitingUser` is durable and independent of the worker loop. For a
+  `human_or_model` gate, use `TaskAnswer(task_id, request_id, answer)`; a
+  human-only gate is answered by the user in the TUI or the human CLI, never
+  through ad-hoc files.
 - Resource policy uses **actual occupancy only**. Do not encode predictive
   `token_cap`, projected usage, or model-supplied machine limits in scripts or
   manifests.
@@ -329,10 +347,8 @@ Evidence gates must fail closed (`neo.verify` / `neo.fail`).
   `worktree = "shared"`.
 - **Mutation slices:** `worktree = "isolated"`, then `neo.await_user` for
   merge/retire. Never auto-merge.
-- **Heterogeneous `neo.swarm`:** distinct roles/schemas per item when children
-  are not template-identical.
-- **Homogeneous `neo.swarm`:** title/value + `prompt_template` for large uniform
-  shards.
+- **Direct `neo.swarm`:** one complete child spec and schema per item, including
+  uniform shards.
 - **Adversarial verify:** independent reviewer children prompted to refute;
   require concrete evidence fields in schema.
 - **Inspect builtins through the tool:** `Workflow(show)` on `code-review`,
@@ -377,9 +393,8 @@ Product ships three ordinary registry builtins (inspect via `Workflow(show)`):
 
 ## Human/headless CLI reference (not the assistant path)
 
-These commands remain supported for humans, scripts, and explicit CLI testing.
-**The assistant must use the registered `Workflow` tool unless the user
-explicitly asked for CLI operation.**
+These commands remain supported for humans and scripts. They are documentation
+for that human-owned surface, never an assistant workflow route.
 
 ```bash
 neo workflow list
@@ -414,3 +429,11 @@ Report only after the requested terminal state is real:
 
 If validation or launch fails, report the structured error exactly; do not
 claim the workflow is ready.
+
+## Immediate next action after activation
+
+For a one-off workflow run, test, evaluation, or black-box assessment, stop
+planning and call only `Workflow(validate_inline)` next. Do not batch it with
+any other tool. After validation succeeds, call only `Workflow(run_inline)`,
+then inspect the returned task with `TaskOutput`. Do not inspect `.tmp`, saved
+workflows, repository files, or the CLI first.

@@ -12,13 +12,15 @@
         "status": "completed",
         "mode": "foreground",
         "agent_id": "fixture_primary",
-        "findings": [
-          {
-            "claim": "revision is SHA-256 of framed bytes",
-            "source": "definition.rs",
-            "evidence": "compute_definition_revision"
-          }
-        ]
+        "structured_output": {
+          "findings": [
+            {
+              "claim": "revision is SHA-256 of framed bytes",
+              "source": "definition.rs",
+              "evidence": "compute_definition_revision"
+            }
+          ]
+        }
       }
     },
     {
@@ -29,13 +31,15 @@
         "status": "completed",
         "mode": "foreground",
         "agent_id": "fixture_counter",
-        "findings": [
-          {
-            "claim": "path and mtime are not hash inputs",
-            "source": "design \u00a710",
-            "evidence": "revision framing contract"
-          }
-        ]
+        "structured_output": {
+          "findings": [
+            {
+              "claim": "path and mtime are not hash inputs",
+              "source": "design \u00a710",
+              "evidence": "revision framing contract"
+            }
+          ]
+        }
       }
     },
     {
@@ -46,7 +50,9 @@
         "status": "completed",
         "mode": "foreground",
         "agent_id": "fixture_context",
-        "findings": []
+        "structured_output": {
+          "findings": []
+        }
       }
     },
     {
@@ -57,9 +63,11 @@
         "status": "completed",
         "mode": "foreground",
         "agent_id": "fixture_verify",
-        "ok": true,
-        "contradictions": [],
-        "gaps": []
+        "structured_output": {
+          "ok": true,
+          "contradictions": [],
+          "gaps": []
+        }
       }
     }
   ],

@@ -87,9 +87,35 @@ $NEO_HOME/workflows                  # 用户定义
 
 项目发现与项目保存复用 Neo 已有的 **工作区信任**（`trust.json`）。未信任或禁用项目发现时不会出现 project 候选。符号链接/reparse point 定义文件与父路径逃逸会被拒绝；不跟随目录链接。
 
-保存（`neo workflow save`）先校验，默认 **no-clobber**；覆盖不同定义需要 `--force`。builtin scope 不可写。
+供人类/脚本使用的 `neo workflow save` 会先校验，默认 **no-clobber**；覆盖不同定义需要 `--force`。builtin scope 不可写。assistant 通过 `Workflow(save)` 保存。
 
-## 启动面
+## Assistant-native workflow 路径
+
+需要 inline 编写、新建已保存定义或一次性测试/评测时，assistant 激活
+`create-workflow`；如果该 skill 已激活则不得重复调用。对于已知的已保存
+workflow，可不激活编写 skill，直接使用 `Workflow(list|show|run_saved)`
+发现或运行。全部生命周期 action 仍由 `Workflow` 统一拥有：`list`、
+`show`、`validate_inline`、`validate_saved`、`save`、`run_inline`、
+`run_saved`。
+
+一次性评测必须严格遵循以下路径；在此之前不得插入源码检查、shell/CLI、
+Cargo、TodoList 或已保存 workflow 发现：
+
+```text
+Skill(create-workflow) -> Workflow(validate_inline) -> Workflow(run_inline) -> TaskOutput
+```
+
+创建并测试则走 `Workflow(save) -> Workflow(run_saved) -> TaskOutput`。run
+action 返回 task ID。这些路径均不需要 slash、capability、手工 manifest/hash
+操作或 `neo workflow` CLI 调用。
+
+workflow 等待输入时，每个 `TaskOutput` view 都会暴露可执行的
+`pending_user`：`request_id`、`prompt`、`answer_schema`、可选 `default`、
+`answer_policy` 与 `next_action`。仅当 `next_action` 为 `TaskAnswer` 时，
+assistant 才以这些精确 ID 调用 `TaskAnswer(task_id, request_id, answer)`；
+`wait_for_human` 表示必须由用户在 TUI 或人类 CLI 中回答。
+
+## 人类启动与运维面
 
 ### 斜杠：命名（宿主直启）
 
@@ -102,17 +128,17 @@ $NEO_HOME/workflows                  # 用户定义
 - **宿主直接启动** — **零次模型往返**。
 - Ask 模式显示 launch 审阅（Launch / Revise / Cancel）。Auto / Yolo 仍需要显式 slash，但不会在普通 child 权限之外再叠第二层 launch 对话框。
 
-### 斜杠：裸命令（动态 capability）
+### 斜杠：裸命令（手动 skill 激活）
 
 ```text
 /workflow
 ```
 
-为下一次已审查的动态 `RunWorkflow` 工具调用授予 **一次** session 级 capability。模型再提供动态定义（`name`、`description`、`phases`、`script`、`args`）。Capability 一次性绑定精确 source 与 args；不授权 child effect。
+通过普通手动 skill 路径激活 `create-workflow` 并开始普通模型回合。skill 会让 assistant 经由 `Workflow` 执行；不会授予 capability。
 
-仅精确 slash 解析：`/workflowish` 以及正文中的 `/workflow` 不会授予 capability。
+仅精确 slash 解析：`/workflowish` 以及正文中的 `/workflow` 不会激活 skill。
 
-### Headless CLI
+### Headless CLI（仅人类和脚本）
 
 ```text
 neo workflow list [--scope builtin|user|project|effective] [--output text|json]
@@ -135,6 +161,8 @@ neo workflow prune [--older-than <duration>] [--max-bytes <bytes>] [--dry-run] [
 - `--args-json` 与 `--args-file` 互斥。
 - `prune` 默认 **dry-run**；真正删除需要 `--yes`，且只考虑终态、无引用、未 pin 的存储。
 
+这些命令仅说明人类与脚本的操作方式，不是 assistant workflow 路径。
+
 ## Lua 宿主 API
 
 沙箱为 **仅 mlua**。无文件系统、进程、网络、package、debug、time、random 或环境类标准库。参数（`neo.args`）递归只读。
@@ -145,7 +173,7 @@ neo workflow prune [--older-than <duration>] [--max-bytes <bytes>] [--dry-run] [
 | `neo.phase(id)` | 选择已声明 phase（写入 journal） |
 | `neo.log(message)` | 有界进度日志 |
 | `neo.delegate(input)` | 单个子 agent；**必须**提供 `output_schema` |
-| `neo.swarm(input)` | 异构（或同构模板）子 agent 批；**每项** `output_schema` 必需 |
+| `neo.swarm(input)` | 直接 child spec 批；包括同构 fan-out 在内，**每项** `output_schema` 都必需 |
 | `neo.tool({ name, input })` | 通过规范 `ToolRegistry` 调用合格工具 |
 | `neo.await_user(input)` | 持久化类型化用户输入（见下） |
 | `neo.verify(condition, message)` | 本地断言 |
@@ -180,6 +208,28 @@ task（必需）, title?, role?, model?, provider?, context?, worktree?,
 tool_allow?, output_schema（必需的 JSON Schema）
 ```
 
+成功时，通过 schema 的 child JSON 位于
+`outcome.details.structured_output`。
+
+Direct swarm 形态：
+
+```lua
+neo.swarm({
+  description = "review each subsystem",
+  items = {
+    { task = "review runtime", role = "reviewer", output_schema = runtime_schema },
+    { task = "review persistence", role = "reviewer", output_schema = persistence_schema },
+  },
+})
+```
+
+每个 item 都是完整 child spec。Workflow Lua 不接受独立 model-facing
+`DelegateSwarm` 的简写：禁止 `prompt_template`、`title`/`value` item、
+`resume_agent_ids` 与顶层 `output_schema`。
+
+JSON marker 不可变。先构建并修改普通 Lua table，收集完成后再调用
+`neo.json_array(table)` 或 `neo.json_object(table)`；标记后不得继续修改。
+
 恢复型 child 只接受 `resume`、`task`、`output_schema`。新 child 的 worktree 默认为 `shared`；`isolated` 需显式指定。**没有** 模型/脚本字段可设置 `max_concurrency`、token budget、agent budget 或 wall-clock timeout。宿主 `runtime.workflow.swarm_concurrency` 提供默认 swarm 并发（不是总 child 数上限）。没有硬编码 `MAX_SWARM_CHILDREN`；真实字节、内存、journal 与准入上限仍然生效。
 
 ### 恰好一次 schema repair
@@ -195,7 +245,7 @@ repair 期间的 tool call 以 `schema_repair_tool_forbidden` 失败。不确定
 
 ### `neo.tool` 拒绝集
 
-已注册工具默认合格，但集中拒绝编排/控制类工具，包括（不限于）：`RunWorkflow`、`Delegate`、`DelegateSwarm`、`TaskPause` / `TaskResume` / `TaskStop` / `TaskAnswer`、plan/goal 工具、多 agent 控制工具。子 agent、用户输入与 workflow 控制由专用 API 拥有。指向 **当前** run 的 `TaskOutput` 会被拒绝，避免递归锁/路径重入。Shell 准入保持 pending，无隐式超时。
+已注册工具默认合格，但集中拒绝编排/控制类工具，包括（不限于）：`Workflow`、`Delegate`、`DelegateSwarm`、`TaskPause` / `TaskResume` / `TaskStop` / `TaskAnswer`、plan/goal 工具、多 agent 控制工具。子 agent、用户输入与 workflow 控制由专用 API 拥有。指向 **当前** run 的 `TaskOutput` 会被拒绝，避免递归锁/路径重入。Shell 准入保持 pending，无隐式超时。
 
 ### `neo.await_user`（禁止密钥）
 
@@ -204,11 +254,7 @@ prompt（必需）, answer_schema（必需）, default?, title?,
 answer_policy?  # human | human_or_model；默认 human
 ```
 
-**不要通过该接口索取密码、API key 或其他密钥。** 回答会写入本地 journal，重启后仍可检查。Run 进入持久化 `awaiting_user`，释放活动 VM/worker 准入，并继续在 `/tasks` 与 CLI 中可见。回答方式：
-
-```text
-neo workflow answer <run> <request_id> --json '<value>'
-```
+**不要通过该接口索取密码、API key 或其他密钥。** 回答会写入本地 journal，重启后仍可检查。Run 进入持久化 `awaiting_user`，释放活动 VM/worker 准入，并继续在 `/tasks` 与 CLI 中可见。assistant 只对 `human_or_model` 使用 `TaskAnswer`；仅人类请求由用户通过 TUI 或人类 CLI 回答。
 
 没有 answer 的 `TaskResume` **不能** 解除 `awaiting_user`。
 
@@ -274,21 +320,31 @@ neo workflow fork <run> --checkpoint <seq> [--args-json ...]
 | `deep-research` | 结构化多步研究 |
 | `large-refactor` | 分阶段重构编排 |
 
-用 `neo workflow list --scope builtin` 与 `neo workflow show <name>` 查看。启动：`/workflow code-review {"scope":"..."}` 或 `neo workflow run code-review --args-json '...'`。
+assistant 用 `Workflow(list)`、`Workflow(show)` 与 `Workflow(run_saved)`。人类可使用前述命名 slash 启动或 headless CLI。
 
 ## 作者检查清单
+
+### Assistant 路径
+
+1. 激活 `create-workflow`，再通过 `Workflow(validate_inline)` 编写并校验。
+2. 仅通过 `Workflow(save)` 持久化，并通过 `Workflow(run_inline)` 或 `Workflow(run_saved)` 运行。
+3. 对每个已启动 task 用 `TaskOutput` 检查。
+4. 只在 `human_or_model` gate 使用 `TaskAnswer`；仅人类回答留给用户。
+5. 不要要求用户先输入裸 slash、调用 `neo workflow`，或手写 manifest/hash。
+
+### 人类/脚本文件编写
 
 1. 成对放置 `.lua` + `.workflow.toml`，stem 与 `source_sha256` 一致。
 2. 声明有序 `phases` 与必需的最终 `output_schema`。
 3. 每个 `neo.delegate` / `neo.swarm` child 都给 `output_schema`。
 4. 绝不通过 `neo.await_user` 索取密钥。
 5. 保存前用 `neo workflow check` 校验；fixture 用 `neo workflow test --case`。
-6. 已审查启动优先命名 `/workflow <name>`；仅在需要一次动态模型编写时用裸 `/workflow`。
+6. 交互式宿主直启使用命名 `/workflow <name>`；脚本化操作使用 headless CLI。
 7. 用 `TaskOutput` 视图/cursor 检查；prune 前先 dry-run。
 
 ## 下一步
 
-- [内置工具](../reference/tools.md) — `RunWorkflow`、`TaskOutput`、pause/resume/stop
+- [内置工具](../reference/tools.md) — `Workflow`、`TaskAnswer`、`TaskOutput`、pause/resume/stop
 - [斜杠命令](../reference/slash-commands.md) — `/workflow`、`/tasks`
 - [配置文件](../configuration/config-files.md) — `[runtime.workflow]`
 - [数据路径](../configuration/data-locations.md) — 会话下的 run 布局

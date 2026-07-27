@@ -13,7 +13,7 @@ Source location: [`crates/neo-agent/src/modes/interactive/slash_commands.rs`](..
 | `/resume` | — | Open the session picker to restore a local session. |
 | `/compact` | — | Request a manual context compaction; an instruction may be appended as `/compact <instruction>`. |
 | `/tasks` | — | Open the task browser: background tasks and workflow runs (phase, admission wait, awaiting input, usage). |
-| `/workflow` | — | Bare: grant one capability for the next reviewed dynamic `RunWorkflow`. Named: `/workflow <name> [JSON_OBJECT]` resolves the registry and launches host-direct (zero model calls). |
+| `/workflow` | — | Bare: activate the `create-workflow` skill and begin a normal model turn. Named: `/workflow <name> [JSON_OBJECT]` resolves the registry and launches host-direct (zero model calls). |
 | `/fork` | — | Create a new branch from the current session and switch to it. |
 | `/init [instruction]` | — | Create or refresh the workspace-root `AGENTS.md` only; nested `AGENTS.md` files are user-authored and never generated or modified by `/init`. Extra text is passed to the init workflow as natural-language guidance. |
 
@@ -23,10 +23,10 @@ Source location: [`crates/neo-agent/src/modes/interactive/slash_commands.rs`](..
 
 | Form | Behavior |
 | --- | --- |
-| `/workflow` | One-shot session capability for the next model `RunWorkflow` call (exact source/args bound). |
+| `/workflow` | Activates `create-workflow` through the normal manual-skill path and starts a model turn. The skill uses `Workflow`; no capability is granted. |
 | `/workflow <name> [JSON_OBJECT]` | Host resolves `<name>` through effective registry precedence (`builtin < user < trusted project`), validates args, and launches in the background with **no model round-trip**. Ask mode shows launch review; Auto/Yolo still require the explicit slash. |
 
-Slash matching is exact: `/workflowish` does not grant capability. Launch approval authorizes orchestration only; every later child or tool effect still follows Ask / Auto / Yolo. Control and inspect with `TaskPause`, `TaskResume`, `TaskStop`, `TaskOutput` (paged views/cursors), and headless `neo workflow answer` / `fork` / `prune`. See [Workflows](../guides/workflows.md).
+Slash matching is exact: `/workflowish` does not activate the skill. Launch approval authorizes orchestration only; every later child or tool effect still follows Ask / Auto / Yolo. The assistant controls and inspects with `TaskPause`, `TaskResume`, `TaskStop`, `TaskOutput` (paged views/cursors), and `TaskAnswer` when a workflow explicitly allows a model answer. Headless `neo workflow` commands are for humans and scripts. See [Workflows](../guides/workflows.md).
 
 ## Mode Control
 

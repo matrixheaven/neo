@@ -174,8 +174,8 @@ fn child_tool_allow_only_reduces_parent_capability() {
     assert!(!combined.contains("Delegate"));
 }
 
-/// `Workflow` is root-only: child, restricted, and schema-repair tool sets
-/// never receive it, and no model-visible `RunWorkflow` remains.
+/// `Workflow` and `TaskAnswer` are root-only: child, restricted, and schema-repair
+/// tool sets never receive them, and no model-visible `RunWorkflow` remains.
 #[test]
 fn workflow_tool_is_root_only_and_run_workflow_is_gone() {
     let root = ToolRegistry::with_builtin_tools();
@@ -184,9 +184,11 @@ fn workflow_tool_is_root_only_and_run_workflow_is_gone() {
         !root.contains("RunWorkflow"),
         "retired model tool must stay absent from the root registry"
     );
+    assert!(root.contains("TaskAnswer"));
 
     let child = ToolRegistry::with_builtin_child_tools();
     assert!(!child.contains("Workflow"));
+    assert!(!child.contains("TaskAnswer"));
     assert!(!child.contains("RunWorkflow"));
 
     // Schema-repair turns run tools-disabled: no workflow launch surface.
@@ -205,6 +207,23 @@ fn workflow_tool_is_root_only_and_run_workflow_is_gone() {
     assert!(description.contains("TaskOutput"));
     assert!(description.contains("do not inspect Neo source"));
     assert!(description.contains("no slash capability"));
+    assert!(description.contains(
+        "For inline authoring, creation, or one-off evaluation, call Skill(create-workflow) first"
+    ));
+    assert!(description.contains("do not call it again after manual activation"));
+    assert!(description.contains("known saved workflow may use list/show/run_saved directly"));
+    assert!(description.contains("MUST call Workflow(validate_inline), then Workflow(run_inline)"));
+
+    let schema = neo_agent_core::tools::WorkflowTool.input_schema();
+    assert_eq!(
+        schema["$defs"]["WorkflowAction"]["enum"][0],
+        "validate_inline"
+    );
+    assert!(
+        schema["properties"]["action"]["description"]
+            .as_str()
+            .is_some_and(|text| text.contains("start with validate_inline"))
+    );
 }
 
 /// Workflow provenance is typed on approvals and tool events.

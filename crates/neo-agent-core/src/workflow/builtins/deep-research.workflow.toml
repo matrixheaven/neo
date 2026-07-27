@@ -2,7 +2,7 @@ definition_format_version = 2
 name = "deep-research"
 display_name = "Deep Research"
 description = "Plan, fan out heterogeneous research children, verify gaps, and synthesize a structured report with durable artifacts."
-source_sha256 = "28e8954ea3a1e0eff87b7b02550d776a97e516e4fed2673ed429086c3f852f1a"
+source_sha256 = "d821c7e6d36719c733311d95a365bb5db23c1ca2abb9a1cce6454f7f695d9fa8"
 
 [[phases]]
 id = "plan"

@@ -3,16 +3,16 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use neo_agent_core::AgentContext;
 use neo_agent_core::harness::FakeHarness;
 use neo_agent_core::runtime::WorkflowDispatchHandle;
-use neo_agent_core::tools::{BackgroundTaskManager, ProcessSupervisor, ToolRegistry};
+use neo_agent_core::tools::{BackgroundTaskManager, ProcessSupervisor, ToolContext, ToolRegistry};
 use neo_agent_core::workflow::journal::{JournalPayload, collect_journal_v2, run_dir};
 use neo_agent_core::workflow::{
-    FinalResultBody, LuaWorkflowRunner, UserAnswerPolicy, WorkflowActor, WorkflowErrorCode,
-    WorkflowHandle, WorkflowLaunchRequest, WorkflowLimits, WorkflowRuntime, WorkflowState,
-    request_id_for_call_index,
+    CompiledSchema, FinalResultBody, LuaWorkflowRunner, UserAnswerPolicy, WorkflowActor,
+    WorkflowErrorCode, WorkflowHandle, WorkflowLaunchRequest, WorkflowLimits, WorkflowRuntime,
+    WorkflowState, request_id_for_call_index,
 };
+use neo_agent_core::{AgentContext, ToolAccess};
 use serde_json::json;
 
 fn answer_schema() -> serde_json::Value {
@@ -24,6 +24,27 @@ fn answer_schema() -> serde_json::Value {
         "required": ["ok"],
         "additionalProperties": false
     })
+}
+
+#[test]
+fn task_answer_schema_accepts_scalar_array_and_object_answers() {
+    let schema = ToolRegistry::with_builtin_tools()
+        .specs()
+        .into_iter()
+        .find(|spec| spec.name == "TaskAnswer")
+        .expect("TaskAnswer spec")
+        .input_schema;
+    let schema = CompiledSchema::compile(&schema).expect("compile TaskAnswer schema");
+
+    for answer in [json!(true), json!(["approve", 1]), json!({ "ok": true })] {
+        schema
+            .validate_instance(&json!({
+                "task_id": "workflow-1",
+                "request_id": "req-1",
+                "answer": answer,
+            }))
+            .expect("TaskAnswer schema must accept every JSON answer shape");
+    }
 }
 
 fn await_user_script(policy: &str) -> String {
@@ -328,6 +349,182 @@ async fn answer_validates_request_schema_before_queueing() {
             answer: Some(ans),
         } if rid == &request_id && ans == &json!({ "ok": true })
     )));
+}
+
+#[tokio::test]
+async fn task_answer_adapter_uses_runtime_model_policy() {
+    let registry = ToolRegistry::with_builtin_tools();
+
+    let denied_fixture = live_await_user_fixture(await_user_script("human")).await;
+    let denied_task_id = denied_fixture.handle.run_id.0.clone();
+    let denied_request_id = denied_fixture
+        .handle
+        .pending_user_input()
+        .await
+        .expect("pending request")
+        .expect("open request")
+        .request_id;
+    let denied_tasks = BackgroundTaskManager::new();
+    denied_tasks
+        .start_workflow(
+            denied_task_id.clone(),
+            "await test".to_owned(),
+            denied_fixture.handle.clone(),
+        )
+        .await
+        .expect("register");
+    let denied_context = ToolContext::new(denied_fixture.dir.path())
+        .expect("context")
+        .with_access(ToolAccess::all())
+        .with_background_tasks(denied_tasks);
+    let denied = registry
+        .run(
+            "TaskAnswer",
+            &denied_context,
+            json!({
+                "task_id": denied_task_id,
+                "request_id": denied_request_id,
+                "answer": { "ok": true },
+            }),
+        )
+        .await
+        .expect_err("human-only request must reject model TaskAnswer");
+    assert!(
+        denied
+            .to_string()
+            .contains("answer_policy human rejects actor Model")
+    );
+    assert_eq!(
+        denied_fixture.handle.snapshot().await.state,
+        WorkflowState::AwaitingUser
+    );
+    let denied_output = registry
+        .run(
+            "TaskOutput",
+            &denied_context,
+            json!({ "task_id": denied_task_id }),
+        )
+        .await
+        .expect("human-only TaskOutput");
+    assert!(
+        denied_output
+            .content
+            .contains("next_action: wait_for_human")
+    );
+    assert!(!denied_output.content.contains("wait_for_human("));
+
+    let allowed_fixture = live_await_user_fixture(await_user_script("human_or_model")).await;
+    let allowed_task_id = allowed_fixture.handle.run_id.0.clone();
+    let allowed_request_id = allowed_fixture
+        .handle
+        .pending_user_input()
+        .await
+        .expect("pending request")
+        .expect("open request")
+        .request_id;
+    let allowed_tasks = BackgroundTaskManager::new();
+    allowed_tasks
+        .start_workflow(
+            allowed_task_id.clone(),
+            "await test".to_owned(),
+            allowed_fixture.handle.clone(),
+        )
+        .await
+        .expect("register");
+    let allowed_context = ToolContext::new(allowed_fixture.dir.path())
+        .expect("context")
+        .with_access(ToolAccess::all())
+        .with_background_tasks(allowed_tasks);
+    let accepted = registry
+        .run(
+            "TaskAnswer",
+            &allowed_context,
+            json!({
+                "task_id": allowed_task_id,
+                "request_id": allowed_request_id,
+                "answer": { "ok": true },
+            }),
+        )
+        .await
+        .expect("model-allowed request should accept TaskAnswer");
+    assert!(!accepted.is_error, "{}", accepted.content);
+    wait_state(&allowed_fixture.handle, WorkflowState::Completed).await;
+}
+
+#[tokio::test]
+async fn task_output_exposes_actionable_pending_request_without_journal_view() {
+    let fixture = live_await_user_fixture(await_user_script("human_or_model")).await;
+    let task_id = fixture.handle.run_id.0.clone();
+    let tasks = BackgroundTaskManager::new();
+    tasks
+        .start_workflow(
+            task_id.clone(),
+            "await test".to_owned(),
+            fixture.handle.clone(),
+        )
+        .await
+        .expect("register");
+    let context = ToolContext::new(fixture.dir.path())
+        .expect("context")
+        .with_access(ToolAccess::all())
+        .with_background_tasks(tasks);
+    let registry = ToolRegistry::with_builtin_tools();
+
+    let output = registry
+        .run("TaskOutput", &context, json!({ "task_id": task_id }))
+        .await
+        .expect("default TaskOutput");
+    assert!(!output.is_error, "{}", output.content);
+    assert!(output.content.contains("view: summary"));
+    assert!(output.content.contains("pending_request_id: req_c0"));
+    assert!(output.content.contains("answer_policy: human_or_model"));
+    assert!(output.content.contains("answer_schema:"));
+    assert!(output.content.contains("default_answer: {\"ok\":true}"));
+    assert!(output.content.contains("next_action: TaskAnswer("));
+
+    let details = output.details.expect("TaskOutput details");
+    let pending = details
+        .get("pending_user")
+        .expect("top-level pending request");
+    let request_id = pending
+        .get("request_id")
+        .and_then(serde_json::Value::as_str)
+        .expect("request_id");
+    assert_eq!(pending.get("answer_schema"), Some(&answer_schema()));
+    assert_eq!(pending.get("default"), Some(&json!({ "ok": true })));
+    assert_eq!(
+        pending
+            .get("next_action")
+            .and_then(serde_json::Value::as_str),
+        Some("TaskAnswer")
+    );
+
+    let result_view = registry
+        .run(
+            "TaskOutput",
+            &context,
+            json!({ "task_id": fixture.handle.run_id.0, "view": "result" }),
+        )
+        .await
+        .expect("result TaskOutput");
+    assert!(result_view.content.contains("view: result"));
+    assert!(result_view.content.contains("pending_request_id: req_c0"));
+    assert!(result_view.content.contains("next_action: TaskAnswer("));
+
+    let answered = registry
+        .run(
+            "TaskAnswer",
+            &context,
+            json!({
+                "task_id": fixture.handle.run_id.0,
+                "request_id": request_id,
+                "answer": { "ok": true },
+            }),
+        )
+        .await
+        .expect("TaskAnswer built only from TaskOutput");
+    assert!(!answered.is_error, "{}", answered.content);
+    wait_state(&fixture.handle, WorkflowState::Completed).await;
 }
 
 /// TaskResume / ordinary resume cannot bypass a missing answer.

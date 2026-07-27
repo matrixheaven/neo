@@ -98,7 +98,8 @@ local function try_child_findings(outcome, domain)
     push_summary_finding(outcome, domain)
     return
   end
-  local list = details.findings
+  local structured = details.structured_output
+  local list = type(structured) == "table" and structured.findings or nil
   if type(list) ~= "table" then
     push_summary_finding(outcome, domain)
     return
@@ -193,6 +194,7 @@ neo.report({
   report = report_text,
 })
 
+findings = neo.json_array(findings)
 return {
   ok = true,
   question = question,

@@ -240,7 +240,11 @@ impl SkillStore {
              MANDATORY: When the user mentions a task that a skill listed below could \
              help with, or when the user explicitly asks to use a skill, your FIRST \
              action must be a Skill tool call for that skill. Do not start any work, \
-             exploration, or planning before invoking the matching skill.\n",
+             exploration, or planning before invoking the matching skill. If a \
+             task-specific product skill and a generic methodology/process skill both \
+             appear relevant, invoke the task-specific product skill first unless the \
+             user explicitly requested the generic skill; generic skills must not \
+             otherwise delay it.\n",
         );
 
         let groups: [(SkillSource, &str); 3] = [

@@ -770,6 +770,22 @@ dependencies:
     assert!(catalog.contains("Model-facing description"));
 }
 
+#[test]
+fn available_skills_prompt_prioritizes_task_specific_skills_over_generic_methods() {
+    let store = SkillStore::load(&[], &[], builtin_skills().expect("built-ins"));
+    let catalog = store.available_skills_prompt();
+
+    assert!(
+        catalog.contains(
+            "task-specific product skill and a generic methodology/process skill both appear relevant"
+        ),
+        "catalog must prevent generic process skills from delaying the matching product skill"
+    );
+    assert!(catalog.contains(
+        "invoke the task-specific product skill first unless the user explicitly requested the generic skill"
+    ));
+}
+
 fn write(path: impl AsRef<Path>, content: &str) {
     let path = path.as_ref();
     fs::create_dir_all(path.parent().unwrap()).unwrap();

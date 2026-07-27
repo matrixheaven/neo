@@ -7,8 +7,7 @@ Date: `2026-07-27`
 
 - Approved design: `docs/aegis/specs/2026-07-27-assistant-native-workflow-tool-design.md` (`b2bc08c7`).
 - Implementation plan: `docs/aegis/plans/2026-07-27-assistant-native-workflow-tool.md` (`536c678f`).
-- Tests and black-box acceptance: `docs/aegis/work/2026-07-27-assistant-native-workflow-tool/90-evidence.md`.
-- Three-session Chinese black-box traces recorded on macOS aarch64 on 2026-07-27.
+- Focused test evidence and the pending fresh acceptance record: `docs/aegis/work/2026-07-27-assistant-native-workflow-tool/90-evidence.md`.
 
 ## Context
 
@@ -41,15 +40,18 @@ ADR-0006 boundaries. What changes is the model-facing adapter layer:
    removed; the coordinator holds no authorization state.
 5. Linked-run forks and independent launches no longer contend on a global
    one-shot capability lock.
-6. `Workflow` is present only in the root model tool registry. Child,
-   restricted, schema-repair, and workflow-script tool sets cannot reach
-   workflow launch.
+6. `Workflow` and `TaskAnswer` are present only in the root model tool registry.
+   Child, restricted, schema-repair, and workflow-script tool sets cannot reach
+   workflow launch or answer a workflow gate. `TaskAnswer` remains governed by
+   the durable request's runtime `human`/`human_or_model` policy.
 7. Named `/workflow <name> [JSON_OBJECT]` remains host-direct and
    zero-model-turn, but exact bare `/workflow` now activates `create-workflow`
    through the canonical manual skill path and starts a normal model turn.
-8. The `create-workflow` skill routes every workflow lifecycle step through
-   the `Workflow` tool and explicitly prohibits CLI, hash, manifest, Cargo, or
-   source-inspection fallbacks.
+8. The `create-workflow` skill is the first action for inline authoring, new
+   definitions, and one-off evaluation unless already active. Known saved
+   workflows may use `list`/`show`/`run_saved` directly. Every lifecycle step
+   routes through `Workflow`, with no CLI, hash, manifest, Cargo, or
+   source-inspection fallback.
 9. Headless `neo workflow ...` CLI is supported for humans and scripts; the
    assistant never uses it as a workflow product path.
 
@@ -68,6 +70,11 @@ ADR-0006 boundaries. What changes is the model-facing adapter layer:
 - The model tool surface for workflow lifecycle is one tool with an explicit
   action discriminator. The model never needs a slash capability, a nonce, or
   CLI access.
+- One-off evaluation follows `Skill(create-workflow) ->
+  Workflow(validate_inline) -> Workflow(run_inline) -> TaskOutput`.
+- `TaskOutput.pending_user` is the actionable answer contract. The model calls
+  `TaskAnswer` only when `next_action` permits it; human-only gates wait for the
+  user.
 - Ask-mode save and launch reviews show typed presentations with target-pair
   paths (save) or source/phases/args (launch). Revise and Cancel create no
   files, runs, or tasks.
@@ -75,10 +82,9 @@ ADR-0006 boundaries. What changes is the model-facing adapter layer:
 - Existing paired `.lua` + `.workflow.toml` definitions, V2 journals,
   artifacts, lineage, and headless CLI remain compatible and require no
   migration.
-- Three consecutive black-box sessions using the approved Chinese acceptance
-  request demonstrated the required `Skill(create-workflow) -> Workflow ->
-  TaskOutput -> report` business trace. Session-level model behavior
-  variations are recorded in the evidence bundle.
+- The exact fresh three-session black-box acceptance remains pending. Until it
+  is recorded, this ADR makes no model-behavior or business-trace completion
+  claim beyond the focused test evidence.
 
 ## Compatibility Boundary
 
@@ -103,8 +109,8 @@ authorization-mode, nonce, or capability-type references in product source.
 - Needed: needed
 - Target: `docs/aegis/baseline/2026-07-27-assistant-native-workflow-contract.md`
 - Action: create superseding snapshot
-- Reason: Landing the assistant-native contract with live evidence replaces the
-  capability-based launch baseline from ADR-0006.
+- Reason: The assistant-native contract replaces the capability-based launch
+  baseline from ADR-0006; fresh three-session acceptance remains pending.
 
 ## Evidence References
 
@@ -112,8 +118,7 @@ authorization-mode, nonce, or capability-type references in product source.
 - `docs/aegis/plans/2026-07-27-assistant-native-workflow-tool.md`
 - `docs/aegis/work/2026-07-27-assistant-native-workflow-tool/20-checkpoint.md`
 - `docs/aegis/work/2026-07-27-assistant-native-workflow-tool/90-evidence.md`
-- Black-box session JSONL traces on macOS aarch64 (2026-07-27)
-- Model-generated evaluation reports under `.tmp/`
+- Fresh three-session black-box acceptance (pending; no session traces claimed)
 
 ## Supersedes
 

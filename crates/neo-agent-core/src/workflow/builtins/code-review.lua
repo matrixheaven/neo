@@ -88,7 +88,8 @@ local function append_findings(outcome)
   if type(details) ~= "table" then
     return
   end
-  local list = details.findings
+  local structured = details.structured_output
+  local list = type(structured) == "table" and structured.findings or nil
   if type(list) ~= "table" then
     return
   end
@@ -155,6 +156,7 @@ neo.report({
 })
 
 -- Findings-first final output (findings is the primary required field).
+findings = neo.json_array(findings)
 return {
   findings = findings,
   ok = true,

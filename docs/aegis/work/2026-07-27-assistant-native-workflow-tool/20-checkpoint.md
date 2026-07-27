@@ -1,63 +1,70 @@
 # Assistant-native unified Workflow tool - Checkpoint
 
 - Task ID: `2026-07-27-assistant-native-workflow-tool`
-- Current todo: Task 3 - retire capability state from launch and linked runs.
-- Active slice: Task 2 committed as `69455260`; permission routing is now the
-  sole interactive authorization owner for Workflow save/launch.
-- Blocked on: none.
-- Next step: delete `workflow/capability.rs` and strip nonce/authorization-mode
-  state from the launch coordinator, linked runs, and fork paths (Task 3).
+- Current todo: implementation and follow-on remediation complete.
+- Active slice: completion candidate after Tasks 1-7 and review of commit
+  `9004d14f`; focused verification is green.
+- Blocked on: none for implementation; the approved three-consecutive-session
+  model acceptance remains uncollected.
+- Next step: collect the still-pending three consecutive strict model sessions
+  when release-grade model-routing acceptance is required.
 
 ## Completed Todos
 
-- Approved design committed as `b2bc08c7`.
-- Implementation plan committed as `536c678f`.
-- Unified root-only `Workflow` adapter committed as `74cc07c3`.
-- Pair rollback and typed launch-stage failure semantics committed as
-  `7d48c08`.
-- Task 1 focused verification passed.
-- Task 1 handoff prepared for Tasks 2-7.
-- Task 2 normal-permission routing committed as `69455260` (typed save/launch
-  reviews, plan-mode matrix, zero-effect preflight before approval, capability
-  revoke logic removed from permission paths).
+- Approved design: `b2bc08c7`.
+- Approved implementation plan: `536c678f`.
+- Task 1 unified adapter and failure semantics: `74cc07c3`, `7d48c08`.
+- Task 2 permission routing: `69455260`.
+- Task 3 capability retirement: `0c8f326e`.
+- Task 4 production registry wiring: `782f5957`.
+- Task 5 slash and headless CLI correction: `6757fdf2`.
+- Task 6 skill routing: `442af376`.
+- Task 7 integration and follow-on binding: `9004d14f`.
+- Follow-on remediation now covers model-allowed `TaskAnswer`, actionable
+  `TaskOutput.pending_user`, root-only policy, mixed-batch zero execution,
+  one-off route correction, saved-workflow exceptions, direct `neo.swarm`,
+  canonical `details.structured_output`, and immutable JSON markers.
 
 ## Evidence Refs
 
-- `commit:74cc07c3`
-- `commit:7d48c08`
 - `docs/aegis/work/2026-07-27-assistant-native-workflow-tool/90-evidence.md`
-- `docs/aegis/handoffs/2026-07-27-assistant-native-workflow-tool.md`
+- Strict-entry audited session:
+  `session_d99ac5cf-a4be-480f-8827-9b29507375b6`.
+- Zero-side-effect route correction session:
+  `session_b2025de1-1871-427a-bfe6-6724f9ecfb08`.
+- Focused tests listed in `90-evidence.md`.
 
 ## ResumeStateHint
 
 - Preserve the user's unrelated `.gitignore` modification.
-- Read the spec, plan, runtime baseline, ADR-0006, this checkpoint, and the
-  handoff before editing.
-- Begin Task 2 only. Do not reopen design or repeat the Grok comparison.
-- The sole model-visible workflow tool is `Workflow`; there is no
-  `RunWorkflow` alias.
-- `PreparedWorkflowLaunch`, `LaunchAuthorizationMode::Headless`, capability
-  carriers, and the empty default registry are temporary bridges, not final
-  architecture.
-- Task 4 must inject the existing session-shared registry into production root
-  tool contexts; do not create another registry owner.
-- Tasks 2-5 retire capability state in the approved dependency order.
-- Do not begin engine, persistence, nested-workflow, or task-card work.
+- The sole model-visible lifecycle tool is `Workflow`; `TaskAnswer` is the
+  model answer path only when runtime `answer_policy` allows it.
+- Both tools are root-only. Do not add a child alias, CLI fallback, capability,
+  nonce, or second workflow state owner.
+- A known saved workflow may use `list`/`show`/`run_saved` directly. Inline
+  authoring/new definitions/one-off evaluation activate `create-workflow`
+  unless it is already active.
+- Do not generalize from model-generated `.tmp` reports; canonical evidence is
+  the tool wire plus workflow journal.
+- Do not claim the approved three-session acceptance until three fresh strict
+  sessions exist.
 
 ## DriftCheckDraft
 
-- Original intent: aligned for Task 1.
-- Scope fence: aligned; no engine, persistence, nested-workflow, CLI removal,
-  or task-card expansion occurred.
+- Original intent: aligned; assistants can validate, save, launch, inspect, and
+  answer model-allowed gates without slash or CLI prerequisites.
+- Scope fence: aligned; no engine rewrite, persistence migration, nested
+  workflow, task-card redesign, predictive governance, or child-count cap.
 - Baseline lock: aligned; registry, coordinator, runtime, task, lineage, and
-  actual-usage owners remain intact.
+  actual-usage owners remain canonical.
 - Compatibility boundary: saved definitions, journals, tasks, named slash, and
-  headless CLI remain preserved.
-- Retirement boundary: explicit and pending Tasks 2-5; no alias was added.
-- New risk signals:
-  - production registry injection remains Task 4 work;
-  - capability and Headless authorization bridges remain until Tasks 2-5.
-- Evidence status: sufficient for Task 1 completion, not for the whole plan.
-- Advisory decision: `continue` with Task 2.
+  human/script CLI remain preserved.
+- Retirement boundary: aligned; capability/nonce/authorization-mode and
+  `RunWorkflow` remain absent with no alias or fallback.
+- Evidence status: implementation and focused regression evidence are current;
+  one strict real session plus one zero-effect correction session are audited;
+  three-consecutive-session model acceptance is pending.
+- Advisory decision: implementation `done`; model-consistency acceptance
+  `needs-verification` and remains explicit residual risk.
 
 Method Pack records are advisory evidence, not completion authority.

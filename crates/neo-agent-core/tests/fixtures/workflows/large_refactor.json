@@ -12,14 +12,16 @@
         "status": "completed",
         "mode": "foreground",
         "agent_id": "fixture_slice_a",
-        "ok": true,
-        "slice_id": "slice_a",
-        "summary": "runtime extracted",
-        "commits": [
-          "abc111"
-        ],
-        "verification": "unit tests green",
-        "risks": []
+        "structured_output": {
+          "ok": true,
+          "slice_id": "slice_a",
+          "summary": "runtime extracted",
+          "commits": [
+            "abc111"
+          ],
+          "verification": "unit tests green",
+          "risks": []
+        }
       }
     },
     {
@@ -30,16 +32,18 @@
         "status": "completed",
         "mode": "foreground",
         "agent_id": "fixture_slice_b",
-        "ok": true,
-        "slice_id": "slice_b",
-        "summary": "tests moved",
-        "commits": [
-          "abc222"
-        ],
-        "verification": "integration green",
-        "risks": [
-          "docs lag"
-        ]
+        "structured_output": {
+          "ok": true,
+          "slice_id": "slice_b",
+          "summary": "tests moved",
+          "commits": [
+            "abc222"
+          ],
+          "verification": "integration green",
+          "risks": [
+            "docs lag"
+          ]
+        }
       }
     },
     {
@@ -50,11 +54,13 @@
         "status": "completed",
         "mode": "foreground",
         "agent_id": "fixture_slice_review",
-        "ok": true,
-        "summary": "review complete",
-        "risks": [
-          "migration window"
-        ]
+        "structured_output": {
+          "ok": true,
+          "summary": "review complete",
+          "risks": [
+            "migration window"
+          ]
+        }
       }
     }
   ],

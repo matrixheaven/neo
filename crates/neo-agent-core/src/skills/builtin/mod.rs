@@ -211,6 +211,24 @@ mod tests {
             .find(|skill| skill.name == "create-workflow")
             .expect("create-workflow built-in");
 
+        assert!(
+            create_workflow.body.contains("Direct form only")
+                && create_workflow
+                    .body
+                    .contains("Even when every child performs the same kind of work")
+                && !create_workflow.body.contains("Homogeneous form"),
+            "create-workflow must teach the canonical per-item schema swarm contract"
+        );
+        assert!(
+            create_workflow
+                .body
+                .contains("outcome.details and outcome.details.structured_output")
+                && create_workflow
+                    .body
+                    .contains("findings = neo.json_array(findings)"),
+            "create-workflow example must consume canonical child JSON and preserve empty arrays"
+        );
+
         let (frontmatter, _) = crate::skills::split_frontmatter(CREATE_WORKFLOW)
             .expect("create-workflow must have raw frontmatter");
         let frontmatter: serde_yaml::Mapping =
@@ -234,14 +252,11 @@ mod tests {
         for term in [
             "reate",
             "save",
-            "run",
-            "use",
             "test",
             "evaluate",
-            "inspect",
             "black-box",
             "Neo repository",
-            "Workflow tool",
+            "known saved workflow",
             "implementation",
         ] {
             assert!(
@@ -268,6 +283,11 @@ mod tests {
             "Workflow(save)",
             "Workflow(list)",
             "TaskOutput",
+            "One-off evaluation is an immediate execution path",
+            "first business tool call",
+            "Do not insert `TodoList`",
+            "Immediate next action after activation",
+            "Do not batch it with",
             "not** call `neo workflow ...` through Bash or Terminal",
             "the host owns",
             "escape hatch",
@@ -282,6 +302,16 @@ mod tests {
             !create_workflow.body.contains("Compute `source_sha256`"),
             "create-workflow must not teach manual hash computation"
         );
+        for required in [
+            "REQUIRED FIRST ACTION",
+            "Invoke before TodoList",
+            "Workflow(validate_inline), then Workflow(run_inline), then TaskOutput",
+        ] {
+            assert!(
+                description.contains(required),
+                "create-workflow discovery description must enforce {required:?}: {description}"
+            );
+        }
         assert!(
             !create_workflow.body.contains("agent(prompt")
                 && !create_workflow.body.contains("parallel([")

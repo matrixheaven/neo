@@ -222,6 +222,8 @@ struct RunState {
     /// journal I/O so the async run mutex never crosses file sync.
     journal: Option<SharedJournal>,
     final_result: Option<WorkflowFinalResultMetadata>,
+    /// Current or most recently answered durable user-input request projection.
+    pending_user_input: Option<PendingUserInput>,
     /// Run-scoped immutable artifact store (visibility requires journal commit).
     artifacts: ArtifactStore,
     /// V1 durable artifacts are inspectable projections only; no append path.
@@ -528,6 +530,7 @@ impl WorkflowRuntime {
             replay_live: false,
             journal: Some(Arc::new(StdMutex::new(writer))),
             final_result: None,
+            pending_user_input: None,
             artifacts,
             v1_read_only: false,
         }));
@@ -786,6 +789,7 @@ impl WorkflowRuntime {
             replay_live: false,
             journal: Some(Arc::new(StdMutex::new(writer))),
             final_result: None,
+            pending_user_input: None,
             artifacts,
             v1_read_only: false,
         }));
@@ -1022,7 +1026,9 @@ impl WorkflowRuntime {
             reports: guard.reports.clone(),
             final_result,
             artifacts: guard.artifacts.clone(),
-            pending_user: None,
+            pending_user: guard.pending_user_input.clone().filter(|pending| {
+                guard.state == WorkflowState::AwaitingUser && pending.answer.is_none()
+            }),
             started_child_count: 0,
             queued_child_count: 0,
             terminal_child_count: 0,
@@ -1036,8 +1042,6 @@ impl WorkflowRuntime {
         run_id: &WorkflowId,
         request: TaskOutputRequest,
     ) -> Result<TaskOutputPage, WorkflowError> {
-        // Do not call pending_user_input here: it scans the full journal.
-        // Summary surfaces wait state via `state` / admission_wait_reason only.
         let materials = self.task_output_materials(run_id).await?;
 
         let delay_ms = self
@@ -1269,6 +1273,15 @@ impl WorkflowRuntime {
             let mut guard = state.lock().await;
             guard.projection_sequence = Some(sequence);
             guard.updated_at_ms = Some(timestamp_ms);
+            guard.pending_user_input = Some(PendingUserInput {
+                request_id: request_id.clone(),
+                prompt: prepared.prompt.clone(),
+                answer_schema: prepared.answer_schema.clone(),
+                default: prepared.default.clone(),
+                title: prepared.title.clone(),
+                answer_policy: prepared.answer_policy,
+                answer: None,
+            });
             self.emit_projection(&guard, WorkflowProjectionStage::Updated);
         }
 
@@ -1385,6 +1398,13 @@ impl WorkflowRuntime {
             let mut guard = state.lock().await;
             guard.projection_sequence = Some(sequence);
             guard.updated_at_ms = Some(timestamp_ms);
+            if let Some(pending) = guard
+                .pending_user_input
+                .as_mut()
+                .filter(|pending| pending.request_id == request_id)
+            {
+                pending.answer = Some(value.clone());
+            }
             // Reset replay so the next worker pass can return the journaled answer.
             if let Ok(envelopes) =
                 journal::collect_journal_v2(&guard.journal_path(), Some(&guard.metadata.run_id))
@@ -1412,12 +1432,7 @@ impl WorkflowRuntime {
         run_id: &WorkflowId,
     ) -> Result<Option<PendingUserInput>, WorkflowError> {
         let state = self.run_state(run_id).await?;
-        let journal_path = {
-            let guard = state.lock().await;
-            guard.journal_path()
-        };
-        let envelopes = journal::collect_journal_v2(&journal_path, Some(run_id))?;
-        Ok(latest_open_user_input(&envelopes).or_else(|| latest_user_input(&envelopes)))
+        Ok(state.lock().await.pending_user_input.clone())
     }
 
     async fn user_input_by_id(
@@ -3694,6 +3709,7 @@ impl WorkflowRuntime {
             replay_live: false,
             journal: None,
             final_result: None,
+            pending_user_input: None,
             artifacts,
             v1_read_only: true,
         };
@@ -3723,6 +3739,8 @@ impl WorkflowRuntime {
         let control = Arc::new(RunControl::new());
         let run_id = metadata.run_id.clone();
         let final_result = final_result_v2(&envelopes);
+        let pending_user_input =
+            latest_open_user_input(&envelopes).or_else(|| latest_user_input(&envelopes));
         let mut artifacts = ArtifactStore::open(&run_dir, run_id.clone())
             .unwrap_or_else(|_| ArtifactStore::empty(run_id.clone(), &run_dir));
         // Best-effort rehydrate: corrupt/missing files stay invisible and typed on get.
@@ -3768,6 +3786,7 @@ impl WorkflowRuntime {
             replay_live: false,
             journal: writer,
             final_result,
+            pending_user_input,
             artifacts,
             v1_read_only: false,
         };
@@ -3841,6 +3860,7 @@ impl WorkflowRuntime {
             replay_live: false,
             journal: None,
             final_result: None,
+            pending_user_input: None,
             artifacts,
             v1_read_only: false,
         };

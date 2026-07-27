@@ -124,10 +124,11 @@ Registered by `GoalManager`; available when goal mode is enabled.
 | Tool | Purpose |
 | --- | --- |
 | `TaskList` | List background tasks and their status. Workflow entries may include phase, admission wait reason, and awaiting-user metadata. Supports pagination cursors rather than a hard 50-item cut. |
-| `TaskOutput` | Retrieve output for a running or completed background task. Prefer `block=true` when waiting for a known task to finish. For **workflow** tasks, use explicit views (`summary`, `journal`, `result`, `artifacts`, `artifact_content`) with opaque cursors; Neo never loads a complete journal into one result. |
+| `TaskOutput` | Retrieve output for a running or completed background task. Prefer `block=true` when waiting for a known task to finish. For **workflow** tasks, use explicit views (`summary`, `journal`, `result`, `artifacts`, `artifact_content`) with opaque cursors; Neo never loads a complete journal into one result. Every view exposes actionable `pending_user` fields while waiting: `request_id`, `prompt`, `answer_schema`, optional `default`, `answer_policy`, and `next_action`. |
 | `TaskStop` | Stop a running background task or cancel a workflow run. |
 | `TaskPause` | Request that a running workflow pause at its next durable invocation boundary; the active child finishes first. |
 | `TaskResume` | Resume a paused workflow by replaying matching journaled invocations before continuing live work. Cannot answer `awaiting_user` without a typed answer. |
+| `TaskAnswer` | Answer a durable workflow `awaiting_user` request with `task_id`, `request_id`, and typed `answer`, only when its policy allows the model actor. Human-only gates are answered by the user in the TUI or human CLI. |
 
 ## Timing
 
@@ -144,21 +145,28 @@ Registered by `GoalManager`; available when goal mode is enabled.
 | `AskUserQuestion` | Ask the user a question with structured options during execution. |
 | `CreateSkill` | Create a new skill at `~/.neo/skills/<name>/SKILL.md`. |
 | `MoveSkill` | Move a skill directory into its parent bundle, automatically generating a timestamped backup. |
-| `RunWorkflow` | Start a reviewed dynamic Lua workflow in the background. Model input is exactly `name`, `description`, `phases`, `script`, and `args`; machine limits and concurrency are runtime configuration, not model input. Named registry launches use `/workflow <name>` or `neo workflow run` instead of this tool. |
+| `Workflow` | Canonical assistant-native workflow tool. Its flat actions are `list`, `show`, `validate_inline`, `validate_saved`, `save`, `run_inline`, and `run_saved`; inline and saved runs return a task ID. |
 | `ListSkills` | List all discoverable skills (user / extra / builtin). |
 | `SummarizeSessions` | Read and summarize a local session transcript, useful for distilling it into a skill. |
 
 ### Workflow tools and control
 
-`RunWorkflow` requires a bare `/workflow` capability grant first. Named launches (`/workflow <name> [JSON_OBJECT]`) are host-direct and do not call the model. Every launch is background and returns a `run_id` (also the task ID).
+Use `Workflow` for every assistant workflow lifecycle action. Inline authoring,
+new definitions, and one-off evaluation activate `create-workflow` first unless
+it is already active; known saved workflows may use `list`/`show`/`run_saved`
+directly. A one-off evaluation is strictly `Skill(create-workflow) ->
+Workflow(validate_inline) -> Workflow(run_inline) -> TaskOutput`. No route needs
+a slash command, capability, or CLI. Every run action is background and returns
+a task ID (also the `run_id`).
 
 | Action | How |
 | --- | --- |
+| Discover, validate, save, or run | `Workflow(list|show|validate_inline|validate_saved|save|run_inline|run_saved)` |
 | Inspect | `TaskOutput` with workflow views/cursors; summary never embeds full journals or large artifacts |
 | Pause / resume / stop | `TaskPause`, `TaskResume`, `TaskStop` at durable boundaries |
-| Answer `awaiting_user` | `neo workflow answer …` (typed JSON); resume alone is not enough |
-| Fork / linked run | `neo workflow fork … --checkpoint <seq>` |
-| Prune storage | `neo workflow prune` (dry-run by default; `--yes` deletes only terminal unreferenced unpinned data) |
+| Answer `awaiting_user` | Follow `TaskOutput.pending_user.next_action`; call `TaskAnswer` with the exact IDs only when it says `TaskAnswer`. Resume alone is not enough. |
+
+`neo workflow answer`, `fork`, and `prune` are human/script CLI operations, not assistant workflow instructions.
 
 Child agents from workflow Lua use required per-child `output_schema` values. Invalid child JSON receives **exactly one** tools-disabled repair turn in the same child session; no fuzzy JSON extraction. Swarm fan-out is heterogeneous and has no hard-coded total child cap; host `swarm_concurrency` is default concurrency only. Ask / Auto / Yolo govern every child and tool effect; launch approval never bypasses them.
 
@@ -168,7 +176,9 @@ Usage accounting is **actual provider usage only**. There is no predictive token
 
 Derived agents (`Delegate` / `DelegateSwarm`) register only a subset by default, built via `ToolRegistry::with_builtin_child_tools()`:
 
-`Read` · `List` · `Grep` · `Find` · `Glob` · `TodoList` · `Write` · `Edit` · `Bash` · `TaskList` · `TaskOutput` · `TaskStop` · `Terminal` · `EnterPlanMode` · `ExitPlanMode` · `RunWorkflow` · `Sleep`
+`Read` · `List` · `Grep` · `Find` · `Glob` · `TodoList` · `Write` · `Edit` · `Bash` · `TaskList` · `TaskOutput` · `TaskStop` · `Terminal` · `EnterPlanMode` · `ExitPlanMode` · `Sleep`
+
+`Workflow` and `TaskAnswer` are root-agent-only and are not in this toolset.
 
 In addition, `AgentProfile::for_role` filters by a role-specific whitelist, and any custom tools explicitly registered by the caller are always passed through.
 

@@ -13,7 +13,7 @@
 | `/resume` | — | 打开 session 选择器，恢复某个本地会话。 |
 | `/compact` | — | 请求手动压缩上下文；可附加指令 `/compact <instruction>`。 |
 | `/tasks` | — | 打开任务浏览器：后台任务与 workflow run（phase、准入等待、等待输入、用量）。 |
-| `/workflow` | — | 裸命令：为下一次已审查的动态 `RunWorkflow` 授予一次 capability。命名：`/workflow <name> [JSON_OBJECT]` 解析 registry 并由宿主直启（零次模型调用）。 |
+| `/workflow` | — | 裸命令：激活 `create-workflow` skill 并开始普通模型回合。命名：`/workflow <name> [JSON_OBJECT]` 解析 registry 并由宿主直启（零次模型调用）。 |
 | `/fork` | — | 为当前会话创建一个新的分支并跳转。 |
 | `/init [instruction]` | — | 仅创建或刷新工作区根目录的 `AGENTS.md`；嵌套的 `AGENTS.md` 由用户自行编写，`/init` 绝不生成或修改。后续文本会作为自然语言指导传入 init 工作流。 |
 
@@ -23,10 +23,10 @@
 
 | 形态 | 行为 |
 | --- | --- |
-| `/workflow` | 为下一次模型 `RunWorkflow` 调用授予一次性 session capability（绑定精确 source/args）。 |
+| `/workflow` | 通过普通手动 skill 路径激活 `create-workflow` 并开始模型回合。skill 使用 `Workflow`；不会授予 capability。 |
 | `/workflow <name> [JSON_OBJECT]` | 宿主按 effective 优先级（`builtin < user < trusted project`）解析 `<name>`，校验 args，并在后台启动，**无模型往返**。Ask 显示 launch 审阅；Auto/Yolo 仍需显式 slash。 |
 
-Slash 匹配是精确的：`/workflowish` 不会授予 capability。Launch 审批只授权编排；之后每个 child 或 tool effect 仍走 Ask / Auto / Yolo。用 `TaskPause`、`TaskResume`、`TaskStop`、`TaskOutput`（分页视图/cursor）以及 headless `neo workflow answer` / `fork` / `prune` 控制与检查。见 [Workflows](../guides/workflows.md)。
+Slash 匹配是精确的：`/workflowish` 不会激活 skill。Launch 审批只授权编排；之后每个 child 或 tool effect 仍走 Ask / Auto / Yolo。assistant 用 `TaskPause`、`TaskResume`、`TaskStop`、`TaskOutput`（分页视图/cursor）控制与检查；workflow 显式允许模型回答时用 `TaskAnswer`。headless `neo workflow` 命令只供人类和脚本使用。见 [Workflows](../guides/workflows.md)。
 
 ## 模式控制
 

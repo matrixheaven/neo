@@ -121,9 +121,10 @@ if decision.retire_worktrees ~= true then
 end
 
 pcall(function()
-  if type(review.details) == "table" and type(review.details.risks) == "table" then
+  local structured = type(review.details) == "table" and review.details.structured_output or nil
+  if type(structured) == "table" and type(structured.risks) == "table" then
     for i = 1, 32 do
-      local risk = review.details.risks[i]
+      local risk = structured.risks[i]
       if risk == nil then
         break
       end
@@ -151,6 +152,7 @@ neo.report({
   },
 })
 
+unresolved = neo.json_array(unresolved)
 return {
   ok = true,
   spec = spec,

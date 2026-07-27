@@ -2424,6 +2424,7 @@ impl Tool for TaskOutputTool {
          - By default this tool is non-blocking and returns a current status/output snapshot.\n\
          - Use `block=true` only when you intentionally want to wait for completion or timeout.\n\
          - This tool returns structured task metadata and an output preview.\n\
+         - A workflow waiting for input exposes request_id, prompt, answer_schema, optional default, answer_policy, and next_action in every view. Call TaskAnswer with those exact IDs only when next_action is TaskAnswer; never guess a request_id or inspect the journal just to answer.\n\
          - For delegate agent IDs and swarm IDs, this tool returns the canonical multi-agent result shape used by Delegate, DelegateSwarm, and WaitDelegate.\n\
          - For a terminal task, check `status` and `exit_code` to understand why it ended.\n\
          - This tool works with the generic background task system and should remain the primary read path for future task types.\n\n\
@@ -2733,7 +2734,6 @@ pub struct TaskAnswerTool;
 struct TaskAnswerInput {
     task_id: String,
     request_id: String,
-    #[schemars(with = "std::collections::BTreeMap<String, serde_json::Value>")]
     answer: serde_json::Value,
 }
 

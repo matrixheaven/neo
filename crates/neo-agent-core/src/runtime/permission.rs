@@ -191,18 +191,8 @@ fn workflow_permission_preparation(
 ) -> PermissionPreparation {
     // Extract the already-parsed action from the prepared execution. This is the
     // single parse that flows from validation through approval to execution.
-    let prepared = match &prepared_call.execution {
-        PreparedExecution::Workflow(action) => action,
-        // Fallback: re-parse from raw arguments (shouldn't happen if
-        // prepare_workflow_calls ran, but kept for defensive safety).
-        _ => {
-            return match crate::tools::workflow::prepare_action(&prepared_call.arguments) {
-                Ok(prepared) => dispatch_workflow_permission(config, tool_call, &prepared, mode),
-                Err(error) => PermissionPreparation::Terminal(
-                    crate::tools::workflow::input_error_result(error),
-                ),
-            };
-        }
+    let PreparedExecution::Workflow(prepared) = &prepared_call.execution else {
+        unreachable!("Workflow calls are prepared before permission evaluation");
     };
     dispatch_workflow_permission(config, tool_call, prepared, mode)
 }

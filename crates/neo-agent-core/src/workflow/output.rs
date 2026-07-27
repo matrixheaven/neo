@@ -8,6 +8,7 @@
 //! are summary / journal / result / artifacts / artifact_content; cursors bind
 //! run, view, and query hash; the complete ToolResult is byte-capped.
 
+use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
 
 use base64::Engine;
@@ -410,7 +411,7 @@ pub struct WorkflowOutputSummary {
     pub artifacts_next_cursor: Option<String>,
 }
 
-/// Pending user request metadata without large schema/default bodies when possible.
+/// Actionable pending user request metadata exposed by ordinary TaskOutput views.
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct PendingUserInputMeta {
     pub request_id: String,
@@ -418,6 +419,10 @@ pub struct PendingUserInputMeta {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub title: Option<String>,
     pub answer_policy: String,
+    pub answer_schema: serde_json::Value,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub default: Option<serde_json::Value>,
+    pub next_action: String,
 }
 
 /// Canonical paged TaskOutput response (all views).
@@ -445,6 +450,8 @@ pub struct TaskOutputPage {
     pub artifacts: Vec<ArtifactMetadata>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub artifact_content: Option<ArtifactContentPage>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pending_user: Option<PendingUserInputMeta>,
     /// Wire-compatible state field used by existing TaskOutput consumers.
     pub state: WorkflowState,
     pub failure_count: u64,
@@ -683,6 +690,16 @@ fn pending_meta(pending: &PendingUserInput) -> PendingUserInputMeta {
         prompt: pending.prompt.clone(),
         title: pending.title.clone(),
         answer_policy: pending.answer_policy.as_str().to_owned(),
+        answer_schema: pending.answer_schema.clone(),
+        default: pending.default.clone(),
+        next_action: if pending
+            .answer_policy
+            .allows_actor(super::state::WorkflowActor::Model)
+        {
+            "TaskAnswer".to_owned()
+        } else {
+            "wait_for_human".to_owned()
+        },
     }
 }
 
@@ -837,6 +854,7 @@ pub fn build_summary_page(
         result: materials.final_result.clone(),
         artifacts: Vec::new(),
         artifact_content: None,
+        pending_user: materials.pending_user.as_ref().map(pending_meta),
         state: materials.state,
         failure_count: materials.failure_count,
         invocation_count: materials.invocation_count,
@@ -955,6 +973,7 @@ fn pack_journal_page(
         result: None,
         artifacts: Vec::new(),
         artifact_content: None,
+        pending_user: materials.pending_user.as_ref().map(pending_meta),
         state: materials.state,
         failure_count: materials.failure_count,
         invocation_count: materials.invocation_count,
@@ -1001,6 +1020,7 @@ pub fn build_result_page(
         result,
         artifacts: Vec::new(),
         artifact_content: None,
+        pending_user: materials.pending_user.as_ref().map(pending_meta),
         state: materials.state,
         failure_count: materials.failure_count,
         invocation_count: materials.invocation_count,
@@ -1067,6 +1087,7 @@ pub fn build_artifacts_page(
         result: None,
         artifacts,
         artifact_content: None,
+        pending_user: materials.pending_user.as_ref().map(pending_meta),
         state: materials.state,
         failure_count: materials.failure_count,
         invocation_count: materials.invocation_count,
@@ -1145,6 +1166,7 @@ pub fn build_artifact_content_page(
         result: None,
         artifacts: Vec::new(),
         artifact_content: Some(page),
+        pending_user: materials.pending_user.as_ref().map(pending_meta),
         state: materials.state,
         failure_count: materials.failure_count,
         invocation_count: materials.invocation_count,
@@ -1210,7 +1232,7 @@ pub fn measure_tool_result_bytes(content: &str, details: &serde_json::Value) -> 
 }
 
 fn format_page_content(page: &TaskOutputPage) -> String {
-    match page.view {
+    let mut content = match page.view {
         TaskOutputView::Summary => format!(
             "task_id: {}\nkind: workflow\nstatus: {}\nview: summary\ninvocations: {}\nfailures: {}",
             page.run_id, page.status, page.invocation_count, page.failure_count
@@ -1248,7 +1270,27 @@ fn format_page_content(page: &TaskOutputPage) -> String {
                 page.run_id, page.status, offset, bytes, more
             )
         }
+    };
+    if let Some(pending) = &page.pending_user {
+        let _ = write!(
+            content,
+            "\npending_request_id: {}\nprompt: {}\nanswer_policy: {}\nanswer_schema: {}",
+            pending.request_id, pending.prompt, pending.answer_policy, pending.answer_schema
+        );
+        if let Some(default) = &pending.default {
+            let _ = write!(content, "\ndefault_answer: {default}");
+        }
+        if pending.next_action == "TaskAnswer" {
+            let _ = write!(
+                content,
+                "\nnext_action: TaskAnswer(task_id=\"{}\", request_id=\"{}\", answer=<JSON matching answer_schema>)",
+                page.run_id, pending.request_id
+            );
+        } else {
+            let _ = write!(content, "\nnext_action: {}", pending.next_action);
+        }
     }
+    content
 }
 
 /// Dispatch a view after materials were collected (I/O-safe / lock-free).

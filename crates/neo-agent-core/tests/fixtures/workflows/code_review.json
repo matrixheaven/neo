@@ -12,15 +12,17 @@
         "status": "completed",
         "mode": "foreground",
         "agent_id": "fixture_security",
-        "findings": [
-          {
-            "severity": "high",
-            "path": "runtime.rs",
-            "line": 42,
-            "evidence": "unbounded allocation risk",
-            "test_gap": "missing limit test"
-          }
-        ]
+        "structured_output": {
+          "findings": [
+            {
+              "severity": "high",
+              "path": "runtime.rs",
+              "line": 42,
+              "evidence": "unbounded allocation risk",
+              "test_gap": "missing limit test"
+            }
+          ]
+        }
       }
     },
     {
@@ -31,15 +33,17 @@
         "status": "completed",
         "mode": "foreground",
         "agent_id": "fixture_correctness",
-        "findings": [
-          {
-            "severity": "medium",
-            "path": "lua.rs",
-            "line": 10,
-            "evidence": "edge case on empty table",
-            "test_gap": "empty fixture"
-          }
-        ]
+        "structured_output": {
+          "findings": [
+            {
+              "severity": "medium",
+              "path": "lua.rs",
+              "line": 10,
+              "evidence": "edge case on empty table",
+              "test_gap": "empty fixture"
+            }
+          ]
+        }
       }
     },
     {
@@ -50,7 +54,9 @@
         "status": "completed",
         "mode": "foreground",
         "agent_id": "fixture_maintain",
-        "findings": []
+        "structured_output": {
+          "findings": []
+        }
       }
     },
     {
@@ -61,7 +67,9 @@
         "status": "completed",
         "mode": "foreground",
         "agent_id": "fixture_challenge",
-        "findings": []
+        "structured_output": {
+          "findings": []
+        }
       }
     }
   ]

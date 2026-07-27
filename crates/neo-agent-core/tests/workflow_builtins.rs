@@ -129,6 +129,10 @@ async fn deep_research_builtin_fixture() {
     );
     assert!(result["report"].as_str().is_some_and(|s| !s.is_empty()));
     assert!(result["findings"].as_array().is_some());
+    assert_eq!(
+        result["findings"][0]["claim"],
+        json!("revision is SHA-256 of framed bytes")
+    );
     assert!(result["plan"].is_object());
     assert!(
         result["artifacts"]
@@ -201,6 +205,9 @@ async fn code_review_builtin_is_read_only_and_findings_first() {
     assert_eq!(result["scope"], json!("crates/neo-agent-core/src/workflow"));
     // Structured finding fields.
     let first = &findings[0];
+    assert_eq!(first["severity"], json!("high"));
+    assert_eq!(first["path"], json!("runtime.rs"));
+    assert_eq!(first["evidence"], json!("unbounded allocation risk"));
     for key in ["severity", "path", "line", "evidence", "test_gap"] {
         assert!(first.get(key).is_some(), "missing {key} in {first}");
     }
@@ -260,6 +267,10 @@ async fn large_refactor_builtin_requires_explicit_merge_decision() {
             .as_str()
             .is_some_and(|s| s.contains("worktree") || s.contains("retire"))),
         "unresolved risks should mention worktree retention: {risks:?}"
+    );
+    assert!(
+        risks.iter().any(|risk| risk == "migration window"),
+        "review structured output must contribute risks: {risks:?}"
     );
     let lineage = result["lineage"].as_object().expect("lineage");
     assert_eq!(lineage.get("auto_merge"), Some(&json!(false)));

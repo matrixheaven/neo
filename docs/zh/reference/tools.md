@@ -110,10 +110,11 @@ Neo 通过 `ToolRegistry` 向模型暴露一组内置工具。本文按类别列
 | 工具 | 用途 |
 | --- | --- |
 | `TaskList` | 列出后台任务及其状态。Workflow 条目可包含 phase、准入等待原因与 awaiting-user 元数据。支持分页 cursor，而不是硬截断 50 条。 |
-| `TaskOutput` | 取回运行中或已完成后台任务的输出。等待已知任务完成时优先 `block=true`。对 **workflow** 任务使用显式视图（`summary`、`journal`、`result`、`artifacts`、`artifact_content`）与不透明 cursor；Neo 绝不会把完整 journal 一次加载进结果。 |
+| `TaskOutput` | 取回运行中或已完成后台任务的输出。等待已知任务完成时优先 `block=true`。对 **workflow** 任务使用显式视图（`summary`、`journal`、`result`、`artifacts`、`artifact_content`）与不透明 cursor；Neo 绝不会把完整 journal 一次加载进结果。等待输入时，每个 view 都暴露可执行的 `pending_user` 字段：`request_id`、`prompt`、`answer_schema`、可选 `default`、`answer_policy` 与 `next_action`。 |
 | `TaskStop` | 停止运行中的后台任务，或取消 workflow run。 |
 | `TaskPause` | 请求运行中的 workflow 在下一个持久化 invocation 边界暂停；当前 child 会先完成。 |
 | `TaskResume` | 恢复已暂停 workflow；先回放匹配的 journal invocation，再继续 live work。不能在没有类型化 answer 时解除 `awaiting_user`。 |
+| `TaskAnswer` | 以 `task_id`、`request_id` 和类型化 `answer` 回答持久化 workflow `awaiting_user` 请求，仅在该请求的策略允许模型 actor 时可用。仅人类 gate 由用户通过 TUI 或人类 CLI 回答。 |
 
 ## 计时
 
@@ -130,21 +131,27 @@ Neo 通过 `ToolRegistry` 向模型暴露一组内置工具。本文按类别列
 | `AskUserQuestion` | 执行中向用户提出带结构化选项的问题。 |
 | `CreateSkill` | 在 `~/.neo/skills/<name>/SKILL.md` 创建新 skill。 |
 | `MoveSkill` | 将 skill 目录移入父级 bundle，自动生成时间戳备份。 |
-| `RunWorkflow` | 在后台启动已审查的**动态** Lua workflow。模型输入严格只有 `name`、`description`、`phases`、`script`、`args`；机器上限与并发属于 runtime 配置，不属于模型输入。命名 registry 启动请用 `/workflow <name>` 或 `neo workflow run`，不要走此工具。 |
+| `Workflow` | 规范的 assistant-native workflow 工具。平铺 action 为 `list`、`show`、`validate_inline`、`validate_saved`、`save`、`run_inline`、`run_saved`；inline 和 saved run 都返回 task ID。 |
 | `ListSkills` | 列出所有可发现 skill（user / extra / builtin）。 |
 | `SummarizeSessions` | 读取并总结本地 session transcript，便于沉淀为 skill。 |
 
 ### Workflow 工具与控制
 
-`RunWorkflow` 必须先通过裸 `/workflow` 授予 launch capability。命名启动（`/workflow <name> [JSON_OBJECT]`）由宿主直启，不调用模型。每次 launch 都在后台，返回 `run_id`（亦即 task ID）。
+assistant 的每个 workflow 生命周期动作都通过 `Workflow`。inline 编写、
+新定义与一次性评测会先激活 `create-workflow`（已激活时不得重复）；已知的
+已保存 workflow 可直接 `list`/`show`/`run_saved`。一次性评测严格遵循
+`Skill(create-workflow) -> Workflow(validate_inline) ->
+Workflow(run_inline) -> TaskOutput`。这些路径均不需要 slash、capability 或
+CLI。每次 run action 都在后台，返回 task ID（亦即 `run_id`）。
 
 | 动作 | 方式 |
 | --- | --- |
+| 发现、校验、保存或运行 | `Workflow(list|show|validate_inline|validate_saved|save|run_inline|run_saved)` |
 | 检查 | `TaskOutput` 的 workflow 视图/cursor；summary 从不内嵌完整 journal 或大 artifact |
 | 暂停 / 恢复 / 停止 | `TaskPause`、`TaskResume`、`TaskStop`（持久化边界） |
-| 回答 `awaiting_user` | `neo workflow answer …`（类型化 JSON）；仅 resume 不够 |
-| 分叉 / linked run | `neo workflow fork … --checkpoint <seq>` |
-| 清理存储 | `neo workflow prune`（默认 dry-run；`--yes` 仅删除终态、无引用、未 pin 的数据） |
+| 回答 `awaiting_user` | 遵循 `TaskOutput.pending_user.next_action`；仅当其为 `TaskAnswer` 时才使用精确 ID 调用。仅 resume 不够。 |
+
+`neo workflow answer`、`fork` 与 `prune` 是人类/脚本 CLI 操作，不是 assistant workflow 指令。
 
 Workflow Lua 创建的 child 必须带每 child 的 `output_schema`。无效 child JSON 在同一 child session 上获得 **恰好一次** 禁用工具的 repair 回合；无模糊 JSON 提取。Swarm 扇出支持异构且无硬编码总 child 上限；宿主 `swarm_concurrency` 只是默认并发。Ask / Auto / Yolo 控制每个 child 与 tool effect；launch 审批不能绕过它们。
 
@@ -154,7 +161,9 @@ Workflow Lua 创建的 child 必须带每 child 的 `output_schema`。无效 chi
 
 派生 agent（`Delegate` / `DelegateSwarm`）默认仅注册子集，由 `ToolRegistry::with_builtin_child_tools()` 构建：
 
-`Read` · `List` · `Grep` · `Find` · `Glob` · `TodoList` · `Write` · `Edit` · `Bash` · `TaskList` · `TaskOutput` · `TaskStop` · `Terminal` · `EnterPlanMode` · `ExitPlanMode` · `RunWorkflow` · `Sleep`
+`Read` · `List` · `Grep` · `Find` · `Glob` · `TodoList` · `Write` · `Edit` · `Bash` · `TaskList` · `TaskOutput` · `TaskStop` · `Terminal` · `EnterPlanMode` · `ExitPlanMode` · `Sleep`
+
+`Workflow` 和 `TaskAnswer` 仅属于 root agent，不在此工具集中。
 
 外加 `AgentProfile::for_role` 按角色白名单过滤，调用方显式注册的自定义工具始终透传。
 
