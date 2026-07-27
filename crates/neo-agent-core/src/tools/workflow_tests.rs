@@ -476,7 +476,7 @@ async fn run_inline_returns_registered_task_and_task_output_next_action() {
     let task_id = details["task"]["task_id"].as_str().expect("task id");
     assert_eq!(details["ok"], true);
     assert_eq!(details["action"], "run_inline");
-    assert_eq!(details["status"], "running");
+    assert_eq!(details["status"], "started");
     assert_eq!(details["next_actions"][0]["tool"], "TaskOutput");
     assert_eq!(details["next_actions"][0]["arguments"]["task_id"], task_id);
     assert!(
@@ -487,6 +487,85 @@ async fn run_inline_returns_registered_task_and_task_output_next_action() {
     );
 }
 
+#[tokio::test]
+async fn run_inline_starts_without_prevalidation_and_returns_completion_contract() {
+    let workspace = tempfile::tempdir().expect("workspace");
+    let neo_home = tempfile::tempdir().expect("neo home");
+    let session = tempfile::tempdir().expect("session");
+    let ctx = test_context(&workspace, &neo_home, &session);
+
+    let result = WorkflowTool
+        .execute(&ctx, inline_input("run_inline"))
+        .await
+        .expect("execute run");
+
+    assert!(!result.is_error, "{}", result.content);
+    let details = result.details.expect("structured details");
+    let task_id = details["task"]["task_id"].as_str().expect("task id");
+    assert_eq!(details["ok"], true);
+    assert_eq!(details["action"], "run_inline");
+    assert_eq!(details["status"], "started");
+    assert_eq!(details["task"]["status"], "started");
+    assert!(details["task"]["display_name"].is_string(), "expected display_name");
+    assert!(details["task"]["purpose"].is_string(), "expected purpose");
+    assert_eq!(details["task"]["automatic_notification"], true);
+    assert_eq!(details["task"]["next_action"], "wait_for_completion");
+    assert_eq!(details["next_actions"][0]["tool"], "TaskOutput");
+    assert!(
+        ctx.background_tasks
+            .workflow_handle(task_id)
+            .await
+            .is_some(),
+        "run must register a durable task"
+    );
+}
+
+#[tokio::test]
+async fn saved_actions_run_before_explicit_validation() {
+    let workspace = tempfile::tempdir().expect("workspace");
+    let neo_home = tempfile::tempdir().expect("neo home");
+    let session = tempfile::tempdir().expect("session");
+    let ctx = test_context(&workspace, &neo_home, &session);
+    let mut save = inline_input("save");
+    save["scope"] = json!("user");
+    WorkflowTool
+        .execute(&ctx, save.clone())
+        .await
+        .expect("save")
+        .details
+        .expect("save details");
+
+    let running = WorkflowTool
+        .execute(
+            &ctx,
+            json!({"action": "run_saved", "name": "adapter-test", "args": {}}),
+        )
+        .await
+        .expect("run saved")
+        .details
+        .expect("run details");
+    let task_id = running["task"]["task_id"].as_str().expect("task id");
+    assert_eq!(running["status"], "started");
+    assert_eq!(running["task"]["next_action"], "wait_for_completion");
+    assert!(
+        ctx.background_tasks
+            .workflow_handle(task_id)
+            .await
+            .is_some(),
+        "run_saved must register a durable task"
+    );
+
+    let validated = WorkflowTool
+        .execute(
+            &ctx,
+            json!({"action": "validate_saved", "name": "adapter-test"}),
+        )
+        .await
+        .expect("validate saved")
+        .details
+        .expect("validate details");
+    assert_eq!(validated["validation"]["valid"], true);
+}
 #[test]
 fn workflow_is_root_only() {
     assert!(ToolRegistry::with_builtin_tools().contains("Workflow"));

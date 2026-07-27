@@ -572,144 +572,37 @@ fn emit_synthesized_finished(
     }
 }
 
-fn workflow_route_violation(
-    context: &AgentContext,
+/// Verify the generic single-skill-call isolation invariant: a `Skill`
+/// activation must be the only call in its batch. This check does not select
+/// or order product skills by task type and never scans transcript keywords.
+fn skill_batch_isolation_violation(
     prepared: &[(
         &AgentToolCall,
         Result<super::tool_arguments::PreparedToolCall, ToolResult>,
     )],
-) -> Option<(&'static str, &'static str)> {
-    if prepared.len() > 1
+) -> bool {
+    prepared.len() > 1
         && prepared
             .iter()
             .any(|(call, _)| call.name.as_ref() == "Skill")
-    {
-        return Some((
-            "skill_mixed_batch",
-            "Tool batch rejected: Skill activation must be the only call in its batch. No tool executed. Retry with only the matching Skill call.",
-        ));
-    }
-
-    let messages = context.messages();
-    let activation = messages.iter().rposition(|message| {
-        matches!(
-            message,
-            AgentMessage::ToolResult {
-                tool_name,
-                content,
-                is_error: false,
-                ..
-            } if tool_name.as_ref() == "Skill"
-                && content.iter().any(|part| part.as_text().is_some_and(|text| {
-                    text.contains("<neo-skill-loaded name=\"create-workflow\"")
-                }))
-        )
-    })?;
-
-    if messages[activation + 1..].iter().any(|message| {
-        matches!(
-            message,
-            AgentMessage::User { origin, .. } if origin.is_user()
-        )
-    }) {
-        return None;
-    }
-    if messages[activation + 1..].iter().any(|message| {
-        matches!(
-            message,
-            AgentMessage::ToolResult {
-                tool_name,
-                is_error: false,
-                ..
-            } if tool_name.as_ref() == "Workflow"
-        )
-    }) {
-        return None;
-    }
-
-    let prompt = messages[..activation]
-        .iter()
-        .rev()
-        .find_map(|message| match message {
-            AgentMessage::User {
-                content, origin, ..
-            } if origin.is_user() => Some(
-                content
-                    .iter()
-                    .filter_map(crate::Content::as_text)
-                    .collect::<String>()
-                    .to_lowercase(),
-            ),
-            _ => None,
-        })?;
-    let workflow_intent = prompt.contains("workflow") || prompt.contains("工作流");
-    let evaluation_intent = [
-        "test",
-        "evaluate",
-        "assessment",
-        "assess",
-        "black-box",
-        "测试",
-        "评测",
-        "评估",
-    ]
-    .iter()
-    .any(|term| prompt.contains(term));
-    let deep_or_comprehensive = ["black-box", "deep", "comprehensive", "深度", "全面"]
-        .iter()
-        .any(|term| prompt.contains(term));
-    let creation_intent = ["create", "save", "创建", "新建", "保存"]
-        .iter()
-        .any(|term| prompt.contains(term));
-    let saved_intent = ["saved", "known", "已保存", "现有", "命名"]
-        .iter()
-        .any(|term| prompt.contains(term));
-    // ponytail: this guard is intentionally limited to unambiguous deep product
-    // evaluations; broader intent belongs in a future typed Skill activation field.
-    if !workflow_intent
-        || !evaluation_intent
-        || !deep_or_comprehensive
-        || creation_intent
-        || saved_intent
-    {
-        return None;
-    }
-
-    let is_exact_validate = prepared.len() == 1
-        && prepared[0].0.name.as_ref() == "Workflow"
-        && prepared[0]
-            .1
-            .as_ref()
-            .ok()
-            .and_then(|call| call.arguments.get("action"))
-            .and_then(serde_json::Value::as_str)
-            == Some("validate_inline");
-    (!is_exact_validate).then_some((
-        "workflow_evaluation_route",
-        "Tool batch rejected by the active create-workflow evaluation route. No tool executed. Call exactly one Workflow tool with action validate_inline next; do not call TodoList, list/show, file tools, shell, Cargo, or the CLI first.",
-    ))
 }
 
-fn workflow_route_blocked_outcome(
+fn skill_batch_blocked_outcome(
     turn: u32,
     tool_calls: &[AgentToolCall],
-    reason: &'static str,
-    message: &'static str,
     emitter: &mut EventEmitter,
 ) -> ToolBatchOutcome {
+    let message =
+        "Tool batch rejected: Skill activation must be the only call in its batch. No tool executed. Retry with only the matching Skill call.";
     let results = tool_calls
         .iter()
         .cloned()
         .map(|tool_call| {
             let result = ToolResult::error(message).with_details(serde_json::json!({
                 "status": "blocked",
-                "reason": reason,
+                "reason": "skill_mixed_batch",
                 "side_effect_occurred": false,
-                "next_action": if reason == "workflow_evaluation_route" {
-                    "Workflow(action=validate_inline)"
-                } else {
-                    "Skill only"
-                },
+                "next_action": "Skill only",
             }));
             (tool_call, result)
         })
@@ -1092,10 +985,8 @@ pub(super) async fn execute_tool_calls(
     // error results later without letting valid calls bypass preflight.
     let tool_specs = registry.specs();
     let prepared = prepare_tool_calls_for_execution(tool_calls, &tool_specs);
-    if let Some((reason, message)) = workflow_route_violation(&emitter.context, &prepared) {
-        return Ok(workflow_route_blocked_outcome(
-            turn, tool_calls, reason, message, emitter,
-        ));
+    if skill_batch_isolation_violation(&prepared) {
+        return Ok(skill_batch_blocked_outcome(turn, tool_calls, emitter));
     }
     config
         .workflow_dispatch_resolver
@@ -2108,7 +1999,7 @@ mod tests {
     use super::{
         EventEmitter, PreparedExecution, ToolExecutionDeps, execute_tool_calls, prepare_edit_calls,
         prepare_tool_calls_for_execution, prepare_write_calls, run_tool_with_cancel,
-        workflow_route_violation,
+        skill_batch_isolation_violation,
     };
     use crate::harness::fake_model;
     use crate::runtime::config::{AgentConfig, ToolExecutionMode};
@@ -2153,7 +2044,7 @@ mod tests {
     struct CustomWrite;
 
     #[test]
-    fn workflow_route_blocks_mixed_skill_batches_and_prevalidation_exploration() {
+    fn skill_activation_stays_isolated_without_workflow_choreography() {
         let mixed = [
             AgentToolCall {
                 id: "skill".into(),
@@ -2168,11 +2059,14 @@ mod tests {
         ];
         let registry = ToolRegistry::with_builtin_tools();
         let mixed_prepared = prepare_tool_calls_for_execution(&mixed, &registry.specs());
-        assert_eq!(
-            workflow_route_violation(&AgentContext::new(), &mixed_prepared).map(|value| value.0),
-            Some("skill_mixed_batch")
+        assert!(
+            skill_batch_isolation_violation(&mixed_prepared),
+            "Skill mixed in a batch must still be rejected"
         );
 
+        // No transcript scanning or keyword-based route enforcement remains.
+        // Workflow actions (run_inline, run_saved, save) execute as the first
+        // and only business tool without any mandatory prerequisite.
         let mut context = AgentContext::new();
         context.append_message(AgentMessage::user_text(
             "全面测试我的 dynamic workflow 功能并深度评测",
@@ -2186,49 +2080,40 @@ mod tests {
             false,
         ));
         let bash_prepared = prepare_tool_calls_for_execution(&mixed[1..], &registry.specs());
-        assert_eq!(
-            workflow_route_violation(&context, &bash_prepared).map(|value| value.0),
-            Some("workflow_evaluation_route")
+        // No skill_state or workflow_evaluation_route rejection happens.
+        // A single Bash call after a create-workflow activation is not blocked
+        // by any choreography gate.
+        assert!(
+            !skill_batch_isolation_violation(&bash_prepared),
+            "single non-skill call must not be blocked by skill isolation"
         );
 
-        let validate = [AgentToolCall {
-            id: "validate".into(),
-            name: "Workflow".into(),
-            raw_arguments: r#"{"action":"validate_inline"}}"#.into(),
-        }];
-        let validate_prepared = prepare_tool_calls_for_execution(&validate, &registry.specs());
-        assert!(workflow_route_violation(&context, &validate_prepared).is_none());
-
-        context.append_message(AgentMessage::tool_result(
-            "validate",
-            "Workflow",
-            [crate::Content::text("validated")],
-            false,
-        ));
-        assert!(workflow_route_violation(&context, &bash_prepared).is_none());
-
-        for (prompt, action) in [
-            ("创建一个 workflow 并立即测试它", "save"),
+        for (_prompt, action) in [
             ("全面测试已保存的 workflow release-check", "run_saved"),
+            ("创建一个 workflow 并立即测试它", "save"),
+            ("evaluate my workflow", "run_inline"),
+            ("check my workflow without running", "validate_inline"),
         ] {
-            let mut legal_context = AgentContext::new();
-            legal_context.append_message(AgentMessage::user_text(prompt));
-            legal_context.append_message(AgentMessage::tool_result(
-                "skill",
-                "Skill",
-                [crate::Content::text(
-                    "<neo-skill-loaded name=\"create-workflow\" source=\"builtin\">",
-                )],
-                false,
-            ));
             let call = [AgentToolCall {
                 id: "workflow".into(),
                 name: "Workflow".into(),
                 raw_arguments: format!(r#"{{"action":"{action}"}}"#).into(),
             }];
             let prepared = prepare_tool_calls_for_execution(&call, &registry.specs());
-            assert!(workflow_route_violation(&legal_context, &prepared).is_none());
+            assert!(
+                !skill_batch_isolation_violation(&prepared),
+                "single Workflow {action} call must not be blocked by skill isolation"
+            );
         }
+
+        // Skill as the only call in the batch is not a violation.
+        let solo_skill = [AgentToolCall {
+            id: "skill".into(),
+            name: "Skill".into(),
+            raw_arguments: r#"{"skill":"create-workflow"}"#.into(),
+        }];
+        let solo_prepared = prepare_tool_calls_for_execution(&solo_skill, &registry.specs());
+        assert!(!skill_batch_isolation_violation(&solo_prepared));
     }
 
     impl Tool for CustomWrite {

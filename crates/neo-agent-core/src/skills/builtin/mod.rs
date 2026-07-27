@@ -202,7 +202,7 @@ mod tests {
     }
 
     #[test]
-    fn create_workflow_builtin_is_auto_invokable_host_reference() {
+    fn create_workflow_builtin_teaches_authoring_without_mandatory_choreography() {
         use std::collections::BTreeSet;
 
         let skills = builtin_skills().expect("built-ins load");
@@ -250,11 +250,11 @@ mod tests {
 
         let description = &create_workflow.manifest.description;
         for term in [
-            "reate",
+            "creating",
             "save",
-            "test",
-            "evaluate",
-            "black-box",
+            "testing",
+            "evaluating",
+            "running",
             "Neo repository",
             "known saved workflow",
             "implementation",
@@ -283,11 +283,7 @@ mod tests {
             "Workflow(save)",
             "Workflow(list)",
             "TaskOutput",
-            "One-off evaluation is an immediate execution path",
-            "first business tool call",
-            "Do not insert `TodoList`",
-            "Immediate next action after activation",
-            "Do not batch it with",
+            "each perform their complete validation internally",
             "not** call `neo workflow ...` through Bash or Terminal",
             "the host owns",
             "escape hatch",
@@ -302,16 +298,21 @@ mod tests {
             !create_workflow.body.contains("Compute `source_sha256`"),
             "create-workflow must not teach manual hash computation"
         );
-        for required in [
-            "REQUIRED FIRST ACTION",
-            "Invoke before TodoList",
-            "Workflow(validate_inline), then Workflow(run_inline), then TaskOutput",
-        ] {
-            assert!(
-                description.contains(required),
-                "create-workflow discovery description must enforce {required:?}: {description}"
-            );
-        }
+        // No mandatory choreography: run_inline/run_saved/save validate internally.
+        assert!(
+            !description.contains("REQUIRED FIRST ACTION")
+                && !description.contains("Invoke before TodoList")
+                && !description.contains(
+                    "Workflow(validate_inline), then Workflow(run_inline), then TaskOutput"
+                ),
+            "create-workflow description must not enforce mandatory routing: {description}"
+        );
+        assert!(
+            !create_workflow.body.contains("One-off evaluation is an immediate execution path")
+                && !create_workflow.body.contains("first business tool call")
+                && !create_workflow.body.contains("Immediate next action after activation"),
+            "create-workflow must not teach mandatory validate-before-run ordering"
+        );
         assert!(
             !create_workflow.body.contains("agent(prompt")
                 && !create_workflow.body.contains("parallel([")

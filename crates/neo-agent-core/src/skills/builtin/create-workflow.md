@@ -1,15 +1,6 @@
 ---
 name: create-workflow
-description: >
-  REQUIRED FIRST ACTION when a request needs to create or author an inline
-  workflow, save a new definition, or test or evaluate a one-off workflow, including black-box evaluation
-  while the current directory is the Neo repository. Invoke before TodoList,
-  source inspection, shell/CLI commands, or Workflow(list/show), unless this
-  skill is already active. Do not invoke it for direct discovery or execution
-  of a known saved workflow. For one-off evaluation, the first business tool
-  after activation is Workflow(validate_inline), then Workflow(run_inline),
-  then TaskOutput. Not for modifying or debugging Neo's own workflow
-  implementation or CLI — that is ordinary repository work.
+description: "Authoring guidance for creating, designing, writing, adapting, evaluating, testing, or running a custom Neo workflow. Covers the Lua dialect, definition schemas, and the `neo.*` host APIs used to orchestrate child agents and tools. Does not grant workflow execution capability -- `Workflow(run_inline)`, `Workflow(run_saved)`, and `Workflow(save)` each validate the definition internally. known saved workflows may be discovered or launched with `Workflow(list)`, `Workflow(show)`, or `Workflow(run_saved)` without this skill active, even when the current directory is the Neo repository. Not for modifying or debugging Neo's own workflow implementation or CLI -- that is ordinary repository work."
 disableModelInvocation: false
 ---
 
@@ -32,25 +23,22 @@ The registered `Workflow` tool is the canonical first-party interface for every
 workflow lifecycle step. Saved and inline execution are directly available and
 require **no slash command, no capability, and no CLI**.
 
-### One-off evaluation is an immediate execution path
+`Workflow(run_inline)`, `Workflow(run_saved)`, and `Workflow(save)` each perform their complete validation internally, so they can be called directly without a
+preceding validation step. `Workflow(validate_inline)` and
+`Workflow(validate_saved)` are available for explicit check-only requests that
+compile the definition and Lua without persisting, running, or creating tasks.
 
-Once this skill is active for a one-off run, test, or evaluation, the **first business tool call** must be
-`Workflow(validate_inline)`, followed by `Workflow(run_inline)` and
-`TaskOutput`. Do not insert `TodoList`, `Workflow(list)`, `Workflow(show)`,
-`Read`, `Glob`, `Grep`, `Find`, `Bash`, `Terminal`, Cargo, source inspection,
-or a CLI command before `Workflow(validate_inline)`. This applies even when
-the current directory is the Neo repository. The only exception is an explicit
-request to inspect or run a named saved workflow, or to debug Neo's
-implementation/CLI.
+### Procedure by intent
 
-| User intent | Required procedure |
-|-------------|--------------------|
+| User intent | Procedure |
+|-------------|-----------|
 | Create/save only | author -> `Workflow(save)` -> ask whether to run now |
 | Create and run/test | author -> `Workflow(save)` -> `Workflow(run_saved)` -> `TaskOutput` |
-| One-off run/test/evaluate | author -> `Workflow(validate_inline)` -> `Workflow(run_inline)` -> `TaskOutput` |
+| One-off run/test/evaluate | author -> `Workflow(run_inline)` -> `TaskOutput` |
+| Explicit check-only | author -> `Workflow(validate_inline)` / `Workflow(validate_saved)` -> report |
 | Run a known saved workflow | `Workflow(run_saved)` -> `TaskOutput` |
 | Discover saved workflows | `Workflow(list)` / `Workflow(show)` -> `Workflow(run_saved)` -> `TaskOutput` |
-| Modify/debug Neo's workflow implementation | leave this skill's route; use normal repository diagnosis |
+| Modify/debug Neo's workflow implementation | leave this skill; use normal repository diagnosis |
 
 Rules when the user is using workflows as a **product feature** (even inside
 the Neo repository):
@@ -64,12 +52,11 @@ the Neo repository):
   learn how to use, run, or black-box test workflows.
 - Do **not** ask the user to run `/workflow` first, and never claim validation
   or execution from authored files alone.
-- Do not inspect the repository to decide whether a workflow feature request
-  applies: a workflow evaluation request is product use even when cwd is the
-  Neo repo.
+- Do not examine the repository to decide whether a workflow feature request
+  applies: a workflow use request is product use even when cwd is the Neo repo.
 
 The one escape hatch: when the user **explicitly** asks to debug, modify, or
-test Neo's workflow implementation or CLI itself, ordinary source inspection,
+test Neo's workflow implementation or CLI itself, ordinary source examination,
 Cargo tests, and CLI invocation are allowed and this skill's routing rules do
 not apply.
 
@@ -85,10 +72,11 @@ not apply.
    calls host APIs, and **returns** one JSON-compatible table matching
    `output_schema`. Keep child prompts imperative and self-contained (see
    Pitfalls). Declare ordered phases and JSON Schemas alongside the source.
-4. **Validate**: `Workflow(validate_inline)` for inline definitions or
-   `Workflow(validate_saved)` for saved ones. Iterate until the structured
-   result reports valid. Validation compiles the definition and Lua; it
-   creates no files, runs, or tasks.
+4. **Validate** (optional, explicit check-only): `Workflow(validate_inline)`
+   for inline definitions or `Workflow(validate_saved)` for saved ones compiles
+   the definition and Lua; it creates no files, runs, or tasks. `run_inline`,
+   `run_saved`, and `save` already validate internally before acting, so a
+   standalone validation step is not required before launching.
 5. **Route by intent** using the table above. `Workflow(save)` persists the
    pair (use `replace: true` only when the user wants to overwrite an existing
    definition). Run actions return a task ID; collect the terminal result with
@@ -102,8 +90,8 @@ APIs that are not listed below. Do not launch workflows from workflows.
 
 ## Workflow tool arguments (for the definition fields)
 
-`validate_inline`, `save`, and `run_inline` all take the same definition
-fields the host validates canonically:
+`validate_inline`, `validate_saved`, `save`, `run_inline`, and `run_saved` all
+take the same definition fields the host validates canonically:
 
 - `name`, `description`, ordered `phases` (`{id, description}`), exact Lua
   `script`, `input_schema` (object, optional-but-preferred), `output_schema`
@@ -152,7 +140,7 @@ neo.phase("review")
 local security = neo.delegate({
   title = "security",
   task = "Security review of `" .. scope .. "`. Use Read/Grep; do not modify files. "
-    .. "Return at most 8 concrete findings as {path, issue}. Empty findings only after inspection.",
+    .. "Return at most 8 concrete findings as {path, issue}. Empty findings only after review.",
   role = "reviewer",
   worktree = "shared",
   tool_allow = READ_ONLY,
@@ -227,7 +215,7 @@ matching the return table.
 
 ### Read-only inputs
 
-- `neo.args` — launch arguments object (JSON → Lua). Prefer validating required
+- `neo.args` -- launch arguments object (JSON → Lua). Prefer validating required
   fields early with `neo.fail(...)`.
 
 ### Local (no external child/tool effect beyond journal)
@@ -256,7 +244,7 @@ matching the return table.
 - `model` / `provider` (optional strings)
 - `context`: `"inherit"` \| `"summary"` \| `"none"` (default inherit)
 - `worktree`: `"shared"` \| `"isolated"` (default shared). Use **isolated** for
-  mutation; merge/retire is always an explicit human decision — never
+  mutation; merge/retire is always an explicit human decision -- never
   auto-merge or delete worktrees in script policy.
 - `tool_allow`: optional array of exact tool names; may only **reduce** parent
   tools (e.g. read-only ceiling).
@@ -351,7 +339,7 @@ Evidence gates must fail closed (`neo.verify` / `neo.fail`).
   uniform shards.
 - **Adversarial verify:** independent reviewer children prompted to refute;
   require concrete evidence fields in schema.
-- **Inspect builtins through the tool:** `Workflow(show)` on `code-review`,
+- **Show builtins through the tool:** `Workflow(show)` on `code-review`,
   `deep-research`, or `large-refactor` returns their paired sources. Prefer
   adapting those patterns over inventing new host APIs.
 
@@ -360,16 +348,16 @@ Evidence gates must fail closed (`neo.verify` / `neo.fail`).
 - **Wrong product dialect.** Rhai `agent()` / `parallel()` / `complete()` /
   `let meta = #{...}` is not Neo. Use paired definition fields + `neo.*` +
   `return`.
-- **CLI fallback.** `neo workflow check/run/save` through Bash is the human
-  surface. The assistant validates, saves, and runs through the `Workflow`
-  tool only.
+- **CLI fallback.** `neo workflow list/run/check/test` through Bash is the
+  human/headless surface. The assistant validates, saves, and runs through the
+  `Workflow` tool only.
 - **Hand-computed manifests.** `source_sha256` and the `.workflow.toml` pair
   are host-owned by `Workflow(save)`; never author them yourself.
 - **Missing `output_schema`.** The final definition schema and every workflow
   child require it. Heterogeneous swarm items must set per-item
   `output_schema`.
 - **Terse child prompts.** Cold children return empty structured shells without
-  tools. Command tool use and define what a valid empty answer requires.
+  tools. Tell children to use tools and define what a valid empty answer requires.
 - **Unguarded outcomes.** Always check `outcome.ok` (or `neo.verify`) before
   trusting `details`.
 - **Phase id typos.** `neo.phase` only accepts ids declared in `phases`.
@@ -378,32 +366,30 @@ Evidence gates must fail closed (`neo.verify` / `neo.fail`).
 - **`neo.tool` control-plane bypass.** Denied tools stay denied; do not try
   `Workflow` / `Delegate` / plan-mode / goal tools from scripts.
 - **Silent truncation.** If you cap findings, `neo.log` what was dropped.
-- **Agents do not enforce invariants — scripts do.** Re-check paths, schemas,
+- **Agents do not enforce invariants -- scripts do.** Re-check paths, schemas,
   and counts in Lua after children return.
 - **Empty Lua arrays vs objects.** Use `neo.json_array` / `neo.json_object` when
   schema distinguishes `[]` and `{}`.
 
 ## Built-in references
 
-Product ships three ordinary registry builtins (inspect via `Workflow(show)`):
+Product ships three ordinary registry builtins (review their paired sources via
+`Workflow(show)`):
 
-- `code-review` — read-only multi-domain review, findings-first final output
-- `deep-research` — heterogeneous research children + structured report
-- `large-refactor` — isolated mutation slices + human merge gate
+- `code-review` -- read-only multi-domain review, findings-first final output
+- `deep-research` -- heterogeneous research children + structured report
+- `large-refactor` -- isolated mutation slices + human merge gate
 
 ## Human/headless CLI reference (not the assistant path)
 
-These commands remain supported for humans and scripts. They are documentation
-for that human-owned surface, never an assistant workflow route.
+These four commands remain supported for humans and headless scripts. They are
+documentation for that human-owned surface, never an assistant workflow route.
 
 ```bash
 neo workflow list
-neo workflow show <name>
+neo workflow run <name> --args-json '{"scope":"crates/neo-agent-core"}'
 neo workflow check <name-or-path> --output json
 neo workflow test <name-or-path> --case <fixture.json>
-neo workflow run <name> --args-json '{"scope":"crates/neo-agent-core"}'
-neo workflow save <run-or-pair-path> --scope user|project [--name <name>] [--force]
-neo workflow answer <run> <request_id> --json '<answer>'
 ```
 
 Interactive users may also launch a saved definition host-direct with the exact
@@ -417,11 +403,12 @@ Report only after the requested terminal state is real:
 
 1. Create/save: a structured `Workflow(save)` success exists (ok, saved
    status, resolved definition).
-2. Validate: a structured `Workflow(validate_inline)` or
-   `Workflow(validate_saved)` success exists.
+2. Explicit validation (optional): a structured `Workflow(validate_inline)`
+   or `Workflow(validate_saved)` success exists.
 3. Run/test/evaluate: a real task was launched through `Workflow(run_inline)`
-   or `Workflow(run_saved)` **and** inspected to a terminal state through
-   `TaskOutput`, or a real typed failure is reported verbatim.
+   or `Workflow(run_saved)` (each validates the definition internally) **and**
+   checked to a terminal state through `TaskOutput`, or a real typed failure is
+   reported verbatim.
 4. No slash capability, CLI invocation, or manual hash/manifest step was used
    or requested.
 5. Any intentional limits (read-only, no auto-merge, schema caps) and
@@ -429,11 +416,3 @@ Report only after the requested terminal state is real:
 
 If validation or launch fails, report the structured error exactly; do not
 claim the workflow is ready.
-
-## Immediate next action after activation
-
-For a one-off workflow run, test, evaluation, or black-box assessment, stop
-planning and call only `Workflow(validate_inline)` next. Do not batch it with
-any other tool. After validation succeeds, call only `Workflow(run_inline)`,
-then inspect the returned task with `TaskOutput`. Do not inspect `.tmp`, saved
-workflows, repository files, or the CLI first.

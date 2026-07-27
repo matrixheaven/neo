@@ -175,9 +175,11 @@ fn child_tool_allow_only_reduces_parent_capability() {
 }
 
 /// `Workflow` and `TaskAnswer` are root-only: child, restricted, and schema-repair
-/// tool sets never receive them, and no model-visible `RunWorkflow` remains.
+/// tool sets never receive them, no model-visible `RunWorkflow` remains, and the
+/// model-visible description uses self-contained mutation actions with no
+/// mandatory routing or CLI prerequisite.
 #[test]
-fn workflow_tool_is_root_only_and_run_workflow_is_gone() {
+fn workflow_tool_is_root_only_and_description_has_no_choreography() {
     let root = ToolRegistry::with_builtin_tools();
     assert!(root.contains("Workflow"), "root registry owns Workflow");
     assert!(
@@ -201,18 +203,17 @@ fn workflow_tool_is_root_only_and_run_workflow_is_gone() {
     assert!(!is_workflow_tool_eligible(&root, "Workflow"));
     assert!(!root.is_workflow_eligible("Workflow"));
 
-    // The model-visible description keeps the mandatory routing statements.
+    // The model-visible description teaches self-contained actions and never
+    // enforces mandatory ordering or a CLI prerequisite.
     let description = neo_agent_core::tools::WorkflowTool.description();
     assert!(description.contains("create-workflow"));
     assert!(description.contains("TaskOutput"));
-    assert!(description.contains("do not inspect Neo source"));
     assert!(description.contains("no slash capability"));
-    assert!(description.contains(
-        "For inline authoring, creation, or one-off evaluation, call Skill(create-workflow) first"
-    ));
-    assert!(description.contains("do not call it again after manual activation"));
     assert!(description.contains("known saved workflow may use list/show/run_saved directly"));
-    assert!(description.contains("MUST call Workflow(validate_inline), then Workflow(run_inline)"));
+    assert!(description.contains("each perform their complete validation internally"));
+    assert!(!description.contains("MUST call Workflow(validate_inline), then Workflow(run_inline)"));
+    assert!(!description.contains("do not inspect Neo source"));
+    assert!(!description.contains("REQUIRED FIRST ACTION"));
 
     let schema = neo_agent_core::tools::WorkflowTool.input_schema();
     assert_eq!(
@@ -220,9 +221,14 @@ fn workflow_tool_is_root_only_and_run_workflow_is_gone() {
         "validate_inline"
     );
     assert!(
-        schema["properties"]["action"]["description"]
+        !schema["properties"]["action"]["description"]
             .as_str()
             .is_some_and(|text| text.contains("start with validate_inline"))
+    );
+    assert!(
+        schema["properties"]["action"]["description"]
+            .as_str()
+            .is_some_and(|text| text.contains("validate internally"))
     );
 }
 

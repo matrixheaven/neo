@@ -66,7 +66,7 @@ enum WorkflowScope {
 #[serde(deny_unknown_fields)]
 pub(crate) struct WorkflowInput {
     #[schemars(
-        description = "Workflow action. For a one-off run, test, evaluation, or black-box assessment, start with validate_inline, then submit the same definition with run_inline. Use list/show only when the user explicitly asks to discover or inspect saved workflows."
+        description = "Workflow action. \"list\" discovers saved workflows; \"show\" returns a saved definition; \"validate_inline\"/\"validate_saved\" check a definition without running it; \"save\" persists a new definition; \"run_inline\"/\"run_saved\" validate internally and then launch directly. Use list/show only when the user explicitly asks to discover saved workflows."
     )]
     action: WorkflowAction,
     #[serde(default)]
@@ -879,23 +879,31 @@ async fn launch_definition(
         }
     };
     let task_id = outcome.task_id;
+    let display_name = &definition.display_name;
+    let purpose = &definition.description;
     result(
         action,
-        "running",
-        format!("Workflow started as task {task_id}. Use TaskOutput to inspect it."),
+        "started",
+        format!(
+            "Workflow '{display_name}' started as task {task_id}. \
+             Completion arrives automatically; use TaskOutput for optional details."
+        ),
         Some(workflow_details(definition, false)),
         None,
         None,
         Some(json!({
             "task_id": task_id,
             "kind": "workflow",
-            "status": "running",
+            "status": "started",
+            "display_name": display_name,
+            "purpose": purpose,
             "automatic_notification": true,
+            "next_action": "wait_for_completion",
         })),
         json!([{
             "tool": "TaskOutput",
             "arguments": {"task_id": task_id},
-            "reason": "Inspect the running workflow and collect its final result."
+            "reason": "Optional: check the running workflow for details. Terminal completion arrives automatically."
         }]),
     )
 }
@@ -919,7 +927,15 @@ impl Tool for WorkflowTool {
     }
 
     fn description(&self) -> &'static str {
-        "Canonical first-party tool to validate and run Neo workflows, and to save, inspect, or run saved definitions. For inline authoring, creation, or one-off evaluation, call Skill(create-workflow) first unless it is already active; do not call it again after manual activation. A known saved workflow may use list/show/run_saved directly. After activation, a one-off evaluation MUST call Workflow(validate_inline), then Workflow(run_inline), then TaskOutput. For assistant-native workflow use, do not inspect Neo source, run Cargo, or invoke `neo workflow` through Bash/Terminal. Saved and inline runs require no slash capability, return a task ID, and should be inspected with TaskOutput. Child tool effects remain independently authorized."
+        "Canonical first-party tool to validate and run Neo workflows, and to save, show, or run saved definitions. \
+         run_inline, run_saved, and save each perform their complete validation internally (metadata, source, schema, Lua compile, args when applicable, and typed permission when applicable); \
+         no validation action is required before run_inline, run_saved, or save. \
+         validate_inline and validate_saved remain available for an explicit check-only request with zero side effects. \
+         For inline authoring, creation, or one-off evaluation, Skill(create-workflow) provides authoring guidance for Lua, schemas, and host APIs unless already active; \
+         known saved workflow may use list/show/run_saved directly without skill activation. \
+         Saved and inline runs require no slash capability, return a task handle, and deliver terminal completion automatically via TaskOutput. \
+         For assistant-native workflow use, do not read Neo source, run Cargo, or invoke `neo workflow` through Bash/Terminal. \
+         Child tool effects remain independently authorized."
     }
 
     fn input_schema(&self) -> Value {
