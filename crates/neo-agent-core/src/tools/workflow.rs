@@ -1,7 +1,6 @@
 use serde_json::{Value, json};
 
 use super::{Tool, ToolContext, ToolFuture, ToolResult, schema};
-use crate::WorkflowApprovalPresentation;
 use crate::workflow::{
     DynamicWorkflowDefinitionInput, LaunchAuthorizationMode, ResolvedWorkflowDefinition,
     WorkflowActor, WorkflowDefinitionRegistry, WorkflowError, WorkflowErrorCode,
@@ -9,6 +8,7 @@ use crate::workflow::{
     WorkflowLaunchRequest, WorkflowListScope, WorkflowPhase, WorkflowSaveRequest,
     WorkflowSaveScope, canonical_input_hash, resolve_dynamic_definition,
 };
+use crate::{WorkflowApprovalPresentation, WorkflowSaveApprovalPresentation};
 
 const DEFAULT_LIST_LIMIT: u32 = 20;
 const MAX_LIST_LIMIT: u32 = 100;
@@ -550,7 +550,7 @@ pub(crate) fn prepare_action(input: &Value) -> Result<PreparedWorkflowAction, Wo
     }
 }
 
-fn input_error_result(error: WorkflowInputError) -> ToolResult {
+pub(crate) fn input_error_result(error: WorkflowInputError) -> ToolResult {
     let action = error.action.map(WorkflowAction::as_str);
     ToolResult::error(error.message.clone()).with_details(json!({
         "ok": false,
@@ -567,12 +567,10 @@ fn input_error_result(error: WorkflowInputError) -> ToolResult {
     }))
 }
 
-pub(crate) fn invalid_input_result(message: impl Into<String>) -> ToolResult {
-    input_error_result(WorkflowInputError::input(
-        WorkflowAction::RunInline,
-        None,
-        message,
-    ))
+/// Structured zero-side-effect error for pre-approval validation failures.
+pub(crate) fn preflight_error_result(action: WorkflowAction, error: WorkflowError) -> ToolResult {
+    let field = (error.code() == WorkflowErrorCode::InvalidInput).then_some("args");
+    workflow_error_result_with_context(action, error, field, false, None)
 }
 
 fn workflow_error_code(action: WorkflowAction, error: &WorkflowError) -> &'static str {
@@ -707,6 +705,7 @@ fn inline_action_arguments(
     })
 }
 
+#[allow(clippy::too_many_arguments)]
 fn result(
     action: WorkflowAction,
     status: &'static str,
@@ -740,12 +739,14 @@ fn permission_mode(ctx: &ToolContext) -> crate::PermissionMode {
         })
 }
 
-fn launch_intent(
-    ctx: &ToolContext,
+#[allow(clippy::too_many_arguments)]
+fn launch_intent_parts(
     definition: &ResolvedWorkflowDefinition,
     args: Value,
     action: WorkflowAction,
     session_identity: String,
+    workspace_identity: String,
+    permission_mode: crate::PermissionMode,
     validate_args: bool,
 ) -> WorkflowLaunchIntent {
     let request = WorkflowLaunchRequest {
@@ -762,10 +763,10 @@ fn launch_intent(
         request,
         WorkflowLaunchBinding {
             session_identity,
-            workspace_identity: ctx.cwd.display().to_string(),
+            workspace_identity,
             launch_nonce: String::new(),
             actor: WorkflowActor::Model,
-            permission_mode: permission_mode(ctx),
+            permission_mode,
             parent_lineage: None,
             compiled_input_schema: validate_args
                 .then(|| definition.compiled_input_schema.clone())
@@ -775,6 +776,48 @@ fn launch_intent(
     );
     intent.definition_revision = definition.revision.clone();
     intent
+}
+
+fn launch_intent(
+    ctx: &ToolContext,
+    definition: &ResolvedWorkflowDefinition,
+    args: Value,
+    action: WorkflowAction,
+    session_identity: String,
+    validate_args: bool,
+) -> WorkflowLaunchIntent {
+    launch_intent_parts(
+        definition,
+        args,
+        action,
+        session_identity,
+        ctx.cwd.display().to_string(),
+        permission_mode(ctx),
+        validate_args,
+    )
+}
+
+/// Zero-side-effect launch preflight used by permission preparation before an
+/// Ask review opens. Never creates a file, run, or task.
+pub(crate) fn preflight_run(
+    definition: &ResolvedWorkflowDefinition,
+    args: Value,
+    action: WorkflowAction,
+    workspace_identity: String,
+    permission_mode: crate::PermissionMode,
+    runtime: &crate::workflow::WorkflowRuntime,
+    validate_args: bool,
+) -> Result<(), WorkflowError> {
+    let intent = launch_intent_parts(
+        definition,
+        args,
+        action,
+        "workflow-permission-preflight".to_owned(),
+        workspace_identity,
+        permission_mode,
+        validate_args,
+    );
+    WorkflowLaunchCoordinator.preflight(&intent, runtime)
 }
 
 fn validate_definition(
@@ -1139,57 +1182,119 @@ impl Tool for WorkflowTool {
     }
 }
 
-// Temporary compile bridge for Task 2. The old permission branch still names
-// these functions until it is replaced with action-aware Workflow preparation.
-pub(crate) struct PreparedWorkflowLaunch {
-    definition: DynamicWorkflowDefinitionInput,
-    args: Value,
-}
-
-impl PreparedWorkflowLaunch {
-    pub(crate) fn launch_request(
-        &self,
-        permission_mode: crate::PermissionMode,
-    ) -> WorkflowLaunchRequest {
-        WorkflowLaunchRequest {
-            name: self.definition.name.clone(),
-            description: self.definition.description.clone(),
-            phases: self.definition.phases.clone(),
-            script: self.definition.script.clone(),
-            args: self.args.clone(),
-            launch_source: format!("model:Workflow(run_inline; {})", permission_mode.label()),
-            parent_run_id: None,
-            output_schema: Some(self.definition.output_schema.clone()),
-        }
-    }
-}
-
-pub(crate) fn validated_input(value: &Value) -> Result<PreparedWorkflowLaunch, String> {
-    match prepare_action(value).map_err(|error| error.message)? {
-        PreparedWorkflowAction::RunInline { definition, args } => {
-            Ok(PreparedWorkflowLaunch { definition, args })
-        }
-        _ => Err("typed workflow launch preparation requires action `run_inline`".to_owned()),
-    }
-}
-
-pub(crate) fn approval_presentation(value: &Value) -> Result<WorkflowApprovalPresentation, String> {
-    let PreparedWorkflowLaunch { definition, args } = validated_input(value)?;
-    let args = serde_json::to_string_pretty(&args).map_err(|error| error.to_string())?;
-    Ok(WorkflowApprovalPresentation {
-        name: definition.name,
-        description: definition.description,
-        phases: definition
-            .phases
-            .into_iter()
+fn launch_presentation(
+    name: String,
+    description: String,
+    phases: &[WorkflowPhase],
+    script: &str,
+    args: &Value,
+) -> WorkflowApprovalPresentation {
+    let args = serde_json::to_string_pretty(args).unwrap_or_else(|_| "{}".to_owned());
+    WorkflowApprovalPresentation {
+        name,
+        description,
+        phases: phases
+            .iter()
             .map(|phase| format!("{}: {}", phase.id, phase.description))
             .collect(),
         args,
-        line_count: definition.script.split('\n').count().max(1),
-        byte_count: definition.script.len(),
-        source: definition.script,
+        line_count: script.split('\n').count().max(1),
+        byte_count: script.len(),
+        source: script.to_owned(),
         warning: "Launch approval authorizes orchestration only; child tool effects remain independently authorized."
             .to_owned(),
+    }
+}
+
+/// Typed Ask-mode launch review for `run_inline` / `run_saved`. Reparses with
+/// the canonical action parser; saved definitions resolve through the registry.
+pub(crate) fn launch_approval_presentation(
+    input: &Value,
+    registry: &WorkflowDefinitionRegistry,
+) -> Result<WorkflowApprovalPresentation, ToolResult> {
+    match prepare_action(input).map_err(input_error_result)? {
+        PreparedWorkflowAction::RunInline { definition, args } => Ok(launch_presentation(
+            definition.name,
+            definition.description,
+            &definition.phases,
+            &definition.script,
+            &args,
+        )),
+        PreparedWorkflowAction::RunSaved { name, args } => {
+            let definition = registry
+                .resolve(&name)
+                .map_err(|error| preflight_error_result(WorkflowAction::RunSaved, error))?;
+            Ok(launch_presentation(
+                definition.name.as_str().to_owned(),
+                definition.description.clone(),
+                &definition.phases,
+                &definition.lua_source,
+                &args,
+            ))
+        }
+        prepared => Err(input_error_result(WorkflowInputError::input(
+            prepared.action(),
+            Some("action"),
+            "launch review requires action run_inline or run_saved",
+        ))),
+    }
+}
+
+/// Typed Ask-mode save review for `save`: scope, exact pair paths, and
+/// create/replace state resolved through the registry owner.
+pub(crate) fn save_approval_presentation(
+    input: &Value,
+    registry: &WorkflowDefinitionRegistry,
+) -> Result<WorkflowSaveApprovalPresentation, ToolResult> {
+    let PreparedWorkflowAction::Save { request, scope, .. } =
+        prepare_action(input).map_err(input_error_result)?
+    else {
+        return Err(input_error_result(WorkflowInputError::input(
+            WorkflowAction::Save,
+            Some("action"),
+            "save review requires action save",
+        )));
+    };
+    let target = registry
+        .save_target(scope, &request.name)
+        .map_err(|error| preflight_error_result(WorkflowAction::Save, error))?;
+    let list_scope = match scope {
+        WorkflowSaveScope::User => WorkflowListScope::User,
+        WorkflowSaveScope::Project => WorkflowListScope::Project,
+    };
+    let replace = registry
+        .list(list_scope)
+        .map_err(|error| preflight_error_result(WorkflowAction::Save, error))?
+        .iter()
+        .any(|item| item.name.as_str() == target.name.as_str());
+    let pretty =
+        |value: &Value| serde_json::to_string_pretty(value).unwrap_or_else(|_| value.to_string());
+    let input_schema = request
+        .input_schema
+        .as_ref()
+        .map_or_else(|| "null".to_owned(), &pretty);
+    Ok(WorkflowSaveApprovalPresentation {
+        name: request.name,
+        description: request.description,
+        scope: match scope {
+            WorkflowSaveScope::User => "user",
+            WorkflowSaveScope::Project => "project",
+        }
+        .to_owned(),
+        source_path: target.source_path,
+        manifest_path: target.manifest_path,
+        replace,
+        phases: request
+            .phases
+            .iter()
+            .map(|phase| format!("{}: {}", phase.id, phase.description))
+            .collect(),
+        line_count: request.lua_source.split('\n').count().max(1),
+        byte_count: request.lua_source.len(),
+        source: request.lua_source,
+        input_schema,
+        output_schema: pretty(&request.output_schema),
+        warning: "Saving persists the definition pair only; it does not launch a run.".to_owned(),
     })
 }
 

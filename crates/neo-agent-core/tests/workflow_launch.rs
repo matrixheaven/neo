@@ -14,12 +14,14 @@ use tokio::sync::Notify;
 
 fn valid_input(name: &str) -> Value {
     json!({
+        "action": "run_inline",
         "name": name,
         "description": "Run a reviewed workflow",
         "phases": [{"id": "work", "description": "Do the work"}],
-        "script": "neo.phase('work')",
-        "args": {"target": "core"},
-        "output_schema": {"type": "object"}
+        "script": "neo.phase('work')\nreturn {}",
+        "input_schema": {"type": "object"},
+        "output_schema": {"type": "object"},
+        "args": {"target": "core"}
     })
 }
 
@@ -30,7 +32,7 @@ fn harness_for_calls(calls: &[(&str, Value)]) -> FakeHarness {
     for (id, arguments) in calls {
         first.push(AiStreamEvent::ToolCallStart {
             id: (*id).to_owned(),
-            name: "RunWorkflow".to_owned(),
+            name: "Workflow".to_owned(),
         });
         first.push(AiStreamEvent::ToolCallEnd {
             id: (*id).to_owned(),
@@ -87,7 +89,7 @@ fn workflow_results(events: &[AgentEvent]) -> Vec<ToolResult> {
     events
         .iter()
         .filter_map(|event| match event {
-            AgentEvent::ToolExecutionFinished { name, result, .. } if name == "RunWorkflow" => {
+            AgentEvent::ToolExecutionFinished { name, result, .. } if name == "Workflow" => {
                 Some(result.clone())
             }
             _ => None,
@@ -96,41 +98,45 @@ fn workflow_results(events: &[AgentEvent]) -> Vec<ToolResult> {
 }
 
 #[tokio::test]
-async fn missing_capability_and_invalid_input_never_open_workflow_approval() {
+async fn invalid_workflow_input_never_opens_approval() {
     let session = tempfile::tempdir().unwrap();
     let approval_calls = Arc::new(AtomicUsize::new(0));
-    let harness = harness_for_calls(&[("missing", valid_input("missing"))]);
+
+    let harness = harness_for_calls(&[("unknown", json!({"action": "explode"}))]);
     let calls = Arc::clone(&approval_calls);
     let config = config_for(&harness, session.path(), PermissionMode::Ask).with_approval_handler(
         move |_| {
             calls.fetch_add(1, Ordering::AcqRel);
-            panic!("missing capability must not prompt")
+            panic!("invalid action must not prompt")
         },
     );
     let (events, _) = run(&harness, config).await;
     assert_eq!(approval_calls.load(Ordering::Acquire), 0);
-    assert!(
-        workflow_results(&events)[0]
-            .content
-            .contains("requires a launch capability")
-    );
+    let details = workflow_results(&events)[0]
+        .details
+        .clone()
+        .expect("structured details");
+    assert_eq!(details["ok"], false);
+    assert_eq!(details["error"]["code"], "workflow_action_invalid");
+    assert_eq!(details["error"]["side_effect_occurred"], false);
 
-    let harness = harness_for_calls(&[("invalid", json!({"title": "legacy"}))]);
+    let harness = harness_for_calls(&[("missing", json!({"action": "run_inline"}))]);
     let calls = Arc::clone(&approval_calls);
     let config = config_for(&harness, session.path(), PermissionMode::Ask).with_approval_handler(
         move |_| {
             calls.fetch_add(1, Ordering::AcqRel);
-            panic!("invalid input must not prompt")
+            panic!("missing fields must not prompt")
         },
     );
-    config.workflow_capability.grant();
-    let (events, config) = run(&harness, config).await;
+    let (events, _) = run(&harness, config).await;
     assert_eq!(approval_calls.load(Ordering::Acquire), 0);
-    assert_eq!(
-        workflow_results(&events)[0].details.as_ref().unwrap()["kind"],
-        "invalid_workflow_input"
-    );
-    assert!(config.workflow_capability.inspect());
+    let details = workflow_results(&events)[0]
+        .details
+        .clone()
+        .expect("structured details");
+    assert_eq!(details["ok"], false);
+    assert_eq!(details["error"]["code"], "workflow_input_invalid");
+    assert_eq!(details["error"]["side_effect_occurred"], false);
 }
 
 #[tokio::test]
@@ -138,7 +144,7 @@ async fn source_and_run_metadata_limits_return_typed_invalid_input() {
     for (input, limits) in [
         {
             let mut input = valid_input("source-limit");
-            input["script"] = Value::String("neo.phase('work')".to_owned());
+            input["script"] = Value::String("neo.phase('work')\nreturn {}".to_owned());
             let limits = neo_agent_core::workflow::WorkflowLimits {
                 lua_source_bytes: 8,
                 ..Default::default()
@@ -159,15 +165,20 @@ async fn source_and_run_metadata_limits_return_typed_invalid_input() {
         let harness = harness_for_calls(&[("invalid", input)]);
         let mut config = config_for(&harness, session.path(), PermissionMode::Auto);
         config.workflow_runtime = neo_agent_core::workflow::WorkflowRuntime::new(limits);
-        config.workflow_capability.grant();
 
         let (events, config) = run(&harness, config).await;
         let result = &workflow_results(&events)[0];
-        assert_eq!(
-            result.details.as_ref().unwrap()["kind"],
-            "invalid_workflow_input"
+        assert!(result.is_error);
+        let details = result.details.as_ref().expect("structured details");
+        assert_eq!(details["ok"], false);
+        assert!(
+            matches!(
+                details["error"]["code"].as_str().unwrap_or_default(),
+                "workflow_input_invalid" | "workflow_definition_invalid"
+            ),
+            "unexpected error code: {details}"
         );
-        assert!(config.workflow_capability.inspect());
+        assert_eq!(details["error"]["side_effect_occurred"], false);
         assert!(config.background_tasks.list(false, 10).await.is_empty());
     }
 }
@@ -188,7 +199,7 @@ async fn ask_launch_uses_typed_full_review_and_returns_registered_running_task()
                 panic!("typed workflow presentation")
             };
             assert_eq!(workflow.name, "reviewed");
-            assert_eq!(workflow.source, "neo.phase('work')");
+            assert_eq!(workflow.source, "neo.phase('work')\nreturn {}");
             assert!(workflow.warning.contains("orchestration only"));
             assert_eq!(workflow.phases, ["work: Do the work"]);
             ApprovalResponse::Selected {
@@ -198,7 +209,6 @@ async fn ask_launch_uses_typed_full_review_and_returns_registered_running_task()
             }
         },
     );
-    config.workflow_capability.grant();
     config
         .workflow_runtime
         .bind_runner({
@@ -220,7 +230,7 @@ async fn ask_launch_uses_typed_full_review_and_returns_registered_running_task()
     worker_started.notified().await;
     let result = &workflow_results(&events)[0];
     assert!(!result.is_error);
-    let task_id = result.details.as_ref().unwrap()["task_id"]
+    let task_id = result.details.as_ref().unwrap()["task"]["task_id"]
         .as_str()
         .unwrap();
     assert_eq!(result.details.as_ref().unwrap()["status"], "running");
@@ -234,7 +244,6 @@ async fn ask_launch_uses_typed_full_review_and_returns_registered_running_task()
         handle.snapshot().await.state,
         neo_agent_core::workflow::WorkflowState::Running
     );
-    assert!(!config.workflow_capability.inspect());
     worker_release.notify_one();
 }
 
@@ -248,7 +257,6 @@ async fn workflow_projection_emits_started_updated_and_finished_after_durable_tr
     );
     let harness = harness_for_calls(&[("launch", input)]);
     let config = config_for(&harness, session.path(), PermissionMode::Auto);
-    config.workflow_capability.grant();
     let idle_events = Arc::new(Mutex::new(Vec::new()));
     let captured = Arc::clone(&idle_events);
     let _idle_lease = config
@@ -260,7 +268,7 @@ async fn workflow_projection_emits_started_updated_and_finished_after_durable_tr
         .expect("idle workflow event route");
 
     let (mut events, config) = run(&harness, config).await;
-    let task_id = workflow_results(&events)[0].details.as_ref().unwrap()["task_id"]
+    let task_id = workflow_results(&events)[0].details.as_ref().unwrap()["task"]["task_id"]
         .as_str()
         .unwrap()
         .to_owned();
@@ -335,15 +343,15 @@ async fn workflow_projection_emits_started_updated_and_finished_after_durable_tr
 }
 
 #[tokio::test]
-async fn ask_revise_preserves_capability_and_cancel_revokes_without_run() {
-    for (action, remains) in [
+async fn ask_revise_and_cancel_create_no_run() {
+    for (action, expect_error) in [
         (
             ApprovalAction::ReviseWorkflow {
                 preset_feedback: None,
             },
-            true,
+            false,
         ),
-        (ApprovalAction::CancelWorkflow, false),
+        (ApprovalAction::CancelWorkflow, true),
     ] {
         let session = tempfile::tempdir().unwrap();
         let harness = harness_for_calls(&[("review", valid_input("review"))]);
@@ -355,25 +363,33 @@ async fn ask_revise_preserves_capability_and_cancel_revokes_without_run() {
                 feedback: matches!(selected, ApprovalAction::ReviseWorkflow { .. })
                     .then(|| "split the phases".to_owned()),
             });
-        config.workflow_capability.grant();
         let (events, config) = run(&harness, config).await;
-        assert_eq!(config.workflow_capability.inspect(), remains);
         assert!(config.background_tasks.list(false, 10).await.is_empty());
-        assert_ne!(workflow_results(&events)[0].is_error, remains);
+        let result = &workflow_results(&events)[0];
+        assert_eq!(result.is_error, expect_error);
+        if !expect_error {
+            assert!(
+                result
+                    .content
+                    .contains("No workflow save or run was created")
+            );
+        }
     }
 }
 
 #[tokio::test]
-async fn auto_and_yolo_cannot_bypass_capability_and_one_grant_launches_once() {
+async fn auto_and_yolo_launch_without_slash_and_independent_launches_both_run() {
     for mode in [PermissionMode::Auto, PermissionMode::Yolo] {
         let session = tempfile::tempdir().unwrap();
-        let harness = harness_for_calls(&[("missing", valid_input("missing"))]);
-        let (events, _) = run(&harness, config_for(&harness, session.path(), mode)).await;
+        let harness = harness_for_calls(&[("launch", valid_input("direct"))]);
+        let (events, config) = run(&harness, config_for(&harness, session.path(), mode)).await;
+        let result = &workflow_results(&events)[0];
         assert!(
-            workflow_results(&events)[0]
-                .content
-                .contains("requires a launch capability")
+            !result.is_error,
+            "{mode:?} launch failed: {}",
+            result.content
         );
+        assert_eq!(config.background_tasks.list(false, 10).await.len(), 1);
     }
 
     let session = tempfile::tempdir().unwrap();
@@ -382,29 +398,153 @@ async fn auto_and_yolo_cannot_bypass_capability_and_one_grant_launches_once() {
         ("second", valid_input("second")),
     ]);
     let config = config_for(&harness, session.path(), PermissionMode::Auto);
-    config.workflow_capability.grant();
     let (events, config) = run(&harness, config).await;
     let results = workflow_results(&events);
-    assert_eq!(results.iter().filter(|result| !result.is_error).count(), 1);
-    assert_eq!(results.iter().filter(|result| result.is_error).count(), 1);
-    assert_eq!(config.background_tasks.list(false, 10).await.len(), 1);
+    assert_eq!(results.iter().filter(|result| !result.is_error).count(), 2);
+    assert_eq!(config.background_tasks.list(false, 10).await.len(), 2);
 }
 
 #[tokio::test]
-async fn durable_create_failure_rolls_reservation_back() {
+async fn durable_create_failure_returns_typed_error_without_run() {
     let root = tempfile::tempdir().unwrap();
     let session_file = root.path().join("not-a-directory");
     std::fs::write(&session_file, b"x").unwrap();
     let harness = harness_for_calls(&[("create", valid_input("create"))]);
     let config = config_for(&harness, &session_file, PermissionMode::Auto);
-    config.workflow_capability.grant();
     let (events, config) = run(&harness, config).await;
-    assert!(
-        workflow_results(&events)[0]
-            .content
-            .contains("workflow launch failed")
+    let result = &workflow_results(&events)[0];
+    assert!(result.is_error);
+    let details = result.details.as_ref().expect("structured details");
+    assert_eq!(details["ok"], false);
+    assert_eq!(details["error"]["side_effect_occurred"], false);
+    assert!(config.background_tasks.list(false, 10).await.is_empty());
+}
+
+#[tokio::test]
+async fn ask_save_uses_typed_save_review_and_persists_pair() {
+    let session = tempfile::tempdir().unwrap();
+    let workspace = tempfile::tempdir().unwrap();
+    let neo_home = tempfile::tempdir().unwrap();
+    let registry = neo_agent_core::workflow::WorkflowDefinitionRegistry::new(
+        neo_agent_core::workflow::WorkflowDefinitionRegistryConfig {
+            neo_home: neo_home.path().to_path_buf(),
+            workspace: workspace.path().to_path_buf(),
+            project_trusted: true,
+            limits: neo_agent_core::workflow::WorkflowLimits::default(),
+            builtins: Vec::new(),
+        },
     );
-    assert!(config.workflow_capability.inspect());
+    let save_input = json!({
+        "action": "save",
+        "name": "save-review",
+        "description": "Persist a reviewed workflow",
+        "phases": [{"id": "work", "description": "Do the work"}],
+        "script": "neo.phase('work')\nreturn {}",
+        "input_schema": {"type": "object"},
+        "output_schema": {"type": "object"},
+        "scope": "user"
+    });
+    let harness = harness_for_calls(&[("save", save_input)]);
+    let config = config_for(&harness, session.path(), PermissionMode::Ask)
+        .with_workflow_definitions(registry)
+        .with_approval_handler(|request| {
+            assert_eq!(
+                request.operation,
+                neo_agent_core::PermissionOperation::WorkflowSave
+            );
+            let neo_agent_core::ApprovalPresentation::WorkflowSave { save, .. } =
+                &request.presentation
+            else {
+                panic!("typed workflow save presentation")
+            };
+            assert_eq!(save.name, "save-review");
+            assert_eq!(save.scope, "user");
+            assert!(!save.replace);
+            assert!(
+                save.source_path.ends_with("save-review.lua"),
+                "{}",
+                save.source_path.display()
+            );
+            assert!(
+                save.manifest_path.ends_with("save-review.workflow.toml"),
+                "{}",
+                save.manifest_path.display()
+            );
+            assert_eq!(save.phases, ["work: Do the work"]);
+            assert!(save.warning.contains("does not launch"));
+            ApprovalResponse::Selected {
+                request_id: request.id.clone(),
+                action: ApprovalAction::SaveWorkflow,
+                feedback: None,
+            }
+        });
+    let (events, config) = run(&harness, config).await;
+    let result = &workflow_results(&events)[0];
+    assert!(!result.is_error, "save failed: {}", result.content);
+    let details = result.details.as_ref().expect("structured details");
+    assert_eq!(details["ok"], true);
+    assert_eq!(details["status"], "saved");
+    let pair_dir = neo_home.path().join("workflows");
+    assert!(pair_dir.join("save-review.lua").is_file());
+    assert!(pair_dir.join("save-review.workflow.toml").is_file());
+    assert!(config.background_tasks.list(false, 10).await.is_empty());
+}
+
+#[tokio::test]
+async fn invalid_saved_run_args_fail_before_approval_opens() {
+    let session = tempfile::tempdir().unwrap();
+    let workspace = tempfile::tempdir().unwrap();
+    let neo_home = tempfile::tempdir().unwrap();
+    let registry = neo_agent_core::workflow::WorkflowDefinitionRegistry::new(
+        neo_agent_core::workflow::WorkflowDefinitionRegistryConfig {
+            neo_home: neo_home.path().to_path_buf(),
+            workspace: workspace.path().to_path_buf(),
+            project_trusted: true,
+            limits: neo_agent_core::workflow::WorkflowLimits::default(),
+            builtins: Vec::new(),
+        },
+    );
+    registry
+        .save(
+            neo_agent_core::workflow::WorkflowSaveScope::User,
+            &neo_agent_core::workflow::WorkflowSaveRequest {
+                display_name: "typed-args".to_owned(),
+                name: "typed-args".to_owned(),
+                description: "Requires an integer target".to_owned(),
+                phases: vec![neo_agent_core::workflow::WorkflowPhase {
+                    id: "work".to_owned(),
+                    description: "Do the work".to_owned(),
+                }],
+                lua_source: "neo.phase('work')\nreturn {}".to_owned(),
+                input_schema: Some(json!({
+                    "type": "object",
+                    "properties": { "target": { "type": "integer" } },
+                    "required": ["target"]
+                })),
+                output_schema: json!({"type": "object"}),
+            },
+            false,
+        )
+        .expect("seed saved definition");
+    let harness = harness_for_calls(&[(
+        "run",
+        json!({"action": "run_saved", "name": "typed-args", "args": {"target": "nope"}}),
+    )]);
+    let approval_calls = Arc::new(AtomicUsize::new(0));
+    let calls = Arc::clone(&approval_calls);
+    let config = config_for(&harness, session.path(), PermissionMode::Ask)
+        .with_workflow_definitions(registry)
+        .with_approval_handler(move |_| {
+            calls.fetch_add(1, Ordering::AcqRel);
+            panic!("invalid args must not prompt")
+        });
+    let (events, config) = run(&harness, config).await;
+    assert_eq!(approval_calls.load(Ordering::Acquire), 0);
+    let result = &workflow_results(&events)[0];
+    assert!(result.is_error);
+    let details = result.details.as_ref().expect("structured details");
+    assert_eq!(details["error"]["code"], "workflow_input_invalid");
+    assert_eq!(details["error"]["side_effect_occurred"], false);
     assert!(config.background_tasks.list(false, 10).await.is_empty());
 }
 

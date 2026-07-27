@@ -55,7 +55,7 @@ pub use registry::{
     BuiltinWorkflowDefinition, MANIFEST_SUFFIX, PROJECT_WORKFLOWS_DIR, RegistryDefinitionSummary,
     SOURCE_SUFFIX, USER_WORKFLOWS_DIR, WorkflowDefinitionRegistry,
     WorkflowDefinitionRegistryConfig, WorkflowListScope, WorkflowSaveRequest, WorkflowSaveScope,
-    pin_resolved_source,
+    WorkflowSaveTarget, pin_resolved_source,
 };
 
 pub use admission::{

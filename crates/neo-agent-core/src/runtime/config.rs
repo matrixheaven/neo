@@ -162,6 +162,12 @@ pub struct AgentConfig {
     #[serde(skip)]
     #[schemars(skip)]
     pub workflow_runtime: crate::workflow::WorkflowRuntime,
+    /// Session-shared trusted workflow definition registry (list/resolve/save
+    /// projection). Permission preparation and the root `Workflow` tool both
+    /// read this single owner.
+    #[serde(skip)]
+    #[schemars(skip)]
+    pub workflow_definitions: crate::workflow::WorkflowDefinitionRegistry,
     /// Live dependencies used by workflow-hosted tool calls. Every invocation
     /// snapshots this resolver before awaiting permission or execution.
     #[serde(skip)]
@@ -284,6 +290,7 @@ impl AgentConfig {
             workflow_runtime: crate::workflow::WorkflowRuntime::new(
                 crate::workflow::WorkflowLimits::default(),
             ),
+            workflow_definitions: crate::workflow::WorkflowDefinitionRegistry::empty(),
             workflow_dispatch_resolver: super::workflow_dispatch::WorkflowDispatchResolver::default(
             ),
             workflow_execution_origin: None,
@@ -571,6 +578,16 @@ impl AgentConfig {
         workflow_runtime: crate::workflow::WorkflowRuntime,
     ) -> Self {
         self.workflow_runtime = workflow_runtime;
+        self
+    }
+
+    /// Replace the session-shared trusted workflow definition registry.
+    #[must_use]
+    pub fn with_workflow_definitions(
+        mut self,
+        workflow_definitions: crate::workflow::WorkflowDefinitionRegistry,
+    ) -> Self {
+        self.workflow_definitions = workflow_definitions;
         self
     }
 

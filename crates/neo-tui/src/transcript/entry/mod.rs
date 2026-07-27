@@ -82,7 +82,8 @@ impl ApprovalPromptData {
             | ApprovalPresentation::Write { title, .. }
             | ApprovalPresentation::Plan { title, .. }
             | ApprovalPresentation::Goal { title, .. }
-            | ApprovalPresentation::Workflow { title, .. } => title.as_str(),
+            | ApprovalPresentation::Workflow { title, .. }
+            | ApprovalPresentation::WorkflowSave { title, .. } => title.as_str(),
         }
     }
 
@@ -1056,6 +1057,11 @@ fn render_approval_body(
         rows.extend(PlanBoxComponent::source(workflow.source.clone(), "lua").render(width, theme));
         rows.push(Line::raw(""));
     }
+
+    if let ApprovalPresentation::WorkflowSave { save, .. } = &data.request.presentation {
+        rows.extend(PlanBoxComponent::source(save.source.clone(), "lua").render(width, theme));
+        rows.push(Line::raw(""));
+    }
 }
 
 fn render_approval_options(
@@ -1160,6 +1166,29 @@ fn presentation_detail_lines(presentation: &ApprovalPresentation) -> Vec<String>
                 workflow.line_count, workflow.byte_count
             ));
             lines.push(workflow.warning.clone());
+            lines
+        }
+        ApprovalPresentation::WorkflowSave { save, .. } => {
+            let mut lines = vec![
+                format!("name: {}", save.name),
+                format!("description: {}", save.description),
+                format!("scope: {}", save.scope),
+                format!("source: {}", save.source_path.display()),
+                format!("manifest: {}", save.manifest_path.display()),
+                if save.replace {
+                    "state: replace existing definition".to_owned()
+                } else {
+                    "state: create new definition".to_owned()
+                },
+            ];
+            lines.extend(save.phases.iter().map(|phase| format!("phase: {phase}")));
+            lines.push(format!(
+                "source: {} lines, {} bytes",
+                save.line_count, save.byte_count
+            ));
+            lines.push(format!("input_schema: {}", save.input_schema));
+            lines.push(format!("output_schema: {}", save.output_schema));
+            lines.push(save.warning.clone());
             lines
         }
     }

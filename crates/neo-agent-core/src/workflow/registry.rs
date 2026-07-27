@@ -50,6 +50,16 @@ impl WorkflowSaveScope {
     }
 }
 
+/// Read-only save-target preview returned by
+/// [`WorkflowDefinitionRegistry::save_target`].
+#[derive(Debug, Clone)]
+pub struct WorkflowSaveTarget {
+    pub source_path: PathBuf,
+    pub manifest_path: PathBuf,
+    /// Validated name used to derive the pair paths.
+    pub name: WorkflowName,
+}
+
 /// Optional list / filter scope (includes effective merge).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum WorkflowListScope {
@@ -313,6 +323,28 @@ impl WorkflowDefinitionRegistry {
     #[must_use]
     pub fn project_workflows_dir(workspace: &Path) -> PathBuf {
         workspace.join(PROJECT_WORKFLOWS_DIR)
+    }
+
+    /// Read-only preview of the pair paths a `save` would target, plus the
+    /// validated name. Writes nothing and never mutates the projection.
+    pub fn save_target(
+        &self,
+        scope: WorkflowSaveScope,
+        name: &str,
+    ) -> Result<WorkflowSaveTarget, WorkflowError> {
+        let name = WorkflowName::parse(name.trim())?;
+        let root = {
+            let inner = self.lock();
+            match scope {
+                WorkflowSaveScope::User => Self::user_workflows_dir(&inner.config.neo_home),
+                WorkflowSaveScope::Project => Self::project_workflows_dir(&inner.config.workspace),
+            }
+        };
+        Ok(WorkflowSaveTarget {
+            source_path: root.join(format!("{}{SOURCE_SUFFIX}", name.as_str())),
+            manifest_path: root.join(format!("{}{MANIFEST_SUFFIX}", name.as_str())),
+            name,
+        })
     }
 
     /// Atomic no-clobber save of a paired definition into user or project scope.

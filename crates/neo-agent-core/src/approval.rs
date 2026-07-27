@@ -65,6 +65,26 @@ pub struct WorkflowApprovalPresentation {
     pub warning: String,
 }
 
+/// Presentation-only projection of a prepared Workflow `save` review. Carries
+/// the exact pair paths and create/replace state the user is approving.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, JsonSchema)]
+pub struct WorkflowSaveApprovalPresentation {
+    pub name: String,
+    pub description: String,
+    pub scope: String,
+    pub source_path: PathBuf,
+    pub manifest_path: PathBuf,
+    /// True when an existing pair in the target scope will be replaced.
+    pub replace: bool,
+    pub phases: Vec<String>,
+    pub source: String,
+    pub line_count: usize,
+    pub byte_count: usize,
+    pub input_schema: String,
+    pub output_schema: String,
+    pub warning: String,
+}
+
 /// Explicit created-versus-overwritten preview for a prepared Write target.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, JsonSchema)]
 #[serde(tag = "operation", rename_all = "snake_case")]
@@ -109,6 +129,10 @@ pub enum ApprovalPresentation {
         title: String,
         workflow: WorkflowApprovalPresentation,
     },
+    WorkflowSave {
+        title: String,
+        save: Box<WorkflowSaveApprovalPresentation>,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
@@ -124,6 +148,7 @@ pub enum ApprovalAction {
     StartGoal,
     ReviseGoal { preset_feedback: Option<String> },
     RejectGoal,
+    SaveWorkflow,
     LaunchWorkflow,
     ReviseWorkflow { preset_feedback: Option<String> },
     CancelWorkflow,

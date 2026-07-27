@@ -36,6 +36,7 @@ pub enum PermissionOperation {
     Shell,
     Tool,
     UserQuestion,
+    WorkflowSave,
     WorkflowLaunch,
     PlanTransition,
     GoalTransition,

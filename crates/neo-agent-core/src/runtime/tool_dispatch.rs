@@ -1831,7 +1831,7 @@ fn default_tool_context(seed: ToolContextSeed<'_>) -> Result<ToolContext, AgentR
         .bind_workflow_runtime(&config.workflow_runtime)
         .map_err(|error| {
             AgentRuntimeError::Tool(ToolError::InvalidInput {
-                tool: "RunWorkflow".to_owned(),
+                tool: "Workflow".to_owned(),
                 message: error.to_string(),
             })
         })?;
@@ -1868,6 +1868,7 @@ fn default_tool_context(seed: ToolContextSeed<'_>) -> Result<ToolContext, AgentR
                 .with_shell_runtime(config.shell_runtime.clone())
                 .with_workflow_capability(config.workflow_capability.clone())
                 .with_workflow_runtime(config.workflow_runtime.clone())
+                .with_workflow_definitions(config.workflow_definitions.clone())
                 .with_multi_agent(multi_agent)
                 .with_child_runtime(config.clone(), model, registry, turn)
                 .with_parent_instruction_state(parent_instruction_state);

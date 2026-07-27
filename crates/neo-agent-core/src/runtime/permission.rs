@@ -130,41 +130,12 @@ pub(super) fn permission_preparation_for_mode(
         return prep;
     }
 
-    // Workflow capability is independent launch authority. Validate it and
-    // the complete typed input before Auto/Yolo shortcuts or Ask presentation.
-    if tool_call.name.as_ref() == "RunWorkflow" {
-        if !config.workflow_capability.inspect() {
-            return PermissionPreparation::Deny(
-                "RunWorkflow requires a launch capability. Use the exact /workflow slash command first."
-                    .to_owned(),
-            );
-        }
-        let input = match crate::tools::workflow::validated_input(arguments) {
-            Ok(input) => input,
-            Err(error) => {
-                return PermissionPreparation::Terminal(
-                    crate::tools::workflow::invalid_input_result(error),
-                );
-            }
-        };
-        if let Err(error) = config
-            .workflow_runtime
-            .validate_launch_request(&input.launch_request(mode))
-        {
-            return PermissionPreparation::Terminal(crate::tools::workflow::invalid_input_result(
-                error.to_string(),
-            ));
-        }
-        return if mode == PermissionMode::Ask {
-            PermissionPreparation::Ask {
-                operation: PermissionOperation::WorkflowLaunch,
-                subject: "Launch workflow".to_owned(),
-                session_scope: None,
-                prefix_rule: None,
-            }
-        } else {
-            PermissionPreparation::Run(access_for_tool(tool_call, true))
-        };
+    // Workflow actions route through normal permission semantics. The
+    // canonical parser owns the action matrix: read/validate actions run
+    // directly, save and run actions open typed reviews in Ask mode, and plan
+    // mode denies mutations. No capability, nonce, or hidden authorization.
+    if tool_call.name.as_ref() == "Workflow" {
+        return workflow_permission_preparation(config, tool_call, arguments, mode);
     }
 
     // 2-5. Mode/tool-specific early returns (auto mode, EnterPlanMode, background AskUser).
@@ -205,6 +176,193 @@ pub(super) fn permission_preparation_for_mode(
         subject,
         session_scope,
         prefix_rule,
+    }
+}
+
+/// Action-aware Workflow preparation. Parses once through the canonical
+/// action parser, then applies the permission matrix from the approved
+/// contract: read/validate run directly everywhere, save/run open typed
+/// reviews in Ask mode, and plan mode denies save/run only.
+fn workflow_permission_preparation(
+    config: &AgentConfig,
+    tool_call: &AgentToolCall,
+    arguments: &serde_json::Value,
+    mode: PermissionMode,
+) -> PermissionPreparation {
+    use crate::tools::workflow::PreparedWorkflowAction;
+
+    let prepared = match crate::tools::workflow::prepare_action(arguments) {
+        Ok(prepared) => prepared,
+        Err(error) => {
+            return PermissionPreparation::Terminal(crate::tools::workflow::input_error_result(
+                error,
+            ));
+        }
+    };
+    let plan_active = config
+        .plan_mode
+        .read()
+        .ok()
+        .is_some_and(|plan_mode| plan_mode.is_active());
+    match &prepared {
+        PreparedWorkflowAction::List { .. }
+        | PreparedWorkflowAction::Show { .. }
+        | PreparedWorkflowAction::ValidateInline { .. }
+        | PreparedWorkflowAction::ValidateSaved { .. } => {
+            PermissionPreparation::Run(access_for_tool(tool_call, true))
+        }
+        PreparedWorkflowAction::Save { request, .. } => {
+            if plan_active {
+                return PermissionPreparation::Deny(
+                    "blocked by plan mode: Workflow save is not allowed while planning".to_owned(),
+                );
+            }
+            if let Err(result) = workflow_save_preflight(config, request) {
+                return PermissionPreparation::Terminal(result);
+            }
+            if mode == PermissionMode::Ask {
+                PermissionPreparation::Ask {
+                    operation: PermissionOperation::WorkflowSave,
+                    subject: format!("Save workflow `{}`", request.name),
+                    session_scope: None,
+                    prefix_rule: None,
+                }
+            } else {
+                PermissionPreparation::Run(access_for_tool(tool_call, true))
+            }
+        }
+        PreparedWorkflowAction::RunInline { definition, args } => {
+            if plan_active {
+                return PermissionPreparation::Deny(
+                    "blocked by plan mode: Workflow run is not allowed while planning".to_owned(),
+                );
+            }
+            match crate::workflow::resolve_dynamic_definition(
+                definition.clone(),
+                &config.workflow_runtime.limits(),
+            ) {
+                Ok(resolved) => workflow_run_preparation(
+                    config,
+                    tool_call,
+                    &resolved,
+                    args.clone(),
+                    crate::tools::workflow::WorkflowAction::RunInline,
+                    mode,
+                ),
+                Err(error) => {
+                    PermissionPreparation::Terminal(crate::tools::workflow::preflight_error_result(
+                        crate::tools::workflow::WorkflowAction::RunInline,
+                        error,
+                    ))
+                }
+            }
+        }
+        PreparedWorkflowAction::RunSaved { name, args } => {
+            if plan_active {
+                return PermissionPreparation::Deny(
+                    "blocked by plan mode: Workflow run is not allowed while planning".to_owned(),
+                );
+            }
+            match config.workflow_definitions.resolve(name) {
+                Ok(resolved) => workflow_run_preparation(
+                    config,
+                    tool_call,
+                    &resolved,
+                    args.clone(),
+                    crate::tools::workflow::WorkflowAction::RunSaved,
+                    mode,
+                ),
+                Err(error) => {
+                    PermissionPreparation::Terminal(crate::tools::workflow::preflight_error_result(
+                        crate::tools::workflow::WorkflowAction::RunSaved,
+                        error,
+                    ))
+                }
+            }
+        }
+    }
+}
+
+fn workflow_workspace_identity(config: &AgentConfig) -> String {
+    config
+        .workspace_root
+        .as_deref()
+        .map_or_else(|| ".".to_owned(), |root| root.display().to_string())
+}
+
+/// Zero-effect definition validation for `save` before an Ask review opens.
+fn workflow_save_preflight(
+    config: &AgentConfig,
+    request: &crate::workflow::WorkflowSaveRequest,
+) -> Result<(), ToolResult> {
+    let definition = crate::workflow::resolve_dynamic_definition(
+        crate::workflow::DynamicWorkflowDefinitionInput {
+            name: request.name.clone(),
+            display_name: Some(request.display_name.clone()),
+            description: request.description.clone(),
+            phases: request.phases.clone(),
+            script: request.lua_source.clone(),
+            input_schema: request.input_schema.clone(),
+            output_schema: request.output_schema.clone(),
+        },
+        &config.workflow_runtime.limits(),
+    )
+    .map_err(|error| {
+        crate::tools::workflow::preflight_error_result(
+            crate::tools::workflow::WorkflowAction::Save,
+            error,
+        )
+    })?;
+    crate::tools::workflow::preflight_run(
+        &definition,
+        serde_json::json!({}),
+        crate::tools::workflow::WorkflowAction::Save,
+        workflow_workspace_identity(config),
+        current_permission_mode(config),
+        &config.workflow_runtime,
+        false,
+    )
+    .map_err(|error| {
+        crate::tools::workflow::preflight_error_result(
+            crate::tools::workflow::WorkflowAction::Save,
+            error,
+        )
+    })
+}
+
+/// Zero-effect launch preflight plus the Ask/Auto/Yolo decision for run
+/// actions. Invalid definitions or arguments finish terminally before any
+/// approval dialog opens.
+fn workflow_run_preparation(
+    config: &AgentConfig,
+    tool_call: &AgentToolCall,
+    definition: &crate::workflow::ResolvedWorkflowDefinition,
+    args: serde_json::Value,
+    action: crate::tools::workflow::WorkflowAction,
+    mode: PermissionMode,
+) -> PermissionPreparation {
+    if let Err(error) = crate::tools::workflow::preflight_run(
+        definition,
+        args,
+        action,
+        workflow_workspace_identity(config),
+        mode,
+        &config.workflow_runtime,
+        true,
+    ) {
+        return PermissionPreparation::Terminal(crate::tools::workflow::preflight_error_result(
+            action, error,
+        ));
+    }
+    if mode == PermissionMode::Ask {
+        PermissionPreparation::Ask {
+            operation: PermissionOperation::WorkflowLaunch,
+            subject: format!("Launch workflow `{}`", definition.name.as_str()),
+            session_scope: None,
+            prefix_rule: None,
+        }
+    } else {
+        PermissionPreparation::Run(access_for_tool(tool_call, true))
     }
 }
 
@@ -590,8 +748,8 @@ fn ordinary_approval_presentation(
             title: "User question".to_owned(),
             details: compact_details([Some(subject.to_owned())]),
         },
-        PermissionOperation::WorkflowLaunch => {
-            unreachable!("WorkflowLaunch uses its dedicated presentation builder")
+        PermissionOperation::WorkflowSave | PermissionOperation::WorkflowLaunch => {
+            unreachable!("Workflow save/launch use dedicated presentation builders")
         }
         PermissionOperation::PlanTransition | PermissionOperation::GoalTransition => {
             unreachable!("Plan/Goal use dedicated presentation builders")
@@ -683,7 +841,7 @@ fn goal_approval_options() -> Vec<ApprovalOption> {
     ]
 }
 
-fn workflow_approval_options() -> Vec<ApprovalOption> {
+fn workflow_launch_approval_options() -> Vec<ApprovalOption> {
     vec![
         ApprovalOption {
             label: "Launch".to_owned(),
@@ -692,14 +850,36 @@ fn workflow_approval_options() -> Vec<ApprovalOption> {
         },
         ApprovalOption {
             label: "Revise".to_owned(),
-            description: Some("Return feedback without consuming the capability.".to_owned()),
+            description: Some("Return feedback without creating a run.".to_owned()),
             action: ApprovalAction::ReviseWorkflow {
                 preset_feedback: None,
             },
         },
         ApprovalOption {
             label: "Cancel".to_owned(),
-            description: Some("Revoke the capability without creating a run.".to_owned()),
+            description: Some("Cancel without creating a run.".to_owned()),
+            action: ApprovalAction::CancelWorkflow,
+        },
+    ]
+}
+
+fn workflow_save_approval_options() -> Vec<ApprovalOption> {
+    vec![
+        ApprovalOption {
+            label: "Save".to_owned(),
+            description: None,
+            action: ApprovalAction::SaveWorkflow,
+        },
+        ApprovalOption {
+            label: "Revise".to_owned(),
+            description: Some("Return feedback without saving.".to_owned()),
+            action: ApprovalAction::ReviseWorkflow {
+                preset_feedback: None,
+            },
+        },
+        ApprovalOption {
+            label: "Cancel".to_owned(),
+            description: Some("Cancel without saving.".to_owned()),
             action: ApprovalAction::CancelWorkflow,
         },
     ]
@@ -713,11 +893,15 @@ fn with_workflow_origin(mut request: ApprovalRequest, config: &AgentConfig) -> A
 }
 
 fn build_workflow_approval_request(
+    config: &AgentConfig,
     turn: u32,
     tool_call: &AgentToolCall,
     arguments: &serde_json::Value,
-) -> Result<ApprovalRequest, String> {
-    let workflow = crate::tools::workflow::approval_presentation(arguments)?;
+) -> Result<ApprovalRequest, ToolResult> {
+    let workflow = crate::tools::workflow::launch_approval_presentation(
+        arguments,
+        &config.workflow_definitions,
+    )?;
     Ok(ApprovalRequest {
         turn,
         id: tool_call.id.to_string(),
@@ -726,7 +910,30 @@ fn build_workflow_approval_request(
             title: "Launch workflow?".to_owned(),
             workflow,
         },
-        options: workflow_approval_options(),
+        options: workflow_launch_approval_options(),
+        workflow_origin: None,
+    })
+}
+
+fn build_workflow_save_approval_request(
+    config: &AgentConfig,
+    turn: u32,
+    tool_call: &AgentToolCall,
+    arguments: &serde_json::Value,
+) -> Result<ApprovalRequest, ToolResult> {
+    let save = crate::tools::workflow::save_approval_presentation(
+        arguments,
+        &config.workflow_definitions,
+    )?;
+    Ok(ApprovalRequest {
+        turn,
+        id: tool_call.id.to_string(),
+        operation: PermissionOperation::WorkflowSave,
+        presentation: ApprovalPresentation::WorkflowSave {
+            title: "Save workflow?".to_owned(),
+            save: Box::new(save),
+        },
+        options: workflow_save_approval_options(),
         workflow_origin: None,
     })
 }
@@ -946,19 +1153,6 @@ fn revise_approval(mode: &str, feedback: Option<String>) -> AppliedApproval {
     }
 }
 
-fn cancel_workflow_approval(config: &AgentConfig) -> AppliedApproval {
-    config.workflow_capability.revoke_now();
-    AppliedApproval::Terminal {
-        result: permission_error(
-            PermissionOperation::WorkflowLaunch,
-            "Launch workflow",
-            PermissionTerminalDecision::Cancelled,
-            "approval cancelled",
-        ),
-        permission_decision: Some(PermissionTerminalDecision::Cancelled),
-    }
-}
-
 fn apply_approval_resolution(
     config: &AgentConfig,
     operation: PermissionOperation,
@@ -966,22 +1160,20 @@ fn apply_approval_resolution(
     resolution: ApprovalResolution,
 ) -> AppliedApproval {
     match resolution {
-        ApprovalResolution::Cancelled { .. } => {
-            if operation == PermissionOperation::WorkflowLaunch {
-                config.workflow_capability.revoke_now();
-            }
-            AppliedApproval::Terminal {
-                result: permission_error(
-                    operation,
-                    subject,
-                    PermissionTerminalDecision::Cancelled,
-                    "approval cancelled",
-                ),
-                permission_decision: Some(PermissionTerminalDecision::Cancelled),
-            }
-        }
+        ApprovalResolution::Cancelled { .. } => AppliedApproval::Terminal {
+            result: permission_error(
+                operation,
+                subject,
+                PermissionTerminalDecision::Cancelled,
+                "approval cancelled",
+            ),
+            permission_decision: Some(PermissionTerminalDecision::Cancelled),
+        },
         ApprovalResolution::Selected {
-            action: ApprovalAction::PermitOnce | ApprovalAction::LaunchWorkflow,
+            action:
+                ApprovalAction::PermitOnce
+                | ApprovalAction::SaveWorkflow
+                | ApprovalAction::LaunchWorkflow,
             ..
         } => AppliedApproval::Allow { approval: None },
         ApprovalResolution::Selected {
@@ -1025,7 +1217,15 @@ fn apply_approval_resolution(
         ApprovalResolution::Selected {
             action: ApprovalAction::CancelWorkflow,
             ..
-        } => cancel_workflow_approval(config),
+        } => AppliedApproval::Terminal {
+            result: permission_error(
+                operation,
+                subject,
+                PermissionTerminalDecision::Cancelled,
+                "approval cancelled",
+            ),
+            permission_decision: Some(PermissionTerminalDecision::Cancelled),
+        },
         ApprovalResolution::Selected {
             action: ApprovalAction::RejectPlan,
             ..
@@ -1050,7 +1250,7 @@ fn apply_approval_resolution(
             ..
         } => AppliedApproval::Terminal {
             result: ToolResult::ok(format!(
-                "User requested workflow revisions. No run was created and the /workflow capability remains available.\n\nFeedback: {}",
+                "User requested workflow revisions. No workflow save or run was created.\n\nFeedback: {}",
                 feedback.unwrap_or_default()
             )),
             permission_decision: None,
@@ -1099,8 +1299,10 @@ fn approval_request(
             arguments,
         )),
         PermissionOperation::WorkflowLaunch => {
-            build_workflow_approval_request(input.turn, input.tool_call, arguments)
-                .map_err(crate::tools::workflow::invalid_input_result)
+            build_workflow_approval_request(config, input.turn, input.tool_call, arguments)
+        }
+        PermissionOperation::WorkflowSave => {
+            build_workflow_save_approval_request(config, input.turn, input.tool_call, arguments)
         }
         _ => Ok(build_ordinary_approval_request(
             input.turn,
@@ -1142,9 +1344,6 @@ async fn resolve_approval(
         tokio::select! {
             biased;
             () = cancel_token.cancelled() => {
-                if operation == PermissionOperation::WorkflowLaunch {
-                    config.workflow_capability.revoke_now();
-                }
                 emit_approval_resolved(
                     emitter,
                     request.turn,
@@ -1166,9 +1365,6 @@ async fn resolve_approval(
             response = handler(request.clone()) => response,
         }
     } else {
-        if operation == PermissionOperation::WorkflowLaunch {
-            config.workflow_capability.revoke_now();
-        }
         // No handler: close the request with Cancelled so UI/session never
         // leave an unpaired ApprovalRequested open.
         emit_approval_resolved(
@@ -1192,9 +1388,6 @@ async fn resolve_approval(
     let resolution = match request.validate_response(&response) {
         Ok(resolution) => resolution,
         Err(error) => {
-            if operation == PermissionOperation::WorkflowLaunch {
-                config.workflow_capability.revoke_now();
-            }
             // Invalid responses are rejected at the trust boundary; still emit a
             // terminal resolution so every ApprovalRequested has a pair.
             emit_approval_resolved(
@@ -1230,6 +1423,7 @@ fn permission_error(
         PermissionOperation::Shell => "shell",
         PermissionOperation::Tool => "tool",
         PermissionOperation::UserQuestion => "user question",
+        PermissionOperation::WorkflowSave => "workflow save",
         PermissionOperation::WorkflowLaunch => "workflow launch",
         PermissionOperation::PlanTransition => "plan transition",
         PermissionOperation::GoalTransition => "goal transition",
@@ -1685,5 +1879,167 @@ mod tests {
             raw_arguments: r#"{"duration_seconds":1,"reason":"wait"}"#.into(),
         };
         assert!(is_default_approved_tool(&call));
+    }
+
+    fn workflow_prepared(arguments: serde_json::Value) -> (AgentToolCall, PreparedToolCall) {
+        let call = AgentToolCall {
+            id: "call-workflow".into(),
+            name: "Workflow".into(),
+            raw_arguments: arguments.to_string().into(),
+        };
+        let prepared = PreparedToolCall {
+            id: call.id.to_string(),
+            name: call.name.to_string(),
+            raw_arguments: call.raw_arguments.to_string(),
+            arguments,
+            warning: None,
+            approval: None,
+            execution: PreparedExecution::Direct,
+        };
+        (call, prepared)
+    }
+
+    fn workflow_config(mode: PermissionMode) -> AgentConfig {
+        AgentConfig::for_model(fake_model()).with_permission_mode(mode)
+    }
+
+    fn inline_run_input() -> serde_json::Value {
+        json!({
+            "action": "run_inline",
+            "name": "perm-test",
+            "description": "Permission routing test",
+            "phases": [{"id": "work", "description": "Do the work"}],
+            "script": "neo.phase('work')\nreturn {}",
+            "input_schema": {"type": "object"},
+            "output_schema": {"type": "object"}
+        })
+    }
+
+    fn save_input() -> serde_json::Value {
+        let mut input = inline_run_input();
+        input["action"] = json!("save");
+        input["scope"] = json!("user");
+        input
+    }
+
+    #[test]
+    fn workflow_read_and_validate_actions_run_directly_in_ask_and_plan_mode() {
+        for arguments in [
+            json!({"action": "list"}),
+            json!({"action": "show", "name": "perm-test"}),
+            json!({"action": "validate_saved", "name": "perm-test"}),
+            {
+                let mut input = inline_run_input();
+                input["action"] = json!("validate_inline");
+                input
+            },
+        ] {
+            for mode in [
+                PermissionMode::Ask,
+                PermissionMode::Auto,
+                PermissionMode::Yolo,
+            ] {
+                let config = workflow_config(mode);
+                let (call, prepared) = workflow_prepared(arguments.clone());
+                let preparation = permission_preparation_for_mode(&config, &call, &prepared);
+                assert!(
+                    matches!(preparation, PermissionPreparation::Run(_)),
+                    "read/validate must run directly in {mode:?}: {arguments}"
+                );
+            }
+            let config = workflow_config(PermissionMode::Ask);
+            config
+                .plan_mode
+                .write()
+                .expect("plan mode lock")
+                .enter_in_memory();
+            let (call, prepared) = workflow_prepared(arguments.clone());
+            let preparation = permission_preparation_for_mode(&config, &call, &prepared);
+            assert!(
+                matches!(preparation, PermissionPreparation::Run(_)),
+                "read/validate must run directly in plan mode: {arguments}"
+            );
+        }
+    }
+
+    #[test]
+    fn workflow_save_asks_with_typed_save_review_in_ask_mode() {
+        let config = workflow_config(PermissionMode::Ask);
+        let (call, prepared) = workflow_prepared(save_input());
+        let preparation = permission_preparation_for_mode(&config, &call, &prepared);
+        assert!(
+            matches!(
+                preparation,
+                PermissionPreparation::Ask {
+                    operation: PermissionOperation::WorkflowSave,
+                    ..
+                }
+            ),
+            "save must open the typed save review in Ask mode"
+        );
+    }
+
+    #[test]
+    fn workflow_run_asks_with_typed_launch_review_in_ask_mode() {
+        let config = workflow_config(PermissionMode::Ask);
+        let (call, prepared) = workflow_prepared(inline_run_input());
+        let preparation = permission_preparation_for_mode(&config, &call, &prepared);
+        assert!(
+            matches!(
+                preparation,
+                PermissionPreparation::Ask {
+                    operation: PermissionOperation::WorkflowLaunch,
+                    ..
+                }
+            ),
+            "run must open the typed launch review in Ask mode"
+        );
+    }
+
+    #[test]
+    fn workflow_save_and_run_execute_directly_in_auto_and_yolo() {
+        for mode in [PermissionMode::Auto, PermissionMode::Yolo] {
+            for arguments in [save_input(), inline_run_input()] {
+                let config = workflow_config(mode);
+                let (call, prepared) = workflow_prepared(arguments.clone());
+                let preparation = permission_preparation_for_mode(&config, &call, &prepared);
+                assert!(
+                    matches!(preparation, PermissionPreparation::Run(_)),
+                    "save/run must execute directly in {mode:?}: {arguments}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn workflow_save_and_run_are_denied_in_plan_mode() {
+        for arguments in [save_input(), inline_run_input()] {
+            let config = workflow_config(PermissionMode::Ask);
+            config
+                .plan_mode
+                .write()
+                .expect("plan mode lock")
+                .enter_in_memory();
+            let (call, prepared) = workflow_prepared(arguments.clone());
+            let preparation = permission_preparation_for_mode(&config, &call, &prepared);
+            assert!(
+                matches!(preparation, PermissionPreparation::Deny(_)),
+                "save/run must be denied in plan mode: {arguments}"
+            );
+        }
+    }
+
+    #[test]
+    fn workflow_invalid_input_is_terminal_without_approval() {
+        let config = workflow_config(PermissionMode::Ask);
+        let (call, prepared) = workflow_prepared(json!({"action": "run_inline"}));
+        let preparation = permission_preparation_for_mode(&config, &call, &prepared);
+        let PermissionPreparation::Terminal(result) = preparation else {
+            panic!("invalid workflow input must finish terminally")
+        };
+        let details = result.details.expect("structured details");
+        assert_eq!(details["ok"], false);
+        assert_eq!(details["error"]["code"], "workflow_input_invalid");
+        assert_eq!(details["error"]["side_effect_occurred"], false);
     }
 }
