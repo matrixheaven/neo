@@ -165,7 +165,7 @@ pub(crate) struct WorkflowInputError {
 }
 
 impl WorkflowInputError {
-    fn action(action: Option<WorkflowAction>, message: impl Into<String>) -> Self {
+    pub(crate) fn action(action: Option<WorkflowAction>, message: impl Into<String>) -> Self {
         Self {
             action,
             field: Some("action"),
@@ -174,7 +174,7 @@ impl WorkflowInputError {
         }
     }
 
-    fn input(
+    pub(crate) fn input(
         action: WorkflowAction,
         field: Option<&'static str>,
         message: impl Into<String>,
@@ -900,6 +900,17 @@ async fn launch_definition(
 
 pub struct WorkflowTool;
 
+/// Execute a pre-parsed workflow action. This is the single execution entry point used
+/// by `execute_prepared_tool` via `PreparedExecution::Workflow`, avoiding re-parsing.
+pub(crate) async fn execute_prepared(
+    prepared: &PreparedWorkflowAction,
+    ctx: &ToolContext,
+) -> ToolResult {
+    let action = prepared.action();
+    let registry: &WorkflowDefinitionRegistry = &ctx.workflow_definitions;
+    dispatch_prepared(prepared, action, registry, ctx).await
+}
+
 impl Tool for WorkflowTool {
     fn name(&self) -> &'static str {
         "Workflow"
@@ -921,261 +932,265 @@ impl Tool for WorkflowTool {
             };
             let action = prepared.action();
             let registry: &WorkflowDefinitionRegistry = &ctx.workflow_definitions;
+            Ok(dispatch_prepared(&prepared, action, registry, ctx).await)
+        })
+    }
+}
 
-            let result = match prepared {
-                PreparedWorkflowAction::List {
-                    scope,
-                    offset,
-                    limit,
-                } => {
-                    let summaries = match registry.list(scope) {
-                        Ok(summaries) => summaries,
-                        Err(error) => return Ok(workflow_error_result(action, error)),
-                    };
-                    if offset > summaries.len() {
-                        return Ok(input_error_result(WorkflowInputError::input(
-                            action,
-                            Some("cursor"),
-                            "cursor is beyond the current Workflow list result",
-                        )));
-                    }
-                    let end = offset.saturating_add(limit).min(summaries.len());
-                    let items = match serde_json::to_value(&summaries[offset..end]) {
-                        Ok(Value::Array(items)) => items,
-                        Ok(_) => {
-                            return Ok(feature_error(
-                                action,
-                                "Workflow registry returned an invalid list projection",
-                            ));
-                        }
-                        Err(error) => {
-                            return Ok(feature_error(
-                                action,
-                                format!("Workflow list serialization failed: {error}"),
-                            ));
-                        }
-                    };
-                    let next_cursor =
-                        (end < summaries.len()).then(|| format!("{LIST_CURSOR_PREFIX}{end}"));
-                    let next_actions = items.first().map_or_else(
-                        || json!([]),
-                        |item| {
-                            let name = &item["name"];
-                            json!([
-                                {
-                                    "tool": "Workflow",
-                                    "arguments": {"action": "show", "name": name},
-                                    "reason": "Inspect this saved workflow."
-                                },
-                                {
-                                    "tool": "Workflow",
-                                    "arguments": {"action": "run_saved", "name": name},
-                                    "reason": "Run this saved workflow."
-                                }
-                            ])
-                        },
+async fn dispatch_prepared(
+    prepared: &PreparedWorkflowAction,
+    action: WorkflowAction,
+    registry: &WorkflowDefinitionRegistry,
+    ctx: &ToolContext,
+) -> ToolResult {
+    match prepared {
+        PreparedWorkflowAction::List {
+            scope,
+            offset,
+            limit,
+        } => {
+            let summaries = match registry.list(*scope) {
+                Ok(summaries) => summaries,
+                Err(error) => return workflow_error_result(action, error),
+            };
+            if *offset > summaries.len() {
+                return input_error_result(WorkflowInputError::input(
+                    action,
+                    Some("cursor"),
+                    "cursor is beyond the current Workflow list result",
+                ));
+            }
+            let end = offset.saturating_add(*limit).min(summaries.len());
+            let items = match serde_json::to_value(&summaries[*offset..end]) {
+                Ok(Value::Array(items)) => items,
+                Ok(_) => {
+                    return feature_error(
+                        action,
+                        "Workflow registry returned an invalid list projection",
                     );
-                    result(
+                }
+                Err(error) => {
+                    return feature_error(
                         action,
-                        "listed",
-                        format!("Listed {} workflow(s).", items.len()),
-                        None,
-                        None,
-                        Some(json!({
-                            "entries": items,
-                            "cursor": next_cursor,
-                            "total": summaries.len(),
-                        })),
-                        None,
-                        next_actions,
-                    )
-                }
-                PreparedWorkflowAction::Show { name } => {
-                    let definition = match registry.resolve(&name) {
-                        Ok(definition) => definition,
-                        Err(error) => return Ok(workflow_error_result(action, error)),
-                    };
-                    result(
-                        action,
-                        "shown",
-                        format!("Showing workflow `{}`.", definition.name.as_str()),
-                        Some(workflow_details(&definition, true)),
-                        None,
-                        None,
-                        None,
-                        json!([
-                            {
-                                "tool": "Workflow",
-                                "arguments": {"action": "validate_saved", "name": definition.name.as_str()},
-                                "reason": "Validate this saved workflow without side effects."
-                            },
-                            {
-                                "tool": "Workflow",
-                                "arguments": {"action": "run_saved", "name": definition.name.as_str()},
-                                "reason": "Run this saved workflow."
-                            }
-                        ]),
-                    )
-                }
-                PreparedWorkflowAction::ValidateInline { definition } => {
-                    let definition = match resolve_dynamic_definition(
-                        definition,
-                        &ctx.workflow_runtime.limits(),
-                    ) {
-                        Ok(definition) => definition,
-                        Err(error) => return Ok(workflow_error_result(action, error)),
-                    };
-                    if let Err(error) = validate_definition(ctx, &definition, action) {
-                        return Ok(workflow_error_result(action, error));
-                    }
-                    let mut save_arguments =
-                        inline_action_arguments(&definition, WorkflowAction::Save);
-                    save_arguments["scope"] = json!("user");
-                    result(
-                        action,
-                        "valid",
-                        format!("Workflow `{}` is valid.", definition.name.as_str()),
-                        Some(workflow_details(&definition, false)),
-                        Some(json!({"valid": true})),
-                        None,
-                        None,
-                        json!([
-                            {
-                                "tool": "Workflow",
-                                "arguments": inline_action_arguments(&definition, WorkflowAction::RunInline),
-                                "reason": "Run the validated inline workflow."
-                            },
-                            {
-                                "tool": "Workflow",
-                                "arguments": save_arguments,
-                                "reason": "Save the validated workflow in user scope."
-                            }
-                        ]),
-                    )
-                }
-                PreparedWorkflowAction::ValidateSaved { name } => {
-                    let definition = match registry.resolve(&name) {
-                        Ok(definition) => definition,
-                        Err(error) => return Ok(workflow_error_result(action, error)),
-                    };
-                    if let Err(error) = validate_definition(ctx, &definition, action) {
-                        return Ok(workflow_error_result(action, error));
-                    }
-                    result(
-                        action,
-                        "valid",
-                        format!("Workflow `{}` is valid.", definition.name.as_str()),
-                        Some(workflow_details(&definition, false)),
-                        Some(json!({"valid": true})),
-                        None,
-                        None,
-                        json!([
-                            {
-                                "tool": "Workflow",
-                                "arguments": {"action": "run_saved", "name": definition.name.as_str()},
-                                "reason": "Run the validated saved workflow."
-                            },
-                            {
-                                "tool": "Workflow",
-                                "arguments": {"action": "show", "name": definition.name.as_str()},
-                                "reason": "Inspect the saved definition."
-                            }
-                        ]),
-                    )
-                }
-                PreparedWorkflowAction::Save {
-                    request,
-                    scope,
-                    replace,
-                } => {
-                    let candidate = match resolve_dynamic_definition(
-                        DynamicWorkflowDefinitionInput {
-                            name: request.name.clone(),
-                            display_name: Some(request.display_name.clone()),
-                            description: request.description.clone(),
-                            phases: request.phases.clone(),
-                            script: request.lua_source.clone(),
-                            input_schema: request.input_schema.clone(),
-                            output_schema: request.output_schema.clone(),
-                        },
-                        &ctx.workflow_runtime.limits(),
-                    ) {
-                        Ok(definition) => definition,
-                        Err(error) => return Ok(workflow_error_result(action, error)),
-                    };
-                    if let Err(error) = validate_definition(ctx, &candidate, action) {
-                        return Ok(workflow_error_result(action, error));
-                    }
-                    let definition = match registry.save(scope, &request, replace) {
-                        Ok(definition) => definition,
-                        Err(error) => {
-                            let next_actions = (error.code()
-                                == WorkflowErrorCode::DefinitionConflict)
-                                .then(|| {
-                                    json!([{
-                                        "tool": "Workflow",
-                                        "arguments": {
-                                            "action": "save",
-                                            "name": request.name,
-                                            "description": request.description,
-                                            "phases": request.phases,
-                                            "script": request.lua_source,
-                                            "input_schema": request.input_schema,
-                                            "output_schema": request.output_schema,
-                                            "scope": match scope {
-                                                WorkflowSaveScope::User => "user",
-                                                WorkflowSaveScope::Project => "project",
-                                            },
-                                            "replace": true,
-                                        },
-                                        "reason": "Retry the same save with explicit replacement enabled."
-                                    }])
-                                });
-                            return Ok(workflow_save_error_result(error, next_actions));
-                        }
-                    };
-                    result(
-                        action,
-                        "saved",
-                        format!("Saved workflow `{}`.", definition.name.as_str()),
-                        Some(workflow_details(&definition, false)),
-                        Some(json!({"valid": true})),
-                        None,
-                        None,
-                        json!([
-                            {
-                                "tool": "Workflow",
-                                "arguments": {"action": "run_saved", "name": definition.name.as_str()},
-                                "reason": "Run the saved workflow."
-                            },
-                            {
-                                "tool": "Workflow",
-                                "arguments": {"action": "show", "name": definition.name.as_str()},
-                                "reason": "Inspect the durable saved definition."
-                            }
-                        ]),
-                    )
-                }
-                PreparedWorkflowAction::RunInline { definition, args } => {
-                    let definition = match resolve_dynamic_definition(
-                        definition,
-                        &ctx.workflow_runtime.limits(),
-                    ) {
-                        Ok(definition) => definition,
-                        Err(error) => return Ok(workflow_error_result(action, error)),
-                    };
-                    launch_definition(ctx, &definition, args, action).await
-                }
-                PreparedWorkflowAction::RunSaved { name, args } => {
-                    let definition = match registry.resolve(&name) {
-                        Ok(definition) => definition,
-                        Err(error) => return Ok(workflow_error_result(action, error)),
-                    };
-                    launch_definition(ctx, &definition, args, action).await
+                        format!("Workflow list serialization failed: {error}"),
+                    );
                 }
             };
-            Ok(result)
-        })
+            let next_cursor = (end < summaries.len()).then(|| format!("{LIST_CURSOR_PREFIX}{end}"));
+            let next_actions = items.first().map_or_else(
+                || json!([]),
+                |item| {
+                    let name = &item["name"];
+                    json!([
+                        {
+                            "tool": "Workflow",
+                            "arguments": {"action": "show", "name": name},
+                            "reason": "Inspect this saved workflow."
+                        },
+                        {
+                            "tool": "Workflow",
+                            "arguments": {"action": "run_saved", "name": name},
+                            "reason": "Run this saved workflow."
+                        }
+                    ])
+                },
+            );
+            result(
+                action,
+                "listed",
+                format!("Listed {} workflow(s).", items.len()),
+                None,
+                None,
+                Some(json!({
+                    "entries": items,
+                    "cursor": next_cursor,
+                    "total": summaries.len(),
+                })),
+                None,
+                next_actions,
+            )
+        }
+        PreparedWorkflowAction::Show { name } => {
+            let definition = match registry.resolve(&name) {
+                Ok(definition) => definition,
+                Err(error) => return workflow_error_result(action, error),
+            };
+            result(
+                action,
+                "shown",
+                format!("Showing workflow `{}`.", definition.name.as_str()),
+                Some(workflow_details(&definition, true)),
+                None,
+                None,
+                None,
+                json!([
+                    {
+                        "tool": "Workflow",
+                        "arguments": {"action": "validate_saved", "name": definition.name.as_str()},
+                        "reason": "Validate this saved workflow without side effects."
+                    },
+                    {
+                        "tool": "Workflow",
+                        "arguments": {"action": "run_saved", "name": definition.name.as_str()},
+                        "reason": "Run this saved workflow."
+                    }
+                ]),
+            )
+        }
+        PreparedWorkflowAction::ValidateInline { definition } => {
+            let definition = match resolve_dynamic_definition(
+                definition.clone(),
+                &ctx.workflow_runtime.limits(),
+            ) {
+                Ok(definition) => definition,
+                Err(error) => return workflow_error_result(action, error),
+            };
+            if let Err(error) = validate_definition(ctx, &definition, action) {
+                return workflow_error_result(action, error);
+            }
+            let mut save_arguments = inline_action_arguments(&definition, WorkflowAction::Save);
+            save_arguments["scope"] = json!("user");
+            result(
+                action,
+                "valid",
+                format!("Workflow `{}` is valid.", definition.name.as_str()),
+                Some(workflow_details(&definition, false)),
+                Some(json!({"valid": true})),
+                None,
+                None,
+                json!([
+                    {
+                        "tool": "Workflow",
+                        "arguments": inline_action_arguments(&definition, WorkflowAction::RunInline),
+                        "reason": "Run the validated inline workflow."
+                    },
+                    {
+                        "tool": "Workflow",
+                        "arguments": save_arguments,
+                        "reason": "Save the validated workflow in user scope."
+                    }
+                ]),
+            )
+        }
+        PreparedWorkflowAction::ValidateSaved { name } => {
+            let definition = match registry.resolve(&name) {
+                Ok(definition) => definition,
+                Err(error) => return workflow_error_result(action, error),
+            };
+            if let Err(error) = validate_definition(ctx, &definition, action) {
+                return workflow_error_result(action, error);
+            }
+            result(
+                action,
+                "valid",
+                format!("Workflow `{}` is valid.", definition.name.as_str()),
+                Some(workflow_details(&definition, false)),
+                Some(json!({"valid": true})),
+                None,
+                None,
+                json!([
+                    {
+                        "tool": "Workflow",
+                        "arguments": {"action": "run_saved", "name": definition.name.as_str()},
+                        "reason": "Run the validated saved workflow."
+                    },
+                    {
+                        "tool": "Workflow",
+                        "arguments": {"action": "show", "name": definition.name.as_str()},
+                        "reason": "Inspect the saved definition."
+                    }
+                ]),
+            )
+        }
+        PreparedWorkflowAction::Save {
+            request,
+            scope,
+            replace,
+        } => {
+            let candidate = match resolve_dynamic_definition(
+                DynamicWorkflowDefinitionInput {
+                    name: request.name.clone(),
+                    display_name: Some(request.display_name.clone()),
+                    description: request.description.clone(),
+                    phases: request.phases.clone(),
+                    script: request.lua_source.clone(),
+                    input_schema: request.input_schema.clone(),
+                    output_schema: request.output_schema.clone(),
+                },
+                &ctx.workflow_runtime.limits(),
+            ) {
+                Ok(definition) => definition,
+                Err(error) => return workflow_error_result(action, error),
+            };
+            if let Err(error) = validate_definition(ctx, &candidate, action) {
+                return workflow_error_result(action, error);
+            }
+            let definition = match registry.save(*scope, &request, *replace) {
+                Ok(definition) => definition,
+                Err(error) => {
+                    let next_actions = (error.code() == WorkflowErrorCode::DefinitionConflict)
+                        .then(|| {
+                            json!([{
+                                "tool": "Workflow",
+                                "arguments": {
+                                    "action": "save",
+                                    "name": request.name,
+                                    "description": request.description,
+                                    "phases": request.phases,
+                                    "script": request.lua_source,
+                                    "input_schema": request.input_schema,
+                                    "output_schema": request.output_schema,
+                                    "scope": match scope {
+                                        WorkflowSaveScope::User => "user",
+                                        WorkflowSaveScope::Project => "project",
+                                    },
+                                    "replace": true,
+                                },
+                                "reason": "Retry the same save with explicit replacement enabled."
+                            }])
+                        });
+                    return workflow_save_error_result(error, next_actions);
+                }
+            };
+            result(
+                action,
+                "saved",
+                format!("Saved workflow `{}`.", definition.name.as_str()),
+                Some(workflow_details(&definition, false)),
+                Some(json!({"valid": true})),
+                None,
+                None,
+                json!([
+                    {
+                        "tool": "Workflow",
+                        "arguments": {"action": "run_saved", "name": definition.name.as_str()},
+                        "reason": "Run the saved workflow."
+                    },
+                    {
+                        "tool": "Workflow",
+                        "arguments": {"action": "show", "name": definition.name.as_str()},
+                        "reason": "Inspect the durable saved definition."
+                    }
+                ]),
+            )
+        }
+        PreparedWorkflowAction::RunInline { definition, args } => {
+            let definition = match resolve_dynamic_definition(
+                definition.clone(),
+                &ctx.workflow_runtime.limits(),
+            ) {
+                Ok(definition) => definition,
+                Err(error) => return workflow_error_result(action, error),
+            };
+            launch_definition(ctx, &definition, args.clone(), action).await
+        }
+        PreparedWorkflowAction::RunSaved { name, args } => {
+            let definition = match registry.resolve(&name) {
+                Ok(definition) => definition,
+                Err(error) => return workflow_error_result(action, error),
+            };
+            launch_definition(ctx, &definition, args.clone(), action).await
+        }
     }
 }
 
@@ -1203,30 +1218,30 @@ fn launch_presentation(
     }
 }
 
-/// Typed Ask-mode launch review for `run_inline` / `run_saved`. Reparses with
-/// the canonical action parser; saved definitions resolve through the registry.
-pub(crate) fn launch_approval_presentation(
-    input: &Value,
+/// Typed Ask-mode launch review for `run_inline` / `run_saved`. Takes the
+/// already-parsed prepared action; saved definitions resolve through the registry.
+pub(crate) fn launch_approval_presentation_from_prepared(
+    prepared: &PreparedWorkflowAction,
     registry: &WorkflowDefinitionRegistry,
 ) -> Result<WorkflowApprovalPresentation, ToolResult> {
-    match prepare_action(input).map_err(input_error_result)? {
+    match prepared {
         PreparedWorkflowAction::RunInline { definition, args } => Ok(launch_presentation(
-            definition.name,
-            definition.description,
+            definition.name.clone(),
+            definition.description.clone(),
             &definition.phases,
             &definition.script,
-            &args,
+            args,
         )),
         PreparedWorkflowAction::RunSaved { name, args } => {
             let definition = registry
-                .resolve(&name)
+                .resolve(name)
                 .map_err(|error| preflight_error_result(WorkflowAction::RunSaved, error))?;
             Ok(launch_presentation(
                 definition.name.as_str().to_owned(),
                 definition.description.clone(),
                 &definition.phases,
                 &definition.lua_source,
-                &args,
+                args,
             ))
         }
         prepared => Err(input_error_result(WorkflowInputError::input(
@@ -1237,14 +1252,31 @@ pub(crate) fn launch_approval_presentation(
     }
 }
 
-/// Typed Ask-mode save review for `save`: scope, exact pair paths, and
-/// create/replace state resolved through the registry owner.
-pub(crate) fn save_approval_presentation(
+/// Deprecated: kept for backward compatibility. Use
+/// [`launch_approval_presentation_from_prepared`] instead.
+pub(crate) fn launch_approval_presentation(
     input: &Value,
     registry: &WorkflowDefinitionRegistry,
+) -> Result<WorkflowApprovalPresentation, ToolResult> {
+    launch_approval_presentation_from_prepared(
+        &prepare_action(input).map_err(input_error_result)?,
+        registry,
+    )
+}
+
+/// Typed Ask-mode save review for `save`: scope, exact pair paths, and
+/// create/replace state resolved through the registry owner. Uses the
+/// already-parsed prepared action; `replace` comes from the parsed input, not
+/// from guessing via `registry.list()`.
+pub(crate) fn save_approval_presentation_from_prepared(
+    prepared: &PreparedWorkflowAction,
+    registry: &WorkflowDefinitionRegistry,
 ) -> Result<WorkflowSaveApprovalPresentation, ToolResult> {
-    let PreparedWorkflowAction::Save { request, scope, .. } =
-        prepare_action(input).map_err(input_error_result)?
+    let PreparedWorkflowAction::Save {
+        request,
+        scope,
+        replace,
+    } = prepared
     else {
         return Err(input_error_result(WorkflowInputError::input(
             WorkflowAction::Save,
@@ -1253,17 +1285,8 @@ pub(crate) fn save_approval_presentation(
         )));
     };
     let target = registry
-        .save_target(scope, &request.name)
+        .save_target(*scope, &request.name)
         .map_err(|error| preflight_error_result(WorkflowAction::Save, error))?;
-    let list_scope = match scope {
-        WorkflowSaveScope::User => WorkflowListScope::User,
-        WorkflowSaveScope::Project => WorkflowListScope::Project,
-    };
-    let replace = registry
-        .list(list_scope)
-        .map_err(|error| preflight_error_result(WorkflowAction::Save, error))?
-        .iter()
-        .any(|item| item.name.as_str() == target.name.as_str());
     let pretty =
         |value: &Value| serde_json::to_string_pretty(value).unwrap_or_else(|_| value.to_string());
     let input_schema = request
@@ -1271,8 +1294,8 @@ pub(crate) fn save_approval_presentation(
         .as_ref()
         .map_or_else(|| "null".to_owned(), &pretty);
     Ok(WorkflowSaveApprovalPresentation {
-        name: request.name,
-        description: request.description,
+        name: request.name.clone(),
+        description: request.description.clone(),
         scope: match scope {
             WorkflowSaveScope::User => "user",
             WorkflowSaveScope::Project => "project",
@@ -1280,7 +1303,7 @@ pub(crate) fn save_approval_presentation(
         .to_owned(),
         source_path: target.source_path,
         manifest_path: target.manifest_path,
-        replace,
+        replace: *replace,
         phases: request
             .phases
             .iter()
@@ -1288,11 +1311,23 @@ pub(crate) fn save_approval_presentation(
             .collect(),
         line_count: request.lua_source.split('\n').count().max(1),
         byte_count: request.lua_source.len(),
-        source: request.lua_source,
+        source: request.lua_source.clone(),
         input_schema,
         output_schema: pretty(&request.output_schema),
         warning: "Saving persists the definition pair only; it does not launch a run.".to_owned(),
     })
+}
+
+/// Deprecated: kept for backward compatibility. Use
+/// [`save_approval_presentation_from_prepared`] instead.
+pub(crate) fn save_approval_presentation(
+    input: &Value,
+    registry: &WorkflowDefinitionRegistry,
+) -> Result<WorkflowSaveApprovalPresentation, ToolResult> {
+    save_approval_presentation_from_prepared(
+        &prepare_action(input).map_err(input_error_result)?,
+        registry,
+    )
 }
 
 #[cfg(test)]

@@ -66,8 +66,8 @@ fn builtin_tool_names_use_model_facing_kimi_style_casing() {
             "ListDelegates",
             "MessageDelegate",
             "Read",
-            "RunWorkflow",
             "Sleep",
+            "TaskAnswer",
             "TaskList",
             "TaskOutput",
             "TaskPause",
@@ -76,6 +76,7 @@ fn builtin_tool_names_use_model_facing_kimi_style_casing() {
             "Terminal",
             "TodoList",
             "WaitDelegate",
+            "Workflow",
             "Write",
         ]
     );

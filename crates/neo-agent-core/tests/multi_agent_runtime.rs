@@ -1685,6 +1685,10 @@ async fn subagent_request_hides_and_blocks_parent_orchestration_tools() {
         !child_tool_names.contains(&"RunWorkflow"),
         "{child_tool_names:?}"
     );
+    assert!(
+        !child_tool_names.contains(&"Workflow"),
+        "child must not see the root-only Workflow tool: {child_tool_names:?}"
+    );
     // The child should have completed with the text response since
     // orchestration tools are hidden from subagents.
     assert!(

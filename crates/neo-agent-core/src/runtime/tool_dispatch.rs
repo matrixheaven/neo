@@ -652,6 +652,34 @@ fn prepare_write_calls(
     }
 }
 
+/// Prepare every successfully parsed Workflow call: parse the canonical action once
+/// and bind it to the prepared execution so approval and execution share the same
+/// typed payload without re-parsing.
+fn prepare_workflow_calls(
+    prepared: &mut [(
+        &AgentToolCall,
+        Result<super::tool_arguments::PreparedToolCall, ToolResult>,
+    )],
+) {
+    for (_tool_call, parsed) in prepared.iter_mut() {
+        let Ok(prepared_call) = parsed else {
+            continue;
+        };
+        if prepared_call.name != "Workflow" {
+            continue;
+        }
+        match crate::tools::workflow::prepare_action(&prepared_call.arguments) {
+            Ok(action) => {
+                prepared_call.execution =
+                    super::tool_arguments::PreparedExecution::Workflow(Arc::new(action));
+            }
+            Err(error) => {
+                *parsed = Err(crate::tools::workflow::input_error_result(error));
+            }
+        }
+    }
+}
+
 /// Recheck every authorized prepared mutation (Edit or Write). Stale targets
 /// become terminal results with zero writes.
 fn recheck_prepared_mutations(
@@ -668,7 +696,7 @@ fn recheck_prepared_mutations(
         let recheck = match &prepared.execution {
             PreparedExecution::Edit(edit) => edit.recheck_all(tool_context),
             PreparedExecution::Write(write) => write.recheck_all(tool_context),
-            PreparedExecution::Direct => continue,
+            PreparedExecution::Direct | PreparedExecution::Workflow(_) => continue,
         };
         if let Err(result) = recheck {
             entry.outcome = AuthorizedToolCallOutcome::Terminal {
@@ -956,6 +984,7 @@ pub(super) async fn execute_tool_calls(
     let mut prepared = prepared;
     prepare_edit_calls(&tool_context, registry.as_ref(), &mut prepared);
     prepare_write_calls(&tool_context, registry.as_ref(), &mut prepared);
+    prepare_workflow_calls(&mut prepared);
 
     // Phase 4 — authorize the full batch (dialogs await sequentially).
     // Consumes `prepared` so Allow can write Plan/Goal context onto
@@ -1469,7 +1498,9 @@ async fn execute_prepared_tool(
             match execution {
                 PreparedExecution::Edit(edit) => commit_prepared_mutation!(edit),
                 PreparedExecution::Write(write) => commit_prepared_mutation!(write),
-                PreparedExecution::Direct => unreachable!("guarded by outer match"),
+                PreparedExecution::Direct | PreparedExecution::Workflow(_) => {
+                    unreachable!("guarded by outer match")
+                }
             }
         }
         PreparedExecution::Direct => {
@@ -1482,6 +1513,9 @@ async fn execute_prepared_tool(
                 cancel_token,
             )
             .await
+        }
+        PreparedExecution::Workflow(action) => {
+            crate::tools::workflow::execute_prepared(action, context).await
         }
     }
 }

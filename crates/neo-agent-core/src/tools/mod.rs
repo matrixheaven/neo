@@ -138,7 +138,7 @@ pub use ask_user::{
 pub use background_tasks::{
     BackgroundTaskKind, BackgroundTaskListPage, BackgroundTaskListQuery, BackgroundTaskManager,
     BackgroundTaskSnapshot, BackgroundTaskStatus, CommandOutput, ManagedBackgroundCommand,
-    TaskListTool, TaskOutputTool, TaskPauseTool, TaskResumeTool, TaskStopTool,
+    TaskAnswerTool, TaskListTool, TaskOutputTool, TaskPauseTool, TaskResumeTool, TaskStopTool,
     WorkflowTaskProjection, cap_output_details, cap_plain_output, format_collected_answers,
     task_list_result,
 };
@@ -725,6 +725,7 @@ impl ToolRegistry {
         registry.register(background_tasks::TaskStopTool);
         registry.register(background_tasks::TaskPauseTool);
         registry.register(background_tasks::TaskResumeTool);
+        registry.register(background_tasks::TaskAnswerTool);
         registry.register(terminal::TerminalTool);
         registry.register(plan_mode::EnterPlanModeTool);
         registry.register(plan_mode::ExitPlanModeTool);
@@ -995,6 +996,7 @@ fn is_builtin_tool_name(name: &str) -> bool {
             "InterruptDelegate",
             "MessageDelegate",
             "Workflow",
+            "TaskAnswer",
             "Sleep",
             "StartGoal",
             "ExitGoalMode",

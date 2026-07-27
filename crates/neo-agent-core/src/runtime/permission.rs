@@ -135,7 +135,7 @@ pub(super) fn permission_preparation_for_mode(
     // directly, save and run actions open typed reviews in Ask mode, and plan
     // mode denies mutations. No capability, nonce, or hidden authorization.
     if tool_call.name.as_ref() == "Workflow" {
-        return workflow_permission_preparation(config, tool_call, arguments, mode);
+        return workflow_permission_preparation(config, tool_call, prepared_call, mode);
     }
 
     // 2-5. Mode/tool-specific early returns (auto mode, EnterPlanMode, background AskUser).
@@ -186,19 +186,34 @@ pub(super) fn permission_preparation_for_mode(
 fn workflow_permission_preparation(
     config: &AgentConfig,
     tool_call: &AgentToolCall,
-    arguments: &serde_json::Value,
+    prepared_call: &PreparedToolCall,
+    mode: PermissionMode,
+) -> PermissionPreparation {
+    // Extract the already-parsed action from the prepared execution. This is the
+    // single parse that flows from validation through approval to execution.
+    let prepared = match &prepared_call.execution {
+        PreparedExecution::Workflow(action) => action,
+        // Fallback: re-parse from raw arguments (shouldn't happen if
+        // prepare_workflow_calls ran, but kept for defensive safety).
+        _ => {
+            return match crate::tools::workflow::prepare_action(&prepared_call.arguments) {
+                Ok(prepared) => dispatch_workflow_permission(config, tool_call, &prepared, mode),
+                Err(error) => PermissionPreparation::Terminal(
+                    crate::tools::workflow::input_error_result(error),
+                ),
+            };
+        }
+    };
+    dispatch_workflow_permission(config, tool_call, prepared, mode)
+}
+
+fn dispatch_workflow_permission(
+    config: &AgentConfig,
+    tool_call: &AgentToolCall,
+    prepared: &crate::tools::workflow::PreparedWorkflowAction,
     mode: PermissionMode,
 ) -> PermissionPreparation {
     use crate::tools::workflow::PreparedWorkflowAction;
-
-    let prepared = match crate::tools::workflow::prepare_action(arguments) {
-        Ok(prepared) => prepared,
-        Err(error) => {
-            return PermissionPreparation::Terminal(crate::tools::workflow::input_error_result(
-                error,
-            ));
-        }
-    };
     let plan_active = config
         .plan_mode
         .read()
@@ -382,7 +397,7 @@ fn check_plan_guard(
             PreparedExecution::Write(write) => plan_mode
                 .plan_file_path()
                 .is_some_and(|path| write.all_resolved_targets_match(path)),
-            PreparedExecution::Direct => false,
+            PreparedExecution::Direct | PreparedExecution::Workflow(_) => false,
         };
         if targets_match_plan_file {
             return None;
@@ -532,7 +547,7 @@ fn check_plan_file_write(
         PreparedExecution::Write(write) => plan_mode
             .plan_file_path()
             .is_some_and(|path| write.all_resolved_targets_match(path)),
-        PreparedExecution::Direct => false,
+        PreparedExecution::Direct | PreparedExecution::Workflow(_) => false,
     };
     if allowed {
         return Some(PermissionPreparation::Run(access_for_tool(tool_call, true)));
@@ -896,10 +911,10 @@ fn build_workflow_approval_request(
     config: &AgentConfig,
     turn: u32,
     tool_call: &AgentToolCall,
-    arguments: &serde_json::Value,
+    prepared: &crate::tools::workflow::PreparedWorkflowAction,
 ) -> Result<ApprovalRequest, ToolResult> {
-    let workflow = crate::tools::workflow::launch_approval_presentation(
-        arguments,
+    let workflow = crate::tools::workflow::launch_approval_presentation_from_prepared(
+        prepared,
         &config.workflow_definitions,
     )?;
     Ok(ApprovalRequest {
@@ -919,10 +934,10 @@ fn build_workflow_save_approval_request(
     config: &AgentConfig,
     turn: u32,
     tool_call: &AgentToolCall,
-    arguments: &serde_json::Value,
+    prepared: &crate::tools::workflow::PreparedWorkflowAction,
 ) -> Result<ApprovalRequest, ToolResult> {
-    let save = crate::tools::workflow::save_approval_presentation(
-        arguments,
+    let save = crate::tools::workflow::save_approval_presentation_from_prepared(
+        prepared,
         &config.workflow_definitions,
     )?;
     Ok(ApprovalRequest {
@@ -1055,7 +1070,7 @@ fn build_ordinary_approval_request(
     let (edit_presentation, write_presentation) = match &prepared_call.execution {
         PreparedExecution::Edit(edit) => (Some(edit.approval_presentation()), None),
         PreparedExecution::Write(write) => (None, Some(write.approval_presentation())),
-        PreparedExecution::Direct => (None, None),
+        PreparedExecution::Direct | PreparedExecution::Workflow(_) => (None, None),
     };
     ApprovalRequest {
         turn,
@@ -1299,10 +1314,34 @@ fn approval_request(
             arguments,
         )),
         PermissionOperation::WorkflowLaunch => {
-            build_workflow_approval_request(config, input.turn, input.tool_call, arguments)
+            let prepared = match &input.prepared_call.execution {
+                PreparedExecution::Workflow(action) => action,
+                _ => {
+                    return Err(crate::tools::workflow::input_error_result(
+                        crate::tools::workflow::WorkflowInputError::input(
+                            crate::tools::workflow::WorkflowAction::RunInline,
+                            Some("action"),
+                            "launch review requires prepared workflow action",
+                        ),
+                    ));
+                }
+            };
+            build_workflow_approval_request(config, input.turn, input.tool_call, prepared)
         }
         PermissionOperation::WorkflowSave => {
-            build_workflow_save_approval_request(config, input.turn, input.tool_call, arguments)
+            let prepared = match &input.prepared_call.execution {
+                PreparedExecution::Workflow(action) => action,
+                _ => {
+                    return Err(crate::tools::workflow::input_error_result(
+                        crate::tools::workflow::WorkflowInputError::input(
+                            crate::tools::workflow::WorkflowAction::Save,
+                            Some("action"),
+                            "save review requires prepared workflow action",
+                        ),
+                    ));
+                }
+            };
+            build_workflow_save_approval_request(config, input.turn, input.tool_call, prepared)
         }
         _ => Ok(build_ordinary_approval_request(
             input.turn,
@@ -1355,7 +1394,7 @@ async fn resolve_approval(
                 let result = match &prepared_call.execution {
                     PreparedExecution::Edit(edit) => edit.cancelled_before_commit_result(),
                     PreparedExecution::Write(write) => write.cancelled_before_commit_result(),
-                    PreparedExecution::Direct => cancelled_tool_result(),
+                    PreparedExecution::Direct | PreparedExecution::Workflow(_) => cancelled_tool_result(),
                 };
                 return AppliedApproval::Terminal {
                     result,

@@ -2720,6 +2720,51 @@ impl Tool for TaskResumeTool {
     }
 }
 
+/// Model-visible control for answering durable workflow AwaitingUser requests.
+///
+/// Only available to the root agent; children, restricted, and schema-repair
+/// registries do not receive this tool. The `neo.tool` deny classifier also
+/// rejects it. Answer policy (human-only vs model-allowed) is enforced by the
+/// workflow runtime's actor/policy owner, not this tool adapter.
+pub struct TaskAnswerTool;
+
+#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
+struct TaskAnswerInput {
+    task_id: String,
+    request_id: String,
+    #[schemars(with = "std::collections::BTreeMap<String, serde_json::Value>")]
+    answer: serde_json::Value,
+}
+
+impl Tool for TaskAnswerTool {
+    fn name(&self) -> &'static str {
+        "TaskAnswer"
+    }
+
+    fn description(&self) -> &'static str {
+        "Answer a durable workflow AwaitingUser question. Only usable for workflow tasks where the answer policy allows the model actor. Human-only gates must be answered by the user through the TUI or `neo workflow answer` CLI."
+    }
+
+    fn input_schema(&self) -> serde_json::Value {
+        schema::<TaskAnswerInput>()
+    }
+
+    fn execute<'a>(&'a self, ctx: &'a ToolContext, input: serde_json::Value) -> ToolFuture<'a> {
+        Box::pin(async move {
+            let input: TaskAnswerInput = parse_input(self.name(), input)?;
+            ctx.background_tasks
+                .answer_workflow(
+                    &input.task_id,
+                    &input.request_id,
+                    input.answer,
+                    crate::workflow::WorkflowActor::Model,
+                )
+                .await
+        })
+    }
+}
+
 pub fn task_list_result(tasks: &[BackgroundTaskSnapshot], active_only: bool) -> ToolResult {
     let header = if active_only {
         format!("active_background_tasks: {}", tasks.len())

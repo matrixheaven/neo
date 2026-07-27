@@ -33,6 +33,7 @@ pub(super) enum PreparedExecution {
     Direct,
     Edit(Arc<PreparedEdit>),
     Write(Arc<PreparedWrite>),
+    Workflow(Arc<crate::tools::workflow::PreparedWorkflowAction>),
 }
 
 impl PartialEq for PreparedExecution {
@@ -41,6 +42,7 @@ impl PartialEq for PreparedExecution {
             (Self::Direct, Self::Direct) => true,
             (Self::Edit(left), Self::Edit(right)) => Arc::ptr_eq(left, right),
             (Self::Write(left), Self::Write(right)) => Arc::ptr_eq(left, right),
+            (Self::Workflow(left), Self::Workflow(right)) => Arc::ptr_eq(left, right),
             _ => false,
         }
     }
