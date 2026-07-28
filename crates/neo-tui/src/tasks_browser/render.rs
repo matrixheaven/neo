@@ -10,8 +10,10 @@ use super::{
 
 const MIN_WIDE_WIDTH: usize = 72;
 const WIDE_GAP: usize = 1;
-const FOOTER: &str = " ↑↓ select   Enter/O output   S stop   P/U pause/resume   [/] page   R refresh   Tab filter   Q/Esc close";
+const FOOTER: &str = " ↑↓ select   Enter workflow/O output   S/X stop   P/U pause/resume   [/] page   R refresh   Tab filter   Q/Esc close";
 const COMPACT_FOOTER: &str = " Q/Esc close   Tab filter   S stop   [/] page   R refresh";
+const WORKFLOW_FOOTER: &str =
+    " O output   P/U pause/resume   S/X stop   A answer   Esc back   Q close";
 
 pub struct TaskBrowserRenderer<'a> {
     state: &'a TaskBrowserState,
@@ -32,11 +34,61 @@ impl<'a> TaskBrowserRenderer<'a> {
         if height < 6 {
             return self.render_tiny(width, height);
         }
+        if self.state.workflow_item().is_some() {
+            return self.render_workflow(width, height);
+        }
         if width >= MIN_WIDE_WIDTH {
             self.render_wide(width, height)
         } else {
             self.render_narrow(width, height)
         }
+    }
+
+    fn render_workflow(&self, width: usize, height: usize) -> Vec<String> {
+        let item = self.state.workflow_item().expect("checked above");
+        let content_height = height.saturating_sub(2).max(3);
+        let detail_height = if self.state.workflow_output_open() {
+            content_height / 2
+        } else {
+            content_height
+        };
+        let mut lines = Vec::with_capacity(height);
+        lines.push(truncate_width(
+            &format!(
+                " WORKFLOW {}  {}  {}",
+                item.title,
+                item.status.label(),
+                item.elapsed
+            ),
+            width,
+            "...",
+            false,
+        ));
+        lines.extend(pane(
+            " Workflow ",
+            width,
+            detail_height,
+            &item.detail_lines,
+            self.theme.overlay_border,
+        ));
+        if self.state.workflow_output_open() {
+            let output_height = content_height.saturating_sub(detail_height);
+            let output = item
+                .preview_lines
+                .iter()
+                .skip(self.state.output_scroll())
+                .cloned()
+                .collect::<Vec<_>>();
+            lines.extend(pane(
+                " Workflow Output ",
+                width,
+                output_height,
+                &output,
+                self.theme.overlay_border,
+            ));
+        }
+        lines.push(truncate_width(WORKFLOW_FOOTER, width, "...", false));
+        pad_height(lines, height)
     }
 
     fn render_wide(&self, width: usize, height: usize) -> Vec<String> {

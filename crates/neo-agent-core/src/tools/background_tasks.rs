@@ -3,7 +3,7 @@ use std::{
     fmt::Write,
     path::{Path, PathBuf},
     sync::Arc,
-    time::{Duration, Instant},
+    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
 use base64::Engine;
@@ -213,10 +213,19 @@ enum BackgroundTaskState {
 struct BackgroundTaskRecord {
     description: String,
     started_at: Instant,
+    finished_at: Option<Instant>,
     state: BackgroundTaskState,
     detached: bool,
     /// Session-local human handle for workflow tasks (stable after registration).
     human_handle: Option<String>,
+}
+
+impl BackgroundTaskRecord {
+    fn elapsed(&self) -> Duration {
+        self.finished_at
+            .unwrap_or_else(Instant::now)
+            .saturating_duration_since(self.started_at)
+    }
 }
 
 #[derive(Deserialize)]
@@ -290,6 +299,7 @@ impl BackgroundTaskManager {
             BackgroundTaskRecord {
                 description,
                 started_at: Instant::now(),
+                finished_at: None,
                 state: BackgroundTaskState::BashRunning(command),
                 detached: true,
                 human_handle: None,
@@ -332,6 +342,7 @@ impl BackgroundTaskManager {
             BackgroundTaskRecord {
                 description: description.clone(),
                 started_at: Instant::now(),
+                finished_at: None,
                 state: BackgroundTaskState::QuestionWaiting,
                 detached: true,
                 human_handle: None,
@@ -363,6 +374,7 @@ impl BackgroundTaskManager {
                 status: BackgroundTaskStatus::Completed,
                 answers: Some(answers),
             };
+            record.finished_at = Some(Instant::now());
         }
     }
 
@@ -371,7 +383,8 @@ impl BackgroundTaskManager {
     pub async fn start_delegate(&self, snapshot: crate::multi_agent::AgentSnapshot) -> String {
         let task_id = snapshot.id.as_str().to_owned();
         let description = snapshot.task.clone();
-        let state = if snapshot.state.is_terminal() {
+        let terminal = snapshot.state.is_terminal();
+        let state = if terminal {
             let status = match snapshot.state {
                 crate::multi_agent::AgentLifecycleState::Completed => {
                     BackgroundTaskStatus::Completed
@@ -392,6 +405,7 @@ impl BackgroundTaskManager {
             BackgroundTaskRecord {
                 description,
                 started_at: Instant::now(),
+                finished_at: terminal.then(Instant::now),
                 state,
                 detached: true,
                 human_handle: None,
@@ -414,6 +428,7 @@ impl BackgroundTaskManager {
                 status: BackgroundTaskStatus::Completed,
                 snapshot,
             };
+            record.finished_at = Some(Instant::now());
         }
     }
 
@@ -431,6 +446,7 @@ impl BackgroundTaskManager {
                 status: BackgroundTaskStatus::Cancelled,
                 snapshot,
             };
+            record.finished_at = Some(Instant::now());
         }
     }
 
@@ -446,6 +462,7 @@ impl BackgroundTaskManager {
             BackgroundTaskRecord {
                 description: snapshot.description.clone(),
                 started_at: Instant::now(),
+                finished_at: None,
                 state: BackgroundTaskState::DelegateSwarmRunning { snapshot },
                 detached: true,
                 human_handle: None,
@@ -509,6 +526,7 @@ impl BackgroundTaskManager {
                 status: BackgroundTaskStatus::Completed,
                 snapshot,
             };
+            record.finished_at = Some(Instant::now());
         }
     }
 
@@ -529,6 +547,7 @@ impl BackgroundTaskManager {
                 status: BackgroundTaskStatus::Cancelled,
                 snapshot,
             };
+            record.finished_at = Some(Instant::now());
         }
     }
 
@@ -547,6 +566,7 @@ impl BackgroundTaskManager {
             && matches!(record.state, BackgroundTaskState::DelegateRunning { .. })
         {
             record.state = BackgroundTaskState::DelegateFinished { status, snapshot };
+            record.finished_at = Some(Instant::now());
         }
     }
 
@@ -566,6 +586,7 @@ impl BackgroundTaskManager {
             )
         {
             record.state = BackgroundTaskState::DelegateSwarmFinished { status, snapshot };
+            record.finished_at = Some(Instant::now());
         }
     }
 
@@ -589,6 +610,7 @@ impl BackgroundTaskManager {
             BackgroundTaskRecord {
                 description,
                 started_at: Instant::now(),
+                finished_at: None,
                 state: BackgroundTaskState::Workflow { handle },
                 detached: false,
                 human_handle: Some(human_handle),
@@ -967,6 +989,7 @@ impl BackgroundTaskManager {
             BackgroundTaskRecord {
                 description,
                 started_at: Instant::now(),
+                finished_at: None,
                 state: BackgroundTaskState::BashRunning(command),
                 detached: false,
                 human_handle: None,
@@ -1143,11 +1166,10 @@ impl BackgroundTaskManager {
         if let BackgroundTaskState::Workflow { handle } = &record.state {
             let handle = handle.clone();
             let description = record.description.clone();
-            let elapsed = record.started_at.elapsed();
             let human_handle = record.human_handle.clone();
             drop(tasks);
             return Some(
-                Self::workflow_snapshot(task_id, description, elapsed, human_handle, &handle).await,
+                Self::workflow_snapshot(task_id, description, human_handle, &handle).await,
             );
         }
         let mut snapshot = Self::snapshot_from_record(record, task_id);
@@ -1164,18 +1186,18 @@ impl BackgroundTaskManager {
         let BackgroundTaskState::BashRunning(command) = &record.state else {
             return None;
         };
-        let started_at = record.started_at;
         let description = record.description.clone();
         if let Some(result) = command.client.final_result() {
             let status = background_status(&result);
             let output = command_output_from_guard(result);
             record.state = BackgroundTaskState::BashFinished { status, output };
+            record.finished_at = Some(Instant::now());
             return Some(BackgroundTaskSnapshot {
                 task_id: task_id.to_owned(),
                 kind: BackgroundTaskKind::Bash,
                 status,
                 description,
-                elapsed: started_at.elapsed(),
+                elapsed: record.elapsed(),
                 output: None,
                 answers: None,
                 delegate: None,
@@ -1188,7 +1210,7 @@ impl BackgroundTaskManager {
             kind: BackgroundTaskKind::Bash,
             status: BackgroundTaskStatus::Running,
             description,
-            elapsed: started_at.elapsed(),
+            elapsed: record.elapsed(),
             output: None,
             answers: None,
             delegate: None,
@@ -1271,7 +1293,7 @@ impl BackgroundTaskManager {
             kind: BackgroundTaskKind::Bash,
             status: background_status_from_kind(status.exit.status),
             description: task_id.to_owned(),
-            elapsed: Duration::ZERO,
+            elapsed: elapsed_from_epoch_ms(status.started_at_ms, status.finished_at_ms),
             output: None,
             answers: None,
             delegate: None,
@@ -1377,7 +1399,7 @@ impl BackgroundTaskManager {
                         kind: BackgroundTaskKind::Bash,
                         status: *status,
                         description: record.description.clone(),
-                        elapsed: record.started_at.elapsed(),
+                        elapsed: record.elapsed(),
                         output: Some(output.clone()),
                         answers: None,
                         delegate: None,
@@ -1391,7 +1413,7 @@ impl BackgroundTaskManager {
                         kind: BackgroundTaskKind::Question,
                         status: *status,
                         description: record.description.clone(),
-                        elapsed: record.started_at.elapsed(),
+                        elapsed: record.elapsed(),
                         output: None,
                         answers: answers.clone(),
                         delegate: None,
@@ -1434,6 +1456,7 @@ impl BackgroundTaskManager {
                         status: BackgroundTaskStatus::Cancelled,
                         answers: None,
                     };
+                    record.finished_at = Some(Instant::now());
                     StopAction::StopQuestion {
                         started_at: record.started_at,
                         description: record.description.clone(),
@@ -1450,12 +1473,13 @@ impl BackgroundTaskManager {
                         status: BackgroundTaskStatus::Cancelled,
                         snapshot: snapshot.clone(),
                     };
+                    record.finished_at = Some(Instant::now());
                     let snap = BackgroundTaskSnapshot {
                         task_id: task_id.to_owned(),
                         kind: BackgroundTaskKind::Delegate,
                         status: BackgroundTaskStatus::Cancelled,
                         description: record.description.clone(),
-                        elapsed: record.started_at.elapsed(),
+                        elapsed: record.elapsed(),
                         output: None,
                         answers: None,
                         delegate: Some(snapshot),
@@ -1474,12 +1498,13 @@ impl BackgroundTaskManager {
                         status: BackgroundTaskStatus::Cancelled,
                         snapshot: snapshot.clone(),
                     };
+                    record.finished_at = Some(Instant::now());
                     let snap = BackgroundTaskSnapshot {
                         task_id: task_id.to_owned(),
                         kind: BackgroundTaskKind::DelegateSwarm,
                         status: BackgroundTaskStatus::Cancelled,
                         description: record.description.clone(),
-                        elapsed: record.started_at.elapsed(),
+                        elapsed: record.elapsed(),
                         output: None,
                         answers: None,
                         delegate: None,
@@ -1571,6 +1596,7 @@ impl BackgroundTaskManager {
                     BackgroundTaskRecord {
                         description,
                         started_at,
+                        finished_at: Some(Instant::now()),
                         state: BackgroundTaskState::BashFinished { status, output },
                         detached: true,
                         human_handle: None,
@@ -1760,7 +1786,7 @@ impl BackgroundTaskManager {
             kind: BackgroundTaskKind::Bash,
             status: task_status,
             description: task_id.to_owned(),
-            elapsed: Duration::ZERO,
+            elapsed: elapsed_from_epoch_ms(status.started_at_ms, status.finished_at_ms),
             output: Some(CommandOutput {
                 exit_code: status.exit.exit_code,
                 signal: status.exit.signal,
@@ -1820,11 +1846,10 @@ impl BackgroundTaskManager {
         if let BackgroundTaskState::Workflow { handle } = &record.state {
             let handle = handle.clone();
             let description = record.description.clone();
-            let elapsed = record.started_at.elapsed();
             let human_handle = record.human_handle.clone();
             drop(tasks);
             return Some(
-                Self::workflow_snapshot(task_id, description, elapsed, human_handle, &handle).await,
+                Self::workflow_snapshot(task_id, description, human_handle, &handle).await,
             );
         }
         Some(Self::snapshot_from_record(record, task_id))
@@ -1836,7 +1861,6 @@ impl BackgroundTaskManager {
         let BackgroundTaskState::BashRunning(command) = &record.state else {
             return None;
         };
-        let started_at = record.started_at;
         let description = record.description.clone();
         if let Some(result) = command.client.final_result() {
             let status = background_status(&result);
@@ -1845,12 +1869,13 @@ impl BackgroundTaskManager {
                 status,
                 output: output.clone(),
             };
+            record.finished_at = Some(Instant::now());
             return Some(BackgroundTaskSnapshot {
                 task_id: task_id.to_owned(),
                 kind: BackgroundTaskKind::Bash,
                 status,
                 description,
-                elapsed: started_at.elapsed(),
+                elapsed: record.elapsed(),
                 output: Some(output),
                 answers: None,
                 delegate: None,
@@ -1865,7 +1890,7 @@ impl BackgroundTaskManager {
             kind: BackgroundTaskKind::Bash,
             status: BackgroundTaskStatus::Running,
             description,
-            elapsed: started_at.elapsed(),
+            elapsed: record.elapsed(),
             output: Some(output),
             answers: None,
             delegate: None,
@@ -1878,7 +1903,7 @@ impl BackgroundTaskManager {
         record: &BackgroundTaskRecord,
         task_id: &str,
     ) -> BackgroundTaskSnapshot {
-        let elapsed = record.started_at.elapsed();
+        let elapsed = record.elapsed();
         let description = record.description.clone();
         let task_id = task_id.to_owned();
         match &record.state {
@@ -1994,7 +2019,6 @@ impl BackgroundTaskManager {
     async fn workflow_snapshot(
         task_id: &str,
         description: String,
-        elapsed: Duration,
         human_handle: Option<String>,
         handle: &crate::workflow::WorkflowHandle,
     ) -> BackgroundTaskSnapshot {
@@ -2012,7 +2036,7 @@ impl BackgroundTaskManager {
             kind: BackgroundTaskKind::Workflow,
             status: workflow_status(snapshot.state),
             description,
-            elapsed,
+            elapsed: workflow_elapsed(&snapshot),
             output: None,
             answers: None,
             delegate: None,
@@ -2896,6 +2920,32 @@ fn format_elapsed(elapsed: Duration) -> String {
     format!("{minutes:02}:{seconds:02}")
 }
 
+fn workflow_elapsed(snapshot: &crate::workflow::WorkflowSnapshot) -> Duration {
+    let Some(started_at_ms) = snapshot.started_at_ms else {
+        return Duration::ZERO;
+    };
+    let ended_at_ms = if snapshot.state.is_terminal() {
+        snapshot.updated_at_ms.unwrap_or(started_at_ms)
+    } else {
+        current_epoch_ms()
+    };
+    elapsed_from_epoch_ms(started_at_ms, ended_at_ms)
+}
+
+fn elapsed_from_epoch_ms(started_at_ms: u64, ended_at_ms: u64) -> Duration {
+    Duration::from_millis(ended_at_ms.saturating_sub(started_at_ms))
+}
+
+fn current_epoch_ms() -> u64 {
+    u64::try_from(
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_millis(),
+    )
+    .unwrap_or(u64::MAX)
+}
+
 fn background_status(result: &GuardedCommandResult) -> BackgroundTaskStatus {
     background_status_from_kind(result.exit.status)
 }
@@ -3047,8 +3097,8 @@ mod tests {
     use super::*;
     use crate::workflow::journal::{JournalPayload, collect_journal_v2};
     use crate::workflow::{
-        WorkflowActor, WorkflowLaunchRequest, WorkflowLimits, WorkflowPhase, WorkflowRuntime,
-        WorkflowState,
+        WorkflowActor, WorkflowId, WorkflowLaunchRequest, WorkflowLimits, WorkflowPhase,
+        WorkflowRuntime, WorkflowSnapshot, WorkflowState,
     };
     use crate::{ShellLimits, ShellRuntime, ToolAccess};
 
@@ -3305,6 +3355,93 @@ mod tests {
                 .status,
             BackgroundTaskStatus::WaitingForUser
         );
+    }
+
+    #[tokio::test]
+    async fn terminal_elapsed_freezes_for_completed_background_tasks() {
+        let manager = BackgroundTaskManager::new();
+        manager
+            .start_question("elapsed-question".to_owned(), "Pick one".to_owned())
+            .await;
+        tokio::time::sleep(Duration::from_millis(10)).await;
+        manager
+            .complete_question("elapsed-question", vec!["answer".to_owned()])
+            .await;
+        let first = manager
+            .snapshot("elapsed-question")
+            .await
+            .expect("completed snapshot")
+            .elapsed;
+        tokio::time::sleep(Duration::from_millis(10)).await;
+        let second = manager
+            .snapshot("elapsed-question")
+            .await
+            .expect("completed snapshot")
+            .elapsed;
+
+        assert_eq!(first, second);
+    }
+
+    #[tokio::test]
+    async fn persisted_terminal_elapsed_rehydrates_from_durable_timestamps() {
+        let tasks = tempfile::tempdir().expect("tasks");
+        tokio::fs::write(
+            tasks.path().join("bash-elapsed.status.json"),
+            serde_json::to_vec(&json!({
+                "schema_version": 1,
+                "task_id": "bash-elapsed",
+                "started_at_ms": 100,
+                "finished_at_ms": 650,
+                "exit": {
+                    "status": "completed",
+                    "exit_code": 0,
+                    "signal": null,
+                    "resource_limit": null,
+                    "omitted_output_bytes": 0,
+                    "omitted_log_bytes": 0
+                },
+                "cleanup_errors": []
+            }))
+            .expect("serialize status"),
+        )
+        .await
+        .expect("write status");
+        let manager = BackgroundTaskManager::new().with_persistence_dir(tasks.path().to_path_buf());
+
+        let snapshot = manager
+            .snapshot("bash-elapsed")
+            .await
+            .expect("rehydrated snapshot");
+        assert_eq!(snapshot.elapsed, Duration::from_millis(550));
+        assert_eq!(
+            manager.list_metadata(false).await[0].elapsed,
+            Duration::from_millis(550)
+        );
+    }
+
+    #[test]
+    fn terminal_workflow_elapsed_uses_its_durable_timestamps() {
+        let snapshot = WorkflowSnapshot {
+            id: WorkflowId("workflow-elapsed".to_owned()),
+            title: "workflow elapsed".to_owned(),
+            state: WorkflowState::Completed,
+            current_phase: None,
+            projection_sequence: None,
+            recovery_failure: false,
+            started_at_ms: Some(100),
+            updated_at_ms: Some(650),
+            invocation_count: 0,
+            failure_count: 0,
+            actual_usage: None,
+            latest_log_summary: None,
+            latest_report_summary: None,
+            terminal_reason: None,
+            steps: Vec::new(),
+            display_name: "workflow elapsed".to_owned(),
+            purpose: "test".to_owned(),
+        };
+
+        assert_eq!(workflow_elapsed(&snapshot), Duration::from_millis(550));
     }
 
     #[tokio::test]

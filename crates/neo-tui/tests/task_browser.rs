@@ -429,3 +429,44 @@ fn task_browser_workflow_detail_and_cursor_rules() {
     };
     assert!(state.apply_snapshot_checked(&matched).is_ok());
 }
+
+#[test]
+fn task_browser_opens_selected_workflow_in_place_and_toggles_its_output() {
+    let mut workflow = item("wf-run-1", TaskBrowserStatus::Running);
+    workflow.kind = TaskBrowserKind::Workflow;
+    workflow.title = "deep-research".to_owned();
+    workflow.detail_lines = vec!["phase: plan".to_owned()];
+    workflow.preview_lines = vec!["workflow report".to_owned()];
+
+    let mut state = TaskBrowserState::new();
+    state.apply_snapshot(&TaskBrowserSnapshot::new(vec![workflow]));
+    assert_eq!(state.handle_action(TaskBrowserAction::OpenWorkflow), None);
+    assert_eq!(
+        state.workflow_item().map(|item| item.id.as_str()),
+        Some("wf-run-1")
+    );
+    assert!(!state.workflow_output_open());
+    assert!(
+        render_plain(&state, 90, 18)
+            .iter()
+            .any(|line| line.contains("WORKFLOW deep-research"))
+    );
+
+    assert_eq!(
+        state.handle_action(TaskBrowserAction::ToggleWorkflowOutput),
+        None
+    );
+    assert!(state.workflow_output_open());
+    assert!(
+        render_plain(&state, 90, 18)
+            .iter()
+            .any(|line| line.contains("Workflow Output"))
+    );
+    let compact = render_plain(&state, 90, 6);
+    assert_eq!(compact.len(), 6);
+    assert!(compact.last().is_some_and(|line| line.contains("Esc back")));
+
+    assert_eq!(state.handle_action(TaskBrowserAction::Cancel), None);
+    assert!(state.workflow_item().is_none());
+    assert_eq!(state.selected_task_id(), Some("wf-run-1"));
+}
