@@ -287,3 +287,4 @@ Entries are workspace records, not authoritative runtime decisions.
 | 2026-07-27 | artifact | docs/aegis/work/2026-07-27-assistant-native-workflow-tool/evidence-bundle-draft-task1-tests.json | 2026-07-27-assistant-native-workflow-tool evidence task1-tests |
 | 2026-07-27 | artifact | docs/aegis/work/2026-07-27-assistant-native-workflow-tool/gate-input-pack.json | 2026-07-27-assistant-native-workflow-tool gate input pack |
 | 2026-07-27 | work | docs/aegis/work/2026-07-27-assistant-native-workflow-tool/proof-bundle.md | 2026-07-27-assistant-native-workflow-tool proof bundle |
+| 2026-07-28 | spec | docs/aegis/specs/2026-07-28-edit-mismatch-compact-recovery-brief.md | Edit match-mismatch compact recovery spec brief |
