@@ -413,6 +413,33 @@ async fn neo_verify_failure_is_a_catchable_outcome_table() {
 }
 
 #[tokio::test]
+async fn denied_neo_tool_is_catchable_without_aborting_the_workflow() {
+    let fixture = make_runner().await;
+    let result = fixture
+        .runner
+        .execute(
+            r#"
+            local ok, err = pcall(function()
+                neo.tool({ name = "Workflow", input = {} })
+            end)
+            assert(not ok)
+            return { caught = true, message = tostring(err) }
+            "#,
+            serde_json::json!({}),
+        )
+        .await
+        .expect("denied generic tool remains catchable");
+
+    assert_eq!(result["caught"], true, "{result}");
+    assert!(
+        result["message"]
+            .as_str()
+            .is_some_and(|message| message.contains("tool_not_workflow_eligible")),
+        "{result}"
+    );
+}
+
+#[tokio::test]
 async fn local_host_operations_are_durable() {
     let fixture = make_runner_with(
         WorkflowLimits::default(),
