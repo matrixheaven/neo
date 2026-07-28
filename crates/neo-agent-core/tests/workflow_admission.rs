@@ -29,6 +29,7 @@ fn launch_request(name: &str) -> WorkflowLaunchRequest {
         input_schema: None,
         definition_origin: None,
         inline_unsaved: false,
+    }
 }
 
 fn limits_one_worker() -> WorkflowLimits {
@@ -599,10 +600,11 @@ fn automatic_retention_reclaims_only_old_terminal_unreferenced_runs_to_low_water
             launch_source: "test".to_owned(),
             journal_format_version: 2,
             output_schema: None,
-        display_name: None,
-        input_schema: None,
-        definition_origin: None,
-        inline_unsaved: false,;
+            display_name: None,
+            input_schema: None,
+            definition_origin: None,
+            inline_unsaved: false,
+        };
         neo_agent_core::workflow::journal::write_run_metadata(
             &run_dir,
             &metadata,
@@ -835,10 +837,11 @@ fn automatic_retention_preserves_protected_runs_and_fails_closed_on_path_escape(
             launch_source: "test".to_owned(),
             journal_format_version: 2,
             output_schema: None,
-        display_name: None,
-        input_schema: None,
-        definition_origin: None,
-        inline_unsaved: false,;
+            display_name: None,
+            input_schema: None,
+            definition_origin: None,
+            inline_unsaved: false,
+        };
         neo_agent_core::workflow::journal::write_run_metadata(
             &run_dir,
             &metadata,

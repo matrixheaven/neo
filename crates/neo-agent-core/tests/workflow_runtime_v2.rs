@@ -132,7 +132,12 @@ fn launch_request() -> WorkflowLaunchRequest {
         args: serde_json::json!({}),
         launch_source: "/workflow review".to_owned(),
         parent_run_id: None,
-        output_schema: None,}
+        output_schema: None,
+        display_name: None,
+        input_schema: None,
+        definition_origin: None,
+        inline_unsaved: false,
+    }
 }
 
 fn completed(summary: &str) -> WorkflowInvocationOutcome {
@@ -179,7 +184,8 @@ async fn v2_create_is_durable_and_queued_before_registration() {
     match &envelopes[0].payload {
         JournalPayload::RunCreated {
             name,
-            description_source,
+            description,
+            launch_source,
         } => {
             assert_eq!(name, "review");
             assert_eq!(description.as_deref(), Some("test run"));
@@ -355,7 +361,12 @@ async fn crash_after_final_result_appends_only_completed_state() {
         args: serde_json::json!({}),
         launch_source: "/workflow".to_owned(),
         journal_format_version: 2,
-        output_schema: None,};
+        output_schema: None,
+        display_name: None,
+        input_schema: None,
+        definition_origin: None,
+        inline_unsaved: false,
+    };
     neo_agent_core::workflow::write_run_metadata(&run_path, &meta, &WorkflowLimits::default())
         .unwrap();
 
@@ -463,7 +474,11 @@ async fn ordinary_resume_cannot_bypass_awaiting_user() {
         launch_source: "/workflow".to_owned(),
         journal_format_version: 2,
         output_schema: None,
-};
+        display_name: None,
+        input_schema: None,
+        definition_origin: None,
+        inline_unsaved: false,
+    };
     neo_agent_core::workflow::write_run_metadata(&run_path, &meta, &WorkflowLimits::default())
         .unwrap();
     let journal_path = run_path.join("journal.jsonl");
@@ -472,7 +487,8 @@ async fn ordinary_resume_cannot_bypass_awaiting_user() {
     for (seq, payload) in [
         JournalPayload::RunCreated {
             name: "await".to_owned(),
-            description: None, launch_source: Some("/workflow".to_owned())),
+            description: None,
+            launch_source: Some("/workflow".to_owned()),
         },
         JournalPayload::StateChanged {
             previous: WorkflowState::Queued,
@@ -620,7 +636,11 @@ async fn rehydrate_starts_no_worker_and_preserves_awaiting_user() {
         launch_source: "/workflow".to_owned(),
         journal_format_version: 2,
         output_schema: None,
-};
+        display_name: None,
+        input_schema: None,
+        definition_origin: None,
+        inline_unsaved: false,
+    };
     neo_agent_core::workflow::write_run_metadata(&run_path, &meta, &WorkflowLimits::default())
         .unwrap();
     let journal_path = run_path.join("journal.jsonl");
@@ -629,7 +649,8 @@ async fn rehydrate_starts_no_worker_and_preserves_awaiting_user() {
     for (seq, payload) in [
         JournalPayload::RunCreated {
             name: "await".to_owned(),
-            description: None, launch_source: Some("/workflow".to_owned())),
+            description: None,
+            launch_source: Some("/workflow".to_owned()),
         },
         JournalPayload::StateChanged {
             previous: WorkflowState::Queued,

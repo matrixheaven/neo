@@ -105,7 +105,8 @@ fn v2_terminal_children_project_read_only_without_rewrite() {
         run_id,
         JournalPayload::RunCreated {
             name: "legacy".to_owned(),
-            description: None,,
+            description: None,
+            launch_source: None,
         },
     );
     assert_eq!(v2.version, JOURNAL_FORMAT_V2);
