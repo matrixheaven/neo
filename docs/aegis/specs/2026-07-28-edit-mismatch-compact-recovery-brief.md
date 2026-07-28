@@ -1,9 +1,9 @@
 # Edit Match-Mismatch Compact Recovery Spec Brief
 
-Status: draft for user review
+Status: approved 2026-07-28
 
 This brief supersedes
-`docs/aegis/specs/2026-07-25-edit-mismatch-readback-brief.md` after approval.
+`docs/aegis/specs/2026-07-25-edit-mismatch-readback-brief.md`.
 
 ## Goal
 

@@ -1,5 +1,8 @@
 # Edit Match-Mismatch Readback Spec Brief
 
+Status: superseded by
+`docs/aegis/specs/2026-07-28-edit-mismatch-compact-recovery-brief.md`
+
 ## Goal
 
 Let an AI correct an `Edit` match-count failure without spending a separate
