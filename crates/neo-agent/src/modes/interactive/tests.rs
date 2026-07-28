@@ -1410,6 +1410,65 @@ async fn active_turn_event_drain_leaves_backlog_for_input_fairness() {
 }
 
 #[tokio::test]
+async fn completed_turn_drains_event_backlog_before_removal() {
+    const BACKLOG: usize = 513;
+
+    let run_turn: TurnDriver = Arc::new(|_request, channels| {
+        Box::pin(async move {
+            for _ in 0..BACKLOG {
+                channels.send_event(AgentEvent::TextDelta {
+                    turn: 1,
+                    text: "x".to_owned(),
+                });
+            }
+            Ok(TurnOutcome::default())
+        })
+    });
+    let mut controller = InteractiveController::new(
+        "neo",
+        "test-session",
+        "openai/gpt-4.1",
+        test_workspace_root(),
+        PickerCatalogs::default(),
+        ControllerCallbacks {
+            run_turn,
+            load_session: Arc::new(|session_id| Box::pin(empty_session_loader(session_id))),
+            fork_session: Arc::new(|session_id| Box::pin(empty_session_forker(session_id))),
+        },
+    );
+
+    controller.type_text("stream");
+    controller
+        .handle_input_event(InputEvent::Submit)
+        .await
+        .expect("start turn");
+    for _ in 0..20 {
+        if controller
+            .active_turn
+            .as_ref()
+            .is_some_and(|turn| turn.task.is_finished())
+        {
+            break;
+        }
+        tokio::task::yield_now().await;
+    }
+    controller
+        .drain_active_turn()
+        .await
+        .expect("drain completed turn");
+
+    let received = transcript_entries(&controller)
+        .iter()
+        .find_map(|entry| match entry {
+            TranscriptEntry::AssistantMessage { content } => Some(content.len()),
+            _ => None,
+        })
+        .expect("streaming assistant entry");
+    assert_eq!(received, BACKLOG);
+    assert!(controller.active_turn.is_none());
+}
+
+#[tokio::test]
 async fn image_prompt_submit_renders_user_transcript_with_attachment() {
     let png = b"\x89PNG\r\n\x1a\n\x00\x00\x00\rIHDR\x00\x00\x00\x01\x00\x00\x00\x01\x08\x02\x00\x00\x00\x90wS\xde"
         .to_vec();
@@ -11079,6 +11138,42 @@ fn persisted_workflow_events_apply_only_to_matching_session_generation() {
 
     let entries_after = controller.tui.transcript().transcript().entries().len();
     assert_eq!(entries_after, entries_before + 1);
+}
+
+#[test]
+fn idle_workflow_events_do_not_set_the_foreground_working_footer() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let mut controller = InteractiveController::new_for_test(
+        "neo",
+        "test-session",
+        "openai/gpt-4.1",
+        temp.path(),
+        |_request| async move { Ok(Vec::<AgentEvent>::new()) },
+    );
+    controller.set_active_session_id(SESSION_A.to_owned());
+    let generation = controller.workflow_event_generation;
+    let (events, workflow_events) = tokio::sync::mpsc::unbounded_channel();
+    controller.workflow_events = workflow_events;
+
+    events
+        .send(crate::modes::run::PersistedSessionWorkflowEvent::Event(
+            Box::new(crate::modes::run::SessionWorkflowEvent {
+                session_id: SESSION_A.to_owned(),
+                generation,
+                event: AgentEvent::ToolExecutionStarted {
+                    turn: 1,
+                    id: "background-workflow".to_owned(),
+                    name: "Bash".to_owned(),
+                    arguments: serde_json::json!({"command": "cargo --version"}),
+                    workflow_origin: None,
+                },
+            }),
+        ))
+        .expect("workflow event");
+
+    controller.drain_workflow_events();
+
+    assert!(controller.chrome().working_label().is_none());
 }
 
 #[tokio::test]

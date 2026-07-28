@@ -398,7 +398,10 @@ pub(crate) struct InteractiveController {
     fork_session: SessionForker,
     active_session_id: Option<String>,
     workflow_event_generation: u64,
-    workflow_event_ingress: Option<mpsc::UnboundedSender<crate::modes::run::SessionWorkflowEvent>>,
+    workflow_event_ingress:
+        Option<mpsc::UnboundedSender<crate::modes::run::PersistedSessionWorkflowEvent>>,
+    workflow_event_persistence_ingress:
+        Option<mpsc::UnboundedSender<crate::modes::run::SessionWorkflowEvent>>,
     workflow_events: mpsc::UnboundedReceiver<crate::modes::run::PersistedSessionWorkflowEvent>,
     workflow_event_routes: HashMap<String, neo_agent_core::runtime::WorkflowDispatchIdleEventLease>,
     workflow_approval_ingress: mpsc::UnboundedSender<SessionWorkflowApproval>,
@@ -884,6 +887,7 @@ impl InteractiveController {
             active_session_id: None,
             workflow_event_generation: 0,
             workflow_event_ingress: None,
+            workflow_event_persistence_ingress: None,
             workflow_events,
             workflow_event_routes: HashMap::new(),
             workflow_approval_ingress,
@@ -1222,15 +1226,28 @@ impl InteractiveController {
         let Ok(runtime) = tokio::runtime::Handle::try_current() else {
             return;
         };
-        let (ingress, events) = mpsc::unbounded_channel();
-        let (persisted, workflow_events) = mpsc::unbounded_channel();
+        let (workflow_event_ingress, live_workflow_events) = mpsc::unbounded_channel();
+        let (persistence_ingress, events) = mpsc::unbounded_channel();
+        let (persisted, mut persistence_results) = mpsc::unbounded_channel();
         runtime.spawn(crate::modes::run::persist_session_workflow_events(
             config.clone(),
             events,
             persisted,
         ));
-        self.workflow_event_ingress = Some(ingress);
-        self.workflow_events = workflow_events;
+        let error_ingress = workflow_event_ingress.clone();
+        runtime.spawn(async move {
+            while let Some(delivery) = persistence_results.recv().await {
+                if matches!(
+                    delivery,
+                    crate::modes::run::PersistedSessionWorkflowEvent::Error { .. }
+                ) {
+                    let _ = error_ingress.send(delivery);
+                }
+            }
+        });
+        self.workflow_event_ingress = Some(workflow_event_ingress);
+        self.workflow_event_persistence_ingress = Some(persistence_ingress);
+        self.workflow_events = live_workflow_events;
     }
 
     fn push_status(&mut self, message: impl Into<String>) {
@@ -1243,6 +1260,7 @@ impl InteractiveController {
         self.workflow_approval_routes.clear();
         self.drop_all_workflow_approvals();
         self.workflow_event_ingress = None;
+        self.workflow_event_persistence_ingress = None;
         if self.active_turn.is_some() {
             self.abort_active_turn();
         }
@@ -1940,9 +1958,10 @@ impl InteractiveController {
     }
 
     fn bind_idle_workflow_event_route(&mut self, session_id: &str) {
-        let (Some(config), Some(ingress)) = (
+        let (Some(config), Some(ingress), Some(persistence_ingress)) = (
             self.local_config.as_ref(),
             self.workflow_event_ingress.as_ref(),
+            self.workflow_event_persistence_ingress.as_ref(),
         ) else {
             return;
         };
@@ -1951,12 +1970,17 @@ impl InteractiveController {
         let route_session_id = session_id.clone();
         let generation = self.workflow_event_generation;
         let ingress = ingress.clone();
+        let persistence_ingress = persistence_ingress.clone();
         let handler: neo_agent_core::tools::ToolEventCallback = Arc::new(move |event| {
-            let _ = ingress.send(crate::modes::run::SessionWorkflowEvent {
+            let envelope = crate::modes::run::SessionWorkflowEvent {
                 session_id: session_id.clone(),
                 generation,
                 event,
-            });
+            };
+            let _ = ingress.send(crate::modes::run::PersistedSessionWorkflowEvent::Event(
+                Box::new(envelope.clone()),
+            ));
+            let _ = persistence_ingress.send(envelope);
         });
         match config
             .workflow_dispatch_resolver
@@ -2221,6 +2245,13 @@ impl InteractiveController {
         if should_refresh_git_status {
             self.request_git_status_refresh();
         }
+        frame_request
+    }
+
+    fn apply_background_workflow_event(&mut self, event: AgentEvent) -> FrameRequest {
+        let frame_request = Self::frame_request_for_agent_event(&event);
+        self.tui.transcript_mut().apply_agent_event(&event);
+        self.tui.chrome_mut().apply_background_agent_event(event);
         frame_request
     }
 

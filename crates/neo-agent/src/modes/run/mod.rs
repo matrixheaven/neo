@@ -893,7 +893,7 @@ struct StreamingTurnIo {
     cancel_token: CancellationToken,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub(crate) struct SessionWorkflowEvent {
     pub(crate) session_id: String,
     pub(crate) generation: u64,

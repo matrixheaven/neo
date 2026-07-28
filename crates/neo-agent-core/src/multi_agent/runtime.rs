@@ -1822,7 +1822,14 @@ pub struct ChildRuntimeDeps {
 
 impl ChildRuntimeDeps {
     #[must_use]
-    pub fn new(config: AgentConfig, model: Arc<dyn ModelClient>, tools: Arc<ToolRegistry>) -> Self {
+    pub fn new(
+        mut config: AgentConfig,
+        model: Arc<dyn ModelClient>,
+        tools: Arc<ToolRegistry>,
+    ) -> Self {
+        if let Ok(mode) = config.live_permission_mode.read().map(|guard| *guard) {
+            config.permission_mode = mode;
+        }
         Self {
             config,
             model,
