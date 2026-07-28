@@ -27,6 +27,8 @@ fn snapshot(state: WorkflowState) -> WorkflowSnapshot {
             .is_terminal()
             .then(|| "workflow reached its durable boundary".to_owned()),
         steps: Vec::new(),
+        display_name: "Runtime audit and fix".to_owned(),
+        purpose: "Verify runtime correctness".to_owned(),
     }
 }
 
