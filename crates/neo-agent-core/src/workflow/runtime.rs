@@ -2010,18 +2010,20 @@ impl WorkflowRuntime {
                         let swarm_id_run = swarm_id.clone();
                         let item_label = child.item.clone();
                         let child_context = resolved.context.mode;
+                        let repair_deps = deps.clone();
                         in_flight.push(async move {
                             let output = runtime
-                                .run_started_swarm_child_turn(
+                                .run_started_swarm_child_turn_with_schema(
                                     deps,
                                     child.agent,
                                     &swarm_id_run,
                                     &item_label,
                                     child_context,
+                                    plan.output_schema.as_ref(),
                                     |_| {},
                                 )
                                 .await;
-                            (item_id, invocation_id, output)
+                            (item_id, invocation_id, output, repair_deps)
                         });
                     }
                     Err(error) => {
@@ -2069,8 +2071,21 @@ impl WorkflowRuntime {
                 break;
             }
 
-            if let Some((item_id, invocation_id, output)) = in_flight.next().await {
-                let outcome = child_run_to_outcome(&output);
+            if let Some((item_id, invocation_id, output, repair_deps)) = in_flight.next().await {
+                let plan = plans
+                    .iter()
+                    .find(|plan| plan.item_id == item_id)
+                    .expect("in-flight swarm item must have a plan");
+                let outcome = self
+                    .child_run_to_outcome_with_schema(
+                        run_id,
+                        &multi_agent,
+                        repair_deps,
+                        plan,
+                        &invocation_id,
+                        &output,
+                    )
+                    .await?;
                 self.append_swarm_item(
                     run_id,
                     JournalPayload::SwarmItemFinished {
@@ -2087,8 +2102,32 @@ impl WorkflowRuntime {
             if self.is_stop_requested(run_id).await {
                 let _ = multi_agent.cancel_swarm(&swarm_id);
                 // Drain in-flight to terminal without starting new ones.
-                while let Some((item_id, invocation_id, output)) = in_flight.next().await {
-                    let outcome = child_run_to_outcome(&output);
+                while let Some((item_id, invocation_id, output, repair_deps)) =
+                    in_flight.next().await
+                {
+                    let plan = plans
+                        .iter()
+                        .find(|plan| plan.item_id == item_id)
+                        .expect("in-flight swarm item must have a plan");
+                    let outcome = self
+                        .child_run_to_outcome_with_schema(
+                            run_id,
+                            &multi_agent,
+                            repair_deps,
+                            plan,
+                            &invocation_id,
+                            &output,
+                        )
+                        .await
+                        .unwrap_or_else(|error| WorkflowInvocationOutcome {
+                            ok: false,
+                            status: WorkflowOutcomeStatus::Failed,
+                            summary: error.to_string(),
+                            details: serde_json::json!({"error": error.to_string()}),
+                            actual_usage: None,
+                            child_refs: Vec::new(),
+                            interruption: None,
+                        });
                     let _ = self
                         .append_swarm_item(
                             run_id,
@@ -2106,8 +2145,32 @@ impl WorkflowRuntime {
             }
             if self.is_pause_requested(run_id).await && next < children.len() {
                 // Let active finish, then stop starting new ones.
-                while let Some((item_id, invocation_id, output)) = in_flight.next().await {
-                    let outcome = child_run_to_outcome(&output);
+                while let Some((item_id, invocation_id, output, repair_deps)) =
+                    in_flight.next().await
+                {
+                    let plan = plans
+                        .iter()
+                        .find(|plan| plan.item_id == item_id)
+                        .expect("in-flight swarm item must have a plan");
+                    let outcome = self
+                        .child_run_to_outcome_with_schema(
+                            run_id,
+                            &multi_agent,
+                            repair_deps,
+                            plan,
+                            &invocation_id,
+                            &output,
+                        )
+                        .await
+                        .unwrap_or_else(|error| WorkflowInvocationOutcome {
+                            ok: false,
+                            status: WorkflowOutcomeStatus::Failed,
+                            summary: error.to_string(),
+                            details: serde_json::json!({"error": error.to_string()}),
+                            actual_usage: None,
+                            child_refs: Vec::new(),
+                            interruption: None,
+                        });
                     let _ = self
                         .append_swarm_item(
                             run_id,
@@ -2129,12 +2192,16 @@ impl WorkflowRuntime {
         let mut ordered = Vec::with_capacity(plans.len());
         for plan in &plans {
             if let Some((_, outcome)) = item_outcomes.iter().find(|(id, _)| id == &plan.item_id) {
-                ordered.push(serde_json::json!({
+                let mut item = serde_json::json!({
                     "item_id": plan.item_id,
                     "ok": outcome.ok,
                     "status": outcome.status,
                     "summary": outcome.summary,
-                }));
+                });
+                if let Some(structured_output) = outcome.details.get("structured_output") {
+                    item["structured_output"] = structured_output.clone();
+                }
+                ordered.push(item);
             } else if finished.contains(&plan.item_id) {
                 ordered.push(serde_json::json!({
                     "item_id": plan.item_id,
@@ -2182,6 +2249,73 @@ impl WorkflowRuntime {
             child_refs: Vec::new(),
             interruption: None,
         })
+    }
+
+    async fn child_run_to_outcome_with_schema(
+        &self,
+        run_id: &WorkflowId,
+        multi_agent: &MultiAgentRuntime,
+        deps: ChildRuntimeDeps,
+        plan: &ChildPlan,
+        invocation_id: &str,
+        output: &ChildRunOutput,
+    ) -> Result<WorkflowInvocationOutcome, WorkflowError> {
+        let mut outcome = child_run_to_outcome(output);
+        let Some(schema_doc) = plan.output_schema.as_ref() else {
+            return Ok(outcome);
+        };
+        let schema = CompiledSchema::compile(schema_doc).map_err(|error| {
+            WorkflowError::InvalidInput(format!(
+                "{} output_schema compile failed: {error}",
+                plan.item_id
+            ))
+        })?;
+        let accepted = self
+            .accept_child_structured_output_with_repair(
+                run_id,
+                multi_agent,
+                deps,
+                ChildSchemaRepairRequest {
+                    invocation_id,
+                    agent_id: &output.snapshot.id,
+                    schema: &schema,
+                    first_output: output,
+                },
+            )
+            .await?;
+        let details = outcome.details.as_object_mut().ok_or_else(|| {
+            WorkflowError::Host("child outcome details must be an object".to_owned())
+        })?;
+        details.insert(
+            "schema_repair_attempted".to_owned(),
+            serde_json::json!(accepted.repair_attempted),
+        );
+        if let Some(repair_id) = accepted.repair_id {
+            details.insert("repair_id".to_owned(), serde_json::json!(repair_id));
+        }
+        if accepted.ok {
+            details.insert(
+                "structured_output".to_owned(),
+                accepted.value.unwrap_or(serde_json::Value::Null),
+            );
+            outcome.actual_usage = accepted.actual_usage;
+        } else {
+            outcome.ok = false;
+            outcome.status = WorkflowOutcomeStatus::Failed;
+            outcome.summary = accepted.summary.clone();
+            details.insert(
+                "schema_error".to_owned(),
+                serde_json::json!(accepted.summary),
+            );
+            if let Some(code) = accepted.error_code {
+                details.insert(
+                    "schema_error_code".to_owned(),
+                    serde_json::json!(code.as_str()),
+                );
+            }
+            outcome.actual_usage = accepted.actual_usage;
+        }
+        Ok(outcome)
     }
 
     async fn append_swarm_item(

@@ -92,21 +92,26 @@ The assistant saves through `Workflow(save)`. Builtin scope is not writable.
 ## Assistant-native workflow route
 
 For inline authoring, a new saved definition, or a one-off test/evaluation, the
-assistant activates `create-workflow` unless it is already active. A known
+assistant may activate `create-workflow` when authoring guidance is useful. A known
 saved workflow may be discovered or run directly with
 `Workflow(list|show|run_saved)` without activating the authoring skill.
 `Workflow` owns every lifecycle action: `list`, `show`, `validate_inline`,
 `validate_saved`, `save`, `run_inline`, and `run_saved`.
 
-A one-off evaluation follows this strict path, with no source inspection,
-shell/CLI, Cargo, TodoList, or saved-workflow discovery inserted before it:
+A one-off evaluation can launch directly through `Workflow(run_inline)` after
+the definition is authored. If the user asks for a check-only result, use
+`Workflow(validate_inline)` first; this is optional and creates no task. No
+source inspection, shell/CLI, Cargo, TodoList, or saved-workflow discovery is
+needed for the normal product path:
 
 ```text
-Skill(create-workflow) -> Workflow(validate_inline) -> Workflow(run_inline) -> TaskOutput
+Skill(create-workflow) -> Workflow(run_inline)
 ```
 
-Create-and-test requests instead use `Workflow(save) -> Workflow(run_saved) ->
-TaskOutput`. Run actions return a task ID. These routes need no slash command,
+Create-and-test requests instead use `Workflow(save) -> Workflow(run_saved)`.
+Run actions return a task ID and continue under the workflow runtime. Use
+`TaskOutput` only when status, result, artifacts, or pending input are needed.
+These routes need no slash command,
 capability, manual manifest/hash work, or `neo workflow` CLI invocation.
 
 Every `TaskOutput` view exposes an actionable `pending_user` object while a
@@ -320,9 +325,9 @@ The assistant uses `Workflow(list)`, `Workflow(show)`, and `Workflow(run_saved)`
 
 ### Assistant route
 
-1. Activate `create-workflow`, then author through `Workflow(validate_inline)`.
+1. Author through `Workflow`; activate `create-workflow` when authoring guidance is useful.
 2. Persist only through `Workflow(save)` and run through `Workflow(run_inline)` or `Workflow(run_saved)`.
-3. Inspect every launched task with `TaskOutput`.
+3. Use `TaskOutput` only when status, result, artifacts, or pending input are needed.
 4. Use `TaskAnswer` only for a `human_or_model` gate; leave human-only answers to the user.
 5. Never ask the user for a bare slash, invoke `neo workflow`, or hand-author a manifest/hash.
 

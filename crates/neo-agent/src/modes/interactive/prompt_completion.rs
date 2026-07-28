@@ -9,6 +9,9 @@ use skim::fuzzy_matcher::{FuzzyMatcher, skim::SkimMatcherV2};
 
 use crate::prompt::templates::{PromptTemplate, load_project_prompt_templates};
 use neo_agent_core::skills::SkillStore;
+use neo_agent_core::workflow::{
+    WorkflowLimits, WorkflowSourceOrigin, builtin_workflow_definitions, resolve_paired_definition,
+};
 use neo_tui::shell::PickerItem;
 
 pub(super) const MAX_FILE_REFERENCE_COMPLETIONS: usize = 100;
@@ -107,6 +110,7 @@ pub(super) fn session_completion_items(skill_store: Option<&SkillStore>) -> Vec<
             PickerItem::new((*value).to_owned(), (*value).to_owned(), Some(*description))
         })
         .collect();
+    items.extend(builtin_workflow_completion_items());
     if let Some(skill_store) = skill_store {
         for skill in skill_store.iter() {
             let value = format!("/skill:{}", skill.name);
@@ -122,6 +126,27 @@ pub(super) fn session_completion_items(skill_store: Option<&SkillStore>) -> Vec<
         }
     }
     items
+}
+
+fn builtin_workflow_completion_items() -> Vec<PickerItem> {
+    let limits = WorkflowLimits::default();
+    builtin_workflow_definitions()
+        .into_iter()
+        .filter_map(|definition| {
+            let resolved = resolve_paired_definition(
+                &definition.name,
+                &definition.manifest_bytes,
+                &definition.source_bytes,
+                WorkflowSourceOrigin::Builtin,
+                None,
+                &limits,
+            )
+            .ok()?;
+            let value = format!("/workflow {}", definition.name);
+            let description = format!("{}: {}", resolved.display_name, resolved.description);
+            Some(PickerItem::new(value.clone(), value, Some(description)))
+        })
+        .collect()
 }
 
 fn slash_prompt_template_completion_items(

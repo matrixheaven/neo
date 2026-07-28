@@ -1,7 +1,8 @@
 use schemars::JsonSchema;
 use serde::Deserialize;
+use serde_json::json;
 use std::ffi::OsStr;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use super::{Tool, ToolContext, ToolFuture, ToolResult, parse_input, schema};
 
@@ -9,6 +10,16 @@ use super::{Tool, ToolContext, ToolFuture, ToolResult, parse_input, schema};
 const LIST_DIR_ROOT_WIDTH: usize = 30;
 /// Maximum number of entries to list inside each child directory.
 const LIST_DIR_CHILD_WIDTH: usize = 10;
+
+fn display_path(path: &Path, workspace: &Path) -> String {
+    let relative = path.strip_prefix(workspace).unwrap_or(path);
+    let display = relative.to_string_lossy();
+    if display.is_empty() {
+        ".".to_owned()
+    } else {
+        display.into_owned()
+    }
+}
 
 #[derive(Debug, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
@@ -76,17 +87,40 @@ impl Tool for ListTool {
             ctx.ensure_file_read_allowed()?;
             let input: ListInput = parse_input(self.name(), input)?;
             let path = ctx.resolve_workspace_path(&input.path)?;
+            let workspace = ctx.workspace_root();
+            let display_root = display_path(&path, workspace);
 
             let root = collect_entries(&path, LIST_DIR_ROOT_WIDTH).await?;
             if !root.readable {
-                return Ok(ToolResult::error(format!(
-                    "{} is not readable",
-                    path.display()
-                )));
+                return Ok(
+                    ToolResult::error(format!("{} is not readable", path.display())).with_details(
+                        json!({
+                            "kind": "list",
+                            "path": display_root,
+                            "entries": [],
+                            "total": 0,
+                            "returned": 0,
+                            "truncated": false,
+                            "readable": false,
+                        }),
+                    ),
+                );
             }
 
             let mut lines = Vec::new();
             let root_remaining = root.total.saturating_sub(root.entries.len());
+            let structured_entries: Vec<_> = root
+                .entries
+                .iter()
+                .map(|entry| {
+                    json!({
+                        "name": entry.name.clone(),
+                        "path": display_path(&entry.path, workspace),
+                        "kind": if entry.is_dir { "directory" } else { "file" },
+                    })
+                })
+                .collect();
+            let mut children_truncated = false;
 
             for (i, entry) in root.entries.iter().enumerate() {
                 let is_last = i == root.entries.len() - 1 && root_remaining == 0;
@@ -105,6 +139,7 @@ impl Tool for ListTool {
                         continue;
                     }
                     let child_remaining = child.total.saturating_sub(child.entries.len());
+                    children_truncated |= child_remaining > 0;
                     for (j, ce) in child.entries.iter().enumerate() {
                         let c_is_last = j == child.entries.len() - 1 && child_remaining == 0;
                         let c_connector = if c_is_last {
@@ -130,11 +165,20 @@ impl Tool for ListTool {
                 lines.push(format!("└── ... and {root_remaining} more entries"));
             }
 
-            Ok(ToolResult::ok(if lines.is_empty() {
+            let content = if lines.is_empty() {
                 "(empty directory)".to_owned()
             } else {
                 lines.join("\n")
-            }))
+            };
+            Ok(ToolResult::ok(content).with_details(json!({
+                "kind": "list",
+                "path": display_root,
+                "entries": structured_entries,
+                "total": root.total,
+                "returned": root.entries.len(),
+                "truncated": root_remaining > 0 || children_truncated,
+                "readable": true,
+            })))
         })
     }
 }
@@ -246,6 +290,35 @@ mod tests {
         assert!(result.contains("secret.rs"));
         // Directories come before files and end with `/`.
         assert!(result.find("src/").unwrap() < result.find("foo.rs").unwrap());
+    }
+
+    #[tokio::test]
+    async fn structured_details_accompany_tree_text() {
+        let workspace = setup_workspace();
+        let ctx = ToolContext::new(workspace.path())
+            .expect("context")
+            .with_access(ToolAccess::all());
+
+        let result = ListTool
+            .execute(&ctx, json!({"path": ".", "collapse_hidden_dirs": false}))
+            .await
+            .expect("list execute");
+
+        assert!(result.content.contains("src/"));
+        let details = result.details.expect("list details");
+        assert_eq!(details["kind"], "list");
+        assert_eq!(details["path"], ".");
+        assert_eq!(details["total"], 4);
+        assert_eq!(details["returned"], 4);
+        assert_eq!(details["truncated"], false);
+        assert_eq!(details["readable"], true);
+        assert!(
+            details["entries"]
+                .as_array()
+                .expect("entries")
+                .iter()
+                .any(|entry| entry["path"] == "src" && entry["kind"] == "directory")
+        );
     }
 
     #[tokio::test]

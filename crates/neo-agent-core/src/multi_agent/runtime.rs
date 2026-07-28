@@ -1879,7 +1879,13 @@ impl MultiAgentRuntime {
             AgentPathKind::Root,
         );
         Ok(self
-            .run_started_child_turn(deps, snapshot, request.context, |_| {})
+            .run_started_child_turn_with_schema(
+                deps,
+                snapshot,
+                request.context,
+                request.output_schema.as_ref(),
+                |_| {},
+            )
             .await)
     }
 
@@ -1888,6 +1894,21 @@ impl MultiAgentRuntime {
         deps: ChildRuntimeDeps,
         snapshot: AgentSnapshot,
         context: DelegateContext,
+        on_update: F,
+    ) -> ChildRunOutput
+    where
+        F: FnMut(AgentSnapshot) + Send,
+    {
+        self.run_started_child_turn_with_schema(deps, snapshot, context, None, on_update)
+            .await
+    }
+
+    pub async fn run_started_child_turn_with_schema<F>(
+        &self,
+        deps: ChildRuntimeDeps,
+        snapshot: AgentSnapshot,
+        context: DelegateContext,
+        output_schema: Option<&serde_json::Value>,
         mut on_update: F,
     ) -> ChildRunOutput
     where
@@ -1908,7 +1929,12 @@ impl MultiAgentRuntime {
         if let Err(error) = self.register_persistent_agent(&snapshot, None, None).await {
             return self.finish_child_run(&snapshot, started_at, Err(error));
         }
-        let prompt = child_prompt(&snapshot.task, context, snapshot.role);
+        let prompt = child_prompt(
+            &snapshot.task,
+            context,
+            snapshot.role,
+            output_schema.is_some(),
+        );
         let prior_context = match self.replay_child_context(&snapshot).await {
             Ok(context) => context,
             Err(error) => return self.finish_child_run(&snapshot, started_at, Err(error)),
@@ -2061,12 +2087,13 @@ impl MultiAgentRuntime {
             AgentPathKind::SwarmChild(swarm_id),
         );
         Ok(self
-            .run_started_swarm_child_turn(
+            .run_started_swarm_child_turn_with_schema(
                 deps,
                 snapshot,
                 swarm_id,
                 item,
                 DelegateContext::None,
+                None,
                 |_| {},
             )
             .await)
@@ -2079,6 +2106,25 @@ impl MultiAgentRuntime {
         swarm_id: &str,
         swarm_item: &str,
         context: DelegateContext,
+        on_update: F,
+    ) -> ChildRunOutput
+    where
+        F: FnMut(AgentProgressSnapshot) + Send,
+    {
+        self.run_started_swarm_child_turn_with_schema(
+            deps, snapshot, swarm_id, swarm_item, context, None, on_update,
+        )
+        .await
+    }
+
+    pub async fn run_started_swarm_child_turn_with_schema<F>(
+        &self,
+        deps: ChildRuntimeDeps,
+        snapshot: AgentSnapshot,
+        swarm_id: &str,
+        swarm_item: &str,
+        context: DelegateContext,
+        output_schema: Option<&serde_json::Value>,
         mut on_update: F,
     ) -> ChildRunOutput
     where
@@ -2102,7 +2148,12 @@ impl MultiAgentRuntime {
         {
             return self.finish_child_run(&snapshot, started_at, Err(error));
         }
-        let prompt = child_prompt(&snapshot.task, context, snapshot.role);
+        let prompt = child_prompt(
+            &snapshot.task,
+            context,
+            snapshot.role,
+            output_schema.is_some(),
+        );
         let prior_context = match self.replay_child_context(&snapshot).await {
             Ok(context) => context,
             Err(error) => return self.finish_child_run(&snapshot, started_at, Err(error)),
@@ -3931,11 +3982,22 @@ fn trim_activity(activity: &mut Vec<AgentActivityEntry>) -> usize {
     excess
 }
 
-fn child_prompt(task: &str, context: DelegateContext, role: AgentRole) -> String {
-    format!(
+fn child_prompt(
+    task: &str,
+    context: DelegateContext,
+    role: AgentRole,
+    requires_structured_output: bool,
+) -> String {
+    let mut prompt = format!(
         "You are a bounded Neo subagent.\n\nRole: {role:?}\nTask: {task}\nContext mode: {}\n\nReturn a concise result for the parent agent. Do not perform git mutations. Do not run git add, git commit, git reset, git checkout, git restore, git stash, git clean, git rebase, git push, git rm, git branch, git switch, git merge, git cherry-pick, git tag, or git worktree.",
         context.as_str()
-    )
+    );
+    if requires_structured_output {
+        prompt.push_str(
+            "\n\nYour final response must be exactly one JSON value matching the requested output schema. Do not wrap it in Markdown or a code fence, and do not add explanatory text before or after the JSON.",
+        );
+    }
+    prompt
 }
 
 fn subagent_system_constraints() -> &'static str {
@@ -3973,6 +4035,26 @@ const _: fn() = || {
 mod tests {
     use super::*;
     use crate::ToolResult;
+
+    #[test]
+    fn structured_child_prompt_requires_json_only_output() {
+        let ordinary = child_prompt(
+            "inspect the change",
+            DelegateContext::None,
+            AgentRole::Coder,
+            false,
+        );
+        assert!(!ordinary.contains("exactly one JSON value"));
+
+        let structured = child_prompt(
+            "inspect the change",
+            DelegateContext::None,
+            AgentRole::Coder,
+            true,
+        );
+        assert!(structured.contains("exactly one JSON value"));
+        assert!(structured.contains("Do not wrap it in Markdown or a code fence"));
+    }
 
     #[test]
     fn shell_tool_summary_preserves_head_and_tail_within_budget() {

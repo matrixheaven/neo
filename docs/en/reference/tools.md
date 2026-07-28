@@ -151,13 +151,13 @@ Registered by `GoalManager`; available when goal mode is enabled.
 
 ### Workflow tools and control
 
-Use `Workflow` for every assistant workflow lifecycle action. Inline authoring,
-new definitions, and one-off evaluation activate `create-workflow` first unless
-it is already active; known saved workflows may use `list`/`show`/`run_saved`
-directly. A one-off evaluation is strictly `Skill(create-workflow) ->
-Workflow(validate_inline) -> Workflow(run_inline) -> TaskOutput`. No route needs
-a slash command, capability, or CLI. Every run action is background and returns
-a task ID (also the `run_id`).
+Use `Workflow` for every assistant workflow lifecycle action. Activate
+`create-workflow` when authoring guidance is useful; known saved workflows may
+use `list`/`show`/`run_saved` directly. `run_inline`, `run_saved`, and `save`
+validate their definitions internally. Use `validate_inline` or
+`validate_saved` only when the user explicitly wants a check without running or
+persisting. No route needs a slash command, capability, or CLI. Every run action
+is background and returns a task ID (also the `run_id`).
 
 | Action | How |
 | --- | --- |

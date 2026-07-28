@@ -160,9 +160,15 @@ async fn execute_delegate(
     });
     let output = ctx
         .multi_agent
-        .run_started_child_turn(deps.clone(), snapshot, request.context, |agent| {
-            ctx.emit_event(AgentEvent::DelegateUpdated { turn, agent });
-        })
+        .run_started_child_turn_with_schema(
+            deps.clone(),
+            snapshot,
+            request.context,
+            request.output_schema.as_ref(),
+            |agent| {
+                ctx.emit_event(AgentEvent::DelegateUpdated { turn, agent });
+            },
+        )
         .await;
     let (result, details_extra) = apply_child_output_schema(ctx, &deps, &request, output).await?;
     let completed = result.snapshot;
@@ -227,10 +233,11 @@ async fn start_background_delegate(
         let callback = event_callback.clone();
         let runner = tokio::spawn(async move {
             runtime
-                .run_started_child_turn(
+                .run_started_child_turn_with_schema(
                     deps,
                     snapshot_for_worker,
                     request_for_worker.context,
+                    request_for_worker.output_schema.as_ref(),
                     move |agent| {
                         if let Some(callback) = &callback {
                             callback(AgentEvent::DelegateUpdated { turn, agent });

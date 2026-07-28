@@ -92,21 +92,24 @@ assistant 通过 `Workflow(save)` 保存。builtin scope 不可写。
 ## Assistant-native workflow 路径
 
 需要 inline 编写、新建已保存定义或一次性测试/评测时，assistant 激活
-`create-workflow`；如果该 skill 已激活则不得重复调用。对于已知的已保存
-workflow，可不激活编写 skill，直接使用 `Workflow(list|show|run_saved)`
+需要编写指导时可激活 `create-workflow`。对于已知的已保存 workflow，可直接使用
+`Workflow(list|show|run_saved)`
 发现或运行。全部生命周期 action 仍由 `Workflow` 统一拥有：`list`、
 `show`、`validate_inline`、`validate_saved`、`save`、`run_inline`、
 `run_saved`。
 
-一次性评测必须严格遵循以下路径；在此之前不得插入源码检查、shell/CLI、
-Cargo、TodoList 或已保存 workflow 发现：
+一次性评测在完成定义后可直接通过 `Workflow(run_inline)` 启动。只有用户明确
+要求只检查、不运行时，才先调用 `Workflow(validate_inline)`；它不会创建任务。
+正常产品路径不需要插入源码检查、shell/CLI、Cargo、TodoList 或已保存 workflow
+发现：
 
 ```text
-Skill(create-workflow) -> Workflow(validate_inline) -> Workflow(run_inline) -> TaskOutput
+Skill(create-workflow) -> Workflow(run_inline)
 ```
 
-创建并测试则走 `Workflow(save) -> Workflow(run_saved) -> TaskOutput`。run
-action 返回 task ID。这些路径均不需要 slash、capability、手工 manifest/hash
+创建并测试则走 `Workflow(save) -> Workflow(run_saved)`。run action 返回 task
+ID，并由 workflow runtime 持续执行。只有需要状态、结果、artifact 或待回答输入时
+才使用 `TaskOutput`。这些路径均不需要 slash、capability、手工 manifest/hash
 操作或 `neo workflow` CLI 调用。
 
 workflow 等待输入时，每个 `TaskOutput` view 都会暴露可执行的
@@ -315,9 +318,9 @@ assistant 用 `Workflow(list)`、`Workflow(show)` 与 `Workflow(run_saved)`。�
 
 ### Assistant 路径
 
-1. 激活 `create-workflow`，再通过 `Workflow(validate_inline)` 编写并校验。
+1. 通过 `Workflow` 编写；需要编写指导时再激活 `create-workflow`。
 2. 仅通过 `Workflow(save)` 持久化，并通过 `Workflow(run_inline)` 或 `Workflow(run_saved)` 运行。
-3. 对每个已启动 task 用 `TaskOutput` 检查。
+3. 只有需要状态、结果、artifact 或待回答输入时才使用 `TaskOutput`。
 4. 只在 `human_or_model` gate 使用 `TaskAnswer`；仅人类回答留给用户。
 5. 不要要求用户先输入裸 slash、调用 `neo workflow`，或手写 manifest/hash。
 

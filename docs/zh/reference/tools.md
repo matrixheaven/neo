@@ -137,12 +137,12 @@ Neo 通过 `ToolRegistry` 向模型暴露一组内置工具。本文按类别列
 
 ### Workflow 工具与控制
 
-assistant 的每个 workflow 生命周期动作都通过 `Workflow`。inline 编写、
-新定义与一次性评测会先激活 `create-workflow`（已激活时不得重复）；已知的
-已保存 workflow 可直接 `list`/`show`/`run_saved`。一次性评测严格遵循
-`Skill(create-workflow) -> Workflow(validate_inline) ->
-Workflow(run_inline) -> TaskOutput`。这些路径均不需要 slash、capability 或
-CLI。每次 run action 都在后台，返回 task ID（亦即 `run_id`）。
+assistant 的每个 workflow 生命周期动作都通过 `Workflow`。需要编写指导时可激活
+`create-workflow`；已知的已保存 workflow 可直接 `list`/`show`/`run_saved`。
+`run_inline`、`run_saved` 与 `save` 会在内部完成校验；只有用户明确要求
+“只检查、不运行或不保存”时才使用 `validate_inline` 或 `validate_saved`。
+这些路径均不需要 slash、capability 或 CLI。每次 run action 都在后台，返回
+task ID（亦即 `run_id`）。
 
 | 动作 | 方式 |
 | --- | --- |

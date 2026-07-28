@@ -319,6 +319,8 @@ impl SwarmInput {
             let output_schema = item.output_schema.clone().ok_or_else(|| {
                 format!("items[{index}].output_schema is required for neo.swarm children")
             })?;
+            CompiledSchema::compile(&output_schema)
+                .map_err(|error| format!("items[{index}].output_schema is invalid: {error}"))?;
             plans.push(ChildPlan {
                 item_id: format!("item-{index}"),
                 item_label: title.clone().unwrap_or_else(|| task.clone()),

@@ -12872,6 +12872,40 @@ fn slash_completions_include_new_clear_and_workflow() {
 }
 
 #[test]
+fn slash_completions_include_builtin_workflows_in_registry_order() {
+    let items = session_completion_items(None);
+    let workflows: Vec<_> = items
+        .iter()
+        .filter(|item| item.value.starts_with("/workflow "))
+        .map(|item| (item.value.as_str(), item.description.as_deref()))
+        .collect();
+
+    assert_eq!(
+        workflows,
+        vec![
+            (
+                "/workflow code-review",
+                Some(
+                    "Code Review: Read-only multi-domain code review with structured findings-first output. Never modifies code."
+                ),
+            ),
+            (
+                "/workflow deep-research",
+                Some(
+                    "Deep Research: Plan, fan out heterogeneous research children, verify gaps, and synthesize a structured report with durable artifacts."
+                ),
+            ),
+            (
+                "/workflow large-refactor",
+                Some(
+                    "Large Refactor: Partition approved refactor work into isolated-worktree slices, preserve verification artifacts, and await explicit human merge/retirement decisions. Never auto-merges or deletes worktrees."
+                ),
+            ),
+        ]
+    );
+}
+
+#[test]
 fn configured_model_picker_preserves_unqualified_alias() {
     let temp = tempfile::tempdir().expect("tempdir");
     let config = test_config_with_models(

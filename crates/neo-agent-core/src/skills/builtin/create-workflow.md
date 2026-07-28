@@ -33,11 +33,11 @@ compile the definition and Lua without persisting, running, or creating tasks.
 | User intent | Procedure |
 |-------------|-----------|
 | Create/save only | author -> `Workflow(save)` -> ask whether to run now |
-| Create and run/test | author -> `Workflow(save)` -> `Workflow(run_saved)` -> `TaskOutput` |
-| One-off run/test/evaluate | author -> `Workflow(run_inline)` -> `TaskOutput` |
+| Create and run/test | author -> `Workflow(save)` -> `Workflow(run_saved)`; use `TaskOutput` only when status, result, artifacts, or a pending question are needed |
+| One-off run/test/evaluate | author -> `Workflow(run_inline)`; use `TaskOutput` only when status, result, artifacts, or a pending question are needed |
 | Explicit check-only | author -> `Workflow(validate_inline)` / `Workflow(validate_saved)` -> report |
-| Run a known saved workflow | `Workflow(run_saved)` -> `TaskOutput` |
-| Discover saved workflows | `Workflow(list)` / `Workflow(show)` -> `Workflow(run_saved)` -> `TaskOutput` |
+| Run a known saved workflow | `Workflow(run_saved)`; use `TaskOutput` only for requested details or pending input |
+| Discover saved workflows | `Workflow(list)` / `Workflow(show)` -> `Workflow(run_saved)` |
 | Modify/debug Neo's workflow implementation | leave this skill; use normal repository diagnosis |
 
 Rules when the user is using workflows as a **product feature** (even inside
@@ -79,8 +79,9 @@ not apply.
    standalone validation step is not required before launching.
 5. **Route by intent** using the table above. `Workflow(save)` persists the
    pair (use `replace: true` only when the user wants to overwrite an existing
-   definition). Run actions return a task ID; collect the terminal result with
-   `TaskOutput`.
+   definition). Run actions return a task ID and continue under the workflow
+   runtime. Use `TaskOutput` only when the user asks for status/result/artifacts
+   or the run needs a pending question answered.
 6. **Report**: workflow name, validation/save/run structured outcomes, task
    terminal state, saved scope, and remaining risks (e.g. live child quality,
    human gates).
@@ -406,9 +407,9 @@ Report only after the requested terminal state is real:
 2. Explicit validation (optional): a structured `Workflow(validate_inline)`
    or `Workflow(validate_saved)` success exists.
 3. Run/test/evaluate: a real task was launched through `Workflow(run_inline)`
-   or `Workflow(run_saved)` (each validates the definition internally) **and**
-   checked to a terminal state through `TaskOutput`, or a real typed failure is
-   reported verbatim.
+   or `Workflow(run_saved)` (each validates the definition internally), or a
+   real typed failure is reported verbatim. Use `TaskOutput` only when terminal
+   details, artifacts, status, or pending input are part of the request.
 4. No slash capability, CLI invocation, or manual hash/manifest step was used
    or requested.
 5. Any intentional limits (read-only, no auto-merge, schema caps) and

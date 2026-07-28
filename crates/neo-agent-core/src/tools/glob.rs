@@ -2,6 +2,8 @@ use globset::GlobSetBuilder;
 use ignore::WalkBuilder;
 use schemars::JsonSchema;
 use serde::Deserialize;
+use serde_json::json;
+use std::path::Path;
 
 use super::{Tool, ToolContext, ToolError, ToolFuture, ToolResult, parse_input, schema};
 
@@ -39,6 +41,18 @@ const fn default_include_dirs() -> bool {
 
 const fn default_max_matches() -> usize {
     100
+}
+
+const MAX_STRUCTURED_MATCHES: usize = 100;
+
+fn display_path(path: &Path, workspace: &Path) -> String {
+    let relative = path.strip_prefix(workspace).unwrap_or(path);
+    let display = relative.to_string_lossy();
+    if display.is_empty() {
+        ".".to_owned()
+    } else {
+        display.into_owned()
+    }
 }
 
 pub struct GlobTool;
@@ -86,6 +100,7 @@ impl Tool for GlobTool {
             let input: GlobInput = parse_input(self.name(), input)?;
             let walk_root = ctx.resolve_workspace_path(&input.path)?;
             let workspace = ctx.workspace_root().to_path_buf();
+            let display_root = display_path(&walk_root, &workspace);
 
             // Brace-expand the pattern into individual sub-patterns.
             let sub_patterns = expand_braces(&input.pattern);
@@ -156,6 +171,10 @@ impl Tool for GlobTool {
             .map_err(std::io::Error::other)??;
 
             let (paths, total_matched, truncated) = result;
+            let returned = paths.len();
+            let structured_matches: Vec<_> =
+                paths.iter().take(MAX_STRUCTURED_MATCHES).cloned().collect();
+            let details_truncated = structured_matches.len() < returned;
             let mut lines = paths;
             if truncated {
                 lines.push(format!(
@@ -168,7 +187,16 @@ impl Tool for GlobTool {
                 lines.push(format!("Found {} matches", lines.len()));
             }
 
-            Ok(ToolResult::ok(lines.join("\n")))
+            Ok(ToolResult::ok(lines.join("\n")).with_details(json!({
+                "kind": "glob",
+                "pattern": input.pattern,
+                "path": display_root,
+                "matches": structured_matches,
+                "total_matched": total_matched,
+                "returned": returned,
+                "truncated": truncated,
+                "details_truncated": details_truncated,
+            })))
         })
     }
 }
@@ -262,6 +290,45 @@ mod tests {
         assert!(!result.contains("bar.txt"));
         assert!(!result.contains("baz.toml"));
         assert!(!result.contains("sub/qux.rs"));
+    }
+
+    #[tokio::test]
+    async fn structured_details_are_bounded_and_accompany_match_text() {
+        let workspace = tempfile::tempdir().expect("workspace");
+        for index in 0..101 {
+            std::fs::write(
+                workspace.path().join(format!("file{index:03}.rs")),
+                "content",
+            )
+            .expect("write file");
+        }
+        let ctx = ToolContext::new(workspace.path())
+            .expect("context")
+            .with_access(ToolAccess::all());
+
+        let result = GlobTool
+            .execute(
+                &ctx,
+                json!({
+                    "pattern": "*.rs",
+                    "path": ".",
+                    "max_matches": 101,
+                    "include_dirs": true,
+                }),
+            )
+            .await
+            .expect("glob execute");
+
+        assert!(result.content.contains("Found 101 matches"));
+        let details = result.details.expect("glob details");
+        assert_eq!(details["kind"], "glob");
+        assert_eq!(details["pattern"], "*.rs");
+        assert_eq!(details["path"], ".");
+        assert_eq!(details["matches"].as_array().expect("matches").len(), 100);
+        assert_eq!(details["total_matched"], 101);
+        assert_eq!(details["returned"], 101);
+        assert_eq!(details["truncated"], false);
+        assert_eq!(details["details_truncated"], true);
     }
 
     #[tokio::test]
