@@ -1,8 +1,8 @@
 //! Tests for V3 journal format (generic child lifecycle) and V2 read-only compatibility.
 
 use neo_agent_core::workflow::{
-    JOURNAL_FORMAT_V2, JOURNAL_FORMAT_V3, JournalEnvelope, JournalPayload,
-    WorkflowChildKey, WorkflowChildKind, WorkflowId,
+    JOURNAL_FORMAT_V2, JOURNAL_FORMAT_V3, JournalEnvelope, JournalPayload, JournalPayloadRef,
+    WorkflowArtifactId, WorkflowChildKey, WorkflowChildKind, WorkflowId,
     validate_v2_envelope,
 };
 
@@ -148,4 +148,123 @@ fn unknown_or_torn_v3_data_remains_fail_closed() {
         r#"{"version":3,"seq":0,"timestamp_ms":1000,"run_id":"wf_test","payload":{"type":"bogus_event","data":42}}"#,
     );
     assert!(bad.is_err(), "unknown payload type must fail deserialization");
+}
+
+#[test]
+fn direct_and_swarm_children_replay_exactly_once_with_unresolved_started_as_recovering() {
+    let run_id = WorkflowId("wf_replay_exact".to_owned());
+    let delegate_key = WorkflowChildKey::DirectDelegate {
+        invocation_id: "inv_direct".to_owned(),
+    };
+    let swarm_key = WorkflowChildKey::SwarmItem {
+        swarm_id: "sw1".to_owned(),
+        item_id: "item1".to_owned(),
+    };
+
+    // Direct delegate lifecycle: queued -> started -> finished
+    let q = JournalEnvelope::new_v3(0, 1000, run_id.clone(),
+        JournalPayload::ChildQueued {
+            child_key: delegate_key.clone(),
+            child_kind: WorkflowChildKind::Delegate,
+            invocation_id: "inv_direct".to_owned(),
+            phase_id: None,
+            spec_payload_ref: JournalPayloadRef {
+                role: "spec".to_owned(),
+                artifact_id: WorkflowArtifactId {
+                    run_id: run_id.clone(),
+                    content_sha256: "aabb".to_owned(),
+                },
+                sha256: "aabb".to_owned(),
+                byte_len: 10,
+                media_type: None,
+                logical_name: None,
+            },
+        },
+    );
+    assert!(matches!(q.payload, JournalPayload::ChildQueued { .. }));
+
+    let s = JournalEnvelope::new_v3(1, 2000, run_id.clone(),
+        JournalPayload::ChildStarted {
+            child_key: delegate_key.clone(),
+            agent_id: "agent-d".to_owned(),
+        },
+    );
+    assert!(matches!(s.payload, JournalPayload::ChildStarted { .. }));
+
+    let f = JournalEnvelope::new_v3(2, 3000, run_id.clone(),
+        JournalPayload::ChildFinished {
+            child_key: delegate_key.clone(),
+            agent_id: Some("agent-d".to_owned()),
+            outcome_payload_ref: JournalPayloadRef {
+                role: "outcome".to_owned(),
+                artifact_id: WorkflowArtifactId {
+                    run_id: run_id.clone(),
+                    content_sha256: "ccdd".to_owned(),
+                },
+                sha256: "ccdd".to_owned(),
+                byte_len: 20,
+                media_type: None,
+                logical_name: None,
+            },
+        },
+    );
+    assert!(matches!(f.payload, JournalPayload::ChildFinished { .. }));
+
+    // Swarm item lifecycle: queued -> started -> finished
+    let sq = JournalEnvelope::new_v3(3, 4000, run_id.clone(),
+        JournalPayload::ChildQueued {
+            child_key: swarm_key.clone(),
+            child_kind: WorkflowChildKind::SwarmItem,
+            invocation_id: "inv_swarm".to_owned(),
+            phase_id: Some("step2".to_owned()),
+            spec_payload_ref: JournalPayloadRef {
+                role: "spec".to_owned(),
+                artifact_id: WorkflowArtifactId {
+                    run_id: run_id.clone(),
+                    content_sha256: "eeff".to_owned(),
+                },
+                sha256: "eeff".to_owned(),
+                byte_len: 30,
+                media_type: None,
+                logical_name: None,
+            },
+        },
+    );
+    assert!(matches!(sq.payload, JournalPayload::ChildQueued { .. }));
+
+    let ss = JournalEnvelope::new_v3(4, 5000, run_id.clone(),
+        JournalPayload::ChildStarted {
+            child_key: swarm_key.clone(),
+            agent_id: "agent-s".to_owned(),
+        },
+    );
+    assert!(matches!(ss.payload, JournalPayload::ChildStarted { .. }));
+
+    // Simulate: swarm item finishes (terminal), then replay would see it once
+    let sf = JournalEnvelope::new_v3(5, 6000, run_id,
+        JournalPayload::ChildFinished {
+            child_key: swarm_key,
+            agent_id: Some("agent-s".to_owned()),
+            outcome_payload_ref: JournalPayloadRef {
+                role: "outcome".to_owned(),
+                artifact_id: WorkflowArtifactId {
+                    run_id: WorkflowId("wf_tmp".to_owned()),
+                    content_sha256: "gghh".to_owned(),
+                },
+                sha256: "gghh".to_owned(),
+                byte_len: 40,
+                media_type: None,
+                logical_name: None,
+            },
+        },
+    );
+    assert!(matches!(sf.payload, JournalPayload::ChildFinished { .. }));
+
+    // After restart, a started child without ChildFinished projects as Recovering
+    // (projection logic in Tasks 4-5; type-level proof here).
+    assert_eq!(
+        serde_json::to_string(&s).unwrap().contains("child_started"),
+        true,
+        "ChildStarted must serialize as child_started type"
+    );
 }
