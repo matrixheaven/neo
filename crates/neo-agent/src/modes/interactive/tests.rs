@@ -16362,6 +16362,34 @@ async fn task_browser_workflow_controls_use_human_handle() {
         .expect("show tasks");
 
     controller
+        .handle_input_event(InputEvent::Submit)
+        .await
+        .expect("open workflow");
+    assert_eq!(
+        controller
+            .chrome()
+            .task_browser_state()
+            .and_then(neo_tui::tasks_browser::TaskBrowserState::workflow_item)
+            .map(|item| item.id.as_str()),
+        Some(run_id.0.as_str())
+    );
+    controller
+        .handle_input_event(InputEvent::Insert('O'))
+        .await
+        .expect("toggle workflow output");
+    assert!(
+        controller
+            .chrome()
+            .task_browser_state()
+            .expect("browser open")
+            .workflow_output_open()
+    );
+    controller
+        .handle_input_event(InputEvent::Cancel)
+        .await
+        .expect("return to task browser");
+
+    controller
         .handle_input_event(InputEvent::Insert('p'))
         .await
         .expect("request pause");

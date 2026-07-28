@@ -55,6 +55,8 @@ pub enum TaskBrowserAction {
     SelectPageDown,
     ToggleFilter,
     ToggleOutputFocus,
+    OpenWorkflow,
+    ToggleWorkflowOutput,
     RequestPause,
     ConfirmPause,
     RequestResume,
@@ -88,6 +90,8 @@ pub struct TaskBrowserState {
     selected_task_id: Option<String>,
     output_scroll: usize,
     focus: TaskBrowserFocus,
+    workflow_task_id: Option<String>,
+    workflow_output_open: bool,
     pause_confirmation_task_id: Option<String>,
     resume_confirmation_task_id: Option<String>,
     stop_confirmation_task_id: Option<String>,
@@ -115,6 +119,8 @@ impl TaskBrowserState {
             selected_task_id: None,
             output_scroll: 0,
             focus: TaskBrowserFocus::List,
+            workflow_task_id: None,
+            workflow_output_open: false,
             pause_confirmation_task_id: None,
             resume_confirmation_task_id: None,
             stop_confirmation_task_id: None,
@@ -138,6 +144,17 @@ impl TaskBrowserState {
     #[must_use]
     pub const fn focus(&self) -> TaskBrowserFocus {
         self.focus
+    }
+
+    #[must_use]
+    pub fn workflow_item(&self) -> Option<&TaskBrowserItem> {
+        let task_id = self.workflow_task_id.as_deref()?;
+        self.snapshot.items().iter().find(|item| item.id == task_id)
+    }
+
+    #[must_use]
+    pub const fn workflow_output_open(&self) -> bool {
+        self.workflow_output_open
     }
 
     #[must_use]
@@ -293,14 +310,14 @@ impl TaskBrowserState {
                 }
             }
             TaskBrowserAction::SelectPageUp => {
-                if self.focus == TaskBrowserFocus::Output {
+                if self.focus == TaskBrowserFocus::Output || self.workflow_output_open {
                     self.move_output_scroll(-PAGE_SIZE.cast_signed());
                 } else {
                     self.move_selection(-PAGE_SIZE.cast_signed());
                 }
             }
             TaskBrowserAction::SelectPageDown => {
-                if self.focus == TaskBrowserFocus::Output {
+                if self.focus == TaskBrowserFocus::Output || self.workflow_output_open {
                     self.move_output_scroll(PAGE_SIZE.cast_signed());
                 } else {
                     self.move_selection(PAGE_SIZE.cast_signed());
@@ -321,6 +338,20 @@ impl TaskBrowserState {
                     TaskBrowserFocus::List => TaskBrowserFocus::Output,
                     TaskBrowserFocus::Output => TaskBrowserFocus::List,
                 };
+            }
+            TaskBrowserAction::OpenWorkflow => {
+                let item = self.selected_item()?;
+                if item.kind != TaskBrowserKind::Workflow {
+                    return None;
+                }
+                self.workflow_task_id = Some(item.id.clone());
+                self.workflow_output_open = false;
+            }
+            TaskBrowserAction::ToggleWorkflowOutput => {
+                if self.workflow_task_id.is_some() {
+                    self.workflow_output_open = !self.workflow_output_open;
+                    self.output_scroll = 0;
+                }
             }
             TaskBrowserAction::RequestPause => {
                 let item = self.selected_item()?;
@@ -440,6 +471,8 @@ impl TaskBrowserState {
                 let cancelled_confirmation = self.clear_confirmations();
                 if cancelled_confirmation {
                     self.footer_message = None;
+                } else if self.workflow_task_id.take().is_some() {
+                    self.workflow_output_open = false;
                 } else {
                     return Some(CLOSE_TASK_BROWSER.to_owned());
                 }
@@ -465,6 +498,16 @@ impl TaskBrowserState {
 
         if !selected_still_visible {
             self.selected_task_id = visible_items.first().map(|item| item.id.clone());
+        }
+
+        if self.workflow_task_id.as_deref().is_some_and(|task_id| {
+            self.snapshot
+                .items()
+                .iter()
+                .all(|item| item.id != task_id || item.kind != TaskBrowserKind::Workflow)
+        }) {
+            self.workflow_task_id = None;
+            self.workflow_output_open = false;
         }
 
         self.output_scroll = 0;

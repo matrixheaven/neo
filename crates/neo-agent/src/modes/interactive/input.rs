@@ -337,6 +337,12 @@ impl InteractiveController {
                         Some(TaskBrowserAction::ConfirmResume)
                     } else if state.answer_confirmation_task_id().is_some() {
                         Some(TaskBrowserAction::ConfirmAnswer)
+                    } else if state.workflow_item().is_some() {
+                        Some(TaskBrowserAction::ToggleWorkflowOutput)
+                    } else if state.selected_item().is_some_and(|item| {
+                        item.kind == neo_tui::tasks_browser::TaskBrowserKind::Workflow
+                    }) {
+                        Some(TaskBrowserAction::OpenWorkflow)
                     } else {
                         Some(TaskBrowserAction::ToggleOutputFocus)
                     }
@@ -353,11 +359,20 @@ impl InteractiveController {
             InputEvent::Insert('r' | 'R') => Some(TaskBrowserAction::Refresh),
             InputEvent::Insert('p' | 'P') => Some(TaskBrowserAction::RequestPause),
             InputEvent::Insert('u' | 'U') => Some(TaskBrowserAction::RequestResume),
-            InputEvent::Insert('s' | 'S') => Some(TaskBrowserAction::RequestStop),
+            InputEvent::Insert('s' | 'S' | 'x' | 'X') => Some(TaskBrowserAction::RequestStop),
             InputEvent::Insert('a' | 'A') => Some(TaskBrowserAction::RequestAnswer),
             InputEvent::Insert(']') => Some(TaskBrowserAction::RequestNextPage),
             InputEvent::Insert('[') => Some(TaskBrowserAction::RequestPrevPage),
-            InputEvent::Insert('o' | 'O') => Some(TaskBrowserAction::ToggleOutputFocus),
+            InputEvent::Insert('o' | 'O') => self.tui.chrome().task_browser_state().map_or(
+                Some(TaskBrowserAction::ToggleOutputFocus),
+                |state| {
+                    if state.workflow_item().is_some() {
+                        Some(TaskBrowserAction::ToggleWorkflowOutput)
+                    } else {
+                        Some(TaskBrowserAction::ToggleOutputFocus)
+                    }
+                },
+            ),
             InputEvent::Key(key) => {
                 let actions = self.keybindings.matching_actions(&key);
                 OVERLAY_ACTION_PRIORITY
