@@ -397,6 +397,10 @@ impl Tool for EditTool {
 
     fn description(&self) -> &'static str {
         "Apply ordered exact-text edits to existing UTF-8 files.\n\n\
+         CRITICAL - READ BEFORE EDIT: Never call Edit from memory. Build every edits[].old from \
+         the latest Read of that exact target in the current turn. If needed, Read only the \
+         smallest relevant range and wait for its result before Edit; never batch Read with Edit. \
+         Exclude Read line numbers and <system> status text.\n\n\
          Use exactly this input shape:\n\
          {\"edits\":[{\"path\":\"src/file.rs\",\"old\":\"exact existing text\",\"new\":\"replacement text\"}]}\n\n\
          Each edits[] item is one replacement and contains:\n\
@@ -404,8 +408,8 @@ impl Tool for EditTool {
          - old: exact current text to replace\n\
          - new: replacement text; empty deletes old\n\
          - expected_matches: optional exact match count, default 1\n\n\
-         Read each target before editing. For the normal single-match case, omit \
-         expected_matches and include enough surrounding text in old to make it unique. \
+         For the normal single-match case, omit expected_matches and include enough \
+         surrounding text in old to make it unique. \
          Set expected_matches only when intentionally replacing an observed exact count \
          greater than 1.\n\n\
          Items run in declaration order. Later edits to the same path see the staged \
