@@ -9,8 +9,8 @@ Neo 通过 `ToolRegistry` 向模型暴露一组内置工具。本文按类别列
 | 工具 | 用途 |
 | --- | --- |
 | `Read` | 读取 UTF-8 文本文件，支持按行偏移分页读取。 |
-| `Write` | 通过 `files[]`（每项含 `path` 和 `content`）创建或完整覆盖工作区内 UTF-8 文件。整批 prepare 后才写入，Ask 模式批准已验证投影，按声明顺序逐文件原子提交，并如实报告 partial commit。已有目标必须是 UTF-8 常规文件（拒绝二进制、符号链接、目录）。无变更覆盖（内容相同）导致整批失败。不接受旧版顶层 `path`/`content`。 |
-| `Edit` | 通过扁平 `edits[]` 数组对已有 UTF-8 文件做有序精确文本编辑。每项包含 `path`、`old`、`new` 与可选 `expected_matches`（默认 1）。整批 prepare 后才写入，Ask 模式批准已验证 diff，按首次出现顺序逐文件原子提交，并如实报告 partial commit。不创建文件（用 `Write`）。不接受嵌套 `files[]`/`replacements[]` 格式。 |
+| `Write` | 通过 `path` 和 `content` 创建或完整覆盖一个工作区内 UTF-8 文件。写入前完成 prepare 与重新检查，再执行一次原子安装。已有目标必须是 UTF-8 常规文件；拒绝二进制文件、链接、目录和无变更覆盖。多个独立文件由模型在同一响应中发出多个 `Write` 调用。 |
+| `Edit` | 通过 `path`、`old`、`new` 与可选 `expected_matches`（默认 1）对一个已有 UTF-8 文件做一次精确文本替换。写入前完成 prepare 与重新检查，再执行一次原子替换。不创建文件；多个独立修改由模型在同一响应中发出多个 `Edit` 调用。 |
 | `List` | 以两层树形列出目录内容。 |
 | `Glob` | 按 glob 模式匹配文件/目录路径，按修改时间排序。 |
 | `Find` | 按文件/目录名子串查找工作区路径。 |
@@ -18,48 +18,20 @@ Neo 通过 `ToolRegistry` 向模型暴露一组内置工具。本文按类别列
 
 ### Edit 暂存与提交合同
 
-`Edit` 按声明顺序接收扁平 `edits[]` 数组。每项包含 `path`、`old`、`new`
-与可选 `expected_matches`（默认 `1`）。同一路径的编辑按声明顺序分组并作用于暂存
-内容，后续编辑可见先前暂存结果。路径首次出现决定文件展示和提交顺序。
-
-任何写入之前，Neo 会解析所有目标，以不跟随链接类目标的方式读取每个已有 UTF-8
-常规文件，在内存中应用完整有序批次，验证精确匹配数，并生成审批 diff。任一 prepare
-错误都会让整次调用以零写入失败。Ask 模式中，用户批准的是这份已验证 diff。随后 Neo
-重新检查解析后的目标与内容；首次提交前发现 stale 同样是零写入。
-
-文件按首次出现顺序提交。每个文件的写入是原子的，但整批不是跨文件事务：一个文件
-提交后，后续 stale、I/O 失败、持久性失败或取消都不会回滚它。结构化结果区分
-`committed`、`prepare_failed`、`stale`、`cancelled`、`commit_failed`、
-`partial_commit` 与 `durability_uncertain`；逐文件状态为 `committed`、
-`committed_unsynced`、`failed` 或 `not_attempted`。
-
-首次提交前取消保证零写入。提交期间的取消只阻止下一个文件开始，不会中断正在进行的原子
-替换。`durability_uncertain` 表示请求内容已经安装，但无法确认父目录持久化。此时应重新
-读取受影响文件并发起新的 `Edit`；Neo 不会盲目重试或回滚部分批次。创建文件或完整替换
-文件请使用 `Write`。
+`Edit` 只接收一个对象：`path`、`old`、`new` 与可选 `expected_matches`（默认
+`1`）。写入前，Neo 解析并读取已有 UTF-8 常规文件且不跟随链接，验证精确匹配数，
+暂存替换并生成审批 diff。Ask 模式中用户批准这份已验证 diff。随后 Neo 重新检查目标
+与内容，再原子替换文件。prepare、stale 或提交前取消均保证零写入。
+`durability_uncertain` 表示内容已安装但无法确认父目录持久化；再次调用前应重新读取文件。
+创建文件或完整替换请使用 `Write`。
 
 ### Write 暂存与提交合同
 
-`Write` 按声明顺序接收 `files[]`。每个文件包含 `path` 和 `content`。不存在的文件
-将被创建（缺失的父目录在提交期间创建）；已有文件被完整覆盖。
-
-任何写入之前，Neo 会解析所有目标，将每个分类为 created 或 overwritten，拒绝非 UTF-8
-已有文件、符号链接、重解析点、目录、无变更覆盖（内容与当前相同）以及重复的已解析目标，
-并生成审批投影（created 文件显示带行号的内容，overwritten 文件显示 unified diff）。
-任一 prepare 错误都会让整次调用以零写入、零目录创建失败。Ask 模式中，用户批准的是这份
-已验证投影。随后 Neo 重新检查每个目标的指纹；首次提交前发现 stale 或已出现的目标同样
-是零写入。
-
-文件按声明顺序提交。每个文件的安装是原子的（create-new 或 strict-replace），但整批
-不是跨文件事务：一个文件提交后，后续 stale、I/O 失败、持久性失败或取消都不会回滚它。
-结构化结果区分 `committed`、`prepare_failed`、`stale`、`cancelled`、
-`commit_failed`、`partial_commit` 与 `durability_uncertain`；逐文件状态为
-`committed`、`committed_unsynced`、`failed` 或 `not_attempted`。结果报告提交期间
-创建的 `created_directories`。
-
-首次提交前取消保证零写入。提交期间的取消只阻止下一个文件开始，不会中断正在进行的原子
-安装。`durability_uncertain` 表示请求内容已经安装，但无法确认父目录持久化。此时应
-重新读取受影响文件并发起新的 `Write`；Neo 不会盲目重试或回滚部分批次。
+`Write` 只接收一个包含 `path` 与完整 UTF-8 `content` 的对象。写入前，Neo 解析并
+分类目标，拒绝不安全或无变更的覆盖，并生成审批投影。Ask 模式中用户批准已验证的完整
+内容或 diff。随后 Neo 重新检查目标，再执行一次原子创建或替换。缺失父目录只在提交期间
+创建。prepare、stale 或提交前取消均保证零写入。结果报告 `created_directories`；
+`durability_uncertain` 表示内容已安装但无法确认父目录持久化。
 
 ## Shell
 

@@ -342,7 +342,7 @@ fn complete_value_end(raw: &str, start: usize) -> Option<usize> {
 /// Probes come only from typed arguments — never from shell command text,
 /// MCP payloads, or additional workspace roots. `Read` probes the parent
 /// directory of its single typed file path, `Edit`/`Write` probe the parent
-/// directory of every `files[].path`, `List`/`Grep`/`Find`/`Glob` probe their
+/// directory of their typed `path`, `List`/`Grep`/`Find`/`Glob` probe their
 /// explicit root (defaulting to the primary workspace), and
 /// `Bash`/`Terminal`(start) probe the explicit `cwd` (defaulting to the
 /// primary workspace). Anything else carries no probe.
@@ -356,8 +356,7 @@ pub struct InstructionScopeProbe {
 impl InstructionScopeProbe {
     /// Derive probes for one prepared tool call. Returns an empty collection
     /// when the tool class carries no probe or no typed path resolves inside
-    /// the primary workspace. Edit and Write contribute one probe per distinct
-    /// parent directory of `files[].path` in declaration order.
+    /// the primary workspace.
     #[must_use]
     pub fn from_prepared_tool(
         name: &str,
@@ -365,8 +364,10 @@ impl InstructionScopeProbe {
         primary_workspace: &Path,
     ) -> Vec<Self> {
         match name {
-            "Edit" => edits_parent_scope_probes(arguments, primary_workspace),
-            "Write" => files_parent_scope_probes(arguments, primary_workspace),
+            "Edit" | "Write" => file_parent_scope_probe(arguments, primary_workspace)
+                .into_iter()
+                .map(|target_directory| Self { target_directory })
+                .collect(),
             "Read" => {
                 let Some(path) = arguments.get("path").and_then(serde_json::Value::as_str) else {
                     return Vec::new();
@@ -423,72 +424,13 @@ impl InstructionScopeProbe {
     }
 }
 
-/// Collect parent-directory probes for every `edits[].path`, preserving
-/// declaration order and deduplicating identical canonical directories.
-fn edits_parent_scope_probes(
+fn file_parent_scope_probe(
     arguments: &serde_json::Value,
     primary_workspace: &Path,
-) -> Vec<InstructionScopeProbe> {
-    let Some(edits) = arguments.get("edits").and_then(serde_json::Value::as_array) else {
-        return Vec::new();
-    };
-    let mut probes = Vec::new();
-    let mut seen = std::collections::HashSet::new();
-    for edit in edits {
-        let Some(path) = edit.get("path").and_then(serde_json::Value::as_str) else {
-            continue;
-        };
-        let Some(resolved) = resolve_probe_path(path, primary_workspace) else {
-            continue;
-        };
-        let Some(parent) = resolved.parent() else {
-            continue;
-        };
-        let Some(directory) = probe_existing_directory(parent, primary_workspace) else {
-            continue;
-        };
-        let key = directory.as_os_str().to_owned();
-        if seen.insert(key) {
-            probes.push(InstructionScopeProbe {
-                target_directory: directory,
-            });
-        }
-    }
-    probes
-}
-
-/// Collect parent-directory probes for every `files[].path`, preserving
-/// declaration order and deduplicating identical canonical directories.
-fn files_parent_scope_probes(
-    arguments: &serde_json::Value,
-    primary_workspace: &Path,
-) -> Vec<InstructionScopeProbe> {
-    let Some(files) = arguments.get("files").and_then(serde_json::Value::as_array) else {
-        return Vec::new();
-    };
-    let mut probes = Vec::new();
-    let mut seen = std::collections::HashSet::new();
-    for file in files {
-        let Some(path) = file.get("path").and_then(serde_json::Value::as_str) else {
-            continue;
-        };
-        let Some(resolved) = resolve_probe_path(path, primary_workspace) else {
-            continue;
-        };
-        let Some(parent) = resolved.parent() else {
-            continue;
-        };
-        let Some(directory) = probe_existing_directory(parent, primary_workspace) else {
-            continue;
-        };
-        let key = directory.as_os_str().to_owned();
-        if seen.insert(key) {
-            probes.push(InstructionScopeProbe {
-                target_directory: directory,
-            });
-        }
-    }
-    probes
+) -> Option<PathBuf> {
+    let path = arguments.get("path").and_then(serde_json::Value::as_str)?;
+    let resolved = resolve_probe_path(path, primary_workspace)?;
+    probe_existing_directory(resolved.parent()?, primary_workspace)
 }
 
 /// Probe the explicit `cwd` of a shell tool, falling back to the primary
@@ -684,13 +626,11 @@ mod tests {
             Vec::<PathBuf>::new(),
             "Read external absolute path"
         );
-        // Edit probes every edits[].path parent; Write probes files[].path.
+        // Edit and Write probe their typed path parent.
         assert_eq!(
             probe(
                 "Edit",
-                json!({
-                    "edits": [{ "path": "nested/file.txt", "old": "a", "new": "b" }]
-                })
+                json!({ "path": "nested/file.txt", "old": "a", "new": "b" })
             ),
             vec![nested.clone()],
             "Edit relative path"
@@ -698,9 +638,7 @@ mod tests {
         assert_eq!(
             probe(
                 "Write",
-                json!({
-                    "files": [{ "path": "nested/file.txt", "content": "body" }]
-                })
+                json!({ "path": "nested/file.txt", "content": "body" })
             ),
             vec![nested.clone()],
             "Write relative path"
@@ -804,67 +742,5 @@ mod tests {
             probe("Read", json!({ "path": "../outside.txt" })),
             Vec::<PathBuf>::new()
         );
-    }
-
-    #[test]
-    fn typed_scope_probes_cover_every_edit_parent() {
-        let temp = tempfile::tempdir().expect("tempdir");
-        let workspace = temp.path().join("workspace");
-        let nested_a = workspace.join("a");
-        let nested_b = workspace.join("b");
-        std::fs::create_dir_all(&nested_a).expect("a");
-        std::fs::create_dir_all(&nested_b).expect("b");
-        std::fs::write(nested_a.join("one.txt"), "1").expect("one");
-        std::fs::write(nested_b.join("two.txt"), "2").expect("two");
-        let workspace = workspace.canonicalize().expect("canonical workspace");
-        let nested_a = workspace.join("a");
-        let nested_b = workspace.join("b");
-
-        let probes = InstructionScopeProbe::from_prepared_tool(
-            "Edit",
-            &json!({
-                "edits": [
-                    { "path": "a/one.txt", "old": "1", "new": "x" },
-                    { "path": "b/two.txt", "old": "2", "new": "y" },
-                    { "path": "a/one.txt", "old": "x", "new": "z" }
-                ]
-            }),
-            &workspace,
-        );
-        let directories: Vec<_> = probes
-            .into_iter()
-            .map(|probe| probe.target_directory)
-            .collect();
-        assert_eq!(directories, vec![nested_a, nested_b]);
-    }
-
-    #[test]
-    fn typed_scope_probes_cover_every_write_parent() {
-        let temp = tempfile::tempdir().expect("tempdir");
-        let workspace = temp.path().join("workspace");
-        let nested_a = workspace.join("a");
-        let nested_b = workspace.join("b");
-        std::fs::create_dir_all(&nested_a).expect("a");
-        std::fs::create_dir_all(&nested_b).expect("b");
-        let workspace = workspace.canonicalize().expect("canonical workspace");
-        let nested_a = workspace.join("a");
-        let nested_b = workspace.join("b");
-
-        let probes = InstructionScopeProbe::from_prepared_tool(
-            "Write",
-            &json!({
-                "files": [
-                    { "path": "a/one.txt", "content": "1\n" },
-                    { "path": "b/two.txt", "content": "2\n" },
-                    { "path": "a/three.txt", "content": "3\n" }
-                ]
-            }),
-            &workspace,
-        );
-        let directories: Vec<_> = probes
-            .into_iter()
-            .map(|probe| probe.target_directory)
-            .collect();
-        assert_eq!(directories, vec![nested_a, nested_b]);
     }
 }

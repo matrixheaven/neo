@@ -93,6 +93,22 @@ pub fn render_edit_body(input: EditRenderInput<'_>) -> Vec<Line> {
                         input.theme,
                         input.theme.status_error,
                     ),
+                    "mixed" => render_terminal_changes(
+                        "completed with failures · successful edits remain applied",
+                        details,
+                        input.expanded,
+                        input.width,
+                        input.theme,
+                        input.theme.status_error,
+                    ),
+                    "failed" => render_terminal_changes(
+                        "failed · zero writes",
+                        details,
+                        input.expanded,
+                        input.width,
+                        input.theme,
+                        input.theme.status_error,
+                    ),
                     "prepare_failed" => render_failure(
                         "prepare · zero writes",
                         details,
@@ -181,46 +197,23 @@ fn render_streaming_or_intent(
 ) -> Vec<Line> {
     let muted = Style::default().fg(theme.text_muted);
     let args = arguments.unwrap_or("");
-    let Some(edits) = serde_json::from_str::<Value>(args)
+    let Some(path) = serde_json::from_str::<Value>(args)
         .ok()
-        .and_then(|value| value.get("edits").and_then(Value::as_array).cloned())
+        .and_then(|value| value.get("path").and_then(Value::as_str).map(str::to_owned))
     else {
         return styled_wrapped("receiving structured changes...", width, muted);
     };
-    if edits.is_empty() {
-        return styled_wrapped("receiving structured changes...", width, muted);
-    }
-
-    let mut path_counts: Vec<(&str, usize)> = Vec::new();
-    for edit in &edits {
-        let path = edit.get("path").and_then(Value::as_str).unwrap_or("?");
-        if let Some(entry) = path_counts.iter_mut().find(|(p, _)| *p == path) {
-            entry.1 += 1;
-        } else {
-            path_counts.push((path, 1));
-        }
-    }
-    let mut rows = styled_wrapped(
-        &format!(
-            "{} files · {} replacements · unverified intent",
-            path_counts.len(),
-            edits.len()
-        ),
+    let mut rows = styled_wrapped("1 files · 1 replacements · unverified intent", width, muted);
+    rows.extend(render_code_frame(
+        Line::from_spans(vec![
+            Span::styled("? ", muted),
+            Span::styled(path, Style::default().fg(theme.text_primary)),
+            Span::styled(" · 1 replacements", muted),
+        ]),
+        Vec::new(),
         width,
-        muted,
-    );
-    for (path, count) in &path_counts {
-        rows.extend(render_code_frame(
-            Line::from_spans(vec![
-                Span::styled("? ", muted),
-                Span::styled((*path).to_owned(), Style::default().fg(theme.text_primary)),
-                Span::styled(format!(" · {count} replacements"), muted),
-            ]),
-            Vec::new(),
-            width,
-            Some(theme),
-        ));
-    }
+        Some(theme),
+    ));
     rows
 }
 
@@ -234,7 +227,12 @@ fn render_prepared_or_committed(
     let mut rows = if committed {
         Vec::new()
     } else {
-        render_summary(details, width, theme, Some("verified".to_owned()))
+        let prefix = if details.get("verified").and_then(Value::as_bool) == Some(false) {
+            "unverified intent"
+        } else {
+            "verified"
+        };
+        render_summary(details, width, theme, Some(prefix.to_owned()))
     };
     let Some(changes) = details.get("changes").and_then(Value::as_array) else {
         return rows;

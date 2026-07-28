@@ -1877,13 +1877,7 @@ fn child_activity_projects_edit_write_file_rows() {
                 turn: 1,
                 id: "edit-1".to_owned(),
                 name: "Edit".to_owned(),
-                arguments: json!({
-                    "edits": [
-                        { "path": "src/a.rs", "old": "a", "new": "b" },
-                        { "path": "src/a.rs", "old": "c", "new": "d" },
-                        { "path": "src/b.rs", "old": "e", "new": "f" }
-                    ]
-                }),
+                arguments: json!({ "path": "src/a.rs", "old": "a", "new": "b" }),
                 workflow_origin: None,
             },
         )
@@ -1895,7 +1889,7 @@ fn child_activity_projects_edit_write_file_rows() {
             .iter()
             .map(|file| file.path.as_str())
             .collect::<Vec<_>>(),
-        ["src/a.rs", "src/b.rs"]
+        ["src/a.rs"]
     );
     assert!(running_files.iter().all(|file| {
         file.operation == Some(AgentToolFileOperation::Edited)
@@ -1910,15 +1904,14 @@ fn child_activity_projects_edit_write_file_rows() {
                 turn: 1,
                 id: "edit-1".to_owned(),
                 name: "Edit".to_owned(),
-                result: ToolResult::ok("edited 2 files").with_details(json!({
+                result: ToolResult::ok("edited 1 files").with_details(json!({
                     "kind": "edit",
                     "status": "committed",
-                    "files": 2,
-                    "added": 7,
-                    "removed": 3,
+                    "files": 1,
+                    "added": 5,
+                    "removed": 1,
                     "changes": [
-                        { "path": "src/a.rs", "status": "committed", "added": 5, "removed": 1 },
-                        { "path": "src/b.rs", "status": "committed", "added": 2, "removed": 2 }
+                        { "path": "src/a.rs", "status": "committed", "added": 5, "removed": 1 }
                     ]
                 })),
                 workflow_origin: None,
@@ -1928,7 +1921,6 @@ fn child_activity_projects_edit_write_file_rows() {
     let edited = runtime.snapshot(&agent.id).expect("edited snapshot");
     let edited_files = latest_tool_files(&edited, "edit-1");
     assert_eq!(edited_files[0].added, Some(5));
-    assert_eq!(edited_files[1].removed, Some(2));
     assert!(
         edited_files
             .iter()
@@ -1943,13 +1935,7 @@ fn child_activity_projects_edit_write_file_rows() {
                 turn: 1,
                 id: "write-1".to_owned(),
                 name: "Write".to_owned(),
-                arguments: json!({
-                    "files": [
-                        { "path": "docs/new.md", "content": "new" },
-                        { "path": "docs/existing.md", "content": "changed" },
-                        { "path": "docs/skipped.md", "content": "skipped" }
-                    ]
-                }),
+                arguments: json!({ "path": "docs/new.md", "content": "new" }),
                 workflow_origin: None,
             },
         )
@@ -1964,11 +1950,9 @@ fn child_activity_projects_edit_write_file_rows() {
                 name: "Write".to_owned(),
                 partial_result: ToolResult::ok("prepared Write").with_details(json!({
                     "kind": "write_prepared",
-                    "files": 3,
+                    "files": 1,
                     "changes": [
-                        { "path": "docs/new.md", "operation": "created", "line_count": 4, "added": 4, "removed": 0 },
-                        { "path": "docs/existing.md", "operation": "overwritten", "line_count": 6, "added": 3, "removed": 2 },
-                        { "path": "docs/skipped.md", "operation": "created", "line_count": 1, "added": 1, "removed": 0 }
+                        { "path": "docs/new.md", "operation": "created", "line_count": 4, "added": 4, "removed": 0 }
                     ]
                 })),
                 workflow_origin: None,
@@ -1983,10 +1967,10 @@ fn child_activity_projects_edit_write_file_rows() {
                 turn: 1,
                 id: "write-1".to_owned(),
                 name: "Write".to_owned(),
-                partial_result: ToolResult::ok("committed 1/3").with_details(json!({
+                partial_result: ToolResult::ok("committed 1/1").with_details(json!({
                     "kind": "write_progress",
                     "committed": 1,
-                    "total": 3,
+                    "total": 1,
                     "latest_path": "docs/new.md"
                 })),
                 workflow_origin: None,
@@ -1999,7 +1983,7 @@ fn child_activity_projects_edit_write_file_rows() {
         .progress_snapshot();
     assert_eq!(
         progress.last_tool.as_ref().map(|tool| tool.files.len()),
-        Some(3)
+        Some(1)
     );
 
     runtime
@@ -2010,14 +1994,12 @@ fn child_activity_projects_edit_write_file_rows() {
                 turn: 1,
                 id: "write-1".to_owned(),
                 name: "Write".to_owned(),
-                result: ToolResult::error("Write partial commit").with_details(json!({
+                result: ToolResult::ok("wrote 1 files").with_details(json!({
                     "kind": "write",
-                    "status": "partial_commit",
-                    "files": 3,
+                    "status": "committed",
+                    "files": 1,
                     "changes": [
-                        { "path": "docs/new.md", "operation": "created", "status": "committed", "line_count": 4, "added": 4, "removed": 0 },
-                        { "path": "docs/existing.md", "operation": "overwritten", "status": "failed", "message": "permission denied" },
-                        { "path": "docs/skipped.md", "operation": "created", "status": "not_attempted" }
+                        { "path": "docs/new.md", "operation": "created", "status": "committed", "line_count": 4, "added": 4, "removed": 0 }
                     ]
                 })),
                 workflow_origin: None,
@@ -2026,17 +2008,10 @@ fn child_activity_projects_edit_write_file_rows() {
         .expect("Write finish update");
     let written = runtime.snapshot(&agent.id).expect("written snapshot");
     let files = latest_tool_files(&written, "write-1");
-    assert_eq!(files.len(), 3);
+    assert_eq!(files.len(), 1);
     assert_eq!(files[0].operation, Some(AgentToolFileOperation::Created));
     assert_eq!(files[0].status, AgentToolFileStatus::Committed);
     assert_eq!(files[0].line_count, Some(4));
-    assert_eq!(
-        files[1].operation,
-        Some(AgentToolFileOperation::Overwritten)
-    );
-    assert_eq!(files[1].status, AgentToolFileStatus::Failed);
-    assert_eq!(files[1].message.as_deref(), Some("permission denied"));
-    assert_eq!(files[2].status, AgentToolFileStatus::NotAttempted);
 }
 
 #[test]

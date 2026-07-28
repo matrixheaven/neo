@@ -408,6 +408,19 @@ impl ToolCallComponent {
         }
         rows
     }
+
+    pub(super) fn render_projected_state(
+        &self,
+        state: ToolCallState,
+        expanded: bool,
+        width: usize,
+        theme: &TuiTheme,
+    ) -> Vec<Line> {
+        let mut projected = self.clone();
+        projected.state = state;
+        projected.expanded = expanded;
+        projected.render_with_theme(width, theme)
+    }
 }
 
 fn wrap_live_rows(lines: &[String], width: usize, style: Style) -> Vec<Line> {

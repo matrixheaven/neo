@@ -3419,29 +3419,27 @@ fn tool_files_from_arguments(
     name: &str,
     arguments: &serde_json::Value,
 ) -> Vec<AgentToolFileChange> {
-    let (key, operation) = match name {
-        "Edit" => ("edits", Some(AgentToolFileOperation::Edited)),
-        "Write" => ("files", None),
+    let operation = match name {
+        "Edit" => Some(AgentToolFileOperation::Edited),
+        "Write" => None,
         _ => return Vec::new(),
     };
-    let Some(items) = arguments.get(key).and_then(serde_json::Value::as_array) else {
+    let Some(path) = arguments
+        .get("path")
+        .and_then(serde_json::Value::as_str)
+        .filter(|path| !path.is_empty())
+    else {
         return Vec::new();
     };
-    let mut seen = BTreeSet::new();
-    items
-        .iter()
-        .filter_map(|item| item.get("path").and_then(serde_json::Value::as_str))
-        .filter(|path| !path.is_empty() && seen.insert((*path).to_owned()))
-        .map(|path| AgentToolFileChange {
-            path: path.to_owned(),
-            operation,
-            status: AgentToolFileStatus::Pending,
-            line_count: None,
-            added: None,
-            removed: None,
-            message: None,
-        })
-        .collect()
+    vec![AgentToolFileChange {
+        path: path.to_owned(),
+        operation,
+        status: AgentToolFileStatus::Pending,
+        line_count: None,
+        added: None,
+        removed: None,
+        message: None,
+    }]
 }
 
 fn tool_files_from_result(
@@ -3610,57 +3608,18 @@ fn summarize_tool_arguments(name: &str, arguments: &serde_json::Value) -> Option
 }
 
 fn summarize_edit_arguments(arguments: &serde_json::Value) -> Option<String> {
-    let edits = arguments.get("edits")?.as_array()?;
-    if edits.is_empty() {
-        return None;
-    }
-    let mut paths: Vec<&str> = Vec::new();
-    for edit in edits {
-        if let Some(path) = edit.get("path").and_then(serde_json::Value::as_str)
-            && !paths.contains(&path)
-        {
-            paths.push(path);
-        }
-    }
-    let head = paths.first().copied().unwrap_or("?");
-    let tail = paths.last().copied().unwrap_or(head);
-    let path_part = if paths.len() <= 1 {
-        compact_line(head)
-    } else if paths.len() == 2 {
-        format!("{} · {}", compact_line(head), compact_line(tail))
-    } else {
-        format!("{} … {}", compact_line(head), compact_line(tail))
-    };
+    let path = arguments.get("path")?.as_str()?;
     Some(bounded_edit_summary(format!(
-        "{} files · {} replacements · {path_part}",
-        paths.len(),
-        edits.len()
+        "1 files · 1 replacements · {}",
+        compact_line(path)
     )))
 }
 
 fn summarize_write_arguments(arguments: &serde_json::Value) -> Option<String> {
-    let files = arguments.get("files")?.as_array()?;
-    if files.is_empty() {
-        return None;
-    }
-    let mut paths = Vec::new();
-    for file in files {
-        if let Some(path) = file.get("path").and_then(serde_json::Value::as_str) {
-            paths.push(path);
-        }
-    }
-    let head = paths.first().copied().unwrap_or("?");
-    let tail = paths.last().copied().unwrap_or(head);
-    let path_part = if paths.len() <= 1 {
-        compact_line(head)
-    } else if paths.len() == 2 {
-        format!("{} · {}", compact_line(head), compact_line(tail))
-    } else {
-        format!("{} … {}", compact_line(head), compact_line(tail))
-    };
+    let path = arguments.get("path")?.as_str()?;
     Some(bounded_edit_summary(format!(
-        "Write {} files · {path_part}",
-        files.len()
+        "Write 1 files · {}",
+        compact_line(path)
     )))
 }
 
@@ -4113,23 +4072,17 @@ mod tests {
     }
 
     #[test]
-    fn edit_tool_summary_preserves_counts_and_head_tail_within_budget() {
+    fn edit_tool_summary_shows_single_path_within_budget() {
         let summary = summarize_tool_arguments(
             "Edit",
             &serde_json::json!({
-                "edits": [
-                    {"path": "src/a.rs", "old": "a", "new": "A"},
-                    {"path": "src/b.rs", "old": "b", "new": "B"},
-                    {"path": "src/c.rs", "old": "c", "new": "C"},
-                    {"path": "src/a.rs", "old": "x", "new": "X"}
-                ]
+                "path": "src/a.rs", "old": "a", "new": "A"
             }),
         )
         .expect("edit summary");
-        assert!(summary.contains("3 files"), "{summary}");
-        assert!(summary.contains("4 replacements"), "{summary}");
+        assert!(summary.contains("1 files"), "{summary}");
+        assert!(summary.contains("1 replacements"), "{summary}");
         assert!(summary.contains("src/a.rs"), "{summary}");
-        assert!(summary.contains("src/c.rs"), "{summary}");
         assert!(summary.chars().count() <= 160, "{summary}");
     }
 
@@ -4141,9 +4094,7 @@ mod tests {
             turn: 1,
             id: "e1".to_owned(),
             name: "Edit".to_owned(),
-            arguments: serde_json::json!({
-                "edits": [{"path":"a.rs","old":"a","new":"A"}]
-            }),
+            arguments: serde_json::json!({"path":"a.rs","old":"a","new":"A"}),
             workflow_origin: None,
         };
         assert!(apply_tool_activity_event(
@@ -4287,10 +4238,7 @@ mod tests {
             id: "w1".to_owned(),
             name: "Write".to_owned(),
             arguments: serde_json::json!({
-                "files": [
-                    {"path": "src/a.rs", "content": "fn main() {}"},
-                    {"path": "src/b.rs", "content": "pub fn b() {}"}
-                ]
+                "path": "src/a.rs", "content": "fn main() {}"
             }),
             workflow_origin: None,
         };
@@ -4301,7 +4249,7 @@ mod tests {
         ));
         // Raw argument summary is available before structured details arrive.
         let raw_summary = last_tool_summary(&activity, "w1").expect("raw summary");
-        assert!(raw_summary.contains("Write 2 files"), "{raw_summary}");
+        assert!(raw_summary.contains("Write 1 files"), "{raw_summary}");
 
         // Structured progress overrides raw argument summary.
         let update = AgentEvent::ToolExecutionUpdate {
@@ -4374,11 +4322,7 @@ mod tests {
             id: "w-live".to_owned(),
             name: "Write".to_owned(),
             arguments: serde_json::json!({
-                "files": [
-                    {"path": "src/first.rs", "content": large_content},
-                    {"path": "src/middle.rs", "content": large_content},
-                    {"path": "src/last.rs", "content": large_content}
-                ]
+                "path": "src/first.rs", "content": large_content
             }),
             workflow_origin: None,
         };
@@ -4390,9 +4334,8 @@ mod tests {
 
         // Summary must not contain any file content.
         assert!(!summary.contains("xxx"), "{summary}");
-        assert!(summary.contains("Write 3 files"), "{summary}");
+        assert!(summary.contains("Write 1 files"), "{summary}");
         assert!(summary.contains("src/first.rs"), "{summary}");
-        assert!(summary.contains("src/last.rs"), "{summary}");
         // Summary must be within the 160-char bound.
         assert!(summary.chars().count() <= 160, "{summary}");
 

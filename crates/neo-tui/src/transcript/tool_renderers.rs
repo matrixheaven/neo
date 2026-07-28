@@ -97,7 +97,12 @@ fn edit_header_chip(state: &ToolCallState, theme: &TuiTheme) -> Option<Vec<Span>
         return None;
     }
     let kind = details.get("kind").and_then(serde_json::Value::as_str);
-    if !matches!(kind, Some("edit" | "edit_progress")) {
+    if !matches!(kind, Some("edit" | "edit_progress" | "edit_prepared")) {
+        return None;
+    }
+    if kind == Some("edit_prepared")
+        && details.get("verified").and_then(serde_json::Value::as_bool) != Some(false)
+    {
         return None;
     }
     let number = |key| {
@@ -109,6 +114,18 @@ fn edit_header_chip(state: &ToolCallState, theme: &TuiTheme) -> Option<Vec<Span>
     let committed = state.status == ToolStatusKind::Succeeded
         && kind == Some("edit")
         && details.get("status").and_then(serde_json::Value::as_str) == Some("committed");
+    if kind == Some("edit_prepared")
+        && details.get("verified").and_then(serde_json::Value::as_bool) == Some(false)
+    {
+        return Some(vec![Span::styled(
+            format!(
+                " · {} files · {} replacements · unverified intent",
+                number("files"),
+                number("replacements")
+            ),
+            Style::default().fg(theme.text_muted),
+        )]);
+    }
     if !committed {
         return Some(vec![
             Span::styled(" · ", Style::default().fg(theme.text_muted)),
@@ -177,7 +194,11 @@ fn write_header_chip(state: &ToolCallState, theme: &TuiTheme) -> Option<Vec<Span
                 })
                 .count() as u64
         });
-    let summary = if committed || kind == Some("write_prepared") {
+    let summary = if kind == Some("write_prepared")
+        && details.get("verified").and_then(serde_json::Value::as_bool) == Some(false)
+    {
+        format!(" · {} files · unverified intent · ", number("files"))
+    } else if committed || kind == Some("write_prepared") {
         format!(
             " · {} files · {} created · {} overwritten · ",
             number("files"),

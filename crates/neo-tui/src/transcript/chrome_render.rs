@@ -7,6 +7,7 @@ use crate::shell::{MAX_PROMPT_VISIBLE_LINES, NeoChromeState, PromptState};
 use crate::transcript::{ToolCallComponent, ToolCallState, ToolGroup, render_tool_group};
 use crate::widgets::box_draw::{ROUNDED, repeat_char};
 use crate::widgets::{PendingInputPreview, TodoPanel, box_draw};
+use serde_json::{Value, json};
 
 const GITHUB_YELLOW: Color = Color::Rgb(191, 135, 0);
 const GITHUB_GREEN: Color = Color::Rgb(26, 127, 55);
@@ -34,12 +35,11 @@ pub fn apply_gutter(lines: &mut [String]) {
 }
 
 /// Render an ordered slice of tool components, collapsing consecutive runs of
-/// the same groupable tool (read/grep/glob/find) into a single tree card.
+/// the same groupable tool into one card.
 ///
 /// A run of length 1 still renders as a normal solo card. Any non-groupable
-/// tool (bash/edit/write/...) breaks an in-progress run. Live output buffers
-/// are preserved because we render from the components directly (not cloned
-/// states).
+/// Edit and Write runs keep their existing mutation-card presentation; their
+/// runtime calls and results remain independent.
 pub(super) struct OrderedToolRender {
     pub lines: Vec<Line>,
     pub animated_header_indices: Vec<usize>,
@@ -58,8 +58,9 @@ pub(super) fn render_ordered_tools(
             rows.push(Line::raw(""));
         }
         let current_name = ordered[i].name().to_owned();
-        let groupable = is_groupable(&current_name);
-        if !groupable {
+        let tree_groupable = is_tree_groupable(&current_name);
+        let mutation_groupable = is_mutation_groupable(&current_name);
+        if !tree_groupable && !mutation_groupable {
             record_tool_header(&ordered[i], rows.len(), &mut animated_header_indices);
             rows.extend(ordered[i].render_with_theme(width, theme));
             i += 1;
@@ -69,11 +70,35 @@ pub(super) fn render_ordered_tools(
         let mut j = i + 1;
         while j < ordered.len()
             && ordered[j].name() == current_name
-            && is_groupable(ordered[j].name())
+            && (is_tree_groupable(ordered[j].name()) || is_mutation_groupable(ordered[j].name()))
         {
             j += 1;
         }
         if j - i >= 2 {
+            if mutation_groupable {
+                if ordered[i..j]
+                    .iter()
+                    .any(ToolCallComponent::has_visible_animation)
+                {
+                    animated_header_indices.push(rows.len());
+                }
+                let projected = aggregate_mutation_state(&ordered[i..j], &current_name);
+                let expanded = ordered[i..j].iter().all(ToolCallComponent::is_expanded);
+                let display = ordered[i..j]
+                    .iter()
+                    .find(|tool| {
+                        matches!(
+                            tool.status(),
+                            crate::shell::ToolStatusKind::Pending
+                                | crate::shell::ToolStatusKind::Queued
+                                | crate::shell::ToolStatusKind::Running
+                        )
+                    })
+                    .unwrap_or(&ordered[i]);
+                rows.extend(display.render_projected_state(projected, expanded, width, theme));
+                i = j;
+                continue;
+            }
             // Group of >= 2: render as a tree card. Only group tools that are
             // NOT still streaming live output (a running read shows solo).
             let any_live_output = ordered[i..j].iter().any(ToolCallComponent::has_live_rows);
@@ -118,8 +143,175 @@ fn record_tool_header(
 }
 
 /// Whether a tool name is eligible for consecutive-call grouping.
-fn is_groupable(name: &str) -> bool {
+fn is_tree_groupable(name: &str) -> bool {
     matches!(name, "Read" | "Grep" | "Glob" | "Find" | "List")
+}
+
+fn is_mutation_groupable(name: &str) -> bool {
+    matches!(name, "Edit" | "Write")
+}
+
+fn aggregate_mutation_state(tools: &[ToolCallComponent], name: &str) -> ToolCallState {
+    use crate::shell::ToolStatusKind;
+
+    let states = tools
+        .iter()
+        .map(ToolCallComponent::state)
+        .collect::<Vec<_>>();
+    let any_active = states.iter().any(|state| {
+        matches!(
+            state.status,
+            ToolStatusKind::Pending | ToolStatusKind::Queued | ToolStatusKind::Running
+        )
+    });
+    let any_failed = states.iter().any(|state| {
+        matches!(
+            state.status,
+            ToolStatusKind::Failed | ToolStatusKind::Cancelled
+        )
+    });
+    let succeeded = states
+        .iter()
+        .filter(|state| state.status == ToolStatusKind::Succeeded)
+        .count();
+    let status = if any_failed {
+        ToolStatusKind::Failed
+    } else if states
+        .iter()
+        .any(|state| state.status == ToolStatusKind::Running)
+    {
+        ToolStatusKind::Running
+    } else if states
+        .iter()
+        .any(|state| state.status == ToolStatusKind::Queued)
+    {
+        ToolStatusKind::Queued
+    } else if any_active {
+        ToolStatusKind::Pending
+    } else {
+        ToolStatusKind::Succeeded
+    };
+
+    let mut changes = Vec::with_capacity(states.len());
+    let mut added = 0;
+    let mut removed = 0;
+    let mut created = 0;
+    let mut overwritten = 0;
+    for state in &states {
+        if let Some(details) = &state.details {
+            added += detail_count(details, "added");
+            removed += detail_count(details, "removed");
+            created += detail_count(details, "created");
+            overwritten += detail_count(details, "overwritten");
+            if let Some(items) = details.get("changes").and_then(Value::as_array) {
+                changes.extend(items.iter().cloned());
+                continue;
+            }
+        }
+        changes.push(project_argument_change(state, name));
+    }
+
+    let terminal_status = if any_failed {
+        if succeeded == 0 { "failed" } else { "mixed" }
+    } else {
+        "committed"
+    };
+    let projecting_intent = any_active && !any_failed;
+    let details = if name == "Edit" {
+        json!({
+            "kind": if projecting_intent { "edit_prepared" } else { "edit" },
+            "status": terminal_status,
+            "verified": !projecting_intent,
+            "files": states.len(),
+            "replacements": states.len(),
+            "added": added,
+            "removed": removed,
+            "changes": changes,
+        })
+    } else {
+        json!({
+            "kind": if projecting_intent { "write_prepared" } else { "write" },
+            "status": terminal_status,
+            "verified": !projecting_intent,
+            "files": states.len(),
+            "created": created,
+            "overwritten": overwritten,
+            "added": added,
+            "removed": removed,
+            "changes": changes,
+        })
+    };
+    let active_arguments = states
+        .iter()
+        .find(|state| {
+            matches!(
+                state.status,
+                ToolStatusKind::Pending | ToolStatusKind::Queued | ToolStatusKind::Running
+            )
+        })
+        .and_then(|state| state.arguments.clone());
+
+    ToolCallState {
+        id: states[0].id.clone(),
+        name: name.to_owned(),
+        arguments: active_arguments,
+        result: None,
+        details: Some(details),
+        status,
+        exit_code: None,
+    }
+}
+
+fn detail_count(details: &Value, key: &str) -> u64 {
+    details.get(key).and_then(Value::as_u64).unwrap_or(0)
+}
+
+fn project_argument_change(state: &ToolCallState, name: &str) -> Value {
+    let arguments = state
+        .arguments
+        .as_deref()
+        .and_then(|arguments| serde_json::from_str::<Value>(arguments).ok());
+    let path = state
+        .details
+        .as_ref()
+        .and_then(|details| details.get("path"))
+        .and_then(Value::as_str)
+        .or_else(|| {
+            arguments
+                .as_ref()
+                .and_then(|arguments| arguments.get("path"))
+                .and_then(Value::as_str)
+        })
+        .unwrap_or("?");
+    let change_status = match state.status {
+        crate::shell::ToolStatusKind::Succeeded => "committed",
+        crate::shell::ToolStatusKind::Failed | crate::shell::ToolStatusKind::Cancelled => "failed",
+        _ => "not_attempted",
+    };
+    let message = state
+        .details
+        .as_ref()
+        .and_then(|details| details.get("message"))
+        .and_then(Value::as_str);
+    if name == "Edit" {
+        json!({
+            "path": path,
+            "status": change_status,
+            "replacements": 1,
+            "added": 0,
+            "removed": 0,
+            "message": message,
+        })
+    } else {
+        json!({
+            "path": path,
+            "status": change_status,
+            "operation": "pending",
+            "added": 0,
+            "removed": 0,
+            "message": message,
+        })
+    }
 }
 
 /// Chrome lines, optional cursor position, and the row where the prompt box

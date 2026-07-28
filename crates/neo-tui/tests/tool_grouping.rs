@@ -464,3 +464,132 @@ fn multiple_consecutive_tool_cards_are_each_separated_by_blank_lines() {
         "blank between bash0 and list1, got: {gap_b:?}"
     );
 }
+
+#[test]
+fn consecutive_single_file_edits_render_as_one_mutation_card() {
+    let mut runtime = TranscriptPane::new(100, 30);
+    for (index, path) in ["src/a.rs", "src/b.rs"].into_iter().enumerate() {
+        let id = format!("edit-{index}");
+        runtime.apply_agent_event(AgentEvent::ToolCallStarted {
+            turn: 1,
+            id: id.clone(),
+            name: "Edit".to_owned(),
+        });
+        runtime.apply_agent_event(AgentEvent::ToolCallArgumentsDelta {
+            turn: 1,
+            id: id.clone(),
+            json_fragment: format!(r#"{{"path":"{path}","old":"before","new":"after"}}"#),
+        });
+        runtime.apply_agent_event(AgentEvent::ToolExecutionFinished {
+            turn: 1,
+            id,
+            name: "Edit".to_owned(),
+            result: neo_agent_core::ToolResult::ok("edited 1 files").with_details(
+                serde_json::json!({
+                    "kind": "edit",
+                    "status": "committed",
+                    "files": 1,
+                    "replacements": 1,
+                    "added": 1,
+                    "removed": 1,
+                    "changes": [{
+                        "path": path,
+                        "status": "committed",
+                        "replacements": 1,
+                        "added": 1,
+                        "removed": 1,
+                        "diff": format!("--- {path}\n+++ {path}\n@@ -1 +1 @@\n-before\n+after\n"),
+                    }],
+                }),
+            ),
+            workflow_origin: None,
+        });
+    }
+
+    let joined = plain_frame(&mut runtime, 100, 30).join("\n");
+    assert!(joined.contains("2 files · 2 replacements"), "{joined}");
+    assert!(joined.contains("src/a.rs"), "{joined}");
+    assert!(joined.contains("src/b.rs"), "{joined}");
+    assert_eq!(joined.matches("Used Edit").count(), 1, "{joined}");
+}
+
+#[test]
+fn running_single_file_edits_share_one_unverified_mutation_card() {
+    let mut runtime = TranscriptPane::new(100, 20);
+    for (index, path) in ["src/a.rs", "src/b.rs"].into_iter().enumerate() {
+        let id = format!("edit-live-{index}");
+        runtime.apply_agent_event(AgentEvent::ToolCallStarted {
+            turn: 1,
+            id: id.clone(),
+            name: "Edit".to_owned(),
+        });
+        runtime.apply_agent_event(AgentEvent::ToolCallArgumentsDelta {
+            turn: 1,
+            id,
+            json_fragment: format!(r#"{{"path":"{path}","old":"before","new":"after"}}"#),
+        });
+    }
+
+    let joined = plain_frame(&mut runtime, 100, 20).join("\n");
+    assert!(
+        joined.contains("2 files · 2 replacements · unverified intent"),
+        "{joined}"
+    );
+    assert!(joined.contains("src/a.rs"), "{joined}");
+    assert!(joined.contains("src/b.rs"), "{joined}");
+    assert_eq!(joined.matches("Edit").count(), 1, "{joined}");
+}
+
+#[test]
+fn consecutive_single_file_writes_render_as_one_mutation_card() {
+    let mut runtime = TranscriptPane::new(100, 30);
+    for (index, path) in ["src/a.rs", "src/b.rs"].into_iter().enumerate() {
+        let id = format!("write-{index}");
+        runtime.apply_agent_event(AgentEvent::ToolCallStarted {
+            turn: 1,
+            id: id.clone(),
+            name: "Write".to_owned(),
+        });
+        runtime.apply_agent_event(AgentEvent::ToolCallArgumentsDelta {
+            turn: 1,
+            id: id.clone(),
+            json_fragment: format!(r#"{{"path":"{path}","content":"content"}}"#),
+        });
+        runtime.apply_agent_event(AgentEvent::ToolExecutionFinished {
+            turn: 1,
+            id,
+            name: "Write".to_owned(),
+            result: neo_agent_core::ToolResult::ok("wrote 1 files").with_details(
+                serde_json::json!({
+                    "kind": "write",
+                    "status": "committed",
+                    "files": 1,
+                    "created": 1,
+                    "overwritten": 0,
+                    "added": 1,
+                    "removed": 0,
+                    "created_directories": [],
+                    "changes": [{
+                        "path": path,
+                        "status": "committed",
+                        "operation": "created",
+                        "line_count": 1,
+                        "content": "content",
+                        "added": 1,
+                        "removed": 0,
+                    }],
+                }),
+            ),
+            workflow_origin: None,
+        });
+    }
+
+    let joined = plain_frame(&mut runtime, 100, 30).join("\n");
+    assert!(
+        joined.contains("2 files · 2 created · 0 overwritten"),
+        "{joined}"
+    );
+    assert!(joined.contains("src/a.rs"), "{joined}");
+    assert!(joined.contains("src/b.rs"), "{joined}");
+    assert_eq!(joined.matches("Used Write").count(), 1, "{joined}");
+}

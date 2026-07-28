@@ -690,10 +690,7 @@ fn write_tool_card_renders_finalized_diff_from_details() {
         id: "tool-1".to_owned(),
         name: "Write".to_owned(),
         arguments: Some(
-            serde_json::json!({
-                "files": [{"path": "src/generated.rs", "content": content}]
-            })
-            .to_string(),
+            serde_json::json!({"path": "src/generated.rs", "content": content}).to_string(),
         ),
         result: Some("wrote 1 files".to_owned()),
         details: Some(serde_json::json!({
@@ -745,7 +742,7 @@ fn streaming_write_tool_card_renders_line_numbered_preview_from_partial_json() {
     });
 
     card.update_call(Some(
-        r#"{"files":[{"path":"/workspace/sample_service.go","content":"// sample_service.go\n\npackage service\n\nimport (\n\t\"context\"\n\t\"fmt\"\n)\n"#.to_owned(),
+        r#"{"path":"/workspace/sample_service.go","content":"// sample_service.go\n\npackage service\n\nimport (\n\t\"context\"\n\t\"fmt\"\n)\n"#.to_owned(),
     ));
 
     let rows = plain(card.render(100));
@@ -756,7 +753,7 @@ fn streaming_write_tool_card_renders_line_numbered_preview_from_partial_json() {
     );
 
     card.update_call(Some(
-        r#"{"files":[{"path":"/workspace/sample_service.go","content":"// sample_service.go\n\npackage service\n\nimport (\n\t\"context\"\n\t\"fmt\"\n)\n"}]}"#.to_owned(),
+        r#"{"path":"/workspace/sample_service.go","content":"// sample_service.go\n\npackage service\n\nimport (\n\t\"context\"\n\t\"fmt\"\n)\n"}"#.to_owned(),
     ));
 
     let rows = plain(card.render(100));
@@ -783,7 +780,7 @@ fn streaming_write_tool_card_highlights_content_before_path_arrives() {
     });
 
     card.update_call(Some(
-        r#"{"files":[{"path":"service.go","content":"package service\n\nfunc main() {\n\tfmt.Println(\"ok\")\n}\n"}]}"#.to_owned(),
+        r#"{"path":"service.go","content":"package service\n\nfunc main() {\n\tfmt.Println(\"ok\")\n}\n"}"#.to_owned(),
     ));
 
     let rows = plain(card.render(100));
@@ -811,7 +808,7 @@ fn streaming_write_tool_card_does_not_panic_on_trailing_blank_lines() {
     });
 
     card.update_call(Some(
-        r#"{"files":[{"path":"design.md","content":"---\nrole: technical-design\n---\n\n# Design\n\n"}]}"#
+        r#"{"path":"design.md","content":"---\nrole: technical-design\n---\n\n# Design\n\n"}"#
             .to_owned(),
     ));
 
@@ -873,13 +870,7 @@ fn edit_tool_card_renders_finalized_real_line_diff_from_details() {
         id: "tool-1".to_owned(),
         name: "Edit".to_owned(),
         arguments: Some(
-            serde_json::json!({
-                "files": [{
-                    "path": "src/lib.rs",
-                    "replacements": [{ "old": "old", "new": "new" }]
-                }]
-            })
-            .to_string(),
+            serde_json::json!({ "path": "src/lib.rs", "old": "old", "new": "new" }).to_string(),
         ),
         result: Some("edited 1 files".to_owned()),
         details: Some(serde_json::json!({
@@ -1039,10 +1030,8 @@ fn edit_and_write_frames_preserve_color_line_numbers_and_wrapped_tails() {
         id: "write-frame".to_owned(),
         name: "Write".to_owned(),
         arguments: Some(
-            json!({
-                "files": [{"path": long_path, "content": "fn main() { let value = ENDING_SENTINEL; }"}]
-            })
-            .to_string(),
+            json!({"path": long_path, "content": "fn main() { let value = ENDING_SENTINEL; }"})
+                .to_string(),
         ),
         result: Some("written".to_owned()),
         details: Some(json!({
@@ -1213,7 +1202,7 @@ fn narrow_write_frame_expands_tabs_without_extra_border_overflow() {
         let mut card = ToolCallComponent::new(ToolCallState {
             id: format!("write-{width}"),
             name: "Write".to_owned(),
-            arguments: Some(json!({"files": [{"path": "x.rs", "content": content}]}).to_string()),
+            arguments: Some(json!({"path": "x.rs", "content": content}).to_string()),
             result: Some("written".to_owned()),
             details: Some(json!({
                 "kind": "write",
@@ -1260,7 +1249,7 @@ fn write_frame_shrinks_to_content_width() {
     let mut card = ToolCallComponent::new(ToolCallState {
         id: "write-compact-frame".to_owned(),
         name: "Write".to_owned(),
-        arguments: Some(json!({"files": [{"path": "x.rs", "content": "ok"}]}).to_string()),
+        arguments: Some(json!({"path": "x.rs", "content": "ok"}).to_string()),
         result: Some("written".to_owned()),
         details: Some(json!({
             "kind": "write",
@@ -1987,7 +1976,9 @@ fn write_streaming_preview_reuses_final_format() {
     runtime.apply_agent_event(AgentEvent::ToolCallArgumentsDelta {
         turn: 1,
         id: "write-1".to_owned(),
-        json_fragment: r#"{"files":[{"path":"src/foo.rs","content":"use std::collections::HashMap;\n\npub f"}]}"#.to_owned(),
+        json_fragment:
+            r#"{"path":"src/foo.rs","content":"use std::collections::HashMap;\n\npub f"}"#
+                .to_owned(),
     });
 
     let frame = runtime
@@ -2025,7 +2016,7 @@ fn edit_streaming_preview_shows_flat_intent() {
     runtime.apply_agent_event(AgentEvent::ToolCallArgumentsDelta {
         turn: 1,
         id: "edit-1".to_owned(),
-        json_fragment: r#"{"edits":[{"path":"src/foo.rs","old":"foo","new":"bar"}]}"#.to_owned(),
+        json_fragment: r#"{"path":"src/foo.rs","old":"foo","new":"bar"}"#.to_owned(),
     });
 
     let frame = runtime
@@ -2047,7 +2038,7 @@ fn edit_streaming_token_count_ignores_original_content() {
     use neo_tui::transcript::tool_renderers::estimate_tool_tokens;
 
     let original = "original file content ".repeat(1_000);
-    let before_new = format!(r#"{{"edits":[{{"path":"src/foo.rs","old":"{original}""#);
+    let before_new = format!(r#"{{"path":"src/foo.rs","old":"{original}""#);
     assert_eq!(estimate_tool_tokens("Edit", &before_new), 0);
 
     let with_new = format!(r#"{before_new},"new":"small replacement"#);
@@ -2078,7 +2069,7 @@ fn edit_batch_card_renders_collapsed_expanded_and_narrow() {
     let mut card = ToolCallComponent::new(ToolCallState {
         id: "edit-batch".to_owned(),
         name: "Edit".to_owned(),
-        arguments: Some(r#"{"files":[]}"#.to_owned()),
+        arguments: Some(r#"{"path":"src/foo.rs","old":"foo","new":"bar"}"#.to_owned()),
         result: Some("edited".to_owned()),
         details: Some(details),
         status: ToolStatusKind::Succeeded,
@@ -2253,8 +2244,7 @@ fn write_streaming_uses_preview_format() {
         id: "stream-1".to_string(),
         name: "Write".to_string(),
         arguments: Some(
-            r##"{"files":[{"path":"/tmp/test.md","content":"# Title\nLine 2\nLine 3"}]}"##
-                .to_string(),
+            r##"{"path":"/tmp/test.md","content":"# Title\nLine 2\nLine 3"}"##.to_string(),
         ),
         result: None,
         details: None,
@@ -2348,20 +2338,12 @@ fn queued_shell_card_keeps_relative_position_across_later_entries() {
 }
 
 #[test]
-fn batch_write_card_renders_created_content_and_overwrite_diff() {
+fn aggregated_write_card_renders_created_content_and_overwrite_diff() {
     let diff = "--- a/old.txt\n+++ b/old.txt\n@@ -1,2 +1,2 @@\n-old line\n+new line\n context\n";
     let mut card = ToolCallComponent::new(ToolCallState {
         id: "batch-write-1".to_owned(),
         name: "Write".to_owned(),
-        arguments: Some(
-            json!({
-                "files": [
-                    {"path": "src/new_file.rs", "content": "fn main() {}\n"},
-                    {"path": "old.txt", "content": "new line\ncontext\n"}
-                ]
-            })
-            .to_string(),
-        ),
+        arguments: None,
         result: Some("wrote 2 files".to_owned()),
         details: Some(json!({
             "kind": "write",
@@ -2874,9 +2856,7 @@ fn edit_and_write_file_frames_embed_semantic_headers_in_top_border() {
     let mut write_card = ToolCallComponent::new(ToolCallState {
         id: "write-border".to_owned(),
         name: "Write".to_owned(),
-        arguments: Some(
-            json!({"files": [{"path": "src/embedded.rs", "content": "hello"}]}).to_string(),
-        ),
+        arguments: Some(json!({"path": "src/embedded.rs", "content": "hello"}).to_string()),
         result: Some("written".to_owned()),
         details: Some(json!({
             "kind": "write",
@@ -2985,7 +2965,7 @@ fn streaming_batch_write_uses_unverified_content_preview_without_raw_json() {
     let mut card = ToolCallComponent::new(ToolCallState {
         id: "stream-batch".to_owned(),
         name: "Write".to_owned(),
-        arguments: Some(r#"{"files":[{"path":"new.rs","content":"fn main() {}"}]}"#.to_owned()),
+        arguments: Some(r#"{"path":"new.rs","content":"fn main() {}"}"#.to_owned()),
         result: None,
         details: None,
         status: ToolStatusKind::Running,

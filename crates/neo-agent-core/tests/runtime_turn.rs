@@ -4604,13 +4604,7 @@ async fn runtime_edit_approval_interrupt_reports_structured_zero_write_cancellat
         tool_call_turn(&[(
             "edit_cancel",
             "Edit",
-            json!({
-                "edits": [{
-                    "path": "file.txt",
-                    "old": "before",
-                    "new": "after"
-                }]
-            }),
+            json!({ "path": "file.txt", "old": "before", "new": "after" }),
         )]),
         final_done_turn(),
     ]);
@@ -4768,8 +4762,7 @@ fn parallel_write_and_glob_harness() -> FakeHarness {
             },
             AiStreamEvent::ToolCallEnd {
                 id: "tool_1".to_owned(),
-                raw_arguments: json!({ "files": [{ "path": "approved.txt", "content": "ok" }] })
-                    .to_string(),
+                raw_arguments: json!({ "path": "approved.txt", "content": "ok" }).to_string(),
             },
             AiStreamEvent::ToolCallStart {
                 id: "tool_2".to_owned(),
@@ -4802,8 +4795,7 @@ async fn runtime_approval_handler_allows_file_write_tool_permission() {
             },
             AiStreamEvent::ToolCallEnd {
                 id: "tool_1".to_owned(),
-                raw_arguments: json!({ "files": [{ "path": "approved.txt", "content": "ok" }] })
-                    .to_string(),
+                raw_arguments: json!({ "path": "approved.txt", "content": "ok" }).to_string(),
             },
             AiStreamEvent::MessageEnd {
                 stop_reason: neo_ai::StopReason::ToolUse,
@@ -7256,8 +7248,7 @@ async fn runtime_plan_mode_guard_denies_write_outside_plan_file() {
             },
             AiStreamEvent::ToolCallEnd {
                 id: "tool_1".to_owned(),
-                raw_arguments: json!({ "files": [{ "path": "other.txt", "content": "x" }] })
-                    .to_string(),
+                raw_arguments: json!({ "path": "other.txt", "content": "x" }).to_string(),
             },
             AiStreamEvent::MessageEnd {
                 stop_reason: neo_ai::StopReason::ToolUse,
@@ -7329,10 +7320,8 @@ async fn runtime_plan_mode_allows_writing_active_plan_file_outside_workspace() {
             AiStreamEvent::ToolCallEnd {
                 id: "tool_1".to_owned(),
                 raw_arguments: json!({
-                    "files": [{
-                        "path": plan_path,
-                        "content": "# Plan\n\nUse Write, not Bash."
-                    }]
+                    "path": plan_path,
+                    "content": "# Plan\n\nUse Write, not Bash."
                 })
                 .to_string(),
             },
@@ -7408,11 +7397,9 @@ async fn runtime_plan_mode_allows_editing_active_plan_file_outside_workspace() {
             AiStreamEvent::ToolCallEnd {
                 id: "tool_1".to_owned(),
                 raw_arguments: json!({
-                    "edits": [{
-                        "path": plan_path,
-                        "old": "Draft.",
-                        "new": "Finalized."
-                    }]
+                    "path": plan_path,
+                    "old": "Draft.",
+                    "new": "Finalized."
                 })
                 .to_string(),
             },
@@ -7451,7 +7438,7 @@ async fn runtime_plan_mode_allows_editing_active_plan_file_outside_workspace() {
 }
 
 #[tokio::test]
-async fn runtime_plan_mode_rejects_edit_when_any_resolved_target_is_not_active_plan() {
+async fn runtime_plan_mode_checks_each_edit_call_independently() {
     let home = tempfile::tempdir().expect("home");
     let workspace = tempfile::tempdir().expect("workspace");
     let workspace_root = workspace.path().canonicalize().expect("workspace");
@@ -7472,36 +7459,38 @@ async fn runtime_plan_mode_rejects_edit_when_any_resolved_target_is_not_active_p
         data.path
     };
     let harness = FakeHarness::from_turns([
-        tool_call_turn(&[(
-            "edit_plan_batch",
-            "Edit",
-            json!({
-                "edits": [{
-                    "path": plan_path,
-                    "old": "plan",
-                    "new": "PLAN"
-                }, {
-                    "path": other,
-                    "old": "other",
-                    "new": "OTHER"
-                }]
-            }),
-        )]),
+        tool_call_turn(&[
+            (
+                "edit_plan",
+                "Edit",
+                json!({ "path": plan_path, "old": "plan", "new": "PLAN" }),
+            ),
+            (
+                "edit_other",
+                "Edit",
+                json!({ "path": other, "old": "other", "new": "OTHER" }),
+            ),
+        ]),
         final_done_turn(),
     ]);
     let runtime =
         AgentRuntime::with_tools(config, harness.client(), ToolRegistry::with_builtin_tools());
     let mut context = AgentContext::new();
 
-    let events = run_turn_collect(&runtime, &mut context, "edit plan batch").await;
+    let events = run_turn_collect(&runtime, &mut context, "edit plan files").await;
 
-    let result = finished_tool_results(&events, "edit_plan_batch")
+    let plan_result = finished_tool_results(&events, "edit_plan")
         .into_iter()
         .next()
-        .expect("finished Edit");
+        .expect("finished plan Edit");
+    assert!(!plan_result.is_error);
+    let result = finished_tool_results(&events, "edit_other")
+        .into_iter()
+        .next()
+        .expect("finished other Edit");
     assert!(result.is_error);
     assert!(result.content.contains("Plan mode"), "{}", result.content);
-    assert_eq!(std::fs::read_to_string(&plan_path).expect("plan"), "plan\n");
+    assert_eq!(std::fs::read_to_string(&plan_path).expect("plan"), "PLAN\n");
     assert_eq!(std::fs::read_to_string(other).expect("other"), "other\n");
 }
 
@@ -7669,8 +7658,7 @@ async fn yolo_mode_approves_write_without_approval() {
             },
             AiStreamEvent::ToolCallEnd {
                 id: "tool_1".to_owned(),
-                raw_arguments: json!({ "files": [{ "path": "yolo.txt", "content": "yolo" }] })
-                    .to_string(),
+                raw_arguments: json!({ "path": "yolo.txt", "content": "yolo" }).to_string(),
             },
             AiStreamEvent::MessageEnd {
                 stop_reason: neo_ai::StopReason::ToolUse,
@@ -9090,7 +9078,7 @@ async fn approval_requests_only_offer_runtime_supported_actions() {
 
     let write = collect_approval_request_for_tool(
         "Write",
-        json!({ "files": [{ "path": "approved.txt", "content": "ok" }] }),
+        json!({ "path": "approved.txt", "content": "ok" }),
         workspace.path(),
     )
     .await;
@@ -10570,11 +10558,9 @@ async fn first_nested_edit_defers_before_side_effect_and_retried_batch_executes_
     let target = fixture.workspace.join("nested").join("target.txt");
     std::fs::write(&target, "alpha").expect("target file");
     let edit_arguments = json!({
-        "edits": [{
-            "path": target.to_string_lossy(),
-            "old": "alpha",
-            "new": "beta"
-        }]
+        "path": target.to_string_lossy(),
+        "old": "alpha",
+        "new": "beta"
     });
     let harness = FakeHarness::from_turns([
         tool_call_turn(&[("call_1", "Edit", edit_arguments.clone())]),
@@ -10665,7 +10651,7 @@ async fn one_new_scope_defers_every_call_in_a_parallel_mixed_batch() {
             (
                 "call_write",
                 "Write",
-                json!({ "files": [{ "path": "nested/new.txt", "content": "created" }] }),
+                json!({ "path": "nested/new.txt", "content": "created" }),
             ),
             ("call_grep", "Grep", json!({ "pattern": "hello" })),
         ]),
@@ -10742,7 +10728,7 @@ async fn first_read_write_and_nested_cwd_shell_each_defer_before_execution() {
         ("Read", json!({ "path": "nested/data.txt" }), None),
         (
             "Write",
-            json!({ "files": [{ "path": "nested/created.txt", "content": "created" }] }),
+            json!({ "path": "nested/created.txt", "content": "created" }),
             Some("nested/created.txt"),
         ),
         (
@@ -10877,7 +10863,7 @@ async fn approval_wait_rechecks_instruction_fingerprint_before_execution() {
         tool_call_turn(&[(
             "write_1",
             "Write",
-            json!({ "files": [{ "path": "nested/approved.txt", "content": "approved" }] }),
+            json!({ "path": "nested/approved.txt", "content": "approved" }),
         )]),
         end_turn_events("done"),
     ]);
@@ -10943,11 +10929,9 @@ async fn blocked_scope_allows_read_only_diagnosis_but_blocks_mixed_mutation_batc
     let target = fixture.workspace.join("nested").join("data.txt");
     std::fs::write(&target, "body").expect("data file");
     let edit_arguments = json!({
-        "edits": [{
-            "path": target.to_string_lossy(),
-            "old": "body",
-            "new": "changed"
-        }]
+        "path": target.to_string_lossy(),
+        "old": "body",
+        "new": "changed"
     });
     let read_arguments = json!({ "path": target.to_string_lossy() });
     let harness = FakeHarness::from_turns([
@@ -11299,11 +11283,9 @@ async fn context_pressure_compacts_before_pending_epoch_admission() {
     let target = fixture.workspace.join("nested").join("target.txt");
     std::fs::write(&target, "alpha").expect("target file");
     let edit_arguments = json!({
-        "edits": [{
-            "path": target.to_string_lossy(),
-            "old": "alpha",
-            "new": "beta"
-        }]
+        "path": target.to_string_lossy(),
+        "old": "alpha",
+        "new": "beta"
     });
     let harness = FakeHarness::from_turns([
         tool_call_turn(&[("call_1", "Edit", edit_arguments.clone())]),
@@ -11356,11 +11338,9 @@ async fn history_pressure_compacts_before_whole_bundle_omission() {
     let target = fixture.workspace.join("nested/target.txt");
     std::fs::write(&target, "alpha").expect("target file");
     let edit_arguments = json!({
-        "edits": [{
-            "path": target.to_string_lossy(),
-            "old": "alpha",
-            "new": "beta"
-        }]
+        "path": target.to_string_lossy(),
+        "old": "alpha",
+        "new": "beta"
     });
     let harness = FakeHarness::from_turns([
         tool_call_turn(&[("call_1", "Edit", edit_arguments.clone())]),
@@ -11437,10 +11417,8 @@ async fn post_tool_instruction_update_compacts_before_fresh_admission() {
             "write_agents",
             "Write",
             json!({
-                "files": [{
-                    "path": agents_path.to_string_lossy(),
-                    "content": updated_rules,
-                }],
+                "path": agents_path.to_string_lossy(),
+                "content": updated_rules,
             }),
         )]),
         end_turn_events("summary output"),
@@ -11490,25 +11468,16 @@ async fn post_tool_instruction_update_compacts_before_fresh_admission() {
     );
 }
 
-fn batch_edit_arguments(files: &[(&str, &str, &str)]) -> serde_json::Value {
-    json!({
-        "edits": files.iter().map(|(path, old, new)| {
-            json!({
-                "path": path,
-                "old": old,
-                "new": new
-            })
-        }).collect::<Vec<_>>()
-    })
+fn edit_arguments(path: &str, old: &str, new: &str) -> serde_json::Value {
+    json!({ "path": path, "old": old, "new": new })
 }
 
 #[tokio::test]
-async fn runtime_edit_approval_uses_verified_projection_and_multi_key_scope() {
+async fn runtime_edit_approval_uses_verified_single_file_projection() {
     let workspace = tempfile::tempdir().expect("workspace");
     std::fs::create_dir_all(workspace.path().join("src")).expect("mkdir");
     std::fs::write(workspace.path().join("src/a.txt"), "aaa\n").expect("a");
-    std::fs::write(workspace.path().join("src/b.txt"), "bbb\n").expect("b");
-    let args = batch_edit_arguments(&[("src/a.txt", "aaa", "AAA"), ("src/b.txt", "bbb", "BBB")]);
+    let args = edit_arguments("src/a.txt", "aaa", "AAA");
     let harness = FakeHarness::from_turns([
         tool_call_turn(&[("edit_1", "Edit", args)]),
         final_done_turn(),
@@ -11522,18 +11491,17 @@ async fn runtime_edit_approval_uses_verified_projection_and_multi_key_scope() {
                 assert_eq!(request.operation, PermissionOperation::FileWrite);
                 match &request.presentation {
                     ApprovalPresentation::Edit { title, edit } => {
-                        assert_eq!(title, "Edit 2 files?");
-                        assert_eq!(edit.files, 2);
-                        assert_eq!(edit.replacements, 2);
-                        assert_eq!(edit.changes.len(), 2);
+                        assert_eq!(title, "Edit 1 files?");
+                        assert_eq!(edit.files, 1);
+                        assert_eq!(edit.replacements, 1);
+                        assert_eq!(edit.changes.len(), 1);
                     }
                     other => panic!("expected Edit presentation, got {other:?}"),
                 }
                 assert!(request.options.iter().any(|option| matches!(
                     &option.action,
                     ApprovalAction::PermitForSession { scope }
-                        if scope.label == "Approve edits to these 2 files for this session"
-                            && scope.keys.len() == 2
+                        if scope.keys.len() == 1
                 )));
                 permit_once(request)
             }),
@@ -11561,7 +11529,7 @@ async fn runtime_edit_approval_uses_verified_projection_and_multi_key_scope() {
     assert!(!finished.is_error, "{}", finished.content);
     let details = finished.details.as_ref().expect("details");
     assert_eq!(details["status"], "committed");
-    assert_eq!(details["files"], 2);
+    assert_eq!(details["files"], 1);
     let success_diff = details["changes"][0]["diff"].as_str().expect("diff");
     let approval = events
         .iter()
@@ -11580,17 +11548,13 @@ async fn runtime_edit_approval_uses_verified_projection_and_multi_key_scope() {
         std::fs::read_to_string(workspace.path().join("src/a.txt")).expect("a"),
         "AAA\n"
     );
-    assert_eq!(
-        std::fs::read_to_string(workspace.path().join("src/b.txt")).expect("b"),
-        "BBB\n"
-    );
 }
 
 #[tokio::test]
 async fn runtime_edit_stale_after_approval_writes_nothing() {
     let workspace = tempfile::tempdir().expect("workspace");
     std::fs::write(workspace.path().join("stale.txt"), "before\n").expect("seed");
-    let args = batch_edit_arguments(&[("stale.txt", "before", "after")]);
+    let args = edit_arguments("stale.txt", "before", "after");
     let harness = FakeHarness::from_turns([
         tool_call_turn(&[("edit_stale", "Edit", args)]),
         final_done_turn(),
@@ -11650,12 +11614,11 @@ async fn runtime_edit_stale_after_approval_writes_nothing() {
 }
 
 #[tokio::test]
-async fn runtime_edit_emits_prepared_then_per_file_progress_updates() {
+async fn runtime_edit_emits_prepared_then_progress_update() {
     let workspace = tempfile::tempdir().expect("workspace");
     std::fs::create_dir_all(workspace.path().join("src")).expect("mkdir");
     std::fs::write(workspace.path().join("src/a.txt"), "aaa\n").expect("a");
-    std::fs::write(workspace.path().join("src/b.txt"), "bbb\n").expect("b");
-    let args = batch_edit_arguments(&[("src/a.txt", "aaa", "AAA"), ("src/b.txt", "bbb", "BBB")]);
+    let args = edit_arguments("src/a.txt", "aaa", "AAA");
     let harness = FakeHarness::from_turns([
         tool_call_turn(&[("edit_prog", "Edit", args)]),
         final_done_turn(),
@@ -11716,24 +11679,27 @@ async fn runtime_edit_emits_prepared_then_per_file_progress_updates() {
     );
 }
 
-fn batch_write_arguments(files: &[(&str, &str)]) -> serde_json::Value {
-    json!({
-        "files": files.iter().map(|(path, content)| {
-            json!({ "path": path, "content": content })
-        }).collect::<Vec<_>>()
-    })
+fn write_arguments(path: &str, content: &str) -> serde_json::Value {
+    json!({ "path": path, "content": content })
 }
 
 #[tokio::test]
-async fn runtime_write_approval_uses_verified_batch_projection() {
+async fn runtime_write_approval_uses_verified_single_file_projection() {
     let workspace = tempfile::tempdir().expect("workspace");
     std::fs::write(workspace.path().join("existing.txt"), "old\n").expect("seed");
-    let args = batch_write_arguments(&[
-        ("existing.txt", "new content\n"),
-        ("created.txt", "fresh\n"),
-    ]);
     let harness = FakeHarness::from_turns([
-        tool_call_turn(&[("write_1", "Write", args)]),
+        tool_call_turn(&[
+            (
+                "write_existing",
+                "Write",
+                write_arguments("existing.txt", "new content\n"),
+            ),
+            (
+                "write_created",
+                "Write",
+                write_arguments("created.txt", "fresh\n"),
+            ),
+        ]),
         final_done_turn(),
     ]);
     let runtime = AgentRuntime::with_tools(
@@ -11745,27 +11711,17 @@ async fn runtime_write_approval_uses_verified_batch_projection() {
                 assert_eq!(request.operation, PermissionOperation::FileWrite);
                 match &request.presentation {
                     ApprovalPresentation::Write { title, write } => {
-                        assert_eq!(title, "Write 2 files?");
-                        assert_eq!(write.files, 2);
-                        assert_eq!(write.created, 1);
-                        assert_eq!(write.overwritten, 1);
-                        assert_eq!(write.changes.len(), 2);
-                        assert!(matches!(
-                            write.changes[1].preview,
-                            neo_agent_core::WriteApprovalPreview::Created { .. }
-                        ));
-                        assert!(matches!(
-                            write.changes[0].preview,
-                            neo_agent_core::WriteApprovalPreview::Overwritten { .. }
-                        ));
+                        assert_eq!(title, "Write 1 files?");
+                        assert_eq!(write.files, 1);
+                        assert_eq!(write.created + write.overwritten, 1);
+                        assert_eq!(write.changes.len(), 1);
                     }
                     other => panic!("expected Write presentation, got {other:?}"),
                 }
                 assert!(request.options.iter().any(|option| matches!(
                     &option.action,
                     ApprovalAction::PermitForSession { scope }
-                        if scope.label == "Approve writes to these 2 files for this session"
-                            && scope.keys.len() == 2
+                        if scope.keys.len() == 1
                 )));
                 permit_once(request)
             }),
@@ -11781,21 +11737,22 @@ async fn runtime_write_approval_uses_verified_batch_projection() {
         .collect::<Result<Vec<_>, _>>()
         .expect("turn");
 
-    let finished = events
-        .iter()
-        .find_map(|event| match event {
-            AgentEvent::ToolExecutionFinished {
-                id, name, result, ..
-            } if id == "write_1" && name == "Write" => Some(result),
-            _ => None,
-        })
-        .expect("finished write");
-    assert!(!finished.is_error, "{}", finished.content);
-    let details = finished.details.as_ref().expect("details");
-    assert_eq!(details["status"], "committed");
-    assert_eq!(details["files"], 2);
-    assert_eq!(details["created"], 1);
-    assert_eq!(details["overwritten"], 1);
+    for id in ["write_existing", "write_created"] {
+        let finished = events
+            .iter()
+            .find_map(|event| match event {
+                AgentEvent::ToolExecutionFinished {
+                    id: event_id,
+                    name,
+                    result,
+                    ..
+                } if event_id == id && name == "Write" => Some(result),
+                _ => None,
+            })
+            .expect("finished write");
+        assert!(!finished.is_error, "{}", finished.content);
+        assert_eq!(finished.details.as_ref().expect("details")["files"], 1);
+    }
     assert_eq!(
         std::fs::read_to_string(workspace.path().join("existing.txt")).expect("read"),
         "new content\n"
@@ -11810,7 +11767,7 @@ async fn runtime_write_approval_uses_verified_batch_projection() {
 async fn runtime_write_stale_existing_and_appeared_target_install_nothing() {
     let workspace = tempfile::tempdir().expect("workspace");
     std::fs::write(workspace.path().join("stale.txt"), "before\n").expect("seed");
-    let args = batch_write_arguments(&[("stale.txt", "planned overwrite\n")]);
+    let args = write_arguments("stale.txt", "planned overwrite\n");
     let harness = FakeHarness::from_turns([
         tool_call_turn(&[("write_stale", "Write", args)]),
         final_done_turn(),
@@ -11872,7 +11829,7 @@ async fn runtime_write_stale_existing_and_appeared_target_install_nothing() {
         tool_call_turn(&[(
             "write_appeared",
             "Write",
-            batch_write_arguments(&[("appeared.txt", "planned create\n")]),
+            write_arguments("appeared.txt", "planned create\n"),
         )]),
         final_done_turn(),
     ]);
@@ -11920,11 +11877,13 @@ async fn runtime_write_stale_existing_and_appeared_target_install_nothing() {
 }
 
 #[tokio::test]
-async fn runtime_write_emits_prepared_and_ordered_progress_updates() {
+async fn runtime_multiple_write_calls_each_emit_prepared_and_progress_updates() {
     let workspace = tempfile::tempdir().expect("workspace");
-    let args = batch_write_arguments(&[("a.txt", "aaa\n"), ("b.txt", "bbb\n")]);
     let harness = FakeHarness::from_turns([
-        tool_call_turn(&[("write_prog", "Write", args)]),
+        tool_call_turn(&[
+            ("write_a", "Write", write_arguments("a.txt", "aaa\n")),
+            ("write_b", "Write", write_arguments("b.txt", "bbb\n")),
+        ]),
         final_done_turn(),
     ]);
     let runtime = AgentRuntime::with_tools(
@@ -11944,44 +11903,29 @@ async fn runtime_write_emits_prepared_and_ordered_progress_updates() {
         .collect::<Result<Vec<_>, _>>()
         .expect("turn");
 
-    let write_events: Vec<_> = events
-        .iter()
-        .filter(|event| match event {
-            AgentEvent::ToolExecutionStarted { id, .. }
-            | AgentEvent::ToolExecutionUpdate { id, .. }
-            | AgentEvent::ToolExecutionFinished { id, .. } => id == "write_prog",
-            _ => false,
-        })
-        .collect();
-    assert!(
-        matches!(
-            write_events.first(),
-            Some(AgentEvent::ToolExecutionStarted { .. })
-        ),
-        "started first: {write_events:?}"
-    );
-    let kinds: Vec<_> = write_events
-        .iter()
-        .filter_map(|event| match event {
-            AgentEvent::ToolExecutionUpdate { partial_result, .. } => partial_result
-                .details
-                .as_ref()
-                .and_then(|d| d.get("kind"))
-                .and_then(|k| k.as_str())
-                .map(str::to_owned),
-            _ => None,
-        })
-        .collect();
-    assert_eq!(kinds.first().map(String::as_str), Some("write_prepared"));
-    let progress: Vec<_> = kinds.iter().filter(|k| *k == "write_progress").collect();
-    assert_eq!(progress.len(), 2, "one progress per file");
-    assert!(
-        matches!(
-            write_events.last(),
-            Some(AgentEvent::ToolExecutionFinished { .. })
-        ),
-        "finished last"
-    );
+    for id in ["write_a", "write_b"] {
+        let kinds = events
+            .iter()
+            .filter_map(|event| match event {
+                AgentEvent::ToolExecutionUpdate {
+                    id: event_id,
+                    partial_result,
+                    ..
+                } if event_id == id => partial_result
+                    .details
+                    .as_ref()
+                    .and_then(|details| details.get("kind"))
+                    .and_then(|kind| kind.as_str()),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(kinds, vec!["write_prepared", "write_progress"]);
+        assert!(events.iter().any(|event| matches!(
+            event,
+            AgentEvent::ToolExecutionFinished { id: event_id, result, .. }
+                if event_id == id && !result.is_error
+        )));
+    }
 }
 
 #[tokio::test]
@@ -12010,16 +11954,20 @@ async fn runtime_plan_mode_allows_only_single_active_plan_write_target() {
         tool_call_turn(&[(
             "write_single",
             "Write",
-            json!({ "files": [{ "path": plan_path, "content": "# Final plan\n" }] }),
+            json!({ "path": plan_path, "content": "# Final plan\n" }),
         )]),
-        tool_call_turn(&[(
-            "write_multi",
-            "Write",
-            json!({ "files": [
-                { "path": plan_path, "content": "# Changed\n" },
-                { "path": extra, "content": "should not appear\n" }
-            ] }),
-        )]),
+        tool_call_turn(&[
+            (
+                "write_plan_again",
+                "Write",
+                json!({ "path": plan_path, "content": "# Changed\n" }),
+            ),
+            (
+                "write_extra",
+                "Write",
+                json!({ "path": extra, "content": "should not appear\n" }),
+            ),
+        ]),
         final_done_turn(),
     ]);
     let runtime =
@@ -12045,28 +11993,25 @@ async fn runtime_plan_mode_allows_only_single_active_plan_write_target() {
         events.iter().any(|event| matches!(
             event,
             AgentEvent::ToolExecutionFinished { id, result, .. }
-                if id == "write_multi" && result.is_error && result.content.contains("plan mode")
+                if id == "write_extra" && result.is_error && result.content.contains("plan mode")
         )),
-        "multi-target batch denied by plan guard"
+        "non-plan target denied by plan guard"
     );
     assert!(!extra.exists(), "extra file must not be created");
     assert_eq!(
         std::fs::read_to_string(&plan_path).expect("read plan"),
-        "# Final plan\n"
+        "# Changed\n"
     );
     assert!(plan_mode.read().expect("lock").is_active());
 }
 
 #[tokio::test]
-async fn runtime_write_session_scope_requires_complete_prepared_target_set() {
+async fn runtime_write_session_scope_is_bound_to_one_prepared_target() {
     let workspace = tempfile::tempdir().expect("workspace");
-    let args_ab = batch_write_arguments(&[("a.txt", "a1\n"), ("b.txt", "b1\n")]);
-    let args_ab2 = batch_write_arguments(&[("a.txt", "a2\n"), ("b.txt", "b2\n")]);
-    let args_ac = batch_write_arguments(&[("a.txt", "a3\n"), ("c.txt", "c3\n")]);
     let harness = FakeHarness::from_turns([
-        tool_call_turn(&[("w1", "Write", args_ab)]),
-        tool_call_turn(&[("w2", "Write", args_ab2)]),
-        tool_call_turn(&[("w3", "Write", args_ac)]),
+        tool_call_turn(&[("w1", "Write", write_arguments("a.txt", "a1\n"))]),
+        tool_call_turn(&[("w2", "Write", write_arguments("a.txt", "a2\n"))]),
+        tool_call_turn(&[("w3", "Write", write_arguments("c.txt", "c3\n"))]),
         final_done_turn(),
     ]);
     let approval_count = Arc::new(Mutex::new(0usize));
@@ -12097,7 +12042,7 @@ async fn runtime_write_session_scope_requires_complete_prepared_target_set() {
     assert_eq!(
         *approval_count.lock().expect("count"),
         2,
-        "turn 2 reuses session grant; turn 3 introduces c.txt requiring fresh approval"
+        "turn 2 reuses the a.txt grant; turn 3 introduces c.txt"
     );
     for id in ["w1", "w2", "w3"] {
         assert!(
@@ -12111,11 +12056,7 @@ async fn runtime_write_session_scope_requires_complete_prepared_target_set() {
     }
     assert_eq!(
         std::fs::read_to_string(workspace.path().join("a.txt")).expect("a"),
-        "a3\n"
-    );
-    assert_eq!(
-        std::fs::read_to_string(workspace.path().join("b.txt")).expect("b"),
-        "b2\n"
+        "a2\n"
     );
     assert_eq!(
         std::fs::read_to_string(workspace.path().join("c.txt")).expect("c"),
@@ -12124,40 +12065,47 @@ async fn runtime_write_session_scope_requires_complete_prepared_target_set() {
 }
 
 #[tokio::test]
-async fn instruction_preflight_defers_whole_edit_for_one_new_scope() {
+async fn instruction_preflight_defers_whole_multi_edit_call_batch_for_one_new_scope() {
     let fixture = preflight_fixture(&[("nested", "nested rules\n")], "root rules\n");
     let nested_file = fixture.workspace.join("nested").join("a.txt");
     let root_file = fixture.workspace.join("root.txt");
     std::fs::write(&nested_file, "nested\n").expect("nested");
     std::fs::write(&root_file, "root\n").expect("root");
-    let args = json!({
-        "edits": [
-            {
-                "path": root_file.to_string_lossy(),
-                "old": "root",
-                "new": "ROOT"
-            },
-            {
-                "path": nested_file.to_string_lossy(),
-                "old": "nested",
-                "new": "NESTED"
-            }
-        ]
-    });
     let harness = FakeHarness::from_turns([
-        tool_call_turn(&[("edit_batch", "Edit", args)]),
+        tool_call_turn(&[
+            (
+                "edit_root",
+                "Edit",
+                json!({
+                    "path": root_file.to_string_lossy(),
+                    "old": "root",
+                    "new": "ROOT"
+                }),
+            ),
+            (
+                "edit_nested",
+                "Edit",
+                json!({
+                    "path": nested_file.to_string_lossy(),
+                    "old": "nested",
+                    "new": "NESTED"
+                }),
+            ),
+        ]),
         end_turn_events("done"),
     ]);
     let runtime = preflight_runtime(&fixture, &harness);
     let mut context = AgentContext::new();
     let events = run_turn_collect(&runtime, &mut context, "edit across scopes").await;
 
-    let finished = finished_tool_results(&events, "edit_batch");
-    assert_eq!(finished.len(), 1);
-    assert!(!finished[0].is_error);
-    let details = finished[0].details.as_ref().expect("details");
-    assert_eq!(details["status"], "deferred");
-    assert_eq!(details["side_effect_occurred"], false);
+    for id in ["edit_root", "edit_nested"] {
+        let finished = finished_tool_results(&events, id);
+        assert_eq!(finished.len(), 1);
+        assert!(!finished[0].is_error);
+        let details = finished[0].details.as_ref().expect("details");
+        assert_eq!(details["status"], "deferred");
+        assert_eq!(details["side_effect_occurred"], false);
+    }
     assert_eq!(
         std::fs::read_to_string(&nested_file).expect("nested"),
         "nested\n"

@@ -1995,10 +1995,8 @@ async fn ctrl_o_renders_before_queued_tool_finish() {
             id: "write-1".to_owned(),
             name: "Write".to_owned(),
             arguments: serde_json::json!({
-                "files": [{
-                    "path": "artifact.txt",
-                    "content": content,
-                }],
+                "path": "artifact.txt",
+                "content": content,
             }),
             workflow_origin: None,
         });
@@ -8235,10 +8233,8 @@ fn replay_exit_plan_mode_uses_only_persisted_snapshot_details() {
                         id: "write-1".into(),
                         name: "Write".into(),
                         raw_arguments: serde_json::json!({
-                            "files": [{
-                                "path": plan_path_text,
-                                "content": "# Staged write content\n\nFabricated."
-                            }]
+                            "path": plan_path_text,
+                            "content": "# Staged write content\n\nFabricated."
                         })
                         .to_string()
                         .into(),

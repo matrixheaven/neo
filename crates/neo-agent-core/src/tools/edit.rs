@@ -1,4 +1,3 @@
-use std::collections::{HashMap, HashSet};
 use std::fmt::Write;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -25,15 +24,6 @@ const fn default_expected_matches() -> usize {
 #[serde(deny_unknown_fields)]
 struct EditInput {
     #[schemars(
-        description = "Non-empty ordered exact-text edits. Declaration order is meaningful."
-    )]
-    edits: Vec<EditOperationInput>,
-}
-
-#[derive(Debug, Deserialize, JsonSchema)]
-#[serde(deny_unknown_fields)]
-struct EditOperationInput {
-    #[schemars(
         description = "Path to an existing file. Relative paths resolve against the working directory."
     )]
     path: PathBuf,
@@ -50,64 +40,39 @@ struct EditOperationInput {
     expected_matches: usize,
 }
 
-#[derive(Debug)]
-struct EditFilePlan {
-    path: PathBuf,
-    edits: Vec<(usize, EditOperationInput)>,
-}
-
-fn group_edits(input: EditInput) -> Vec<EditFilePlan> {
-    let mut file_indices = HashMap::<PathBuf, usize>::new();
-    let mut files = Vec::<EditFilePlan>::new();
-    for (edit_index, edit) in input.edits.into_iter().enumerate() {
-        if let Some(&file_index) = file_indices.get(&edit.path) {
-            files[file_index].edits.push((edit_index, edit));
-        } else {
-            let path = edit.path.clone();
-            file_indices.insert(path.clone(), files.len());
-            files.push(EditFilePlan {
-                path,
-                edits: vec![(edit_index, edit)],
-            });
-        }
-    }
-    files
-}
-
-fn prepare_file_plan(
+fn prepare_edit(
     context: &ToolContext,
     file_index: usize,
-    plan: &EditFilePlan,
-    seen_targets: &mut HashSet<std::ffi::OsString>,
+    input: &EditInput,
 ) -> Result<PreparedEditFile, ToolResult> {
-    validate_edit_candidate(context, file_index, &plan.path)?;
-    let resolved = resolve_edit_target(context, file_index, &plan.path, seen_targets)?;
-    let bytes = read_edit_bytes(file_index, &plan.path, &resolved)?;
+    validate_edit_candidate(context, file_index, &input.path)?;
+    let resolved = resolve_edit_target(context, file_index, &input.path)?;
+    let bytes = read_edit_bytes(file_index, &input.path, &resolved)?;
     let original = String::from_utf8(bytes.clone()).map_err(|_| {
         prepare_failed(
             Some(file_index),
             None,
-            Some(plan.path.display().to_string()),
+            Some(input.path.display().to_string()),
             &format!("file is not valid UTF-8: {}", resolved.display()),
             "Edit only supports existing UTF-8 regular files.",
         )
     })?;
-    let staged = apply_edit_plan(file_index, plan, &original)?;
+    let staged = apply_edit(input, &original)?;
 
     if staged == original {
         return Err(prepare_failed(
             Some(file_index),
             None,
-            Some(plan.path.display().to_string()),
+            Some(input.path.display().to_string()),
             &format!(
                 "file is unchanged after replacements: {}",
-                plan.path.display()
+                input.path.display()
             ),
             "Remove no-op replacements and submit a fresh Edit call.",
         ));
     }
 
-    let display_path = plan.path.to_string_lossy();
+    let display_path = input.path.to_string_lossy();
     let diff = unified_diff(&display_path, &original, &staged);
     let (added, removed) = diff_stats(&diff);
     let fingerprint = EditFingerprint {
@@ -117,11 +82,11 @@ fn prepare_file_plan(
     };
 
     Ok(PreparedEditFile {
-        requested_path: plan.path.clone(),
+        requested_path: input.path.clone(),
         resolved_path: resolved,
         fingerprint,
         staged,
-        replacements: plan.edits.len(),
+        replacements: 1,
         added,
         removed,
         diff,
@@ -178,7 +143,6 @@ fn resolve_edit_target(
     context: &ToolContext,
     file_index: usize,
     path: &Path,
-    seen_targets: &mut HashSet<std::ffi::OsString>,
 ) -> Result<PathBuf, ToolResult> {
     let resolved = context
         .resolve_parent_for_write(path)
@@ -201,15 +165,6 @@ fn resolve_edit_target(
                 "Re-read the path and submit a fresh Edit call.",
             )
         })?;
-    if !seen_targets.insert(resolved.as_os_str().to_owned()) {
-        return Err(prepare_failed(
-            Some(file_index),
-            None,
-            Some(path.display().to_string()),
-            &format!("duplicate effective target path: {}", resolved.display()),
-            "Use one consistent path spelling per target and submit a fresh Edit call.",
-        ));
-    }
     Ok(resolved)
 }
 
@@ -223,56 +178,46 @@ fn read_edit_bytes(file_index: usize, path: &Path, resolved: &Path) -> Result<Ve
     })
 }
 
-fn apply_edit_plan(
-    file_index: usize,
-    plan: &EditFilePlan,
-    original: &str,
-) -> Result<String, ToolResult> {
-    let mut staged = original.to_owned();
-    for (edit_index, edit) in &plan.edits {
-        let actual = count_non_overlapping(&staged, &edit.old);
-        if actual != edit.expected_matches {
-            let lines = match_line_numbers(&staged, &edit.old);
-            let line_list = if lines.is_empty() {
-                "none".to_owned()
-            } else {
-                lines
-                    .iter()
-                    .map(ToString::to_string)
-                    .collect::<Vec<_>>()
-                    .join(", ")
-            };
-            let guidance = if actual == 0 {
-                format!(
-                    "Use Grep on a distinctive fragment or Read the smallest relevant range, then correct edits[{edit_index}].old and resubmit the complete Edit call."
-                )
-            } else {
-                format!(
-                    "Read the smallest ranges around the reported match lines to make edits[{edit_index}].old more specific, or set edits[{edit_index}].expected_matches to {actual} only if every match is intended; then resubmit the complete Edit call."
-                )
-            };
-            let failure = prepare_failed(
-                None,
-                Some(*edit_index),
-                Some(plan.path.display().to_string()),
-                &format!(
-                    "expected {} exact matches · found {actual}; matches at lines {line_list}",
-                    edit.expected_matches
-                ),
-                &guidance,
-            );
-            return Err(failure);
-        }
-        staged = replace_non_overlapping(&staged, &edit.old, &edit.new);
+fn apply_edit(input: &EditInput, original: &str) -> Result<String, ToolResult> {
+    let actual = count_non_overlapping(original, &input.old);
+    if actual != input.expected_matches {
+        let lines = match_line_numbers(original, &input.old);
+        let line_list = if lines.is_empty() {
+            "none".to_owned()
+        } else {
+            lines
+                .iter()
+                .map(ToString::to_string)
+                .collect::<Vec<_>>()
+                .join(", ")
+        };
+        let guidance = if actual == 0 {
+            "Use Grep on a distinctive fragment or Read the smallest relevant range, then correct old and submit a fresh Edit call.".to_owned()
+        } else {
+            format!(
+                "Read the smallest ranges around the reported match lines to make old more specific, or set expected_matches to {actual} only if every match is intended; then submit a fresh Edit call."
+            )
+        };
+        return Err(prepare_failed(
+            None,
+            None,
+            Some(input.path.display().to_string()),
+            &format!(
+                "expected {} exact matches · found {actual}; matches at lines {line_list}",
+                input.expected_matches
+            ),
+            &guidance,
+        ));
     }
+    let staged = replace_non_overlapping(original, &input.old, &input.new);
     if staged == original {
         return Err(prepare_failed(
-            Some(file_index),
+            Some(0),
             None,
-            Some(plan.path.display().to_string()),
+            Some(input.path.display().to_string()),
             &format!(
                 "file is unchanged after replacements: {}",
-                plan.path.display()
+                input.path.display()
             ),
             "Remove no-op replacements and submit a fresh Edit call.",
         ));
@@ -321,14 +266,14 @@ impl Tool for EditTool {
     }
 
     fn description(&self) -> &'static str {
-        "Apply ordered exact-text edits to existing UTF-8 files.\n\n\
-         CRITICAL - READ BEFORE EDIT: Never call Edit from memory. Build every edits[].old from \
+        "Apply one exact-text replacement to one existing UTF-8 file.\n\n\
+         CRITICAL - READ BEFORE EDIT: Never call Edit from memory. Build old from \
          the latest Read of that exact target in the current turn. If needed, Read only the \
          smallest relevant range and wait for its result before Edit; never batch Read with Edit. \
          Exclude Read line numbers and <system> status text.\n\n\
          Use exactly this input shape:\n\
-         {\"edits\":[{\"path\":\"src/file.rs\",\"old\":\"exact existing text\",\"new\":\"replacement text\"}]}\n\n\
-         Each edits[] item is one replacement and contains:\n\
+         {\"path\":\"src/file.rs\",\"old\":\"exact existing text\",\"new\":\"replacement text\"}\n\n\
+         Parameters:\n\
          - path: existing file path\n\
          - old: exact current text to replace\n\
          - new: replacement text; empty deletes old\n\
@@ -337,10 +282,9 @@ impl Tool for EditTool {
          surrounding text in old to make it unique. \
          Set expected_matches only when intentionally replacing an observed exact count \
          greater than 1.\n\n\
-         Items run in declaration order. Later edits to the same path see the staged \
-         result of earlier edits. The entire call is prepared before any write.\n\n\
          If a match-count error occurs, use Grep or the smallest relevant Read range before \
          constructing a fresh Edit call. Do not replay the failed arguments.\n\n\
+         To edit multiple files, emit multiple Edit tool calls in the same response.\n\n\
          Use Write to create files or replace complete file contents."
     }
 
@@ -365,27 +309,14 @@ impl Tool for EditTool {
 }
 
 impl PreparedEdit {
-    /// Side-effect-free preparation of a complete Edit batch.
+    /// Side-effect-free preparation of one Edit replacement.
     pub fn prepare(
         context: &ToolContext,
         arguments: &serde_json::Value,
     ) -> Result<Arc<Self>, ToolResult> {
         let input: EditInput = parse_edit_input(arguments)?;
         validate_edit_input(&input)?;
-        let total_edits = input.edits.len();
-        let file_plans = group_edits(input);
-
-        let mut prepared_files = Vec::with_capacity(file_plans.len());
-        let mut seen_targets = HashSet::new();
-
-        for (file_index, plan) in file_plans.iter().enumerate() {
-            prepared_files.push(prepare_file_plan(
-                context,
-                file_index,
-                plan,
-                &mut seen_targets,
-            )?);
-        }
+        let prepared_files = vec![prepare_edit(context, 0, &input)?];
 
         let added = prepared_files.iter().map(|file| file.added).sum();
         let removed = prepared_files.iter().map(|file| file.removed).sum();
@@ -394,14 +325,14 @@ impl PreparedEdit {
                 None,
                 None,
                 None,
-                "batch is a no-op",
+                "Edit is a no-op",
                 "Supply at least one effective replacement and submit a fresh Edit call.",
             ));
         }
 
         Ok(Arc::new(Self {
             files: prepared_files,
-            replacements: total_edits,
+            replacements: 1,
             added,
             removed,
         }))
@@ -516,7 +447,7 @@ impl PreparedEdit {
         }))
     }
 
-    /// Whole-batch fingerprint recheck. Zero writes on mismatch.
+    /// Whole-call fingerprint recheck. Zero writes on mismatch.
     pub fn recheck_all(&self, context: &ToolContext) -> Result<(), ToolResult> {
         for (file_index, file) in self.files.iter().enumerate() {
             Self::recheck_file(context, file_index, file)?;
@@ -635,7 +566,7 @@ impl PreparedEdit {
             }
 
             if let Err(result) = Self::recheck_file(context, file_index, file) {
-                // Convert whole-batch stale into partial when earlier files committed.
+                // Retained prepared-file loop reports any already committed content truthfully.
                 if committed_count == 0 {
                     return result;
                 }
@@ -820,58 +751,47 @@ fn parse_edit_input(arguments: &serde_json::Value) -> Result<EditInput, ToolResu
             None,
             None,
             &format!("invalid Edit arguments: {error}"),
-            "Submit exactly {\"edits\":[{\"path\":\"...\",\"old\":\"...\",\"new\":\"...\"}]}.",
+            "Submit exactly {\"path\":\"...\",\"old\":\"...\",\"new\":\"...\"}.",
         )),
     }
 }
 
 fn validate_edit_input(input: &EditInput) -> Result<(), ToolResult> {
-    if input.edits.is_empty() {
+    if input.path.as_os_str().is_empty() {
         return Err(prepare_failed(
             None,
             None,
             None,
-            "edits must be a non-empty array",
-            "Supply at least one edit item and submit a fresh Edit call.",
+            "path must be non-empty",
+            "Provide a non-empty path and submit a fresh Edit call.",
         ));
     }
-    for (edit_index, edit) in input.edits.iter().enumerate() {
-        if edit.path.as_os_str().is_empty() {
-            return Err(prepare_failed(
-                None,
-                Some(edit_index),
-                None,
-                "path must be non-empty",
-                "Provide a non-empty path and submit a fresh Edit call.",
-            ));
-        }
-        if edit.old.is_empty() {
-            return Err(prepare_failed(
-                None,
-                Some(edit_index),
-                Some(edit.path.display().to_string()),
-                "old must be a non-empty string",
-                "Supply exact non-empty old text from a fresh Read.",
-            ));
-        }
-        if edit.expected_matches < 1 {
-            return Err(prepare_failed(
-                None,
-                Some(edit_index),
-                Some(edit.path.display().to_string()),
-                "expected_matches must be at least 1",
-                "Use the observed exact match count (default 1).",
-            ));
-        }
-        if edit.old == edit.new {
-            return Err(prepare_failed(
-                None,
-                Some(edit_index),
-                Some(edit.path.display().to_string()),
-                "old and new are identical (no-op replacement)",
-                "Remove no-op replacements and submit a fresh Edit call.",
-            ));
-        }
+    if input.old.is_empty() {
+        return Err(prepare_failed(
+            None,
+            None,
+            Some(input.path.display().to_string()),
+            "old must be a non-empty string",
+            "Supply exact non-empty old text from a fresh Read.",
+        ));
+    }
+    if input.expected_matches < 1 {
+        return Err(prepare_failed(
+            None,
+            None,
+            Some(input.path.display().to_string()),
+            "expected_matches must be at least 1",
+            "Use the observed exact match count (default 1).",
+        ));
+    }
+    if input.old == input.new {
+        return Err(prepare_failed(
+            None,
+            None,
+            Some(input.path.display().to_string()),
+            "old and new are identical (no-op replacement)",
+            "Remove no-op replacements and submit a fresh Edit call.",
+        ));
     }
     Ok(())
 }
@@ -1086,9 +1006,7 @@ mod workspace_policy_tests {
         let result = EditTool
             .execute(
                 &ctx,
-                json!({
-                    "edits": [{ "path": path, "old": "before", "new": "after" }]
-                }),
+                json!({ "path": path, "old": "before", "new": "after" }),
             )
             .await
             .expect("tool result");
@@ -1103,20 +1021,13 @@ mod workspace_policy_tests {
     async fn cancellation_before_first_commit_writes_nothing() {
         let workspace = tempfile::tempdir().expect("workspace");
         let path = workspace.path().join("existing.txt");
-        let second = workspace.path().join("second.txt");
         std::fs::write(&path, "before\n").expect("seed file");
-        std::fs::write(&second, "second\n").expect("seed second file");
         let context = ToolContext::new(workspace.path())
             .expect("context")
             .with_access(ToolAccess::all());
         let prepared = PreparedEdit::prepare(
             &context,
-            &json!({
-                "edits": [
-                    { "path": "existing.txt", "old": "before", "new": "after" },
-                    { "path": "second.txt", "old": "second", "new": "SECOND" }
-                ]
-            }),
+            &json!({ "path": "existing.txt", "old": "before", "new": "after" }),
         )
         .expect("prepare");
         let cancel = CancellationToken::new();
@@ -1132,60 +1043,22 @@ mod workspace_policy_tests {
         assert_eq!(details["status"], "cancelled");
         assert_eq!(details["cause"], "cancelled");
         assert_eq!(details["changes"][0]["status"], "not_attempted");
-        assert_eq!(details["changes"][1]["status"], "not_attempted");
         assert_eq!(
             std::fs::read_to_string(&path).expect("read file"),
             "before\n"
         );
-        assert_eq!(
-            std::fs::read_to_string(&second).expect("read second file"),
-            "second\n"
-        );
-
-        let partial_cancel = CancellationToken::new();
-        let cancel_after_write = partial_cancel.clone();
-        let result = prepared.commit_with_writer(
-            &context,
-            &partial_cancel,
-            &mut on_progress,
-            move |_, path, content| {
-                let result = replace_existing_file_atomic_status(path, content);
-                cancel_after_write.cancel();
-                result
-            },
-        );
-
-        assert!(result.is_error);
-        let details = result.details.expect("details");
-        assert_eq!(details["status"], "partial_commit");
-        assert_eq!(details["cause"], "cancelled");
-        assert_eq!(details["changes"][0]["status"], "committed");
-        assert_eq!(details["changes"][1]["status"], "not_attempted");
-        assert_eq!(std::fs::read_to_string(path).expect("read file"), "after\n");
-        assert_eq!(
-            std::fs::read_to_string(second).expect("read second file"),
-            "second\n"
-        );
     }
 
     #[tokio::test]
-    async fn writer_failure_after_first_commit_reports_partial_without_rollback() {
+    async fn writer_failure_reports_zero_writes() {
         let workspace = tempfile::tempdir().expect("workspace");
         let context = ToolContext::new(workspace.path())
             .expect("context")
             .with_access(ToolAccess::all());
-        for (name, content) in [("a.txt", "aaa\n"), ("b.txt", "bbb\n"), ("c.txt", "ccc\n")] {
-            std::fs::write(workspace.path().join(name), content).expect("seed file");
-        }
+        std::fs::write(workspace.path().join("a.txt"), "aaa\n").expect("seed file");
         let prepared = PreparedEdit::prepare(
             &context,
-            &json!({
-                "edits": [
-                    { "path": "a.txt", "old": "aaa", "new": "AAA" },
-                    { "path": "b.txt", "old": "bbb", "new": "BBB" },
-                    { "path": "c.txt", "old": "ccc", "new": "CCC" }
-                ]
-            }),
+            &json!({ "path": "a.txt", "old": "aaa", "new": "AAA" }),
         )
         .expect("prepare");
         let mut on_progress = |_update| {};
@@ -1201,48 +1074,14 @@ mod workspace_policy_tests {
         let details = first_failure.details.expect("first failure details");
         assert_eq!(details["status"], "commit_failed");
         assert_eq!(details["changes"][0]["status"], "failed");
-        assert_eq!(details["changes"][1]["status"], "not_attempted");
-        assert_eq!(details["changes"][2]["status"], "not_attempted");
         assert_eq!(
             std::fs::read_to_string(workspace.path().join("a.txt")).expect("a"),
             "aaa\n"
         );
-
-        let result = prepared.commit_with_writer(
-            &context,
-            &CancellationToken::new(),
-            &mut on_progress,
-            |index, path, content| {
-                if index == 1 {
-                    Err(std::io::Error::other("injected writer failure"))
-                } else {
-                    replace_existing_file_atomic_status(path, content)
-                }
-            },
-        );
-
-        assert!(result.is_error);
-        let details = result.details.expect("details");
-        assert_eq!(details["status"], "partial_commit");
-        assert_eq!(details["changes"][0]["status"], "committed");
-        assert_eq!(details["changes"][1]["status"], "failed");
-        assert_eq!(details["changes"][2]["status"], "not_attempted");
-        assert_eq!(
-            std::fs::read_to_string(workspace.path().join("a.txt")).expect("a"),
-            "AAA\n"
-        );
-        assert_eq!(
-            std::fs::read_to_string(workspace.path().join("b.txt")).expect("b"),
-            "bbb\n"
-        );
-        assert_eq!(
-            std::fs::read_to_string(workspace.path().join("c.txt")).expect("c"),
-            "ccc\n"
-        );
     }
 
     #[tokio::test]
-    async fn prepare_rejects_nested_unknown_duplicate_and_non_utf8_inputs() {
+    async fn prepare_rejects_old_array_unknown_and_non_utf8_inputs() {
         let workspace = tempfile::tempdir().expect("workspace");
         let context = ToolContext::new(workspace.path())
             .expect("context")
@@ -1251,9 +1090,7 @@ mod workspace_policy_tests {
 
         let unknown = PreparedEdit::prepare(
             &context,
-            &json!({
-                "edits": [{ "path": "file.txt", "old": "before", "new": "after", "extra": true }]
-            }),
+            &json!({ "path": "file.txt", "old": "before", "new": "after", "extra": true }),
         )
         .expect_err("unknown field on edit item");
         assert_eq!(
@@ -1261,27 +1098,22 @@ mod workspace_policy_tests {
             "prepare_failed"
         );
 
-        let duplicate = PreparedEdit::prepare(
+        let old_array = PreparedEdit::prepare(
             &context,
             &json!({
-                "edits": [
-                    { "path": "file.txt", "old": "before", "new": "after" },
-                    { "path": "./file.txt", "old": "before", "new": "AFTER" }
-                ]
+                "edits": [{ "path": "file.txt", "old": "before", "new": "after" }]
             }),
         )
-        .expect_err("duplicate effective target");
+        .expect_err("old array contract");
         assert_eq!(
-            duplicate.details.expect("duplicate details")["status"],
+            old_array.details.expect("old array details")["status"],
             "prepare_failed"
         );
 
         std::fs::write(workspace.path().join("binary.bin"), [0xff, 0xfe]).expect("binary file");
         let non_utf8 = PreparedEdit::prepare(
             &context,
-            &json!({
-                "edits": [{ "path": "binary.bin", "old": "before", "new": "after" }]
-            }),
+            &json!({ "path": "binary.bin", "old": "before", "new": "after" }),
         )
         .expect_err("non-UTF-8 target");
         assert_eq!(
@@ -1303,9 +1135,7 @@ mod workspace_policy_tests {
             .with_access(ToolAccess::all());
         let prepared = PreparedEdit::prepare(
             &context,
-            &json!({
-                "edits": [{ "path": "target.txt", "old": "before", "new": "after" }]
-            }),
+            &json!({ "path": "target.txt", "old": "before", "new": "after" }),
         )
         .expect("prepare");
         std::fs::remove_file(&path).expect("remove target");

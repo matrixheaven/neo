@@ -1,4 +1,3 @@
-use std::collections::HashSet;
 use std::io;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -21,16 +20,6 @@ use crate::session::atomic_file::{
 #[derive(Debug, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 struct WriteInput {
-    #[schemars(
-        description = "Ordered list of files to create or completely overwrite. Declaration order is the commit order.",
-        length(min = 1)
-    )]
-    files: Vec<WriteFileInput>,
-}
-
-#[derive(Debug, Deserialize, JsonSchema)]
-#[serde(deny_unknown_fields)]
-struct WriteFileInput {
     #[schemars(
         description = "Path to the file to create or overwrite. Relative paths resolve against the working directory.",
         length(min = 1)
@@ -111,35 +100,28 @@ impl Tool for WriteTool {
     }
 
     fn description(&self) -> &'static str {
-        "Create files or completely overwrite existing UTF-8 files inside the workspace.\n\n\
+        "Create or completely overwrite one UTF-8 file inside the workspace.\n\n\
          Write owns file creation and full-content replacement. Use Edit for targeted \
          replacements inside an existing file. Write never deletes, moves, or follows \
          symlinks / reparse points.\n\n\
          Parameters:\n\
-         - files: Non-empty ordered array of file writes. Commit order matches declaration order.\n\
-         - files[].path: Path to create or overwrite. Relative paths resolve against the working directory.\n\
-         - files[].content: Complete UTF-8 content for the file. Empty content is valid for a new file.\n\n\
+         - path: Path to create or overwrite. Relative paths resolve against the working directory.\n\
+         - content: Complete UTF-8 content for the file. Empty content is valid for a new file.\n\n\
          Semantics:\n\
-         - One call may mix new-file creation and existing-file overwrite.\n\
          - Existing targets must be ordinary UTF-8 regular files. Directories, symlinks, reparse \
-         points, and non-UTF-8 files are rejected before anything is written.\n\
-         - Overwriting a file with its current exact contents is a no-op and fails the whole call \
-         with zero writes. Creating an empty new file is allowed.\n\
-         - The whole call is prepared before any write. Any prepare failure writes nothing and \
-         creates no directories.\n\
-         - After approval, every target is rechecked; a stale or newly-appeared target fails with \
+         points, and non-UTF-8 files are rejected.\n\
+         - Overwriting a file with its current exact contents is a no-op and fails with zero writes. \
+         Creating an empty new file is allowed.\n\
+         - After approval, the target is rechecked; a stale or newly-appeared target fails with \
          zero writes.\n\
          - Missing parent directories are created only during commit.\n\
-         - Files commit atomically one-by-one in declaration order. There is no cross-file \
-         transaction and no automatic rollback.\n\
-         - A partial commit is a failed tool result that reports committed, failed, and \
-         not_attempted files plus any directories created.\n\n\
+         - The file is installed atomically.\n\n\
          Guidelines:\n\
          - Read a file before overwriting it so the new content is complete and intended.\n\
          - Provide the entire final content; Write does not merge with existing bytes.\n\
-         - Group a coherent set of files into one call.\n\
+         - To write multiple files, emit multiple Write tool calls in the same response.\n\
          - Prefer Edit for surgical changes to a file you are mostly keeping.\n\
-         - After any stale or partial failure, re-read affected files and submit a fresh Write \
+         - After any stale failure, re-read the affected file and submit a fresh Write \
          call. Never blindly replay the same Write arguments."
     }
 
@@ -164,7 +146,7 @@ impl Tool for WriteTool {
 }
 
 impl PreparedWrite {
-    /// Side-effect-free preparation of a complete Write batch.
+    /// Side-effect-free preparation of one Write operation.
     pub fn prepare(
         context: &ToolContext,
         arguments: &serde_json::Value,
@@ -172,10 +154,9 @@ impl PreparedWrite {
         let input: WriteInput = parse_write_input(arguments)?;
         validate_write_input(&input)?;
 
-        let mut prepared_files = Vec::with_capacity(input.files.len());
-        let mut seen_targets = HashSet::new();
+        let mut prepared_files = Vec::with_capacity(1);
 
-        for (file_index, file) in input.files.iter().enumerate() {
+        for (file_index, file) in std::iter::once(&input).enumerate() {
             let candidate = absolute_candidate(context, &file.path);
 
             // Classify the model-supplied target without following a link.
@@ -242,16 +223,6 @@ impl PreparedWrite {
             } else {
                 resolved
             };
-
-            let identity = resolved.as_os_str().to_owned();
-            if !seen_targets.insert(identity) {
-                return Err(prepare_failed(
-                    Some(file_index),
-                    Some(file.path.display().to_string()),
-                    &format!("duplicate effective target path: {}", resolved.display()),
-                    "Remove duplicate paths and submit a fresh Write call.",
-                ));
-            }
 
             let display_path = file.path.to_string_lossy();
             let (fingerprint, added, removed, diff) = match operation {
@@ -455,7 +426,7 @@ impl PreparedWrite {
         }))
     }
 
-    /// Whole-batch fingerprint recheck. Zero writes on mismatch.
+    /// Whole-call fingerprint recheck. Zero writes on mismatch.
     pub fn recheck_all(&self, context: &ToolContext) -> Result<(), ToolResult> {
         for (file_index, file) in self.files.iter().enumerate() {
             Self::recheck_file(context, file_index, file)?;
@@ -874,36 +845,26 @@ fn parse_write_input(arguments: &serde_json::Value) -> Result<WriteInput, ToolRe
             let message = if arguments.is_string() {
                 "invalid Write arguments: received a JSON string instead of an object"
             } else {
-                "invalid Write arguments: input does not match the files[] contract"
+                "invalid Write arguments: input must contain exactly path and content"
             };
             Err(prepare_failed(
                 None,
                 None,
                 message,
-                "Submit a fresh Write call using the files[] contract.",
+                "Submit exactly {\"path\":\"...\",\"content\":\"...\"}.",
             ))
         }
     }
 }
 
 fn validate_write_input(input: &WriteInput) -> Result<(), ToolResult> {
-    if input.files.is_empty() {
+    if input.path.as_os_str().is_empty() {
         return Err(prepare_failed(
             None,
             None,
-            "files must be a non-empty array",
-            "Group at least one file into files[] and submit a fresh Write call.",
+            "path must be non-empty",
+            "Provide a non-empty path and submit a fresh Write call.",
         ));
-    }
-    for (file_index, file) in input.files.iter().enumerate() {
-        if file.path.as_os_str().is_empty() {
-            return Err(prepare_failed(
-                Some(file_index),
-                None,
-                "path must be non-empty",
-                "Provide a non-empty path and submit a fresh Write call.",
-            ));
-        }
     }
     Ok(())
 }
@@ -1172,10 +1133,7 @@ mod tests {
         let path = added.path().join("new.txt");
 
         let result = WriteTool
-            .execute(
-                &ctx,
-                json!({ "files": [{ "path": path, "content": "hello" }] }),
-            )
+            .execute(&ctx, json!({ "path": path, "content": "hello" }))
             .await
             .expect("tool result");
 
@@ -1185,34 +1143,14 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn write_batch_prepare_rejections_leave_files_and_directories_untouched() {
+    async fn write_prepare_rejections_leave_targets_untouched() {
         let workspace = tempfile::tempdir().expect("workspace");
         let ctx = context(workspace.path());
 
-        // Duplicate effective target.
-        std::fs::write(workspace.path().join("dup.txt"), "same\n").expect("seed dup");
-        let duplicate = PreparedWrite::prepare(
-            &ctx,
-            &json!({
-                "files": [
-                    { "path": "dup.txt", "content": "first\n" },
-                    { "path": "./dup.txt", "content": "second\n" }
-                ]
-            }),
-        )
-        .expect_err("duplicate rejected");
-        assert_eq!(
-            duplicate.details.expect("dup details")["status"],
-            "prepare_failed"
-        );
-
         // Existing directory is not a regular file.
         std::fs::create_dir(workspace.path().join("adir")).expect("seed dir");
-        let directory = PreparedWrite::prepare(
-            &ctx,
-            &json!({ "files": [{ "path": "adir", "content": "x" }] }),
-        )
-        .expect_err("directory rejected");
+        let directory = PreparedWrite::prepare(&ctx, &json!({ "path": "adir", "content": "x" }))
+            .expect_err("directory rejected");
         assert_eq!(
             directory.details.expect("dir details")["status"],
             "prepare_failed"
@@ -1221,11 +1159,9 @@ mod tests {
 
         // Non-UTF-8 existing file cannot be overwritten.
         std::fs::write(workspace.path().join("binary.bin"), [0xff, 0xfe]).expect("seed binary");
-        let non_utf8 = PreparedWrite::prepare(
-            &ctx,
-            &json!({ "files": [{ "path": "binary.bin", "content": "text\n" }] }),
-        )
-        .expect_err("non-utf8 rejected");
+        let non_utf8 =
+            PreparedWrite::prepare(&ctx, &json!({ "path": "binary.bin", "content": "text\n" }))
+                .expect_err("non-utf8 rejected");
         assert_eq!(
             non_utf8.details.expect("binary details")["status"],
             "prepare_failed"
@@ -1237,11 +1173,9 @@ mod tests {
 
         // No-op overwrite of an existing file.
         std::fs::write(workspace.path().join("noop.txt"), "same\n").expect("seed noop");
-        let noop = PreparedWrite::prepare(
-            &ctx,
-            &json!({ "files": [{ "path": "noop.txt", "content": "same\n" }] }),
-        )
-        .expect_err("no-op rejected");
+        let noop =
+            PreparedWrite::prepare(&ctx, &json!({ "path": "noop.txt", "content": "same\n" }))
+                .expect_err("no-op rejected");
         assert_eq!(
             noop.details.expect("noop details")["status"],
             "prepare_failed"
@@ -1250,27 +1184,15 @@ mod tests {
             std::fs::read_to_string(workspace.path().join("noop.txt")).expect("noop bytes"),
             "same\n"
         );
-
-        // Prepare created nothing new.
-        assert!(!workspace.path().join("first.txt").exists());
-        assert!(!workspace.path().join("second.txt").exists());
     }
 
     #[tokio::test]
-    async fn write_batch_failure_after_first_commit_reports_partial_without_rollback() {
+    async fn write_install_failure_reports_zero_writes() {
         let workspace = tempfile::tempdir().expect("workspace");
         let ctx = context(workspace.path());
-        let prepared = PreparedWrite::prepare(
-            &ctx,
-            &json!({
-                "files": [
-                    { "path": "a.txt", "content": "AAA\n" },
-                    { "path": "b.txt", "content": "BBB\n" },
-                    { "path": "c.txt", "content": "CCC\n" }
-                ]
-            }),
-        )
-        .expect("prepare");
+        let prepared =
+            PreparedWrite::prepare(&ctx, &json!({ "path": "a.txt", "content": "AAA\n" }))
+                .expect("prepare");
         let mut on_progress = |_update| {};
 
         // Failure at the very first file installs nothing.
@@ -1295,53 +1217,16 @@ mod tests {
                 .as_str()
                 .is_some_and(|message| message.contains("first install failure"))
         );
-        assert_eq!(details["changes"][1]["status"], "not_attempted");
-        assert_eq!(details["changes"][2]["status"], "not_attempted");
         assert!(!workspace.path().join("a.txt").exists());
-
-        // Failure at the second file keeps the first committed, no rollback.
-        let partial = prepared.commit_with_installer(
-            &ctx,
-            &CancellationToken::new(),
-            &mut on_progress,
-            |index, file| {
-                if index == 1 {
-                    WriteInstallOutcome {
-                        created_directories: Vec::new(),
-                        result: Err(io::Error::other("injected install failure")),
-                    }
-                } else {
-                    default_install(file)
-                }
-            },
-        );
-        assert!(partial.is_error);
-        let details = partial.details.expect("partial details");
-        assert_eq!(details["status"], "partial_commit");
-        assert_eq!(details["changes"][0]["status"], "committed");
-        assert_eq!(details["changes"][1]["status"], "failed");
-        assert!(
-            details["changes"][1]["message"]
-                .as_str()
-                .is_some_and(|message| message.contains("injected install failure"))
-        );
-        assert_eq!(details["changes"][2]["status"], "not_attempted");
-        assert_eq!(details["added"], 1);
-        assert_eq!(
-            std::fs::read_to_string(workspace.path().join("a.txt")).expect("a"),
-            "AAA\n"
-        );
-        assert!(!workspace.path().join("b.txt").exists());
-        assert!(!workspace.path().join("c.txt").exists());
     }
 
     #[tokio::test]
-    async fn write_batch_reports_directories_created_before_install_failure() {
+    async fn write_reports_directories_created_before_install_failure() {
         let workspace = tempfile::tempdir().expect("workspace");
         let ctx = context(workspace.path());
         let prepared = PreparedWrite::prepare(
             &ctx,
-            &json!({ "files": [{ "path": "deep/nested/dir/file.txt", "content": "x\n" }] }),
+            &json!({ "path": "deep/nested/dir/file.txt", "content": "x\n" }),
         )
         .expect("prepare");
         let mut on_progress = |_update| {};
@@ -1382,19 +1267,12 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn write_batch_cancellation_before_and_after_first_commit_is_truthful() {
+    async fn write_cancellation_before_commit_is_truthful() {
         let workspace = tempfile::tempdir().expect("workspace");
         let ctx = context(workspace.path());
-        let prepared = PreparedWrite::prepare(
-            &ctx,
-            &json!({
-                "files": [
-                    { "path": "one.txt", "content": "one\n" },
-                    { "path": "two.txt", "content": "two\n" }
-                ]
-            }),
-        )
-        .expect("prepare");
+        let prepared =
+            PreparedWrite::prepare(&ctx, &json!({ "path": "one.txt", "content": "one\n" }))
+                .expect("prepare");
         let mut on_progress = |_update| {};
 
         let cancel = CancellationToken::new();
@@ -1407,45 +1285,18 @@ mod tests {
         assert_eq!(details["status"], "cancelled");
         assert_eq!(details["cause"], "cancelled");
         assert_eq!(details["changes"][0]["status"], "not_attempted");
-        assert_eq!(details["changes"][1]["status"], "not_attempted");
         assert!(!workspace.path().join("one.txt").exists());
-        assert!(!workspace.path().join("two.txt").exists());
-
-        let partial_cancel = CancellationToken::new();
-        let cancel_after_write = partial_cancel.clone();
-        let after = prepared.commit_with_installer(
-            &ctx,
-            &partial_cancel,
-            &mut on_progress,
-            move |_, file| {
-                let outcome = default_install(file);
-                cancel_after_write.cancel();
-                outcome
-            },
-        );
-        assert!(after.is_error);
-        let details = after.details.expect("after details");
-        assert_eq!(details["status"], "partial_commit");
-        assert_eq!(details["cause"], "cancelled");
-        assert_eq!(details["changes"][0]["status"], "committed");
-        assert_eq!(details["changes"][1]["status"], "not_attempted");
-        assert_eq!(
-            std::fs::read_to_string(workspace.path().join("one.txt")).expect("one"),
-            "one\n"
-        );
-        assert!(!workspace.path().join("two.txt").exists());
     }
 
     #[tokio::test]
-    async fn write_schema_rejects_legacy_and_unknown_fields() {
+    async fn write_schema_is_single_file_and_rejects_old_array_and_unknown_fields() {
         let workspace = tempfile::tempdir().expect("workspace");
         let ctx = context(workspace.path());
 
         for arguments in [
-            json!({ "path": "legacy.txt", "content": "legacy" }),
-            json!({ "files": [{ "path": "x.txt", "content": "x" }], "extra": true }),
-            json!({ "files": [{ "path": "x.txt", "content": "x", "mode": 1 }] }),
-            json!({ "files": [{ "path": "x.txt" }] }),
+            json!({ "files": [{ "path": "x.txt", "content": "x" }] }),
+            json!({ "path": "x.txt", "content": "x", "mode": 1 }),
+            json!({ "path": "x.txt" }),
         ] {
             let rejected = PreparedWrite::prepare(&ctx, &arguments).expect_err("schema rejected");
             assert_eq!(
@@ -1453,19 +1304,12 @@ mod tests {
                 "prepare_failed"
             );
         }
-        assert!(!workspace.path().join("legacy.txt").exists());
         assert!(!workspace.path().join("x.txt").exists());
 
         let schema = WriteTool.input_schema();
-        assert_eq!(schema["properties"]["files"]["minItems"], 1);
-        let item_schema = &schema["properties"]["files"]["items"];
-        let file_schema = item_schema
-            .get("$ref")
-            .and_then(serde_json::Value::as_str)
-            .and_then(|reference| reference.rsplit('/').next())
-            .and_then(|name| schema.get("$defs").and_then(|defs| defs.get(name)))
-            .unwrap_or(item_schema);
-        assert_eq!(file_schema["properties"]["path"]["minLength"], 1);
+        assert_eq!(schema["properties"]["path"]["minLength"], 1);
+        assert!(schema["properties"]["content"].is_object());
+        assert!(schema["properties"]["files"].is_null());
     }
 
     #[tokio::test]
@@ -1480,10 +1324,8 @@ mod tests {
             .execute(
                 &ctx,
                 json!({
-                    "files": [{
-                        "path": "missing/../../outside/escaped.txt",
-                        "content": "escaped"
-                    }]
+                    "path": "missing/../../outside/escaped.txt",
+                    "content": "escaped"
                 }),
             )
             .await
@@ -1501,9 +1343,7 @@ mod tests {
             let linked = WriteTool
                 .execute(
                     &ctx,
-                    json!({
-                        "files": [{"path": "linked/file.txt", "content": "linked"}]
-                    }),
+                    json!({ "path": "linked/file.txt", "content": "linked" }),
                 )
                 .await
                 .expect("tool result");
