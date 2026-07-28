@@ -9,6 +9,7 @@ pub mod journal;
 pub mod launch;
 pub mod limits;
 mod lua;
+pub mod operator;
 pub mod output;
 pub mod recovery;
 pub mod registry;
@@ -78,6 +79,13 @@ pub use launch::{
 };
 pub use limits::WorkflowLimits;
 pub use lua::LuaWorkflowRunner;
+pub use child_projection::{
+    ChildProjection, WorkflowChildRow, WorkflowChildState, project_children,
+};
+pub use operator::{
+    ChildCounts, PendingUserRequest, StepRowState, WorkflowChildPage,
+    WorkflowOperatorRequest, WorkflowOperatorSnapshot, WorkflowStepKey, WorkflowStepRow,
+};
 pub use output::{
     ArtifactContentPage, CanonicalFinalResult, FINAL_RESULT_LOGICAL_NAME, FinalResultBody,
     JournalRecordSummary, PendingUserInputMeta, PreparedFinalBody, TaskOutputMaterials,

@@ -171,10 +171,6 @@ impl JournalEnvelope {
         }
     }
 
-    /// Build a V3 envelope for `run_id` with the given payload.
-    #[must_use]
-    /// Build a V3 envelope for `run_id` with the given payload.
-    #[must_use]
     #[must_use]
     pub fn with_canonical_input_hash(mut self, hash: impl Into<String>) -> Self {
         self.canonical_input_hash = Some(hash.into());

@@ -2,7 +2,7 @@
 //! Stub: full implementation in Task 4.
 
 use super::journal::{WorkflowChildKey, WorkflowChildKind};
-use super::error::{WorkflowError, WorkflowErrorCode};
+use super::error::WorkflowError;
 use super::state::WorkflowId;
 use std::path::Path;
 
