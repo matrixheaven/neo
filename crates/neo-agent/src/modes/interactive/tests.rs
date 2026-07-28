@@ -1469,6 +1469,92 @@ async fn completed_turn_drains_event_backlog_before_removal() {
 }
 
 #[tokio::test]
+async fn completed_turn_drains_pending_approval_and_question_channels() {
+    let approval_receiver = Arc::new(std::sync::Mutex::new(None));
+    let question_receiver = Arc::new(std::sync::Mutex::new(None));
+    let approval_receiver_for_turn = Arc::clone(&approval_receiver);
+    let question_receiver_for_turn = Arc::clone(&question_receiver);
+    let run_turn: TurnDriver = Arc::new(move |_request, channels| {
+        let approval_receiver = Arc::clone(&approval_receiver_for_turn);
+        let question_receiver = Arc::clone(&question_receiver_for_turn);
+        Box::pin(async move {
+            let request = ordinary_tool_request("terminal-approval", "Write", "done.txt", None);
+            let (approval_tx, approval_rx) = oneshot::channel();
+            channels
+                .approvals
+                .send(crate::modes::run::PendingApproval {
+                    request,
+                    response_tx: approval_tx,
+                })
+                .expect("approval sent");
+            *approval_receiver.lock().expect("approval receiver") = Some(approval_rx);
+
+            let (question_tx, question_rx) = oneshot::channel();
+            channels
+                .questions
+                .send(PendingQuestion {
+                    id: "terminal-question".to_owned(),
+                    questions: vec![neo_agent_core::QuestionEventData {
+                        question: "Continue?".to_owned(),
+                        header: None,
+                        body: None,
+                        options: Vec::new(),
+                        multi_select: false,
+                    }],
+                    response_tx: question_tx,
+                })
+                .expect("question sent");
+            *question_receiver.lock().expect("question receiver") = Some(question_rx);
+            Ok(TurnOutcome::default())
+        })
+    });
+    let mut controller = InteractiveController::new(
+        "neo",
+        "test-session",
+        "openai/gpt-4.1",
+        test_workspace_root(),
+        PickerCatalogs::default(),
+        ControllerCallbacks {
+            run_turn,
+            load_session: Arc::new(|session_id| Box::pin(empty_session_loader(session_id))),
+            fork_session: Arc::new(|session_id| Box::pin(empty_session_forker(session_id))),
+        },
+    );
+
+    controller.type_text("finish");
+    controller
+        .handle_input_event(InputEvent::Submit)
+        .await
+        .expect("start turn");
+    for _ in 0..20 {
+        if controller
+            .active_turn
+            .as_ref()
+            .is_some_and(|turn| turn.task.is_finished())
+        {
+            break;
+        }
+        tokio::task::yield_now().await;
+    }
+    controller
+        .drain_active_turn()
+        .await
+        .expect("drain completed turn");
+
+    assert!(
+        controller
+            .pending_approvals
+            .contains_key("terminal-approval")
+    );
+    assert!(
+        controller
+            .pending_questions
+            .contains_key("terminal-question")
+    );
+    assert!(controller.active_turn.is_none());
+}
+
+#[tokio::test]
 async fn image_prompt_submit_renders_user_transcript_with_attachment() {
     let png = b"\x89PNG\r\n\x1a\n\x00\x00\x00\rIHDR\x00\x00\x00\x01\x00\x00\x00\x01\x08\x02\x00\x00\x00\x90wS\xde"
         .to_vec();

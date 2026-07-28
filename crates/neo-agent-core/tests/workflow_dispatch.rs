@@ -1341,6 +1341,49 @@ async fn delegate_and_swarm_forward_canonical_lifecycle_events() {
     );
 }
 
+#[tokio::test]
+async fn workflow_delegate_and_swarm_use_live_yolo_after_handle_creation() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let harness = FakeHarness::from_turns([
+        child_text_turn("delegate done"),
+        child_text_turn("swarm done"),
+    ]);
+    let live_mode = Arc::new(std::sync::RwLock::new(PermissionMode::Ask));
+    let config = AgentConfig::for_model(harness.model())
+        .with_workspace_root(dir.path())
+        .expect("workspace root")
+        .with_permission_mode(PermissionMode::Ask)
+        .with_live_permission_mode(Arc::clone(&live_mode));
+    let handle = handle(
+        config,
+        &harness,
+        Arc::new(ToolRegistry::with_builtin_tools()),
+        AgentContext::new(),
+    );
+    *live_mode.write().expect("live permission mode") = PermissionMode::Yolo;
+
+    let delegate = handle
+        .run_one(
+            invocation("inv_live_delegate"),
+            "Delegate",
+            json!({"task": "inspect dispatch", "context": "none"}),
+        )
+        .await;
+    assert!(delegate.ok, "{}", delegate.summary);
+    let swarm = handle
+        .run_one(
+            invocation("inv_live_swarm"),
+            "DelegateSwarm",
+            json!({
+                "description": "inspect dispatch",
+                "items": [{"title": "runtime", "value": "runtime"}],
+                "prompt_template": "Inspect {{item}}",
+            }),
+        )
+        .await;
+    assert!(swarm.ok, "{}", swarm.summary);
+}
+
 struct BlockingTool {
     entered: Arc<Notify>,
 }

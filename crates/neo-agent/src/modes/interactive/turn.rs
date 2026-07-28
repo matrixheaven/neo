@@ -147,10 +147,10 @@ impl InteractiveController {
         let Some(mut turn) = self.active_turn.take() else {
             return Ok(FrameRequest::None);
         };
-        let mut frame_request = self.drain_turn_channels(&mut turn);
+        let mut frame_request = self.drain_turn_channels(&mut turn, MAX_TURN_EVENTS_PER_TICK);
 
         if turn.task.is_finished() {
-            frame_request = frame_request.merge(self.drain_completed_turn_channels(&mut turn));
+            frame_request = frame_request.merge(self.drain_turn_channels(&mut turn, usize::MAX));
             let turn_result = turn
                 .task
                 .await
@@ -240,7 +240,7 @@ impl InteractiveController {
         frame_request
     }
 
-    fn drain_turn_channels(&mut self, turn: &mut RunningTurn) -> FrameRequest {
+    fn drain_turn_channels(&mut self, turn: &mut RunningTurn, event_limit: usize) -> FrameRequest {
         let mut frame_request = FrameRequest::None;
 
         while let Ok(session_id) = turn.session_ids.try_recv() {
@@ -263,27 +263,10 @@ impl InteractiveController {
             self.register_pending_question(pending);
             frame_request = frame_request.merge(FrameRequest::Immediate);
         }
-        for _ in 0..MAX_TURN_EVENTS_PER_TICK {
+        for _ in 0..event_limit {
             let Ok(event) = turn.events.try_recv() else {
                 break;
             };
-            match event {
-                Ok(event) => {
-                    self.notify_for_event(&event);
-                    frame_request = frame_request.merge(self.apply_turn_event(event));
-                }
-                Err(error) => {
-                    self.push_status(format!("Error: {error}"));
-                    frame_request = frame_request.merge(FrameRequest::Coalesced);
-                }
-            }
-        }
-        frame_request
-    }
-
-    fn drain_completed_turn_channels(&mut self, turn: &mut RunningTurn) -> FrameRequest {
-        let mut frame_request = FrameRequest::None;
-        while let Ok(event) = turn.events.try_recv() {
             match event {
                 Ok(event) => {
                     self.notify_for_event(&event);
