@@ -28,7 +28,8 @@ fn launch_request() -> WorkflowLaunchRequest {
         args: serde_json::json!({}),
         launch_source: "/workflow".to_owned(),
         parent_run_id: None,
-        output_schema: None,launch,
+        output_schema: None,
+        launch,
     }
 }
 

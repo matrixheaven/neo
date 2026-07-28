@@ -472,7 +472,7 @@ async fn ordinary_resume_cannot_bypass_awaiting_user() {
     for (seq, payload) in [
         JournalPayload::RunCreated {
             name: "await".to_owned(),
-            description: None_source: Some("/workflow".to_owned()),
+            description: None, launch_source: Some("/workflow".to_owned())),
         },
         JournalPayload::StateChanged {
             previous: WorkflowState::Queued,
@@ -629,7 +629,7 @@ async fn rehydrate_starts_no_worker_and_preserves_awaiting_user() {
     for (seq, payload) in [
         JournalPayload::RunCreated {
             name: "await".to_owned(),
-            description: None_source: Some("/workflow".to_owned()),
+            description: None, launch_source: Some("/workflow".to_owned())),
         },
         JournalPayload::StateChanged {
             previous: WorkflowState::Queued,

@@ -86,7 +86,8 @@ fn launch(script: String) -> WorkflowLaunchRequest {
         args: json!({}),
         launch_source: "/workflow".to_owned(),
         parent_run_id: None,
-        output_schema: None,}
+        output_schema: None,
+    }
 }
 
 async fn wait_state(handle: &WorkflowHandle, want: WorkflowState) {

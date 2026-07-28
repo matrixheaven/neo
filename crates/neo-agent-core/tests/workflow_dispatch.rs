@@ -1114,7 +1114,8 @@ fn workflow_launch_request() -> WorkflowLaunchRequest {
         args: json!({}),
         launch_source: "test".to_owned(),
         parent_run_id: None,
-        output_schema: None,}
+        output_schema: None,
+    }
 }
 #[tokio::test]
 async fn delegate_usage_and_child_ref_are_journaled_and_aggregated() {

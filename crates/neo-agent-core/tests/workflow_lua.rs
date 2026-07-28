@@ -68,7 +68,8 @@ async fn make_runner_with_config(
                 args: serde_json::json!({}),
                 launch_source: "test".to_owned(),
                 parent_run_id: None,
-                output_schema: None,},
+                output_schema: None,
+            },
         )
         .await
         .expect("create run");

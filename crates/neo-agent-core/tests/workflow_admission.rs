@@ -24,7 +24,11 @@ fn launch_request(name: &str) -> WorkflowLaunchRequest {
         args: serde_json::json!({}),
         launch_source: "/workflow".to_owned(),
         parent_run_id: None,
-        output_schema: None,}
+        output_schema: None,
+        display_name: None,
+        input_schema: None,
+        definition_origin: None,
+        inline_unsaved: false,
 }
 
 fn limits_one_worker() -> WorkflowLimits {
@@ -591,9 +595,14 @@ fn automatic_retention_reclaims_only_old_terminal_unreferenced_runs_to_low_water
             phases: vec![],
             script: "neo.phase('work')".to_owned(),
             script_sha256: "abc".to_owned(),
-            args: serde_json::json!({})_source: "test".to_owned(),
+            args: serde_json::json!({}),
+            launch_source: "test".to_owned(),
             journal_format_version: 2,
-            output_schema: None,};
+            output_schema: None,
+        display_name: None,
+        input_schema: None,
+        definition_origin: None,
+        inline_unsaved: false,;
         neo_agent_core::workflow::journal::write_run_metadata(
             &run_dir,
             &metadata,
@@ -822,9 +831,14 @@ fn automatic_retention_preserves_protected_runs_and_fails_closed_on_path_escape(
             phases: vec![],
             script: "neo.phase('work')".to_owned(),
             script_sha256: "abc".to_owned(),
-            args: serde_json::json!({})_source: "test".to_owned(),
+            args: serde_json::json!({}),
+            launch_source: "test".to_owned(),
             journal_format_version: 2,
-            output_schema: None,};
+            output_schema: None,
+        display_name: None,
+        input_schema: None,
+        definition_origin: None,
+        inline_unsaved: false,;
         neo_agent_core::workflow::journal::write_run_metadata(
             &run_dir,
             &metadata,

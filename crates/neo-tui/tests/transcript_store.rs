@@ -92,6 +92,8 @@ fn workflow_snapshot(id: &str, state: WorkflowState) -> WorkflowSnapshot {
         latest_report_summary: None,
         terminal_reason: None,
         steps: Vec::new(),
+        display_name: "test workflow".to_owned(),
+        purpose: String::new(),
     }
 }
 

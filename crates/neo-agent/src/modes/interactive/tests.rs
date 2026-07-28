@@ -1037,6 +1037,8 @@ async fn background_question_answer_starts_followup_turn() {
             neo_agent_core::workflow::WorkflowId("wf_background_question".to_owned()),
             neo_agent_core::workflow::WorkflowState::Completed,
             "worker completed",
+            "wf_background_question",
+            "background question test",
         ),
     ));
     let requests = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
