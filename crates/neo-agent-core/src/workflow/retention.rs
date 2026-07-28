@@ -67,14 +67,20 @@ pub const MIN_RUN_AGE_MS: u64 = 30 * 24 * 60 * 60 * 1000;
 /// Whether automatic retention should run given current byte usage.
 #[must_use]
 pub fn should_trigger(global_storage_bytes: u64, current_bytes: u64) -> bool {
-    let limit = (global_storage_bytes as f64 * STORAGE_HIGH_WATERMARK_PCT) as u64;
+    // 90% of global: multiply by 9, then divide by 10 — avoids float precision loss.
+    let limit = global_storage_bytes
+        .saturating_mul(9)
+        .saturating_div(10);
     current_bytes >= limit
 }
 
 /// Calculate the target byte count after retention (low watermark).
 #[must_use]
 pub fn target_after_reclaim(global_storage_bytes: u64) -> u64 {
-    (global_storage_bytes as f64 * STORAGE_LOW_WATERMARK_PCT) as u64
+    // 80% of global: multiply by 8, then divide by 10.
+    global_storage_bytes
+        .saturating_mul(8)
+        .saturating_div(10)
 }
 
 #[must_use]

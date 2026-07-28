@@ -233,7 +233,7 @@ async fn ask_launch_uses_typed_full_review_and_returns_registered_running_task()
     let task_id = result.details.as_ref().unwrap()["task"]["task_id"]
         .as_str()
         .unwrap();
-    assert_eq!(result.details.as_ref().unwrap()["status"], "running");
+    assert_eq!(result.details.as_ref().unwrap()["status"], "started");
     let handle = config
         .background_tasks
         .workflow_handle(task_id)
