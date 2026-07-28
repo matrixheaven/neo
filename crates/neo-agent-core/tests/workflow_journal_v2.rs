@@ -259,8 +259,7 @@ fn journal_v2_record_families_preserve_terminal_metadata() {
     append(
         JournalPayload::RunCreated {
             name: "review".to_owned(),
-            description: Some("demo".to_owned()),
-            launch_source: Some("/workflow review".to_owned()),
+            description: Some("demo".to_owned())_source: Some("/workflow review".to_owned()),
         },
         None,
         vec![],
@@ -557,8 +556,7 @@ fn write_valid_prefix(path: &std::path::Path, id: &WorkflowId) -> String {
         id.clone(),
         JournalPayload::RunCreated {
             name: "demo".to_owned(),
-            description: None,
-            launch_source: Some("/workflow".to_owned()),
+            description: None_source: Some("/workflow".to_owned()),
         },
     );
     let line = serde_json::to_string(&env).unwrap();
@@ -861,8 +859,7 @@ fn journal_platform_sync_and_quarantine_semantics() {
         id.clone(),
         JournalPayload::RunCreated {
             name: "platform-sync".to_owned(),
-            description: Some("sync proof".to_owned()),
-            launch_source: Some("/workflow".to_owned()),
+            description: Some("sync proof".to_owned())_source: Some("/workflow".to_owned()),
         },
     );
     writer.append(&created, &limits()).expect("append");

@@ -4,7 +4,7 @@
 //! overlay. It stores selection anchors, pane focus, scroll offsets, and
 //! ephemeral dialog state (dismissed request IDs, answer drafts).
 
-use neo_agent_core::workflow::{WorkflowChildKey, WorkflowOperatorSnapshot, WorkflowStepKey};
+use neo_agent_core::workflow::{WorkflowChildKey, WorkflowStepKey};
 
 use super::answer::AnswerForm;
 

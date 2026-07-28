@@ -3,7 +3,6 @@
 //! Renders the Steps / Agents / Details layout for wide, stacked, and
 //! sequential terminal sizes.
 
-use super::state::{NarrowPage, OperatorFocus, WorkflowOperatorState};
 use neo_agent_core::workflow::{StepRowState, WorkflowOperatorSnapshot};
 
 /// Terminal width threshold for the wide layout (>= 100 columns).

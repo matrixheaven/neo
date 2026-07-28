@@ -163,12 +163,7 @@ async fn invalid_final_lua_result_fails_without_hidden_model_repair() {
                 args: json!({}),
                 launch_source: "test".to_owned(),
                 parent_run_id: None,
-                output_schema: None,
-                display_name: None,
-                input_schema: None,
-                definition_origin: None,
-                inline_unsaved: false,
-            },
+                output_schema: None,},
         )
         .await
         .expect("create run");
@@ -322,12 +317,7 @@ async fn child_schema_invalid_output_gets_exactly_one_tools_disabled_repair() {
         role: None,
         mode: AgentRunMode::Foreground,
         context: DelegateContext::None,
-        output_schema: Some(child_schema_doc()),
-        display_name: None,
-        input_schema: None,
-        definition_origin: None,
-        inline_unsaved: false,
-    };
+        output_schema: Some(child_schema_doc()),};
     let first = multi
         .run_child_turn(deps.clone(), &request, AgentRunMode::Foreground)
         .await
@@ -473,12 +463,7 @@ async fn schema_repair_tool_attempt_is_forbidden() {
         role: None,
         mode: AgentRunMode::Foreground,
         context: DelegateContext::None,
-        output_schema: Some(child_schema_doc()),
-        display_name: None,
-        input_schema: None,
-        definition_origin: None,
-        inline_unsaved: false,
-    };
+        output_schema: Some(child_schema_doc()),};
     let first = multi
         .run_child_turn(deps.clone(), &request, AgentRunMode::Foreground)
         .await
@@ -588,12 +573,7 @@ async fn crash_during_repair_never_repeats_model_effect() {
         role: None,
         mode: AgentRunMode::Foreground,
         context: DelegateContext::None,
-        output_schema: Some(child_schema_doc()),
-        display_name: None,
-        input_schema: None,
-        definition_origin: None,
-        inline_unsaved: false,
-    };
+        output_schema: Some(child_schema_doc()),};
     let first = multi
         .run_child_turn(deps.clone(), &request, AgentRunMode::Foreground)
         .await

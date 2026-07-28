@@ -27,12 +27,7 @@ fn launch_request(name: &str) -> WorkflowLaunchRequest {
         args: serde_json::json!({}),
         launch_source: "/workflow".to_owned(),
         parent_run_id: None,
-        output_schema: None,
-        display_name: None,
-        input_schema: None,
-        definition_origin: None,
-        inline_unsaved: false,
-    }
+        output_schema: None,}
 }
 
 fn limits_small_inline() -> WorkflowLimits {

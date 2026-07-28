@@ -29,7 +29,7 @@ use crate::skills::SkillStoreHandle;
 use crate::tools::execute_model_bash_for_runtime;
 use crate::tools::{PreparedEdit, PreparedWrite};
 use crate::{
-    AgentEvent, AgentMessage, AgentToolCall, PermissionMode, ProcessSupervisor,
+    AgentEvent, AgentToolCall, PermissionMode, ProcessSupervisor,
     ResourceLimitDetail, SkillInvocationOutcome, SkillInvocationSource, ToolAccess, ToolContext,
     ToolError, ToolEventCallback, ToolRegistry, ToolResult,
 };
