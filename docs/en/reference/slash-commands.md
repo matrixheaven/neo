@@ -26,7 +26,7 @@ Source location: [`crates/neo-agent/src/modes/interactive/slash_commands.rs`](..
 | `/workflow` | Activates `create-workflow` through the normal manual-skill path and starts a model turn. The skill uses `Workflow`; no capability is granted. |
 | `/workflow <name> [JSON_OBJECT]` | Host resolves `<name>` through effective registry precedence (`builtin < user < trusted project`), validates args, and launches in the background with **no model round-trip**. Ask mode shows launch review; Auto/Yolo still require the explicit slash. |
 
-Slash matching is exact: `/workflowish` does not activate the skill. Launch approval authorizes orchestration only; every later child or tool effect still follows Ask / Auto / Yolo. The assistant controls and inspects with `TaskPause`, `TaskResume`, `TaskStop`, `TaskOutput` (paged views/cursors), and `TaskAnswer` when a workflow explicitly allows a model answer. Headless `neo workflow` commands are for humans and scripts. See [Workflows](../guides/workflows.md).
+Slash matching is exact: `/workflowish` does not activate the skill. Launch approval authorizes orchestration only; every later child or tool effect still follows Ask / Auto / Yolo. The assistant controls and views workflow output with `TaskPause`, `TaskResume`, `TaskStop`, `TaskOutput` (paged views/cursors), and `TaskAnswer` when a workflow explicitly allows a model answer. Headless `neo workflow` commands are for humans and scripts. See [Workflows](../guides/workflows.md).
 
 ## Mode Control
 

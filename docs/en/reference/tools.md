@@ -162,7 +162,7 @@ is background and returns a task ID (also the `run_id`).
 | Action | How |
 | --- | --- |
 | Discover, validate, save, or run | `Workflow(list|show|validate_inline|validate_saved|save|run_inline|run_saved)` |
-| Inspect | `TaskOutput` with workflow views/cursors; summary never embeds full journals or large artifacts |
+| View workflow output | `TaskOutput` with workflow views/cursors; summary never embeds full journals or large artifacts |
 | Pause / resume / stop | `TaskPause`, `TaskResume`, `TaskStop` at durable boundaries |
 | Answer `awaiting_user` | Follow `TaskOutput.pending_user.next_action`; call `TaskAnswer` with the exact IDs only when it says `TaskAnswer`. Resume alone is not enough. |
 

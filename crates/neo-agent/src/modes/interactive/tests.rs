@@ -11536,7 +11536,7 @@ async fn spawn_workflow_approval_invocation(
 
 fn assert_cancelled_workflow_invocation_journal(journal_path: &Path) {
     let envelopes =
-        neo_agent_core::workflow::collect_journal_v2(journal_path, None).expect("read v2 journal");
+        neo_agent_core::workflow::collect_journal(journal_path, None).expect("read journal");
     assert!(envelopes.iter().any(|envelope| {
         matches!(
             &envelope.payload,

@@ -1,6 +1,6 @@
 # Local Workflow Platform
 
-Neo runs **durable Lua workflows** as first-class local background tasks. A workflow is a reviewed script plus structured metadata: it can fan out children, call ordinary tools, wait for typed user answers, and leave a journaled trail you can inspect, pause, resume, or stop.
+Neo runs **durable Lua workflows** as first-class local background tasks. A workflow is a reviewed script plus structured metadata: it can fan out children, call ordinary tools, wait for typed user answers, and leave a journaled trail you can view, pause, resume, or stop.
 
 This guide covers authoring definitions, launching them, the Lua host API, schemas, machine limits, and operator surfaces. Only landed behavior is described.
 
@@ -339,7 +339,7 @@ The assistant uses `Workflow(list)`, `Workflow(show)`, and `Workflow(run_saved)`
 4. Never request secrets through `neo.await_user`.
 5. Validate with `neo workflow check`; use `neo workflow test --case` for fixture harness cases.
 6. Use named `/workflow <name>` for a host-direct interactive launch, or the headless CLI for scripted operation.
-7. Inspect with `TaskOutput` views/cursors.
+7. View results with `TaskOutput` views/cursors.
 
 ## Next steps
 

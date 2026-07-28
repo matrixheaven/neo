@@ -26,7 +26,7 @@
 | `/workflow` | 通过普通手动 skill 路径激活 `create-workflow` 并开始模型回合。skill 使用 `Workflow`；不会授予 capability。 |
 | `/workflow <name> [JSON_OBJECT]` | 宿主按 effective 优先级（`builtin < user < trusted project`）解析 `<name>`，校验 args，并在后台启动，**无模型往返**。Ask 显示 launch 审阅；Auto/Yolo 仍需显式 slash。 |
 
-Slash 匹配是精确的：`/workflowish` 不会激活 skill。Launch 审批只授权编排；之后每个 child 或 tool effect 仍走 Ask / Auto / Yolo。assistant 用 `TaskPause`、`TaskResume`、`TaskStop`、`TaskOutput`（分页视图/cursor）控制与检查；workflow 显式允许模型回答时用 `TaskAnswer`。headless `neo workflow` 命令只供人类和脚本使用。见 [Workflows](../guides/workflows.md)。
+Slash 匹配是精确的：`/workflowish` 不会激活 skill。Launch 审批只授权编排；之后每个 child 或 tool effect 仍走 Ask / Auto / Yolo。assistant 用 `TaskPause`、`TaskResume`、`TaskStop`、`TaskOutput`（分页视图/cursor）控制并查看结果；workflow 显式允许模型回答时用 `TaskAnswer`。headless `neo workflow` 命令只供人类和脚本使用。见 [Workflows](../guides/workflows.md)。
 
 ## 模式控制
 
