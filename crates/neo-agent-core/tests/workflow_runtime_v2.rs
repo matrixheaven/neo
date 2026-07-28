@@ -125,8 +125,8 @@ fn launch_request() -> WorkflowLaunchRequest {
         name: "review".to_owned(),
         description: "test run".to_owned(),
         phases: vec![WorkflowPhase {
-            id: "inspect".to_owned(),
-            description: "inspect".to_owned(),
+            id: "review".to_owned(),
+            description: "review".to_owned(),
         }],
         script: "return { ok = true }".to_owned(),
         args: serde_json::json!({}),
@@ -168,7 +168,7 @@ async fn v2_create_is_durable_and_queued_before_registration() {
 
     let meta = read_run_metadata(&run_dir(dir.path(), &handle.run_id)).unwrap();
     assert_eq!(meta.run_id, handle.run_id);
-    assert_eq!(meta.journal_format_version, 2);
+    assert_eq!(meta.journal_format_version, 3, "new runs use V3 journal format");
     assert_eq!(meta.name, "review");
 
     let journal_path = run_dir(dir.path(), &handle.run_id).join("journal.jsonl");
