@@ -19,8 +19,8 @@ use sha2::{Digest, Sha256};
 
 use super::error::{WorkflowError, WorkflowErrorCode};
 use super::journal::{
-    JOURNAL_FORMAT_V2, JournalEnvelope, JournalPayload, JournalScanIndex, JournalV2Writer,
-    scan_journal_v2, validate_v2_envelope,
+    JournalEnvelope, JournalPayload, JournalScanIndex, JournalWriter, scan_journal,
+    validate_envelope,
 };
 use super::state::{WorkflowId, WorkflowInvocationOutcome};
 use crate::session::atomic_file;
@@ -44,7 +44,7 @@ pub enum JournalRecoveryAction {
     },
 }
 
-/// Result of scanning and optionally repairing a V2 journal's final EOF suffix.
+/// Result of scanning and optionally repairing the canonical journal's final EOF suffix.
 #[derive(Debug, Clone)]
 pub struct JournalRecoveryReport {
     pub action: JournalRecoveryAction,
@@ -105,7 +105,7 @@ pub fn quarantine_tail_path(run_dir: &Path, sha256_hex: &str) -> PathBuf {
 /// Scans only the final non-newline EOF suffix for normalize/quarantine. All
 /// complete newline-terminated lines must already be valid; any interior or
 /// newline-terminated failure is fail-closed corruption with no mutation.
-pub fn recover_journal_v2(
+pub fn recover_journal(
     path: &Path,
     expected_run_id: Option<&WorkflowId>,
 ) -> Result<JournalRecoveryReport, WorkflowError> {
@@ -138,7 +138,7 @@ pub fn recover_journal_v2(
 
     if suffix.is_empty() {
         // Clean newline-terminated journal (or empty after validated lines).
-        let index = scan_journal_v2(path, expected_run_id)?;
+        let index = scan_journal(path, expected_run_id)?;
         return Ok(JournalRecoveryReport {
             action: JournalRecoveryAction::None,
             index,
@@ -150,7 +150,7 @@ pub fn recover_journal_v2(
     match try_parse_valid_suffix(suffix, &prefix, expected_run_id) {
         Ok(envelope) => {
             normalize_unterminated_newline(path)?;
-            let index = scan_journal_v2(path, expected_run_id)?;
+            let index = scan_journal(path, expected_run_id)?;
             Ok(JournalRecoveryReport {
                 action: JournalRecoveryAction::NormalizedUnterminated { seq: envelope.seq },
                 index,
@@ -170,13 +170,13 @@ pub fn recover_journal_v2(
     }
 }
 
-/// Open a V2 journal after applying torn-tail recovery for `run_id`.
-pub fn open_recovered_journal_v2(
+/// Open the canonical journal after applying torn-tail recovery for `run_id`.
+pub fn open_recovered_journal(
     path: &Path,
     run_id: WorkflowId,
-) -> Result<(JournalV2Writer, JournalRecoveryReport), WorkflowError> {
-    let report = recover_journal_v2(path, Some(&run_id))?;
-    let writer = JournalV2Writer::open_recovered(path, run_id, &report)?;
+) -> Result<(JournalWriter, JournalRecoveryReport), WorkflowError> {
+    let report = recover_journal(path, Some(&run_id))?;
+    let writer = JournalWriter::open_recovered(path, run_id, &report)?;
     Ok((writer, report))
 }
 
@@ -278,12 +278,6 @@ fn validate_envelope_in_sequence(
     run_id: &mut Option<WorkflowId>,
     expected_run_id: Option<&WorkflowId>,
 ) -> Result<(), WorkflowError> {
-    if envelope.version != JOURNAL_FORMAT_V2 {
-        return Err(journal_corrupt(format!(
-            "unknown journal format version {}",
-            envelope.version
-        )));
-    }
     if envelope.seq != expected_seq {
         return Err(journal_corrupt(format!(
             "sequence gap: expected {expected_seq}, got {}",
@@ -310,7 +304,7 @@ fn validate_envelope_in_sequence(
             envelope.run_id.as_str()
         )));
     }
-    validate_v2_envelope(envelope)?;
+    validate_envelope(envelope)?;
     Ok(())
 }
 
@@ -367,12 +361,12 @@ fn quarantine_and_truncate(
         ) {
             Ok(()) => {
                 recovery_record_appended = true;
-                scan_journal_v2(path, Some(run_id))?
+                scan_journal(path, Some(run_id))?
             }
             Err(error) => {
                 // Quarantine + truncate already committed; surface scan/append issues.
                 // Prefer returning the post-truncate index when scan works.
-                match scan_journal_v2(path, Some(run_id)) {
+                match scan_journal(path, Some(run_id)) {
                     Ok(index) => {
                         let _ = error;
                         index
@@ -382,7 +376,7 @@ fn quarantine_and_truncate(
             }
         }
     } else {
-        scan_journal_v2(path, None)?
+        scan_journal(path, None)?
     };
 
     Ok(JournalRecoveryReport {
@@ -471,7 +465,7 @@ fn append_torn_tail_recovery_record(
             ..Default::default()
         }
     } else {
-        scan_journal_v2(path, Some(run_id))?
+        scan_journal(path, Some(run_id))?
     };
 
     let envelope = JournalEnvelope::new(
@@ -489,7 +483,7 @@ fn append_torn_tail_recovery_record(
         },
     );
 
-    // Append without re-entering recover_journal_v2.
+    // Append without re-entering recover_journal.
     let mut file = std::fs::OpenOptions::new()
         .append(true)
         .open(path)

@@ -72,9 +72,10 @@ pub use child_projection::{
 };
 pub use journal::{
     JOURNAL_FORMAT_V1, JOURNAL_FORMAT_V2, JOURNAL_FORMAT_V3, JournalEnvelope, JournalPayload,
-    JournalPayloadRef, JournalRecord, JournalWriter, WorkflowChildKey, WorkflowChildKind,
-    canonical_input_hash, collect_journal_v2, find_incomplete_invocations, journal_path,
-    read_journal, read_run_metadata, run_dir, validate_v2_envelope, write_run_metadata,
+    JournalPayloadRef, JournalRecord, JournalRecordWriter, JournalWriter, WorkflowChildKey,
+    WorkflowChildKind, canonical_input_hash, collect_journal, find_incomplete_invocations,
+    find_incomplete_record_invocations, journal_path, read_journal, read_run_metadata, run_dir,
+    validate_envelope, write_run_metadata,
 };
 pub use launch::{
     WorkflowLaunchBinding, WorkflowLaunchCoordinator, WorkflowLaunchHosts, WorkflowLaunchIntent,

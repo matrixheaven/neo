@@ -6,7 +6,7 @@
 
 use neo_agent_core::workflow::{
     WorkflowErrorCode, WorkflowId, WorkflowRunMetadata, WorkflowRuntime, WorkflowState,
-    find_incomplete_invocations, read_journal, read_run_metadata,
+    find_incomplete_record_invocations, read_journal, read_run_metadata,
 };
 use std::path::{Path, PathBuf};
 
@@ -53,7 +53,7 @@ fn v1_fixtures_decode_current_format() {
         read_journal(&completed.join("journal.jsonl")).expect("completed V1 journal decodes");
     assert_eq!(completed_journal.len(), 4);
     assert!(
-        find_incomplete_invocations(&completed_journal).is_empty(),
+        find_incomplete_record_invocations(&completed_journal).is_empty(),
         "completed fixture must have no incomplete invocations"
     );
     assert!(matches!(
@@ -67,7 +67,7 @@ fn v1_fixtures_decode_current_format() {
     let incomplete_journal =
         read_journal(&incomplete.join("journal.jsonl")).expect("incomplete V1 journal decodes");
     assert_eq!(incomplete_journal.len(), 2);
-    let incomplete_inv = find_incomplete_invocations(&incomplete_journal);
+    let incomplete_inv = find_incomplete_record_invocations(&incomplete_journal);
     assert_eq!(incomplete_inv.len(), 1);
     assert_eq!(incomplete_inv[0].invocation_id, "inv_open");
 
@@ -180,7 +180,7 @@ async fn v1_nonterminal_resume_requires_linked_upgrade_without_append() {
 
     // Incomplete invocation remains durable and un-finished (never relaunched).
     let records = read_journal(&run_dir.join("journal.jsonl")).unwrap();
-    let incomplete = find_incomplete_invocations(&records);
+    let incomplete = find_incomplete_record_invocations(&records);
     assert_eq!(incomplete.len(), 1);
     assert_eq!(incomplete[0].invocation_id, "inv_open");
 }

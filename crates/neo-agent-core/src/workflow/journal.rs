@@ -24,8 +24,8 @@ pub const JOURNAL_FORMAT_V3: u32 = 3;
 pub mod journal_scan;
 
 pub use journal_scan::{
-    JournalPage, JournalScanIndex, collect_journal_v1, collect_journal_v2, scan_journal_v1_index,
-    scan_journal_v2, scan_journal_v2_page,
+    JournalPage, JournalScanIndex, collect_journal, collect_journal_v1, scan_journal,
+    scan_journal_page, scan_journal_v1_index,
 };
 
 // ---------------------------------------------------------------------------
@@ -72,7 +72,7 @@ impl JournalRecord {
 }
 
 // ---------------------------------------------------------------------------
-// V2 versioned envelope + record families
+// Versioned envelope + record families
 // ---------------------------------------------------------------------------
 
 /// Hash-addressed payload reference for large journal bodies.
@@ -324,7 +324,7 @@ pub enum JournalPayload {
 }
 
 /// Validate envelope-local invariants (version, hash vs inline input).
-pub fn validate_v2_envelope(envelope: &JournalEnvelope) -> Result<(), WorkflowError> {
+pub fn validate_envelope(envelope: &JournalEnvelope) -> Result<(), WorkflowError> {
     if envelope.version != JOURNAL_FORMAT_V2 && envelope.version != JOURNAL_FORMAT_V3 {
         return Err(WorkflowError::coded(
             WorkflowErrorCode::JournalCorrupt,
@@ -398,10 +398,10 @@ pub fn canonicalize_json(value: &serde_json::Value) -> serde_json::Value {
 }
 
 // ---------------------------------------------------------------------------
-// V1 writer (runtime path until V2 migration tasks land)
+// Read-only record writer retained for pre-canonical journals.
 // ---------------------------------------------------------------------------
 
-pub struct JournalWriter {
+pub struct JournalRecordWriter {
     file: std::fs::File,
     next_seq: u64,
     bytes_written: u64,
@@ -409,7 +409,7 @@ pub struct JournalWriter {
     finished_invocations: HashSet<String>,
 }
 
-impl JournalWriter {
+impl JournalRecordWriter {
     pub fn open(path: &Path) -> Result<Self, WorkflowError> {
         if let Some(parent) = path.parent() {
             atomic_file::ensure_safe_directory_tree(parent)
@@ -577,10 +577,10 @@ impl JournalWriter {
 }
 
 // ---------------------------------------------------------------------------
-// V2 writer — sole owner of versioned appends
+// Canonical writer — sole owner of versioned appends
 // ---------------------------------------------------------------------------
 
-pub struct JournalV2Writer {
+pub struct JournalWriter {
     file: std::fs::File,
     run_id: WorkflowId,
     next_seq: u64,
@@ -588,8 +588,8 @@ pub struct JournalV2Writer {
     index: JournalScanIndex,
 }
 
-impl JournalV2Writer {
-    /// Open or create a V2 journal bound to `run_id`.
+impl JournalWriter {
+    /// Open or create the canonical journal bound to `run_id`.
     ///
     /// Applies torn-tail recovery (normalize valid unterminated final record or
     /// quarantine+truncate invalid EOF suffix) before indexing. Fail-closed
@@ -619,7 +619,7 @@ impl JournalV2Writer {
         }
 
         let report = if path.exists() && std::fs::metadata(path).map_or(0, |m| m.len()) > 0 {
-            crate::workflow::recovery::recover_journal_v2(path, Some(&run_id))?
+            crate::workflow::recovery::recover_journal(path, Some(&run_id))?
         } else {
             crate::workflow::recovery::JournalRecoveryReport {
                 action: crate::workflow::recovery::JournalRecoveryAction::None,
@@ -642,7 +642,7 @@ impl JournalV2Writer {
         let index = if report.index.run_id.is_some() || report.index.record_count > 0 {
             report.index.clone()
         } else if path.exists() && std::fs::metadata(path).map_or(0, |m| m.len()) > 0 {
-            scan_journal_v2(path, Some(&run_id))?
+            scan_journal(path, Some(&run_id))?
         } else {
             JournalScanIndex {
                 run_id: Some(run_id.clone()),
@@ -670,12 +670,6 @@ impl JournalV2Writer {
         envelope: &JournalEnvelope,
         limits: &WorkflowLimits,
     ) -> Result<u64, WorkflowError> {
-        if envelope.version != JOURNAL_FORMAT_V2 {
-            return Err(WorkflowError::coded(
-                WorkflowErrorCode::JournalCorrupt,
-                format!("unknown journal format version {}", envelope.version),
-            ));
-        }
         if envelope.seq != self.next_seq {
             return Err(WorkflowError::coded(
                 WorkflowErrorCode::JournalCorrupt,
@@ -695,11 +689,11 @@ impl JournalV2Writer {
                 ),
             ));
         }
-        validate_v2_envelope(envelope)?;
+        validate_envelope(envelope)?;
         // Apply observe against a temporary index clone for pre-write checks.
         let mut probe = self.index.clone();
-        journal_scan::observe_v2_envelope(envelope, &mut probe)?;
-        journal_scan::finalize_v2_index(&probe)?;
+        journal_scan::observe_envelope(envelope, &mut probe)?;
+        journal_scan::finalize_index(&probe)?;
 
         let line =
             serde_json::to_string(envelope).map_err(|e| WorkflowError::Journal(e.to_string()))?;
@@ -844,7 +838,7 @@ pub struct IncompleteInvocation {
 }
 
 #[must_use]
-pub fn find_incomplete_invocations(records: &[JournalRecord]) -> Vec<IncompleteInvocation> {
+pub fn find_incomplete_record_invocations(records: &[JournalRecord]) -> Vec<IncompleteInvocation> {
     let mut started: Vec<IncompleteInvocation> = Vec::new();
     let mut finished_ids: std::collections::HashSet<&str> = std::collections::HashSet::new();
 
@@ -879,7 +873,7 @@ pub fn find_incomplete_invocations(records: &[JournalRecord]) -> Vec<IncompleteI
 
 /// Incomplete V2 starts (durable InvocationStarted without InvocationFinished).
 #[must_use]
-pub fn find_incomplete_invocations_v2(envelopes: &[JournalEnvelope]) -> Vec<IncompleteInvocation> {
+pub fn find_incomplete_invocations(envelopes: &[JournalEnvelope]) -> Vec<IncompleteInvocation> {
     let mut started: Vec<IncompleteInvocation> = Vec::new();
     let mut finished_ids: std::collections::HashSet<&str> = std::collections::HashSet::new();
 

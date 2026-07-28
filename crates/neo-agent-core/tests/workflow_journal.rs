@@ -1,7 +1,7 @@
 use neo_agent_core::workflow::{
-    JournalRecord, JournalWriter, WorkflowActor, WorkflowId, WorkflowInvocationKind,
+    JournalRecord, JournalRecordWriter, WorkflowActor, WorkflowId, WorkflowInvocationKind,
     WorkflowInvocationOutcome, WorkflowLimits, WorkflowOutcomeStatus, WorkflowPhase,
-    WorkflowRunMetadata, WorkflowState, canonical_input_hash, find_incomplete_invocations,
+    WorkflowRunMetadata, WorkflowState, canonical_input_hash, find_incomplete_record_invocations,
     journal_path, read_journal, read_run_metadata, run_dir, write_run_metadata,
 };
 use serde_json::json;
@@ -84,7 +84,7 @@ fn journal_writes_and_reads_append_only_records() {
     let jpath = dir.path().join("journal.jsonl");
     let limits = test_limits();
 
-    let mut writer = JournalWriter::open(&jpath).unwrap();
+    let mut writer = JournalRecordWriter::open(&jpath).unwrap();
     writer
         .append(
             &state_changed(0, WorkflowState::Running, WorkflowState::Running),
@@ -105,7 +105,7 @@ fn journal_writes_and_reads_append_only_records() {
     assert_eq!(records[2].seq(), 2);
 
     // Reopen and continue appending
-    let mut writer2 = JournalWriter::open(&jpath).unwrap();
+    let mut writer2 = JournalRecordWriter::open(&jpath).unwrap();
     assert_eq!(writer2.next_seq(), 3);
     writer2
         .append(
@@ -143,7 +143,7 @@ fn incomplete_invocation_is_detected_without_reexecution() {
     let jpath = dir.path().join("journal.jsonl");
     let limits = test_limits();
 
-    let mut writer = JournalWriter::open(&jpath).unwrap();
+    let mut writer = JournalRecordWriter::open(&jpath).unwrap();
     writer
         .append(
             &state_changed(0, WorkflowState::Running, WorkflowState::Running),
@@ -162,7 +162,7 @@ fn incomplete_invocation_is_detected_without_reexecution() {
         .unwrap();
 
     let records = read_journal(&jpath).unwrap();
-    let incomplete = find_incomplete_invocations(&records);
+    let incomplete = find_incomplete_record_invocations(&records);
     assert_eq!(incomplete.len(), 1);
     assert_eq!(incomplete[0].invocation_id, "inv_2");
     assert_eq!(incomplete[0].call_index, 1);
@@ -208,7 +208,7 @@ fn journal_append_rejects_wrong_sequence_and_hash_without_writing() {
     let dir = tempfile::tempdir().unwrap();
     let jpath = dir.path().join("journal.jsonl");
     let limits = test_limits();
-    let mut writer = JournalWriter::open(&jpath).unwrap();
+    let mut writer = JournalRecordWriter::open(&jpath).unwrap();
     let wrong_seq = state_changed(1, WorkflowState::Running, WorkflowState::Running);
     let err = writer.append(&wrong_seq, &limits).unwrap_err();
     assert!(err.to_string().contains("expected 0, got 1"));
@@ -232,7 +232,7 @@ fn journal_rejects_incoherent_invocation_finishes() {
     let dir = tempfile::tempdir().unwrap();
     let jpath = dir.path().join("journal.jsonl");
     let limits = test_limits();
-    let mut writer = JournalWriter::open(&jpath).unwrap();
+    let mut writer = JournalRecordWriter::open(&jpath).unwrap();
     assert!(!writer.has_incomplete_invocations());
 
     let err = writer
@@ -293,7 +293,7 @@ fn journal_rejects_oversized_record() {
         ..WorkflowLimits::default()
     };
 
-    let mut writer = JournalWriter::open(&jpath).unwrap();
+    let mut writer = JournalRecordWriter::open(&jpath).unwrap();
     let canonical_input = json!({"task": "x".repeat(200)});
     let big_record = JournalRecord::InvocationStarted {
         seq: 0,
@@ -323,7 +323,7 @@ fn journal_reservation_prevents_exceeding_total() {
         journal_total_bytes: exact_total,
         ..WorkflowLimits::default()
     };
-    let mut exact_writer = JournalWriter::open(&exact_path).unwrap();
+    let mut exact_writer = JournalRecordWriter::open(&exact_path).unwrap();
     assert!(
         exact_writer
             .has_reservation_for_invocation(&start, &exact_limits)
@@ -337,7 +337,7 @@ fn journal_reservation_prevents_exceeding_total() {
         journal_total_bytes: exact_total - 1,
         ..exact_limits
     };
-    let mut short_writer = JournalWriter::open(&short_path).unwrap();
+    let mut short_writer = JournalRecordWriter::open(&short_path).unwrap();
     assert!(
         !short_writer
             .has_reservation_for_invocation(&start, &short_limits)

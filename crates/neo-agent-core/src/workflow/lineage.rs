@@ -20,7 +20,7 @@ use crate::workflow::artifacts::{ArtifactKind, ArtifactStore, ArtifactValue, art
 use crate::workflow::error::{WorkflowError, WorkflowErrorCode};
 use crate::workflow::journal::{
     self, JournalEnvelope, JournalPayload, JournalRecord, find_incomplete_invocations,
-    find_incomplete_invocations_v2,
+    find_incomplete_record_invocations,
 };
 use crate::workflow::limits::WorkflowLimits;
 use crate::workflow::state::{
@@ -113,8 +113,8 @@ pub fn compute_prefix_digest_v1(
     Ok(format!("{:x}", hasher.finalize()))
 }
 
-/// Running SHA-256 over the durable V2 journal prefix through `through_seq` (inclusive).
-pub fn compute_prefix_digest_v2(
+/// Running SHA-256 over the durable journal prefix through `through_seq` (inclusive).
+pub fn compute_prefix_digest(
     envelopes: &[JournalEnvelope],
     through_seq: u64,
 ) -> Result<String, WorkflowError> {
@@ -155,7 +155,7 @@ pub fn latest_eligible_sequence_v1(records: &[JournalRecord]) -> Result<u64, Wor
     for record in records {
         let seq = record.seq();
         let prefix: Vec<_> = records.iter().filter(|r| r.seq() <= seq).cloned().collect();
-        if find_incomplete_invocations(&prefix).is_empty() {
+        if find_incomplete_record_invocations(&prefix).is_empty() {
             best = Some(seq);
         }
     }
@@ -168,7 +168,7 @@ pub fn latest_eligible_sequence_v1(records: &[JournalRecord]) -> Result<u64, Wor
 }
 
 /// Latest sequence with a complete (no incomplete host-call) V2 journal prefix.
-pub fn latest_eligible_sequence_v2(envelopes: &[JournalEnvelope]) -> Result<u64, WorkflowError> {
+pub fn latest_eligible_sequence(envelopes: &[JournalEnvelope]) -> Result<u64, WorkflowError> {
     if envelopes.is_empty() {
         return Err(WorkflowError::coded(
             WorkflowErrorCode::LineageMismatch,
@@ -179,7 +179,7 @@ pub fn latest_eligible_sequence_v2(envelopes: &[JournalEnvelope]) -> Result<u64,
     for envelope in envelopes {
         let seq = envelope.seq;
         let prefix: Vec<_> = envelopes.iter().filter(|e| e.seq <= seq).cloned().collect();
-        if find_incomplete_invocations_v2(&prefix).is_empty() {
+        if find_incomplete_invocations(&prefix).is_empty() {
             best = Some(seq);
         }
     }
@@ -206,7 +206,7 @@ fn ensure_complete_prefix_v1(
             format!("checkpoint sequence {through_seq} is not present in parent journal"),
         ));
     }
-    let incomplete = find_incomplete_invocations(&prefix);
+    let incomplete = find_incomplete_record_invocations(&prefix);
     if !incomplete.is_empty() {
         return Err(WorkflowError::coded(
             WorkflowErrorCode::LineageMismatch,
@@ -219,7 +219,7 @@ fn ensure_complete_prefix_v1(
     Ok(())
 }
 
-fn ensure_complete_prefix_v2(
+fn ensure_complete_prefix(
     envelopes: &[JournalEnvelope],
     through_seq: u64,
 ) -> Result<(), WorkflowError> {
@@ -234,7 +234,7 @@ fn ensure_complete_prefix_v2(
             format!("checkpoint sequence {through_seq} is not present in parent journal"),
         ));
     }
-    let incomplete = find_incomplete_invocations_v2(&prefix);
+    let incomplete = find_incomplete_invocations(&prefix);
     if !incomplete.is_empty() {
         return Err(WorkflowError::coded(
             WorkflowErrorCode::LineageMismatch,
@@ -339,7 +339,7 @@ pub fn extract_verified_prefix_v1(
 }
 
 /// Build a verified V2 prefix for linked import, including referenced artifacts.
-pub fn extract_verified_prefix_v2(
+pub fn extract_verified_prefix(
     parent_meta: &WorkflowRunMetadata,
     parent_run_dir: &Path,
     envelopes: &[JournalEnvelope],
@@ -354,8 +354,8 @@ pub fn extract_verified_prefix_v2(
                     "checkpoint run id does not match parent",
                 ));
             }
-            ensure_complete_prefix_v2(envelopes, cp.sequence)?;
-            let digest = compute_prefix_digest_v2(envelopes, cp.sequence)?;
+            ensure_complete_prefix(envelopes, cp.sequence)?;
+            let digest = compute_prefix_digest(envelopes, cp.sequence)?;
             if digest != cp.prefix_digest {
                 return Err(WorkflowError::coded(
                     WorkflowErrorCode::LineageMismatch,
@@ -364,11 +364,11 @@ pub fn extract_verified_prefix_v2(
             }
             cp.sequence
         }
-        None => latest_eligible_sequence_v2(envelopes)?,
+        None => latest_eligible_sequence(envelopes)?,
     };
 
-    ensure_complete_prefix_v2(envelopes, through_seq)?;
-    let digest = compute_prefix_digest_v2(envelopes, through_seq)?;
+    ensure_complete_prefix(envelopes, through_seq)?;
+    let digest = compute_prefix_digest(envelopes, through_seq)?;
     let checkpoint = WorkflowCheckpoint::new(parent_meta.run_id.clone(), through_seq, digest)?;
 
     let finished: HashMap<&str, &WorkflowInvocationOutcome> = envelopes

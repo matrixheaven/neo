@@ -12,7 +12,7 @@ use neo_agent_core::runtime::{
 use neo_agent_core::tools::{
     ProcessSupervisor, Tool, ToolContext, ToolFuture, ToolRegistry, ToolResult,
 };
-use neo_agent_core::workflow::journal::{JournalPayload, collect_journal_v2};
+use neo_agent_core::workflow::journal::{JournalPayload, collect_journal};
 use neo_agent_core::workflow::{
     WorkflowActor, WorkflowInvocationContext, WorkflowInvocationKind, WorkflowInvocationOutcome,
     WorkflowLaunchRequest, WorkflowLimits, WorkflowOutcomeStatus, WorkflowRuntime, WorkflowState,
@@ -677,7 +677,7 @@ async fn instruction_replan_blocks_effect_without_model_turn() {
         snapshot.terminal_reason.as_deref(),
         Some("instruction_replan_required")
     );
-    let envelopes = collect_journal_v2(
+    let envelopes = collect_journal(
         &journal_path(temp.path(), &workflow.run_id),
         Some(&workflow.run_id),
     )
@@ -1187,7 +1187,7 @@ async fn delegate_usage_and_child_ref_are_journaled_and_aggregated() {
     );
     let output = workflow.output().await.expect("output");
     assert_eq!(output.actual_usage, Some(usage));
-    let envelopes = collect_journal_v2(
+    let envelopes = collect_journal(
         &journal_path(dir.path(), &workflow.run_id),
         Some(&workflow.run_id),
     )

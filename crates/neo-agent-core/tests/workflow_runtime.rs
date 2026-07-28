@@ -6,7 +6,7 @@ use std::time::Duration;
 use neo_agent_core::AgentTokenUsage;
 use neo_agent_core::runtime::WorkflowDispatchResolver;
 use neo_agent_core::workflow::journal::{
-    JournalEnvelope, JournalPayload, JournalV2Writer, collect_journal_v2,
+    JournalEnvelope, JournalPayload, JournalWriter, collect_journal,
 };
 use neo_agent_core::workflow::{
     WorkflowActor, WorkflowChildRef, WorkflowHandle, WorkflowInterruptionReason,
@@ -148,7 +148,7 @@ async fn oversized_invocation_outcome_terminalizes_without_stranding_running_sta
         snapshot.actual_usage.expect("snapshot usage").input_tokens,
         37
     );
-    let records = collect_journal_v2(&journal_path(dir.path(), &handle.run_id), None).unwrap();
+    let records = collect_journal(&journal_path(dir.path(), &handle.run_id), None).unwrap();
     let compact_outcome = records
         .iter()
         .find_map(|record| match &record.payload {
@@ -210,7 +210,7 @@ async fn oversized_invocation_outcome_terminalizes_without_stranding_running_sta
     let recovered_output = recovered[0].output().await.unwrap();
     assert!(recovered_output.invocations.is_empty());
     let recovered_records =
-        collect_journal_v2(&journal_path(dir.path(), &handle.run_id), None).unwrap();
+        collect_journal(&journal_path(dir.path(), &handle.run_id), None).unwrap();
     let recovered_outcome = recovered_records
         .iter()
         .find_map(|record| match &record.payload {
@@ -265,7 +265,7 @@ async fn durable_create_waits_for_explicit_worker_start() {
                     assert!(run_dir.join("run.json").exists());
                     // Durable create + worker_start leave RunCreated and Running transition
                     // before any host-effect invocation.
-                    let envelopes = collect_journal_v2(&run_dir.join("journal.jsonl"), None)?;
+                    let envelopes = collect_journal(&run_dir.join("journal.jsonl"), None)?;
                     assert!(
                         !envelopes.is_empty(),
                         "expected durable journal head before worker body"
@@ -413,7 +413,7 @@ async fn worker_start_failure_is_durably_terminalized() {
 
     assert_eq!(handle.snapshot().await.state, WorkflowState::Failed);
     assert!(
-        collect_journal_v2(&journal_path(dir.path(), &handle.run_id), None)
+        collect_journal(&journal_path(dir.path(), &handle.run_id), None)
             .unwrap()
             .iter()
             .any(|record| matches!(
@@ -445,7 +445,7 @@ async fn invoke_persists_start_before_effect_and_finish_after_effect() {
                 let observed_start = Arc::clone(&observed_start);
                 move |invocation| async move {
                     observed_start.store(
-                        collect_journal_v2(&path, None)
+                        collect_journal(&path, None)
                             .unwrap()
                             .last()
                             .is_some_and(|env| {
@@ -466,7 +466,7 @@ async fn invoke_persists_start_before_effect_and_finish_after_effect() {
 
     assert!(outcome.ok);
     assert!(observed_start.load(Ordering::Acquire));
-    let records = collect_journal_v2(&path, None).unwrap();
+    let records = collect_journal(&path, None).unwrap();
     assert!(
         records
             .iter()
@@ -522,7 +522,7 @@ async fn instruction_replan_interruption_durably_pauses_workflow() {
         snapshot.terminal_reason.as_deref(),
         Some("instruction_replan_required")
     );
-    assert!(collect_journal_v2(&path, None).unwrap().iter().any(
+    assert!(collect_journal(&path, None).unwrap().iter().any(
         |record| matches!(&record.payload, JournalPayload::StateChanged {
                 new: WorkflowState::Paused,
                 reason,
@@ -565,7 +565,7 @@ async fn projected_instruction_reason_without_typed_interruption_does_not_pause(
 
     assert_eq!(handle.snapshot().await.state, WorkflowState::Running);
     assert!(
-        !collect_journal_v2(&journal_path(dir.path(), &handle.run_id), None)
+        !collect_journal(&journal_path(dir.path(), &handle.run_id), None)
             .unwrap()
             .iter()
             .any(|record| matches!(
@@ -709,12 +709,12 @@ async fn incomplete_invocation_is_interrupted_and_never_reexecuted() {
     let handle = create_running_run(&runtime, dir.path()).await;
     let path = journal_path(dir.path(), &handle.run_id);
     let input = serde_json::json!({"task": "audit"});
-    let existing = collect_journal_v2(&path, None).unwrap();
+    let existing = collect_journal(&path, None).unwrap();
     let next_seq = existing.last().map_or(0, |e| e.seq + 1);
     let run_id = existing
         .first()
         .map_or_else(|| handle.run_id.clone(), |e| e.run_id.clone());
-    let mut writer = JournalV2Writer::open(&path, run_id.clone()).unwrap();
+    let mut writer = JournalWriter::open(&path, run_id.clone()).unwrap();
     let started = JournalEnvelope::new(
         next_seq,
         2,
@@ -771,12 +771,12 @@ async fn recovery_resolver_adopts_known_terminal_child_result() {
     let handle = create_run(&runtime, dir.path()).await;
     let path = journal_path(dir.path(), &handle.run_id);
     let input = serde_json::json!({"task": "audit"});
-    let existing = collect_journal_v2(&path, None).unwrap();
+    let existing = collect_journal(&path, None).unwrap();
     let next_seq = existing.last().map_or(0, |e| e.seq + 1);
     let run_id = existing
         .first()
         .map_or_else(|| handle.run_id.clone(), |e| e.run_id.clone());
-    let mut writer = JournalV2Writer::open(&path, run_id.clone()).unwrap();
+    let mut writer = JournalWriter::open(&path, run_id.clone()).unwrap();
     let started = JournalEnvelope::new(
         next_seq,
         2,
@@ -801,7 +801,7 @@ async fn recovery_resolver_adopts_known_terminal_child_result() {
         })
         .unwrap();
     recovered.rehydrate(dir.path()).await.unwrap();
-    assert!(collect_journal_v2(&path, None).unwrap().iter().any(|record| {
+    assert!(collect_journal(&path, None).unwrap().iter().any(|record| {
         matches!(&record.payload, JournalPayload::InvocationFinished { invocation_id, outcome, .. }
             if invocation_id == "child_7" && outcome.summary == "adopted child")
     }));
@@ -853,7 +853,7 @@ async fn pause_reaches_effect_boundary_and_resume_restarts_same_run() {
     handle.pause(WorkflowActor::Human).await.unwrap();
     wait_for_state(&handle, WorkflowState::Paused).await;
     assert!(
-        collect_journal_v2(&journal_path(dir.path(), &handle.run_id), None)
+        collect_journal(&journal_path(dir.path(), &handle.run_id), None)
             .unwrap()
             .iter()
             .any(|record| {
@@ -938,7 +938,7 @@ async fn stop_cancels_active_effect_and_terminalizes_after_finish_record() {
     wait_for_state(&handle, WorkflowState::Cancelled).await;
     assert!(effect_settled.load(Ordering::Acquire));
 
-    let records = collect_journal_v2(&journal_path(dir.path(), &handle.run_id), None).unwrap();
+    let records = collect_journal(&journal_path(dir.path(), &handle.run_id), None).unwrap();
     let finish = records
         .iter()
         .position(|record| matches!(&record.payload, JournalPayload::InvocationFinished { .. }))
@@ -993,12 +993,12 @@ async fn rehydrate_isolates_recovery_append_failure() {
     let bad_id = bad_handle.run_id.clone();
     let bad_path = journal_path(dir.path(), &bad_id);
     let input = serde_json::json!({"task": "stuck"});
-    let existing = collect_journal_v2(&bad_path, None).unwrap();
+    let existing = collect_journal(&bad_path, None).unwrap();
     let next_seq = existing.last().map_or(0, |e| e.seq + 1);
     let run_id = existing
         .first()
         .map_or_else(|| bad_id.clone(), |e| e.run_id.clone());
-    let mut writer = JournalV2Writer::open(&bad_path, run_id.clone()).unwrap();
+    let mut writer = JournalWriter::open(&bad_path, run_id.clone()).unwrap();
     let started = JournalEnvelope::new(
         next_seq,
         2,
@@ -1017,12 +1017,12 @@ async fn rehydrate_isolates_recovery_append_failure() {
     let good_handle = create_run(&runtime, dir.path()).await;
     let good_id = good_handle.run_id.clone();
     let good_path = journal_path(dir.path(), &good_id);
-    let existing = collect_journal_v2(&good_path, None).unwrap();
+    let existing = collect_journal(&good_path, None).unwrap();
     let next_seq = existing.last().map_or(0, |e| e.seq + 1);
     let run_id = existing
         .first()
         .map_or_else(|| good_id.clone(), |e| e.run_id.clone());
-    let mut good_writer = JournalV2Writer::open(&good_path, run_id.clone()).unwrap();
+    let mut good_writer = JournalWriter::open(&good_path, run_id.clone()).unwrap();
     let changed = JournalEnvelope::new(
         next_seq,
         2,
@@ -1079,7 +1079,7 @@ async fn rehydrate_isolates_recovery_append_failure() {
 
     // Recovery must not invent a finish record when the recovery append failed.
     assert!(
-        !collect_journal_v2(&bad_path, None)
+        !collect_journal(&bad_path, None)
             .unwrap()
             .iter()
             .any(|record| {
@@ -1137,7 +1137,7 @@ async fn workflow_worker_panic_finishes_invocation_before_failed_state() {
     assert_eq!(snapshot.state, WorkflowState::Failed);
     assert_eq!(snapshot.terminal_reason.as_deref(), Some("worker_panicked"));
 
-    let records = collect_journal_v2(&path, None).unwrap();
+    let records = collect_journal(&path, None).unwrap();
     let finished_idx = records
         .iter()
         .position(|record| {

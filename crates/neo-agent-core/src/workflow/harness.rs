@@ -25,7 +25,7 @@ use crate::tools::{
 use crate::workflow::artifacts::{ArtifactKind, ArtifactValue};
 use crate::workflow::definition::ResolvedWorkflowDefinition;
 use crate::workflow::error::{WorkflowError, WorkflowErrorCode};
-use crate::workflow::journal::{JournalPayload, collect_journal_v2, run_dir};
+use crate::workflow::journal::{JournalPayload, collect_journal, run_dir};
 use crate::workflow::lua::LuaWorkflowRunner;
 use crate::workflow::output::FinalResultBody;
 use crate::workflow::state::{WorkflowActor, WorkflowInvocationKind, WorkflowState};
@@ -412,7 +412,7 @@ pub async fn run_fixture_retained(
     let output = handle.output().await?;
     let run_directory = run_dir(&session_dir, &handle.run_id);
     let journal_path = run_directory.join("journal.jsonl");
-    let envelopes = collect_journal_v2(&journal_path, Some(&handle.run_id))?;
+    let envelopes = collect_journal(&journal_path, Some(&handle.run_id))?;
 
     let invocation_kinds: Vec<String> = envelopes
         .iter()

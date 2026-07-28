@@ -5,8 +5,7 @@ use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::time::Duration;
 
 use neo_agent_core::workflow::journal::{
-    JournalEnvelope, JournalPayload, JournalV2Writer, collect_journal_v2, read_run_metadata,
-    run_dir,
+    JournalEnvelope, JournalPayload, JournalWriter, collect_journal, read_run_metadata, run_dir,
 };
 use neo_agent_core::workflow::{
     WORKFLOW_NAME_MAX_LEN, WorkflowActor, WorkflowArtifactId, WorkflowCheckpoint, WorkflowError,
@@ -175,7 +174,7 @@ async fn v2_create_is_durable_and_queued_before_registration() {
     assert_eq!(meta.name, "review");
 
     let journal_path = run_dir(dir.path(), &handle.run_id).join("journal.jsonl");
-    let envelopes = collect_journal_v2(&journal_path, Some(&handle.run_id)).unwrap();
+    let envelopes = collect_journal(&journal_path, Some(&handle.run_id)).unwrap();
     assert_eq!(envelopes.len(), 1);
     assert!(matches!(
         envelopes[0].payload,
@@ -329,7 +328,7 @@ async fn external_effect_is_never_executed_before_durable_start() {
     );
 
     let journal_path = run_dir(dir.path(), &handle.run_id).join("journal.jsonl");
-    let envelopes = collect_journal_v2(&journal_path, Some(&handle.run_id)).unwrap();
+    let envelopes = collect_journal(&journal_path, Some(&handle.run_id)).unwrap();
     let started = envelopes
         .iter()
         .any(|e| matches!(e.payload, JournalPayload::InvocationStarted { .. }));
@@ -371,7 +370,7 @@ async fn crash_after_final_result_appends_only_completed_state() {
         .unwrap();
 
     let journal_path = run_path.join("journal.jsonl");
-    let mut writer = JournalV2Writer::open(&journal_path, run_id.clone()).unwrap();
+    let mut writer = JournalWriter::open(&journal_path, run_id.clone()).unwrap();
     let limits = WorkflowLimits::default();
     let mut seq = 0u64;
     let mut append = |payload: JournalPayload| {
@@ -399,7 +398,7 @@ async fn crash_after_final_result_appends_only_completed_state() {
     });
     drop(writer);
 
-    let before = collect_journal_v2(&journal_path, Some(&run_id)).unwrap();
+    let before = collect_journal(&journal_path, Some(&run_id)).unwrap();
     assert_eq!(before.len(), 3);
     assert!(before.iter().all(|e| {
         !matches!(
@@ -418,7 +417,7 @@ async fn crash_after_final_result_appends_only_completed_state() {
     assert_eq!(recovered.run_id, run_id);
     assert_eq!(recovered.snapshot().await.state, WorkflowState::Completed);
 
-    let after = collect_journal_v2(&journal_path, Some(&run_id)).unwrap();
+    let after = collect_journal(&journal_path, Some(&run_id)).unwrap();
     assert_eq!(
         after.len(),
         4,
@@ -447,7 +446,7 @@ async fn crash_after_final_result_appends_only_completed_state() {
     let runtime2 = WorkflowRuntime::default();
     let handles2 = runtime2.rehydrate(session).await.unwrap();
     assert_eq!(handles2[0].snapshot().await.state, WorkflowState::Completed);
-    let after2 = collect_journal_v2(&journal_path, Some(&run_id)).unwrap();
+    let after2 = collect_journal(&journal_path, Some(&run_id)).unwrap();
     assert_eq!(after2.len(), 4);
 }
 
@@ -482,7 +481,7 @@ async fn ordinary_resume_cannot_bypass_awaiting_user() {
     neo_agent_core::workflow::write_run_metadata(&run_path, &meta, &WorkflowLimits::default())
         .unwrap();
     let journal_path = run_path.join("journal.jsonl");
-    let mut writer = JournalV2Writer::open(&journal_path, run_id.clone()).unwrap();
+    let mut writer = JournalWriter::open(&journal_path, run_id.clone()).unwrap();
     let limits = WorkflowLimits::default();
     for (seq, payload) in [
         JournalPayload::RunCreated {
@@ -600,7 +599,7 @@ async fn worker_panic_clears_active_state_and_releases_resources() {
 
     // Journal must finish the open invocation before Failed.
     let journal_path = run_dir(dir.path(), &handle.run_id).join("journal.jsonl");
-    let envelopes = collect_journal_v2(&journal_path, Some(&handle.run_id)).unwrap();
+    let envelopes = collect_journal(&journal_path, Some(&handle.run_id)).unwrap();
     let finished = envelopes.iter().any(|env| {
         matches!(
             &env.payload,
@@ -644,7 +643,7 @@ async fn rehydrate_starts_no_worker_and_preserves_awaiting_user() {
     neo_agent_core::workflow::write_run_metadata(&run_path, &meta, &WorkflowLimits::default())
         .unwrap();
     let journal_path = run_path.join("journal.jsonl");
-    let mut writer = JournalV2Writer::open(&journal_path, run_id.clone()).unwrap();
+    let mut writer = JournalWriter::open(&journal_path, run_id.clone()).unwrap();
     let limits = WorkflowLimits::default();
     for (seq, payload) in [
         JournalPayload::RunCreated {

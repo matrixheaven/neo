@@ -812,7 +812,7 @@ impl BackgroundTaskManager {
                     tool: "TaskFork".to_owned(),
                     message: format!("materials for checkpoint failed: {error}"),
                 })?;
-            let envelopes = crate::workflow::journal::collect_journal_v2(
+            let envelopes = crate::workflow::journal::collect_journal(
                 &materials.journal_path,
                 Some(&parent.run_id),
             )
@@ -820,11 +820,12 @@ impl BackgroundTaskManager {
                 tool: "TaskFork".to_owned(),
                 message: format!("journal read for checkpoint failed: {error}"),
             })?;
-            let digest = crate::workflow::runtime::compute_prefix_digest_v2(&envelopes, seq)
-                .map_err(|error| ToolError::InvalidInput {
+            let digest = crate::workflow::runtime::compute_prefix_digest(&envelopes, seq).map_err(
+                |error| ToolError::InvalidInput {
                     tool: "TaskFork".to_owned(),
                     message: format!("checkpoint digest failed: {error}"),
-                })?;
+                },
+            )?;
             Some(
                 crate::workflow::WorkflowCheckpoint::new(parent.run_id.clone(), seq, digest)
                     .map_err(|error| ToolError::InvalidInput {
@@ -3095,7 +3096,7 @@ pub fn format_collected_answers(questions: &[QuestionEventData], answers: &[Stri
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::workflow::journal::{JournalPayload, collect_journal_v2};
+    use crate::workflow::journal::{JournalPayload, collect_journal};
     use crate::workflow::{
         WorkflowActor, WorkflowId, WorkflowLaunchRequest, WorkflowLimits, WorkflowPhase,
         WorkflowRuntime, WorkflowSnapshot, WorkflowState,
@@ -3232,7 +3233,7 @@ mod tests {
             "cancelled"
         );
 
-        let records = collect_journal_v2(
+        let records = collect_journal(
             &crate::workflow::journal_path(session.path(), &crate::workflow::WorkflowId(task_id)),
             None,
         )

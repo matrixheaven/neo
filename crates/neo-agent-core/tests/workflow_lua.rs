@@ -6,7 +6,7 @@ use neo_agent_core::runtime::WorkflowDispatchHandle;
 use neo_agent_core::tools::{
     ProcessSupervisor, Tool, ToolContext, ToolFuture, ToolRegistry, ToolResult,
 };
-use neo_agent_core::workflow::journal::{JournalPayload, collect_journal_v2, run_dir};
+use neo_agent_core::workflow::journal::{JournalPayload, collect_journal, run_dir};
 use neo_agent_core::workflow::{
     LuaWorkflowRunner, WorkflowActor, WorkflowHandle, WorkflowInvocationKind, WorkflowLimits,
     WorkflowPhase, WorkflowRuntime,
@@ -94,7 +94,7 @@ fn journal_path(fixture: &RunnerFixture) -> std::path::PathBuf {
 }
 
 fn v2_started_kinds(fixture: &RunnerFixture) -> Vec<WorkflowInvocationKind> {
-    let envelopes = collect_journal_v2(&journal_path(fixture), Some(&fixture.handle.run_id))
+    let envelopes = collect_journal(&journal_path(fixture), Some(&fixture.handle.run_id))
         .expect("collect v2 journal");
     envelopes
         .into_iter()
@@ -106,7 +106,7 @@ fn v2_started_kinds(fixture: &RunnerFixture) -> Vec<WorkflowInvocationKind> {
 }
 
 fn v2_started_inputs(fixture: &RunnerFixture) -> Vec<serde_json::Value> {
-    let envelopes = collect_journal_v2(&journal_path(fixture), Some(&fixture.handle.run_id))
+    let envelopes = collect_journal(&journal_path(fixture), Some(&fixture.handle.run_id))
         .expect("collect v2 journal");
     envelopes
         .into_iter()
@@ -121,7 +121,7 @@ fn v2_started_inputs(fixture: &RunnerFixture) -> Vec<serde_json::Value> {
 }
 
 fn v2_finished_summaries(fixture: &RunnerFixture) -> Vec<String> {
-    let envelopes = collect_journal_v2(&journal_path(fixture), Some(&fixture.handle.run_id))
+    let envelopes = collect_journal(&journal_path(fixture), Some(&fixture.handle.run_id))
         .expect("collect v2 journal");
     envelopes
         .into_iter()

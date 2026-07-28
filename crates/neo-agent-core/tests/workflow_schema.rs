@@ -300,7 +300,7 @@ async fn child_schema_invalid_output_gets_exactly_one_tools_disabled_repair() {
     use neo_agent_core::multi_agent::{
         AgentRunMode, ChildRuntimeDeps, DelegateContext, DelegateRequest, MultiAgentRuntime,
     };
-    use neo_agent_core::workflow::journal::{JournalPayload, collect_journal_v2};
+    use neo_agent_core::workflow::journal::{JournalPayload, collect_journal};
     use neo_agent_core::workflow::{WorkflowInvocationKind, WorkflowOutcomeStatus};
 
     let dir = tempfile::tempdir().unwrap();
@@ -414,7 +414,7 @@ async fn child_schema_invalid_output_gets_exactly_one_tools_disabled_repair() {
 
     let run_dir = neo_agent_core::workflow::run_dir(session_dir, &handle.run_id);
     let envelopes =
-        collect_journal_v2(&run_dir.join("journal.jsonl"), Some(&handle.run_id)).expect("journal");
+        collect_journal(&run_dir.join("journal.jsonl"), Some(&handle.run_id)).expect("journal");
     let kinds: Vec<&str> = envelopes
         .iter()
         .map(|e| match &e.payload {
@@ -445,7 +445,7 @@ async fn schema_repair_tool_attempt_is_forbidden() {
     use neo_agent_core::multi_agent::{
         AgentRunMode, ChildRuntimeDeps, DelegateContext, DelegateRequest, MultiAgentRuntime,
     };
-    use neo_agent_core::workflow::journal::{JournalPayload, collect_journal_v2};
+    use neo_agent_core::workflow::journal::{JournalPayload, collect_journal};
     use neo_agent_core::workflow::{
         WorkflowErrorCode, WorkflowInvocationKind, WorkflowOutcomeStatus,
     };
@@ -540,7 +540,7 @@ async fn schema_repair_tool_attempt_is_forbidden() {
 
     let run_dir = neo_agent_core::workflow::run_dir(session_dir, &handle.run_id);
     let envelopes =
-        collect_journal_v2(&run_dir.join("journal.jsonl"), Some(&handle.run_id)).expect("journal");
+        collect_journal(&run_dir.join("journal.jsonl"), Some(&handle.run_id)).expect("journal");
     let finished_err = envelopes.iter().any(|e| {
         matches!(
             &e.payload,

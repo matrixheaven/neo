@@ -17,8 +17,8 @@ use super::admission::{AdmitOutcome, WorkerPermit, WorkflowAdmission};
 use super::artifacts::{ArtifactKind, ArtifactMetadata, ArtifactStore, ArtifactValue};
 use super::error::{WorkflowError, WorkflowErrorCode};
 use super::journal::{
-    self, IncompleteInvocation, JournalEnvelope, JournalPayload, JournalRecord, JournalV2Writer,
-    canonical_input_hash, find_incomplete_invocations_v2,
+    self, IncompleteInvocation, JournalEnvelope, JournalPayload, JournalRecord, JournalWriter,
+    canonical_input_hash, find_incomplete_invocations,
 };
 use super::limits::WorkflowLimits;
 use super::output::{
@@ -52,20 +52,21 @@ mod support;
 pub use lineage::{
     ChildIsolationRequest, LineageSeedInvocation, ParentChildAuthority, ResolvedChildContext,
     ResolvedChildIsolation, ResolvedWorktreeBinding, SeedArtifactRef, VerifiedPrefix,
-    child_isolation_provenance, cleanup_isolated_worktree, compute_prefix_digest_v1,
-    compute_prefix_digest_v2, extract_verified_prefix_v1, extract_verified_prefix_v2,
-    host_bounded_context_summary, import_seed_artifact, latest_eligible_sequence_v1,
-    latest_eligible_sequence_v2, permission_rank, resolve_child_context, resolve_child_isolation,
+    child_isolation_provenance, cleanup_isolated_worktree, compute_prefix_digest,
+    compute_prefix_digest_v1, extract_verified_prefix, extract_verified_prefix_v1,
+    host_bounded_context_summary, import_seed_artifact, latest_eligible_sequence,
+    latest_eligible_sequence_v1, permission_rank, resolve_child_context, resolve_child_isolation,
     resolve_child_model, resolve_child_permission, resolve_child_tool_ceiling,
     resolve_child_worktree, seed_pair_count_from_journal, split_usage_for_seed,
 };
 use support::{
-    ReplayEntry, RunControl, add_usage, aggregate_usage, aggregate_usage_v2, bounded_summary,
-    compact_resource_limited_outcome, current_timestamp_ms, failure_count_v2, final_result_v2,
-    interrupted_outcome, invocation_count_v2, last_state, latest_log_summary,
-    latest_report_summary, latest_report_summary_v2, projection_timestamps,
-    projection_timestamps_v2, recovered_phase, recovered_phase_v2, recovered_reports,
-    recovered_reports_v2, replay_entries, replay_entries_v2, report_summary,
+    ReplayEntry, RunControl, add_usage, aggregate_record_usage, aggregate_usage, bounded_summary,
+    compact_resource_limited_outcome, current_timestamp_ms, failure_count, final_result,
+    interrupted_outcome, invocation_count, last_record_state, latest_log_summary,
+    latest_record_report_summary, latest_report_summary, projection_timestamps,
+    record_projection_timestamps, recovered_phase, recovered_record_phase,
+    recovered_record_reports, recovered_reports, replay_entries, replay_record_entries,
+    report_summary,
 };
 pub use support::{ReplayPrefix, compute_replay_prefix};
 
@@ -74,7 +75,7 @@ type Runner = dyn Fn(WorkflowHandle, WorkflowRunMetadata, PathBuf) -> RunnerFutu
 type RecoveryFuture = Pin<Box<dyn Future<Output = Option<WorkflowInvocationOutcome>> + Send>>;
 type RecoveryResolver = dyn Fn(Arc<IncompleteInvocation>) -> RecoveryFuture + Send + Sync;
 type ProjectionEmitter = dyn Fn(&Path, WorkflowProjectionStage, WorkflowSnapshot) + Send + Sync;
-type SharedJournal = Arc<StdMutex<JournalV2Writer>>;
+type SharedJournal = Arc<StdMutex<JournalWriter>>;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum WorkflowProjectionStage {
@@ -521,7 +522,7 @@ impl WorkflowRuntime {
 
         let durable_create = (|| {
             journal::write_run_metadata(&run_dir, &metadata, &self.limits)?;
-            let mut writer = JournalV2Writer::open(&run_dir.join("journal.jsonl"), run_id.clone())?;
+            let mut writer = JournalWriter::open(&run_dir.join("journal.jsonl"), run_id.clone())?;
             let timestamp_ms = current_timestamp_ms();
             let created = effect::prepare_run_created(
                 &writer,
@@ -642,8 +643,8 @@ impl WorkflowRuntime {
             )?
         } else {
             let envelopes =
-                journal::collect_journal_v2(&parent_journal_path, Some(&parent_meta.run_id))?;
-            lineage::extract_verified_prefix_v2(
+                journal::collect_journal(&parent_journal_path, Some(&parent_meta.run_id))?;
+            lineage::extract_verified_prefix(
                 &parent_meta,
                 &parent_run_dir,
                 &envelopes,
@@ -707,7 +708,7 @@ impl WorkflowRuntime {
 
         let durable_create = (|| {
             journal::write_run_metadata(&run_dir, &metadata, &self.limits)?;
-            let mut writer = JournalV2Writer::open(&run_dir.join("journal.jsonl"), run_id.clone())?;
+            let mut writer = JournalWriter::open(&run_dir.join("journal.jsonl"), run_id.clone())?;
             let timestamp_ms = current_timestamp_ms();
             let created = effect::prepare_run_created(
                 &writer,
@@ -803,15 +804,15 @@ impl WorkflowRuntime {
         }
 
         let control = Arc::new(RunControl::new());
-        let reports = recovered_reports_v2(
-            &journal::collect_journal_v2(&run_dir.join("journal.jsonl"), Some(&run_id))
+        let reports = recovered_reports(
+            &journal::collect_journal(&run_dir.join("journal.jsonl"), Some(&run_id))
                 .unwrap_or_default(),
         );
         let state = Arc::new(Mutex::new(RunState {
             metadata,
             state: WorkflowState::Queued,
-            current_phase: recovered_phase_v2(
-                &journal::collect_journal_v2(&run_dir.join("journal.jsonl"), Some(&run_id))
+            current_phase: recovered_phase(
+                &journal::collect_journal(&run_dir.join("journal.jsonl"), Some(&run_id))
                     .unwrap_or_default(),
             ),
             invocation_count: seed_entry_count as u64,
@@ -823,8 +824,8 @@ impl WorkflowRuntime {
             started_at_ms: Some(started_at_ms),
             updated_at_ms: Some(started_at_ms),
             latest_log_summary: latest_log_summary(&replay_entries),
-            latest_report_summary: latest_report_summary_v2(
-                &journal::collect_journal_v2(&run_dir.join("journal.jsonl"), Some(&run_id))
+            latest_report_summary: latest_report_summary(
+                &journal::collect_journal(&run_dir.join("journal.jsonl"), Some(&run_id))
                     .unwrap_or_default(),
             ),
             terminal_reason: None,
@@ -1183,9 +1184,9 @@ impl WorkflowRuntime {
             let mut guard = state.lock().await;
             guard.control.clear_pause()?;
             if let Ok(envelopes) =
-                journal::collect_journal_v2(&guard.journal_path(), Some(&guard.metadata.run_id))
+                journal::collect_journal(&guard.journal_path(), Some(&guard.metadata.run_id))
             {
-                guard.replay_entries = replay_entries_v2(&envelopes);
+                guard.replay_entries = replay_entries(&envelopes);
             }
             guard.replay_cursor = 0;
             guard.replay_live = false;
@@ -1458,9 +1459,9 @@ impl WorkflowRuntime {
             }
             // Reset replay so the next worker pass can return the journaled answer.
             if let Ok(envelopes) =
-                journal::collect_journal_v2(&guard.journal_path(), Some(&guard.metadata.run_id))
+                journal::collect_journal(&guard.journal_path(), Some(&guard.metadata.run_id))
             {
-                guard.replay_entries = replay_entries_v2(&envelopes);
+                guard.replay_entries = replay_entries(&envelopes);
             }
             guard.replay_cursor = 0;
             guard.replay_live = false;
@@ -1496,7 +1497,7 @@ impl WorkflowRuntime {
             let guard = state.lock().await;
             guard.journal_path()
         };
-        let envelopes = journal::collect_journal_v2(&journal_path, Some(run_id))?;
+        let envelopes = journal::collect_journal(&journal_path, Some(run_id))?;
         Ok(user_input_from_envelopes(&envelopes, request_id))
     }
 
@@ -2406,7 +2407,7 @@ impl WorkflowRuntime {
         let path = guard.journal_path();
         let run = guard.metadata.run_id.clone();
         drop(guard);
-        let envelopes = journal::collect_journal_v2(&path, Some(&run))?;
+        let envelopes = journal::collect_journal(&path, Some(&run))?;
         Ok(envelopes.iter().any(|env| {
             matches!(
                 &env.payload,
@@ -2569,25 +2570,24 @@ impl WorkflowRuntime {
         }
 
         let journal_path = run_dir.join("journal.jsonl");
-        let recovery = match crate::workflow::recovery::recover_journal_v2(
-            &journal_path,
-            Some(&metadata.run_id),
-        ) {
-            Ok(report) => report,
-            Err(error) => {
-                handles.push(
-                    self.insert_failed_run(
-                        run_dir,
-                        metadata,
-                        format!("journal recovery failed: {error}"),
-                    )
-                    .await,
-                );
-                return Ok(());
-            }
-        };
+        let recovery =
+            match crate::workflow::recovery::recover_journal(&journal_path, Some(&metadata.run_id))
+            {
+                Ok(report) => report,
+                Err(error) => {
+                    handles.push(
+                        self.insert_failed_run(
+                            run_dir,
+                            metadata,
+                            format!("journal recovery failed: {error}"),
+                        )
+                        .await,
+                    );
+                    return Ok(());
+                }
+            };
 
-        let mut writer = match JournalV2Writer::open_recovered(
+        let mut writer = match JournalWriter::open_recovered(
             &journal_path,
             metadata.run_id.clone(),
             &recovery,
@@ -2609,7 +2609,7 @@ impl WorkflowRuntime {
         // Reconcile durable starts without finishes via the production
         // (or test-injected) read-only resolver. Never relaunches effects.
         if let Err(error) = self
-            .reconcile_incomplete_invocations_v2(&mut writer, &metadata, &journal_path)
+            .reconcile_incomplete_invocations(&mut writer, &metadata, &journal_path)
             .await
         {
             handles.push(
@@ -2623,7 +2623,7 @@ impl WorkflowRuntime {
             return Ok(());
         }
         // Open schema repairs never re-dispatch the corrective model effect.
-        if let Err(error) = self.reconcile_open_schema_repairs_v2(&mut writer, &metadata) {
+        if let Err(error) = self.reconcile_open_schema_repairs(&mut writer, &metadata) {
             handles.push(
                 self.insert_failed_run(
                     run_dir,
@@ -2638,8 +2638,7 @@ impl WorkflowRuntime {
         // Crash after FinalResultRecorded / before Completed: append only the
         // missing terminal state. Never re-execute Lua or rewrite the result.
         if writer.index().final_result_seq.is_some() && writer.index().terminal_state.is_none() {
-            let envelopes = match journal::collect_journal_v2(&journal_path, Some(&metadata.run_id))
-            {
+            let envelopes = match journal::collect_journal(&journal_path, Some(&metadata.run_id)) {
                 Ok(envelopes) => envelopes,
                 Err(error) => {
                     handles.push(
@@ -2653,7 +2652,7 @@ impl WorkflowRuntime {
                     return Ok(());
                 }
             };
-            let (previous, _) = support::last_state_v2(&envelopes);
+            let (previous, _) = support::last_state(&envelopes);
             let previous = if previous.is_terminal() {
                 WorkflowState::Running
             } else {
@@ -2720,36 +2719,31 @@ impl WorkflowRuntime {
             return Ok(());
         }
 
-        let mut records_v2 =
-            match journal::collect_journal_v2(&journal_path, Some(&metadata.run_id)) {
-                Ok(records) if !records.is_empty() => records,
-                Ok(_) => {
-                    handles.push(
-                        self.insert_failed_run(
-                            run_dir,
-                            metadata,
-                            "corrupt journal: missing initial state".to_owned(),
-                        )
+        let mut envelopes = match journal::collect_journal(&journal_path, Some(&metadata.run_id)) {
+            Ok(records) if !records.is_empty() => records,
+            Ok(_) => {
+                handles.push(
+                    self.insert_failed_run(
+                        run_dir,
+                        metadata,
+                        "corrupt journal: missing initial state".to_owned(),
+                    )
+                    .await,
+                );
+                return Ok(());
+            }
+            Err(error) => {
+                handles.push(
+                    self.insert_failed_run(run_dir, metadata, format!("corrupt journal: {error}"))
                         .await,
-                    );
-                    return Ok(());
-                }
-                Err(error) => {
-                    handles.push(
-                        self.insert_failed_run(
-                            run_dir,
-                            metadata,
-                            format!("corrupt journal: {error}"),
-                        )
-                        .await,
-                    );
-                    return Ok(());
-                }
-            };
+                );
+                return Ok(());
+            }
+        };
         // Durable host-exit: Queued/Running runs paused by process exit must
         // leave a journaled state transition so projection sequences advance
         // and session rehydrate can emit WorkflowUpdated exactly once.
-        let (last_state, _) = support::last_state_v2(&records_v2);
+        let (last_state, _) = support::last_state(&envelopes);
         if last_state.rehydrates_as_paused_host_exit() {
             let timestamp_ms = current_timestamp_ms();
             match effect::prepare_transition(
@@ -2775,8 +2769,8 @@ impl WorkflowRuntime {
                         );
                         return Ok(());
                     }
-                    records_v2 =
-                        match journal::collect_journal_v2(&journal_path, Some(&metadata.run_id)) {
+                    envelopes =
+                        match journal::collect_journal(&journal_path, Some(&metadata.run_id)) {
                             Ok(records) if !records.is_empty() => records,
                             Ok(_) => {
                                 handles.push(
@@ -2815,12 +2809,12 @@ impl WorkflowRuntime {
                 }
             }
         }
-        let (final_state, terminal_reason) = v2_projection_state(&records_v2);
+        let (final_state, terminal_reason) = projection_state(&envelopes);
         handles.push(
-            self.insert_rehydrated_v2(
+            self.insert_rehydrated(
                 run_dir,
                 metadata,
-                records_v2,
+                envelopes,
                 final_state,
                 terminal_reason,
                 Some(Arc::new(StdMutex::new(writer))),
@@ -2860,7 +2854,7 @@ impl WorkflowRuntime {
             }
         };
 
-        let (last_state, last_reason) = last_state(&records);
+        let (last_state, last_reason) = last_record_state(&records);
         let final_state = if last_state.rehydrates_as_paused_host_exit() {
             WorkflowState::Paused
         } else {
@@ -3608,7 +3602,7 @@ impl WorkflowRuntime {
     fn journal_io<R>(
         &self,
         journal: &SharedJournal,
-        f: impl FnOnce(&mut JournalV2Writer) -> Result<R, WorkflowError>,
+        f: impl FnOnce(&mut JournalWriter) -> Result<R, WorkflowError>,
     ) -> Result<R, WorkflowError> {
         let mut writer = journal
             .lock()
@@ -3636,14 +3630,14 @@ impl WorkflowRuntime {
     /// read-only resolver. Adopts exactly one proven terminal result; zero /
     /// conflicting / unknown results become interrupted(host_exit). Never
     /// dispatches or auto-retries external effects.
-    async fn reconcile_incomplete_invocations_v2(
+    async fn reconcile_incomplete_invocations(
         &self,
-        writer: &mut JournalV2Writer,
+        writer: &mut JournalWriter,
         metadata: &WorkflowRunMetadata,
         journal_path: &Path,
     ) -> Result<(), WorkflowError> {
-        let envelopes = journal::collect_journal_v2(journal_path, Some(&metadata.run_id))?;
-        let incomplete = find_incomplete_invocations_v2(&envelopes);
+        let envelopes = journal::collect_journal(journal_path, Some(&metadata.run_id))?;
+        let incomplete = find_incomplete_invocations(&envelopes);
         if incomplete.is_empty() {
             return Ok(());
         }
@@ -3673,9 +3667,9 @@ impl WorkflowRuntime {
     }
 
     /// Finish open schema repairs as interrupted without re-dispatching the model.
-    fn reconcile_open_schema_repairs_v2(
+    fn reconcile_open_schema_repairs(
         &self,
-        writer: &mut JournalV2Writer,
+        writer: &mut JournalWriter,
         metadata: &WorkflowRunMetadata,
     ) -> Result<(), WorkflowError> {
         let open: Vec<String> = writer
@@ -3734,14 +3728,14 @@ impl WorkflowRuntime {
         state: WorkflowState,
         terminal_reason: Option<String>,
     ) -> WorkflowHandle {
-        let replay_entries = replay_entries(&records);
+        let replay_entries = replay_record_entries(&records);
         let projection_sequence = records.last().map(JournalRecord::seq);
-        let (started_at_ms, updated_at_ms) = projection_timestamps(&records);
+        let (started_at_ms, updated_at_ms) = record_projection_timestamps(&records);
         let control = Arc::new(RunControl::new());
         let run_id = metadata.run_id.clone();
         let artifacts = ArtifactStore::empty(run_id.clone(), &run_dir);
         let run_state = RunState {
-            current_phase: recovered_phase(&records),
+            current_phase: recovered_record_phase(&records),
             invocation_count: records
                 .iter()
                 .filter(|record| matches!(record, JournalRecord::InvocationStarted { .. }))
@@ -3759,15 +3753,15 @@ impl WorkflowRuntime {
                 .count()
                 .try_into()
                 .unwrap_or(u64::MAX),
-            actual_usage: aggregate_usage(&records),
+            actual_usage: aggregate_record_usage(&records),
             inherited_usage: None,
             seed_entry_count: 0,
             projection_sequence,
             started_at_ms,
             updated_at_ms,
             latest_log_summary: latest_log_summary(&replay_entries),
-            latest_report_summary: latest_report_summary(&records),
-            reports: recovered_reports(&records),
+            latest_report_summary: latest_record_report_summary(&records),
+            reports: recovered_record_reports(&records),
             metadata,
             state,
             terminal_reason,
@@ -3797,7 +3791,7 @@ impl WorkflowRuntime {
         }
     }
 
-    async fn insert_rehydrated_v2(
+    async fn insert_rehydrated(
         &self,
         run_dir: PathBuf,
         metadata: WorkflowRunMetadata,
@@ -3806,12 +3800,12 @@ impl WorkflowRuntime {
         terminal_reason: Option<String>,
         writer: Option<SharedJournal>,
     ) -> WorkflowHandle {
-        let replay_entries = replay_entries_v2(&envelopes);
+        let replay_entries = replay_entries(&envelopes);
         let projection_sequence = envelopes.last().map(JournalEnvelope::seq);
-        let (started_at_ms, updated_at_ms) = projection_timestamps_v2(&envelopes);
+        let (started_at_ms, updated_at_ms) = projection_timestamps(&envelopes);
         let control = Arc::new(RunControl::new());
         let run_id = metadata.run_id.clone();
-        let final_result = final_result_v2(&envelopes);
+        let final_result = final_result(&envelopes);
         let pending_user_input =
             latest_open_user_input(&envelopes).or_else(|| latest_user_input(&envelopes));
         let mut artifacts = ArtifactStore::open(&run_dir, run_id.clone())
@@ -3819,13 +3813,13 @@ impl WorkflowRuntime {
         // Best-effort rehydrate: corrupt/missing files stay invisible and typed on get.
         let _ = artifacts.rehydrate_from_envelopes(&envelopes);
         let run_state = RunState {
-            current_phase: recovered_phase_v2(&envelopes),
-            invocation_count: invocation_count_v2(&envelopes),
-            failure_count: failure_count_v2(&envelopes),
+            current_phase: recovered_phase(&envelopes),
+            invocation_count: invocation_count(&envelopes),
+            failure_count: failure_count(&envelopes),
             actual_usage: {
                 let seed_ids = lineage::seed_invocation_ids_from_journal(&envelopes);
                 if seed_ids.is_empty() {
-                    aggregate_usage_v2(&envelopes)
+                    aggregate_usage(&envelopes)
                 } else {
                     lineage::split_usage_for_seed(&envelopes, &seed_ids).1
                 }
@@ -3843,8 +3837,8 @@ impl WorkflowRuntime {
             started_at_ms,
             updated_at_ms,
             latest_log_summary: latest_log_summary(&replay_entries),
-            latest_report_summary: latest_report_summary_v2(&envelopes),
-            reports: recovered_reports_v2(&envelopes),
+            latest_report_summary: latest_report_summary(&envelopes),
+            reports: recovered_reports(&envelopes),
             metadata,
             state,
             terminal_reason,
@@ -3960,8 +3954,8 @@ struct PreparedInvoke {
     timestamp_ms: u64,
 }
 
-fn v2_projection_state(envelopes: &[JournalEnvelope]) -> (WorkflowState, Option<String>) {
-    let (state, reason) = support::last_state_v2(envelopes);
+fn projection_state(envelopes: &[JournalEnvelope]) -> (WorkflowState, Option<String>) {
+    let (state, reason) = support::last_state(envelopes);
     if state.rehydrates_as_paused_host_exit() {
         (WorkflowState::Paused, Some("host_exit".to_owned()))
     } else if state == WorkflowState::Paused || state.is_terminal() {

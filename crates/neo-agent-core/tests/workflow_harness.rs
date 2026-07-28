@@ -2,7 +2,7 @@
 
 use std::path::PathBuf;
 
-use neo_agent_core::workflow::journal::{JournalPayload, collect_journal_v2};
+use neo_agent_core::workflow::journal::{JournalPayload, collect_journal};
 use neo_agent_core::workflow::{
     DEFINITION_FORMAT_VERSION, FixtureExecutionMode, WorkflowLimits, WorkflowSourceOrigin,
     WorkflowState, load_fixture, parse_fixture, resolve_paired_definition, run_fixture,
@@ -183,7 +183,7 @@ return { ok = true }
     );
 
     let envelopes =
-        collect_journal_v2(&report.journal_path, None).expect("journal readable after run");
+        collect_journal(&report.journal_path, None).expect("journal readable after run");
     let repair_starts = envelopes
         .iter()
         .filter(|e| matches!(e.payload, JournalPayload::SchemaRepairStarted { .. }))
@@ -234,7 +234,7 @@ return { ok = true }
     assert_eq!(report.final_result, Some(json!({"ok": true})));
     assert_eq!(report.state, WorkflowState::Completed.as_str());
 
-    let envelopes = collect_journal_v2(&report.journal_path, None).expect("journal");
+    let envelopes = collect_journal(&report.journal_path, None).expect("journal");
     assert!(
         envelopes
             .iter()

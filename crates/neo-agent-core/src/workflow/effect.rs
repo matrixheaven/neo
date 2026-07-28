@@ -19,7 +19,7 @@
 
 use crate::workflow::error::WorkflowError;
 use crate::workflow::journal::{
-    JournalEnvelope, JournalPayload, JournalV2Writer, canonical_input_hash,
+    JournalEnvelope, JournalPayload, JournalWriter, canonical_input_hash,
 };
 use crate::workflow::limits::WorkflowLimits;
 use crate::workflow::state::{
@@ -85,7 +85,7 @@ pub fn has_invocation_reservation(
 
 /// Build a synced-ready `InvocationStarted` envelope. Does not write.
 pub fn prepare_invocation_start(
-    writer: &JournalV2Writer,
+    writer: &JournalWriter,
     run_id: WorkflowId,
     invocation_id: String,
     call_index: u64,
@@ -117,7 +117,7 @@ pub fn prepare_invocation_start(
 
 /// Reserve capacity for the prepared start. Pure check — no I/O.
 pub fn reserve_invocation_start(
-    writer: &JournalV2Writer,
+    writer: &JournalWriter,
     prepared: &PreparedInvocationStart,
     limits: &WorkflowLimits,
 ) -> Result<(), WorkflowError> {
@@ -130,7 +130,7 @@ pub fn reserve_invocation_start(
 
 /// Append+sync `InvocationStarted`. Caller must not hold the async run mutex.
 pub fn commit_invocation_start(
-    writer: &mut JournalV2Writer,
+    writer: &mut JournalWriter,
     prepared: &PreparedInvocationStart,
     limits: &WorkflowLimits,
 ) -> Result<u64, WorkflowError> {
@@ -140,7 +140,7 @@ pub fn commit_invocation_start(
 
 /// Build a finish envelope after the external effect returns.
 pub fn prepare_invocation_finish(
-    writer: &JournalV2Writer,
+    writer: &JournalWriter,
     run_id: WorkflowId,
     invocation_id: String,
     outcome: WorkflowInvocationOutcome,
@@ -164,7 +164,7 @@ pub fn prepare_invocation_finish(
 
 /// Append+sync `InvocationFinished`. Caller must not hold the async run mutex.
 pub fn commit_invocation_finish(
-    writer: &mut JournalV2Writer,
+    writer: &mut JournalWriter,
     prepared: &PreparedInvocationFinish,
     limits: &WorkflowLimits,
 ) -> Result<u64, WorkflowError> {
@@ -173,7 +173,7 @@ pub fn commit_invocation_finish(
 
 /// Build `FinalResultRecorded` (must be durable before `Completed`).
 pub fn prepare_final_result(
-    writer: &JournalV2Writer,
+    writer: &JournalWriter,
     run_id: WorkflowId,
     metadata: WorkflowFinalResultMetadata,
     timestamp_ms: u64,
@@ -191,7 +191,7 @@ pub fn prepare_final_result(
 
 /// Append+sync `FinalResultRecorded`.
 pub fn commit_final_result(
-    writer: &mut JournalV2Writer,
+    writer: &mut JournalWriter,
     prepared: &PreparedFinalResult,
     limits: &WorkflowLimits,
 ) -> Result<u64, WorkflowError> {
@@ -200,7 +200,7 @@ pub fn commit_final_result(
 
 /// Build a table-validated state transition envelope.
 pub fn prepare_transition(
-    writer: &JournalV2Writer,
+    writer: &JournalWriter,
     run_id: WorkflowId,
     previous: WorkflowState,
     new_state: WorkflowState,
@@ -231,7 +231,7 @@ pub fn prepare_transition(
 
 /// Append+sync a state transition.
 pub fn commit_transition(
-    writer: &mut JournalV2Writer,
+    writer: &mut JournalWriter,
     prepared: &PreparedTransition,
     limits: &WorkflowLimits,
 ) -> Result<u64, WorkflowError> {
@@ -241,7 +241,7 @@ pub fn commit_transition(
 /// Build the durable create pair: `RunCreated` then implied `Queued` (no state
 /// record required until the first real transition).
 pub fn prepare_run_created(
-    writer: &JournalV2Writer,
+    writer: &JournalWriter,
     run_id: WorkflowId,
     name: String,
     description: Option<String>,

@@ -4,7 +4,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use neo_agent_core::workflow::journal::{
-    JournalEnvelope, JournalPayload, JournalV2Writer, collect_journal_v2,
+    JournalEnvelope, JournalPayload, JournalWriter, collect_journal,
 };
 use neo_agent_core::workflow::{
     TaskOutputRequest, TaskOutputView, WorkflowActor, WorkflowId, WorkflowLaunchRequest,
@@ -52,9 +52,9 @@ fn append_logical_multi_gigabyte_journal(
     record_count: u64,
     payload_chars: usize,
 ) {
-    let existing = collect_journal_v2(path, Some(run_id)).expect("collect head");
+    let existing = collect_journal(path, Some(run_id)).expect("collect head");
     let next_seq = existing.last().map_or(0, |e| e.seq + 1);
-    let mut writer = JournalV2Writer::open(path, run_id.clone()).expect("open writer");
+    let mut writer = JournalWriter::open(path, run_id.clone()).expect("open writer");
     let limits = WorkflowLimits {
         journal_record_bytes: 32 * 1024 * 1024,
         journal_total_bytes: 8 * 1024 * 1024 * 1024,

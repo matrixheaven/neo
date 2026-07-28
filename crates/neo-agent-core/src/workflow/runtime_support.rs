@@ -103,7 +103,7 @@ pub fn compute_replay_prefix(
     records: &[JournalRecord],
     new_calls: &[(u64, WorkflowInvocationKind, serde_json::Value)],
 ) -> ReplayPrefix {
-    let entries = replay_entries(records);
+    let entries = replay_record_entries(records);
     let mut matched_records = Vec::new();
     let mut first_live_call_index = 0;
     for (entry, (call_index, kind, input)) in entries.iter().zip(new_calls) {
@@ -130,11 +130,11 @@ pub fn compute_replay_prefix(
     ReplayPrefix {
         matched_records,
         first_live_call_index,
-        incomplete: journal::find_incomplete_invocations(records),
+        incomplete: journal::find_incomplete_record_invocations(records),
     }
 }
 
-pub(super) fn replay_entries(records: &[JournalRecord]) -> Vec<ReplayEntry> {
+pub(super) fn replay_record_entries(records: &[JournalRecord]) -> Vec<ReplayEntry> {
     let finished: HashMap<_, _> = records
         .iter()
         .filter_map(|record| match record {
@@ -177,7 +177,7 @@ pub(super) fn replay_entries(records: &[JournalRecord]) -> Vec<ReplayEntry> {
     replay
 }
 
-pub(super) fn last_state(records: &[JournalRecord]) -> (WorkflowState, Option<String>) {
+pub(super) fn last_record_state(records: &[JournalRecord]) -> (WorkflowState, Option<String>) {
     records
         .iter()
         .rev()
@@ -223,7 +223,7 @@ pub(super) fn compact_resource_limited_outcome(
     }
 }
 
-pub(super) fn aggregate_usage(records: &[JournalRecord]) -> Option<AgentTokenUsage> {
+pub(super) fn aggregate_record_usage(records: &[JournalRecord]) -> Option<AgentTokenUsage> {
     records.iter().fold(None, |total, record| match record {
         JournalRecord::InvocationFinished {
             outcome:
@@ -247,7 +247,7 @@ pub(super) fn add_usage(total: Option<AgentTokenUsage>, usage: AgentTokenUsage) 
     total.saturating_add(usage)
 }
 
-pub(super) fn recovered_phase(records: &[JournalRecord]) -> Option<String> {
+pub(super) fn recovered_record_phase(records: &[JournalRecord]) -> Option<String> {
     records.iter().rev().find_map(|record| match record {
         JournalRecord::InvocationFinished { outcome, .. } if outcome.ok => outcome
             .details
@@ -258,7 +258,7 @@ pub(super) fn recovered_phase(records: &[JournalRecord]) -> Option<String> {
     })
 }
 
-pub(super) fn recovered_reports(records: &[JournalRecord]) -> Vec<serde_json::Value> {
+pub(super) fn recovered_record_reports(records: &[JournalRecord]) -> Vec<serde_json::Value> {
     records
         .iter()
         .filter_map(|record| match record {
@@ -284,7 +284,7 @@ pub(super) fn latest_log_summary(entries: &[ReplayEntry]) -> Option<String> {
     })
 }
 
-pub(super) fn latest_report_summary(records: &[JournalRecord]) -> Option<String> {
+pub(super) fn latest_record_report_summary(records: &[JournalRecord]) -> Option<String> {
     records.iter().rev().find_map(|record| match record {
         JournalRecord::InvocationFinished { outcome, .. } if outcome.ok => {
             outcome.details.get("report").and_then(report_summary)
@@ -318,7 +318,9 @@ pub(super) fn bounded_summary(value: &str) -> String {
         .to_owned()
 }
 
-pub(super) fn projection_timestamps(records: &[JournalRecord]) -> (Option<u64>, Option<u64>) {
+pub(super) fn record_projection_timestamps(
+    records: &[JournalRecord],
+) -> (Option<u64>, Option<u64>) {
     let timestamp = |record: &JournalRecord| match record {
         JournalRecord::StateChanged { timestamp_ms, .. }
         | JournalRecord::InvocationStarted { timestamp_ms, .. }
@@ -338,7 +340,7 @@ pub(super) fn current_timestamp_ms() -> u64 {
         })
 }
 
-pub(super) fn replay_entries_v2(envelopes: &[JournalEnvelope]) -> Vec<ReplayEntry> {
+pub(super) fn replay_entries(envelopes: &[JournalEnvelope]) -> Vec<ReplayEntry> {
     let finished: HashMap<_, _> = envelopes
         .iter()
         .filter_map(|envelope| match &envelope.payload {
@@ -385,7 +387,7 @@ pub(super) fn replay_entries_v2(envelopes: &[JournalEnvelope]) -> Vec<ReplayEntr
     replay
 }
 
-pub(super) fn last_state_v2(envelopes: &[JournalEnvelope]) -> (WorkflowState, Option<String>) {
+pub(super) fn last_state(envelopes: &[JournalEnvelope]) -> (WorkflowState, Option<String>) {
     let mut state = WorkflowState::Queued;
     let mut reason: Option<String> = None;
     let mut saw_state = false;
@@ -411,9 +413,7 @@ pub(super) fn last_state_v2(envelopes: &[JournalEnvelope]) -> (WorkflowState, Op
     }
 }
 
-pub(super) fn final_result_v2(
-    envelopes: &[JournalEnvelope],
-) -> Option<WorkflowFinalResultMetadata> {
+pub(super) fn final_result(envelopes: &[JournalEnvelope]) -> Option<WorkflowFinalResultMetadata> {
     envelopes
         .iter()
         .rev()
@@ -423,7 +423,7 @@ pub(super) fn final_result_v2(
         })
 }
 
-pub(super) fn aggregate_usage_v2(envelopes: &[JournalEnvelope]) -> Option<AgentTokenUsage> {
+pub(super) fn aggregate_usage(envelopes: &[JournalEnvelope]) -> Option<AgentTokenUsage> {
     envelopes
         .iter()
         .fold(None, |total, envelope| match &envelope.payload {
@@ -440,7 +440,7 @@ pub(super) fn aggregate_usage_v2(envelopes: &[JournalEnvelope]) -> Option<AgentT
         })
 }
 
-pub(super) fn recovered_phase_v2(envelopes: &[JournalEnvelope]) -> Option<String> {
+pub(super) fn recovered_phase(envelopes: &[JournalEnvelope]) -> Option<String> {
     envelopes
         .iter()
         .rev()
@@ -454,7 +454,7 @@ pub(super) fn recovered_phase_v2(envelopes: &[JournalEnvelope]) -> Option<String
         })
 }
 
-pub(super) fn recovered_reports_v2(envelopes: &[JournalEnvelope]) -> Vec<serde_json::Value> {
+pub(super) fn recovered_reports(envelopes: &[JournalEnvelope]) -> Vec<serde_json::Value> {
     envelopes
         .iter()
         .filter_map(|envelope| match &envelope.payload {
@@ -466,7 +466,7 @@ pub(super) fn recovered_reports_v2(envelopes: &[JournalEnvelope]) -> Vec<serde_j
         .collect()
 }
 
-pub(super) fn latest_report_summary_v2(envelopes: &[JournalEnvelope]) -> Option<String> {
+pub(super) fn latest_report_summary(envelopes: &[JournalEnvelope]) -> Option<String> {
     envelopes
         .iter()
         .rev()
@@ -478,16 +478,14 @@ pub(super) fn latest_report_summary_v2(envelopes: &[JournalEnvelope]) -> Option<
         })
 }
 
-pub(super) fn projection_timestamps_v2(
-    envelopes: &[JournalEnvelope],
-) -> (Option<u64>, Option<u64>) {
+pub(super) fn projection_timestamps(envelopes: &[JournalEnvelope]) -> (Option<u64>, Option<u64>) {
     (
         envelopes.first().map(|e| e.timestamp_ms),
         envelopes.last().map(|e| e.timestamp_ms),
     )
 }
 
-pub(super) fn invocation_count_v2(envelopes: &[JournalEnvelope]) -> u64 {
+pub(super) fn invocation_count(envelopes: &[JournalEnvelope]) -> u64 {
     envelopes
         .iter()
         .filter(|e| matches!(e.payload, JournalPayload::InvocationStarted { .. }))
@@ -496,7 +494,7 @@ pub(super) fn invocation_count_v2(envelopes: &[JournalEnvelope]) -> u64 {
         .unwrap_or(u64::MAX)
 }
 
-pub(super) fn failure_count_v2(envelopes: &[JournalEnvelope]) -> u64 {
+pub(super) fn failure_count(envelopes: &[JournalEnvelope]) -> u64 {
     envelopes
         .iter()
         .filter(|e| {

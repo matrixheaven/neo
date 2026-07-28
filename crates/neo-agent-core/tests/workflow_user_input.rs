@@ -6,7 +6,7 @@ use std::time::Duration;
 use neo_agent_core::harness::FakeHarness;
 use neo_agent_core::runtime::WorkflowDispatchHandle;
 use neo_agent_core::tools::{BackgroundTaskManager, ProcessSupervisor, ToolContext, ToolRegistry};
-use neo_agent_core::workflow::journal::{JournalPayload, collect_journal_v2, run_dir};
+use neo_agent_core::workflow::journal::{JournalPayload, collect_journal, run_dir};
 use neo_agent_core::workflow::{
     CompiledSchema, FinalResultBody, LuaWorkflowRunner, UserAnswerPolicy, WorkflowActor,
     WorkflowErrorCode, WorkflowHandle, WorkflowLaunchRequest, WorkflowLimits, WorkflowRuntime,
@@ -202,7 +202,7 @@ async fn await_user_releases_permits_and_survives_restart() {
     assert_eq!(pending.request_id, request_id_for_call_index(0));
 
     let journal_path = run_dir(dir, &handle.run_id).join("journal.jsonl");
-    let envelopes = collect_journal_v2(&journal_path, Some(&handle.run_id)).unwrap();
+    let envelopes = collect_journal(&journal_path, Some(&handle.run_id)).unwrap();
     assert!(
         envelopes.iter().any(|e| matches!(
             &e.payload,
@@ -264,7 +264,7 @@ async fn await_user_releases_permits_and_survives_restart() {
         .await
         .expect("stop while awaiting");
     assert_eq!(handles[0].snapshot().await.state, WorkflowState::Cancelled);
-    let after_stop = collect_journal_v2(&journal_path, Some(&handle.run_id)).unwrap();
+    let after_stop = collect_journal(&journal_path, Some(&handle.run_id)).unwrap();
     assert!(
         after_stop
             .iter()
@@ -345,7 +345,7 @@ async fn answer_validates_request_schema_before_queueing() {
     assert_eq!(final_value, json!({ "ok": true }));
 
     let journal_path = run_dir(fixture.dir.path(), &handle.run_id).join("journal.jsonl");
-    let envelopes = collect_journal_v2(&journal_path, Some(&handle.run_id)).unwrap();
+    let envelopes = collect_journal(&journal_path, Some(&handle.run_id)).unwrap();
     assert!(envelopes.iter().any(|e| matches!(
         &e.payload,
         JournalPayload::UserInputAnswered {

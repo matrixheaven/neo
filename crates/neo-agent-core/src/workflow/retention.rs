@@ -393,7 +393,7 @@ pub fn perform_retention(
 /// Infer the workflow state from the journal file inside a run directory.
 pub fn infer_run_state(run_dir: &Path, run_id: &WorkflowId) -> WorkflowState {
     let journal_path = run_dir.join("journal.jsonl");
-    if let Ok(envelopes) = super::journal::collect_journal_v2(&journal_path, Some(run_id)) {
+    if let Ok(envelopes) = super::journal::collect_journal(&journal_path, Some(run_id)) {
         for envelope in envelopes.iter().rev() {
             if let super::journal::JournalPayload::StateChanged { new, .. } = &envelope.payload {
                 return *new;

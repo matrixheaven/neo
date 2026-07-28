@@ -617,11 +617,11 @@ fn automatic_retention_reclaims_only_old_terminal_unreferenced_runs_to_low_water
         if !state.is_terminal() {
             use neo_agent_core::workflow::WorkflowId;
             use neo_agent_core::workflow::journal::{
-                JOURNAL_FORMAT_V2, JournalEnvelope, JournalPayload, JournalV2Writer,
+                JOURNAL_FORMAT_V2, JournalEnvelope, JournalPayload, JournalWriter,
             };
             let wid = WorkflowId::from_existing(run_id);
             let limits_journal = WorkflowLimits::default();
-            let mut writer = JournalV2Writer::open(&run_dir.join("journal.jsonl"), wid.clone())
+            let mut writer = JournalWriter::open(&run_dir.join("journal.jsonl"), wid.clone())
                 .expect("open journal");
             writer
                 .append(
@@ -853,11 +853,11 @@ fn automatic_retention_preserves_protected_runs_and_fails_closed_on_path_escape(
         if !state.is_terminal() {
             use neo_agent_core::workflow::WorkflowId;
             use neo_agent_core::workflow::journal::{
-                JOURNAL_FORMAT_V2, JournalEnvelope, JournalPayload, JournalV2Writer,
+                JOURNAL_FORMAT_V2, JournalEnvelope, JournalPayload, JournalWriter,
             };
             let wid = WorkflowId::from_existing(run_id);
             let limits_journal = WorkflowLimits::default();
-            let mut writer = JournalV2Writer::open(&run_dir.join("journal.jsonl"), wid.clone())
+            let mut writer = JournalWriter::open(&run_dir.join("journal.jsonl"), wid.clone())
                 .expect("open journal");
             writer
                 .append(

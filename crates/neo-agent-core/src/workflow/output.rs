@@ -20,7 +20,7 @@ use super::artifacts::{
 };
 use super::error::{WorkflowError, WorkflowErrorCode};
 use super::journal::{
-    self, JournalEnvelope, JournalPage, JournalPayload, canonicalize_json, scan_journal_v2_page,
+    self, JournalEnvelope, JournalPage, JournalPayload, canonicalize_json, scan_journal_page,
 };
 use super::limits::WorkflowLimits;
 use super::state::{
@@ -897,7 +897,7 @@ pub fn page_journal_from_path(
         ));
     }
 
-    let raw_page = scan_journal_v2_page(
+    let raw_page = scan_journal_page(
         path,
         Some(&materials.run_id),
         from_seq,

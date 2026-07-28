@@ -5,7 +5,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 use neo_agent_core::AgentTokenUsage;
-use neo_agent_core::workflow::journal::{JournalPayload, collect_journal_v2};
+use neo_agent_core::workflow::journal::{JournalPayload, collect_journal};
 use neo_agent_core::workflow::{
     ArtifactKind, ArtifactValue, WorkflowActor, WorkflowErrorCode, WorkflowHandle,
     WorkflowInvocationKind, WorkflowInvocationOutcome, WorkflowLaunchRequest,
@@ -172,7 +172,7 @@ async fn linked_upgrade_imports_verified_prefix_and_artifacts() {
 
     let child_dir = run_dir(dir.path(), &child.run_id);
     let envelopes =
-        collect_journal_v2(&child_dir.join("journal.jsonl"), Some(&child.run_id)).expect("journal");
+        collect_journal(&child_dir.join("journal.jsonl"), Some(&child.run_id)).expect("journal");
 
     assert!(
         envelopes
@@ -367,7 +367,7 @@ async fn mismatch_stops_before_new_effect() {
         .expect("mismatch error captured");
     assert_eq!(err.code(), WorkflowErrorCode::LineageMismatch);
 
-    let envelopes = collect_journal_v2(
+    let envelopes = collect_journal(
         &run_dir(dir.path(), &child.run_id).join("journal.jsonl"),
         Some(&child.run_id),
     )

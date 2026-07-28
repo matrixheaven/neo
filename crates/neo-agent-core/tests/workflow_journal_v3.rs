@@ -2,7 +2,8 @@
 
 use neo_agent_core::workflow::{
     JOURNAL_FORMAT_V2, JOURNAL_FORMAT_V3, JournalEnvelope, JournalPayload, JournalPayloadRef,
-    WorkflowArtifactId, WorkflowChildKey, WorkflowChildKind, WorkflowId, validate_v2_envelope,
+    JournalWriter, WorkflowArtifactId, WorkflowChildKey, WorkflowChildKind, WorkflowId,
+    WorkflowLimits, collect_journal, validate_envelope,
 };
 
 fn test_run_id() -> WorkflowId {
@@ -94,6 +95,25 @@ fn journal_v3_generic_child_lifecycle_round_trips_and_replays() {
         f_parsed.payload,
         JournalPayload::ChildFinished { .. }
     ));
+
+    let dir = tempfile::tempdir().expect("journal directory");
+    let path = dir.path().join("journal.jsonl");
+    let mut writer = JournalWriter::open(&path, test_run_id()).expect("open canonical journal");
+    writer
+        .append(&queued, &WorkflowLimits::default())
+        .expect("write queued");
+    writer
+        .append(&started, &WorkflowLimits::default())
+        .expect("write started");
+    writer
+        .append(&finished, &WorkflowLimits::default())
+        .expect("write finished");
+    let envelopes = collect_journal(&path, Some(&test_run_id())).expect("read canonical journal");
+    assert_eq!(envelopes.len(), 3);
+    assert!(matches!(
+        envelopes[2].payload,
+        JournalPayload::ChildFinished { .. }
+    ));
 }
 
 #[test]
@@ -113,7 +133,7 @@ fn v2_terminal_children_project_read_only_without_rewrite() {
     let json = serde_json::to_string(&v2).expect("serialize");
     let parsed: JournalEnvelope = serde_json::from_str(&json).expect("deserialize");
     assert_eq!(parsed.version, JOURNAL_FORMAT_V2);
-    validate_v2_envelope(&parsed).expect("v2 is valid");
+    validate_envelope(&parsed).expect("v2 is valid");
 
     // V2 JSON bytes include only V2 version number, no V3 fields
     assert!(!json.contains("child_queued"));
@@ -152,7 +172,7 @@ fn unknown_or_torn_v3_data_remains_fail_closed() {
         r#"{"version":99,"seq":0,"timestamp_ms":1000,"run_id":"wf_test","payload":{"type":"run_created","name":"bad"}}"#,
     );
     let envelope = result.expect("serde deserialization");
-    validate_v2_envelope(&envelope).expect_err("unknown version 99 must be rejected");
+    validate_envelope(&envelope).expect_err("unknown version 99 must be rejected");
 
     let bad: Result<JournalEnvelope, _> = serde_json::from_str(
         r#"{"version":3,"seq":0,"timestamp_ms":1000,"run_id":"wf_test","payload":{"type":"bogus_event","data":42}}"#,

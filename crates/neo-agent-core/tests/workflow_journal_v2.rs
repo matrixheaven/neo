@@ -2,11 +2,11 @@
 
 use neo_agent_core::AgentTokenUsage;
 use neo_agent_core::workflow::journal::{
-    JOURNAL_FORMAT_V2, JournalEnvelope, JournalPayload, JournalPayloadRef, JournalV2Writer,
-    canonical_input_hash, collect_journal_v2, scan_journal_v2, scan_journal_v2_page,
+    JOURNAL_FORMAT_V2, JournalEnvelope, JournalPayload, JournalPayloadRef, JournalWriter,
+    canonical_input_hash, collect_journal, scan_journal, scan_journal_page,
 };
 use neo_agent_core::workflow::recovery::{
-    JournalRecoveryAction, quarantine_tail_path, recover_journal_v2, recovery_quarantine_dir,
+    JournalRecoveryAction, quarantine_tail_path, recover_journal, recovery_quarantine_dir,
 };
 use neo_agent_core::workflow::{
     WorkflowActor, WorkflowArtifactId, WorkflowChildRef, WorkflowErrorCode,
@@ -48,7 +48,7 @@ fn journal_v2_round_trips_versioned_envelope() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("journal.jsonl");
     let id = run_id();
-    let mut writer = JournalV2Writer::open(&path, id.clone()).unwrap();
+    let mut writer = JournalWriter::open(&path, id.clone()).unwrap();
 
     let input = json!({"task": "scan", "b": 1, "a": 2});
     let hash = canonical_input_hash(&input);
@@ -78,7 +78,7 @@ fn journal_v2_round_trips_versioned_envelope() {
     );
     writer.append(&finished, &limits()).unwrap();
 
-    let envelopes = collect_journal_v2(&path, Some(&id)).unwrap();
+    let envelopes = collect_journal(&path, Some(&id)).unwrap();
     assert_eq!(envelopes.len(), 2);
     assert_eq!(envelopes[0].version, JOURNAL_FORMAT_V2);
     assert_eq!(envelopes[0].seq, 0);
@@ -98,7 +98,7 @@ fn journal_v2_round_trips_versioned_envelope() {
     assert_eq!(envelopes[1].seq, 1);
 
     // Reopen continues sequence without full-Vec open retention.
-    let writer2 = JournalV2Writer::open(&path, id).unwrap();
+    let writer2 = JournalWriter::open(&path, id).unwrap();
     assert_eq!(writer2.next_seq(), 2);
     assert_eq!(writer2.bytes_written(), writer.bytes_written());
 }
@@ -113,7 +113,7 @@ fn journal_scan_rejects_sequence_hash_and_run_mismatch() {
 
     // Sequence gap.
     {
-        let mut writer = JournalV2Writer::open(&path, id.clone()).unwrap();
+        let mut writer = JournalWriter::open(&path, id.clone()).unwrap();
         let ok = JournalEnvelope::new(
             0,
             1_000,
@@ -160,7 +160,7 @@ fn journal_scan_rejects_sequence_hash_and_run_mismatch() {
         .with_canonical_input_hash("not-a-real-hash");
         let line = serde_json::to_string(&bad).unwrap();
         std::fs::write(&path, format!("{line}\n")).unwrap();
-        let err = scan_journal_v2(&path, Some(&id)).unwrap_err();
+        let err = scan_journal(&path, Some(&id)).unwrap_err();
         assert_eq!(err.code(), WorkflowErrorCode::JournalCorrupt);
         assert!(
             err.to_string().contains("canonical input hash mismatch"),
@@ -186,7 +186,7 @@ fn journal_scan_rejects_sequence_hash_and_run_mismatch() {
         );
         let line = serde_json::to_string(&rec).unwrap();
         std::fs::write(&path, format!("{line}\n")).unwrap();
-        let err = scan_journal_v2(&path, Some(&id)).unwrap_err();
+        let err = scan_journal(&path, Some(&id)).unwrap_err();
         assert_eq!(err.code(), WorkflowErrorCode::JournalCorrupt);
         assert!(err.to_string().contains("run id mismatch"), "{err}");
     }
@@ -211,7 +211,7 @@ fn journal_scan_rejects_sequence_hash_and_run_mismatch() {
             format!("{}\n", serde_json::to_string(&value).unwrap()),
         )
         .unwrap();
-        let err = scan_journal_v2(&path, Some(&id)).unwrap_err();
+        let err = scan_journal(&path, Some(&id)).unwrap_err();
         assert_eq!(err.code(), WorkflowErrorCode::JournalCorrupt);
         assert!(
             err.to_string().contains("unknown journal format version")
@@ -228,7 +228,7 @@ fn journal_scan_rejects_sequence_hash_and_run_mismatch() {
             id.as_str()
         );
         std::fs::write(&path, format!("{line}\n")).unwrap();
-        let err = scan_journal_v2(&path, Some(&id)).unwrap_err();
+        let err = scan_journal(&path, Some(&id)).unwrap_err();
         assert_eq!(err.code(), WorkflowErrorCode::JournalCorrupt);
     }
 }
@@ -238,7 +238,7 @@ fn journal_v2_record_families_preserve_terminal_metadata() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("journal.jsonl");
     let id = run_id();
-    let mut writer = JournalV2Writer::open(&path, id.clone()).unwrap();
+    let mut writer = JournalWriter::open(&path, id.clone()).unwrap();
     let limits = limits();
     let mut seq = 0u64;
     let mut ts = 1_000u64;
@@ -464,7 +464,7 @@ fn journal_v2_record_families_preserve_terminal_metadata() {
         vec![],
     );
 
-    let index = scan_journal_v2(&path, Some(&id)).unwrap();
+    let index = scan_journal(&path, Some(&id)).unwrap();
     assert_eq!(index.next_seq, seq);
     assert_eq!(index.final_result_seq, Some(seq - 2));
     assert_eq!(index.terminal_state, Some(WorkflowState::Completed));
@@ -472,7 +472,7 @@ fn journal_v2_record_families_preserve_terminal_metadata() {
     assert!(!index.has_incomplete_invocations());
     assert!(!index.has_incomplete_swarm_items());
 
-    let envelopes = collect_journal_v2(&path, Some(&id)).unwrap();
+    let envelopes = collect_journal(&path, Some(&id)).unwrap();
     // Every required family appears at least once.
     let mut kinds = std::collections::HashSet::new();
     for env in &envelopes {
@@ -546,7 +546,7 @@ fn journal_v2_record_families_preserve_terminal_metadata() {
     assert_eq!(usage.output_tokens, 4);
 
     // Bounded page does not require full retention API for consumers.
-    let page = scan_journal_v2_page(&path, Some(&id), 0, 3, 1024 * 1024).unwrap();
+    let page = scan_journal_page(&path, Some(&id), 0, 3, 1024 * 1024).unwrap();
     assert_eq!(page.envelopes.len(), 3);
     assert!(page.has_more);
     assert_eq!(page.first_seq, Some(0));
@@ -602,7 +602,7 @@ fn journal_recovery_normalizes_valid_unterminated_record() {
     );
     assert!(on_disk.starts_with(format!("{line}\n").as_bytes()));
 
-    let report = recover_journal_v2(&path, Some(&id)).expect("normalize recovery");
+    let report = recover_journal(&path, Some(&id)).expect("normalize recovery");
     assert!(matches!(
         report.action,
         JournalRecoveryAction::NormalizedUnterminated { seq: 1 }
@@ -618,7 +618,7 @@ fn journal_recovery_normalizes_valid_unterminated_record() {
         "normalize must only append a newline"
     );
 
-    let envelopes = collect_journal_v2(&path, Some(&id)).unwrap();
+    let envelopes = collect_journal(&path, Some(&id)).unwrap();
     assert_eq!(envelopes.len(), 2);
     assert_eq!(envelopes[1].seq, 1);
     assert_eq!(report.index.next_seq, 2);
@@ -641,7 +641,7 @@ fn journal_recovery_quarantines_torn_tail_before_truncate() {
     let original = std::fs::read(&path).unwrap();
 
     // Quarantine must succeed before truncate.
-    let report = recover_journal_v2(&path, Some(&id)).expect("quarantine recovery");
+    let report = recover_journal(&path, Some(&id)).expect("quarantine recovery");
     let JournalRecoveryAction::TornTailQuarantined {
         quarantine_sha256,
         quarantine_path,
@@ -688,7 +688,7 @@ fn journal_recovery_quarantines_torn_tail_before_truncate() {
     let qdir = recovery_quarantine_dir(&run2);
     std::fs::write(&qdir, b"not-a-directory").unwrap();
     let before_fail = std::fs::read(&path3).unwrap();
-    let err = recover_journal_v2(&path3, Some(&id)).expect_err("quarantine must fail");
+    let err = recover_journal(&path3, Some(&id)).expect_err("quarantine must fail");
     assert!(
         err.to_string().contains("quarantine") || err.to_string().contains("directory"),
         "unexpected error: {err}"
@@ -714,7 +714,7 @@ fn journal_recovery_fails_closed_on_interior_or_newline_corruption() {
         bytes.extend_from_slice(b"{not-json}\n");
         std::fs::write(&path, &bytes).unwrap();
         let before = std::fs::read(&path).unwrap();
-        let err = recover_journal_v2(&path, Some(&id)).expect_err("must fail closed");
+        let err = recover_journal(&path, Some(&id)).expect_err("must fail closed");
         assert_eq!(err.code(), WorkflowErrorCode::JournalCorrupt);
         assert_eq!(std::fs::read(&path).unwrap(), before);
         let _ = prefix_line;
@@ -751,7 +751,7 @@ fn journal_recovery_fails_closed_on_interior_or_newline_corruption() {
         );
         std::fs::write(&path, &content).unwrap();
         let before = std::fs::read(&path).unwrap();
-        let err = recover_journal_v2(&path, Some(&id)).expect_err("interior must fail closed");
+        let err = recover_journal(&path, Some(&id)).expect_err("interior must fail closed");
         assert_eq!(err.code(), WorkflowErrorCode::JournalCorrupt);
         assert_eq!(std::fs::read(&path).unwrap(), before);
     }
@@ -787,7 +787,7 @@ fn journal_recovery_fails_closed_on_interior_or_newline_corruption() {
         );
         std::fs::write(&path, &content).unwrap();
         let before = std::fs::read(&path).unwrap();
-        let err = recover_journal_v2(&path, Some(&id)).expect_err("seq gap must fail closed");
+        let err = recover_journal(&path, Some(&id)).expect_err("seq gap must fail closed");
         assert_eq!(err.code(), WorkflowErrorCode::JournalCorrupt);
         assert!(err.to_string().contains("sequence gap"), "{err}");
         assert_eq!(std::fs::read(&path).unwrap(), before);
@@ -809,7 +809,7 @@ fn journal_recovery_fails_closed_on_interior_or_newline_corruption() {
         );
         std::fs::write(&path, format!("{}\n", serde_json::to_string(&env).unwrap())).unwrap();
         let before = std::fs::read(&path).unwrap();
-        let err = recover_journal_v2(&path, Some(&id)).expect_err("run id must fail closed");
+        let err = recover_journal(&path, Some(&id)).expect_err("run id must fail closed");
         assert_eq!(err.code(), WorkflowErrorCode::JournalCorrupt);
         assert!(err.to_string().contains("run id mismatch"), "{err}");
         assert_eq!(std::fs::read(&path).unwrap(), before);
@@ -832,7 +832,7 @@ fn journal_recovery_fails_closed_on_interior_or_newline_corruption() {
         .with_canonical_input_hash("0".repeat(64));
         std::fs::write(&path, format!("{}\n", serde_json::to_string(&env).unwrap())).unwrap();
         let before = std::fs::read(&path).unwrap();
-        let err = recover_journal_v2(&path, Some(&id)).expect_err("hash must fail closed");
+        let err = recover_journal(&path, Some(&id)).expect_err("hash must fail closed");
         assert_eq!(err.code(), WorkflowErrorCode::JournalCorrupt);
         assert_eq!(std::fs::read(&path).unwrap(), before);
         env.canonical_input_hash = Some("1".repeat(64));
@@ -856,7 +856,7 @@ fn journal_platform_sync_and_quarantine_semantics() {
     let id = run_id();
 
     // Open creates parent safely and returns a writer bound to Path (not strings).
-    let mut writer = JournalV2Writer::open(&path, id.clone()).expect("open empty journal");
+    let mut writer = JournalWriter::open(&path, id.clone()).expect("open empty journal");
     assert!(path.is_file());
     let created = JournalEnvelope::new(
         0,
@@ -872,7 +872,7 @@ fn journal_platform_sync_and_quarantine_semantics() {
     drop(writer);
 
     // After append+sync_all, a fresh open must see the durable record.
-    let reread = collect_journal_v2(&path, Some(&id)).expect("reread after sync");
+    let reread = collect_journal(&path, Some(&id)).expect("reread after sync");
     assert_eq!(reread.len(), 1);
     assert_eq!(reread[0].seq, 0);
 
@@ -897,7 +897,7 @@ fn journal_platform_sync_and_quarantine_semantics() {
     std::fs::write(&path, &bytes).unwrap();
     let original_with_torn = std::fs::read(&path).unwrap();
 
-    let report = recover_journal_v2(&path, Some(&id)).expect("torn-tail recovery");
+    let report = recover_journal(&path, Some(&id)).expect("torn-tail recovery");
     let JournalRecoveryAction::TornTailQuarantined {
         quarantine_sha256,
         quarantine_path,
@@ -935,7 +935,7 @@ fn journal_platform_sync_and_quarantine_semantics() {
     let q_poison = recovery_quarantine_dir(&nested);
     std::fs::write(&q_poison, b"not-a-directory").unwrap();
     let before = std::fs::read(&fail_path).unwrap();
-    let err = recover_journal_v2(&fail_path, Some(&id)).expect_err("quarantine must fail");
+    let err = recover_journal(&fail_path, Some(&id)).expect_err("quarantine must fail");
     assert!(
         err.to_string().to_lowercase().contains("quarantine")
             || err.to_string().to_lowercase().contains("directory")
@@ -956,7 +956,7 @@ fn journal_platform_sync_and_quarantine_semantics() {
     corrupt.extend_from_slice(b"{not-json}\n");
     std::fs::write(&corrupt_path, &corrupt).unwrap();
     let before_corrupt = std::fs::read(&corrupt_path).unwrap();
-    let cerr = recover_journal_v2(&corrupt_path, Some(&id)).expect_err("interior corrupt");
+    let cerr = recover_journal(&corrupt_path, Some(&id)).expect_err("interior corrupt");
     assert_eq!(cerr.code(), WorkflowErrorCode::JournalCorrupt);
     assert_eq!(std::fs::read(&corrupt_path).unwrap(), before_corrupt);
 }

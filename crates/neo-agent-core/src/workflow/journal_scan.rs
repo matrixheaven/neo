@@ -1,4 +1,4 @@
-//! Bounded journal scanning and validation (V1 index + V2 envelopes).
+//! Bounded journal scanning and validation for record and envelope journals.
 //!
 //! The scanner is the sole owner of sequential journal validation. It produces
 //! replay/index state and pages without requiring full-journal retention.
@@ -10,8 +10,7 @@ use std::path::Path;
 use super::super::error::{WorkflowError, WorkflowErrorCode};
 use super::super::state::{WorkflowId, WorkflowState};
 use super::{
-    JOURNAL_FORMAT_V2, JournalEnvelope, JournalPayload, JournalRecord, canonical_input_hash,
-    validate_v2_envelope,
+    JournalEnvelope, JournalPayload, JournalRecord, canonical_input_hash, validate_envelope,
 };
 
 /// Streaming index built without retaining every record body.
@@ -53,7 +52,7 @@ impl JournalScanIndex {
     }
 }
 
-/// One bounded page of V2 envelopes (never a full multi-gigabyte journal).
+/// One bounded page of envelopes (never a full multi-gigabyte journal).
 #[derive(Debug, Clone)]
 pub struct JournalPage {
     pub envelopes: Vec<JournalEnvelope>,
@@ -64,16 +63,16 @@ pub struct JournalPage {
     pub next_seq: u64,
 }
 
-/// Scan a V2 journal, validating sequence / run ID / hash / pairing invariants.
+/// Scan the canonical journal, validating sequence / run ID / hash / pairing invariants.
 ///
 /// Does not retain record bodies — only index state.
-pub fn scan_journal_v2(
+pub fn scan_journal(
     path: &Path,
     expected_run_id: Option<&WorkflowId>,
 ) -> Result<JournalScanIndex, WorkflowError> {
     let mut index = JournalScanIndex::default();
-    for_each_v2_line(path, expected_run_id, |envelope, line_bytes, offset_end| {
-        observe_v2_envelope(&envelope, &mut index)?;
+    for_each_line(path, expected_run_id, |envelope, line_bytes, offset_end| {
+        observe_envelope(&envelope, &mut index)?;
         index.record_count = index
             .record_count
             .checked_add(1)
@@ -89,19 +88,19 @@ pub fn scan_journal_v2(
             .ok_or_else(|| journal_corrupt("journal sequence overflow"))?;
         Ok(())
     })?;
-    finalize_v2_index(&index)?;
+    finalize_index(&index)?;
     Ok(index)
 }
 
-/// Collect every validated V2 envelope (test / small-journal helper only).
-pub fn collect_journal_v2(
+/// Collect every validated envelope (test / small-journal helper only).
+pub fn collect_journal(
     path: &Path,
     expected_run_id: Option<&WorkflowId>,
 ) -> Result<Vec<JournalEnvelope>, WorkflowError> {
     let mut out = Vec::new();
     let mut index = JournalScanIndex::default();
-    for_each_v2_line(path, expected_run_id, |envelope, line_bytes, offset_end| {
-        observe_v2_envelope(&envelope, &mut index)?;
+    for_each_line(path, expected_run_id, |envelope, line_bytes, offset_end| {
+        observe_envelope(&envelope, &mut index)?;
         index.record_count = index
             .record_count
             .checked_add(1)
@@ -118,12 +117,12 @@ pub fn collect_journal_v2(
         out.push(envelope);
         Ok(())
     })?;
-    finalize_v2_index(&index)?;
+    finalize_index(&index)?;
     Ok(out)
 }
 
-/// Return a bounded ascending page of V2 envelopes starting at `from_seq`.
-pub fn scan_journal_v2_page(
+/// Return a bounded ascending page of envelopes starting at `from_seq`.
+pub fn scan_journal_page(
     path: &Path,
     expected_run_id: Option<&WorkflowId>,
     from_seq: u64,
@@ -142,8 +141,8 @@ pub fn scan_journal_v2_page(
     let mut has_more = false;
     let mut page_started = false;
 
-    for_each_v2_line(path, expected_run_id, |envelope, line_bytes, offset_end| {
-        observe_v2_envelope(&envelope, &mut index)?;
+    for_each_line(path, expected_run_id, |envelope, line_bytes, offset_end| {
+        observe_envelope(&envelope, &mut index)?;
         index.record_count = index
             .record_count
             .checked_add(1)
@@ -180,7 +179,7 @@ pub fn scan_journal_v2_page(
         envelopes.push(envelope);
         Ok(())
     })?;
-    finalize_v2_index(&index)?;
+    finalize_index(&index)?;
 
     let first_seq = envelopes.first().map(|e| e.seq);
     let last_seq = envelopes.last().map(|e| e.seq);
@@ -241,7 +240,7 @@ pub fn collect_journal_v1(path: &Path) -> Result<Vec<JournalRecord>, WorkflowErr
     Ok(records)
 }
 
-fn for_each_v2_line(
+fn for_each_line(
     path: &Path,
     expected_run_id: Option<&WorkflowId>,
     mut on_record: impl FnMut(JournalEnvelope, u64, u64) -> Result<(), WorkflowError>,
@@ -285,12 +284,6 @@ fn for_each_v2_line(
             journal_corrupt(format!("malformed or unknown journal record: {e}"))
         })?;
 
-        if envelope.version != JOURNAL_FORMAT_V2 {
-            return Err(journal_corrupt(format!(
-                "unknown journal format version {}",
-                envelope.version
-            )));
-        }
         if envelope.seq != expected_seq {
             return Err(journal_corrupt(format!(
                 "sequence gap: expected {expected_seq}, got {}",
@@ -318,7 +311,7 @@ fn for_each_v2_line(
             )));
         }
 
-        validate_v2_envelope(&envelope)?;
+        validate_envelope(&envelope)?;
 
         on_record(envelope, line_bytes, offset_end)?;
         expected_seq = expected_seq
@@ -438,7 +431,7 @@ fn observe_v1_record(record: &JournalRecord, index: &mut JournalScanIndex) {
     }
 }
 
-pub(super) fn observe_v2_envelope(
+pub(super) fn observe_envelope(
     envelope: &JournalEnvelope,
     index: &mut JournalScanIndex,
 ) -> Result<(), WorkflowError> {
@@ -610,7 +603,7 @@ pub(super) fn observe_v2_envelope(
     Ok(())
 }
 
-pub(super) fn finalize_v2_index(index: &JournalScanIndex) -> Result<(), WorkflowError> {
+pub(super) fn finalize_index(index: &JournalScanIndex) -> Result<(), WorkflowError> {
     if index.terminal_state == Some(WorkflowState::Completed) && index.final_result_seq.is_none() {
         return Err(journal_corrupt(
             "completed state without final_result_recorded",
