@@ -681,6 +681,7 @@ fn page_budget(max_output_bytes: u64) -> u64 {
 fn state_status_str(state: WorkflowState) -> &'static str {
     match state {
         WorkflowState::Queued | WorkflowState::Running => "running",
+        WorkflowState::Pausing => "finishing_current_work",
         WorkflowState::AwaitingUser => "waiting_for_user",
         WorkflowState::Paused => "paused",
         WorkflowState::Completed => "completed",

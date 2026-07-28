@@ -98,7 +98,7 @@ pub enum Command {
     },
     /// Remove this Neo binary and optionally its active data directory
     Uninstall {
-        /// Answer yes to the data-deletion confirmation
+        /// Confirm yes to the data-deletion prompt
         #[arg(short = 'y', long = "yes")]
         yes: bool,
     },
@@ -126,158 +126,62 @@ pub enum RunOutput {
     Text,
 }
 
-/// Output format for read-only workflow commands.
+/// Output format for read-only and run workflow commands.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum, Default)]
 pub enum WorkflowOutputFormat {
+    /// Human-readable text (default)
     #[default]
     Text,
+    /// Machine-readable JSON
     Json,
-}
-
-/// Output format for `workflow run` (includes streaming JSONL).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum, Default)]
-pub enum WorkflowRunOutputFormat {
-    #[default]
-    Text,
-    Json,
+    /// Streaming JSONL events (run only)
     Jsonl,
-}
-
-/// Definition list/show scope filter.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
-pub enum WorkflowListScopeArg {
-    Builtin,
-    User,
-    Project,
-    Effective,
-}
-
-/// Writable save target scope (builtin is not writable).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
-pub enum WorkflowSaveScopeArg {
-    User,
-    Project,
 }
 
 #[derive(Debug, Subcommand)]
 pub enum WorkflowCommand {
-    /// List registry definitions
+    /// Show the workflows available here and what each one does
     List {
-        #[arg(long, value_enum)]
-        scope: Option<WorkflowListScopeArg>,
-        #[arg(long, value_enum, default_value_t = WorkflowOutputFormat::Text)]
-        output: WorkflowOutputFormat,
+        /// Output in JSON format
+        #[arg(long)]
+        json: bool,
     },
-    /// Show one resolved definition
-    Show {
+    /// Run a registered workflow and wait for its result
+    Run {
+        /// Registry name of the workflow
         name: String,
-        #[arg(long, value_enum)]
-        scope: Option<WorkflowListScopeArg>,
+        /// Inline JSON object arguments
+        #[arg(
+            long = "args",
+            value_name = "OBJECT",
+            conflicts_with = "args_file"
+        )]
+        args: Option<String>,
+        /// Path to a JSON object arguments file
+        #[arg(long = "args-file", value_name = "PATH", conflicts_with = "args")]
+        args_file: Option<std::path::PathBuf>,
+        /// Output format (text, json, jsonl)
         #[arg(long, value_enum, default_value_t = WorkflowOutputFormat::Text)]
         output: WorkflowOutputFormat,
     },
-    /// Validate a definition by name or path without creating a run
+    /// Check that a workflow is valid without running it
     Check {
         /// Registry name or path to a `.lua` / `.workflow.toml` pair
         target: String,
-        #[arg(long, value_enum, default_value_t = WorkflowOutputFormat::Text)]
-        output: WorkflowOutputFormat,
+        /// Output in JSON format
+        #[arg(long)]
+        json: bool,
     },
-    /// Run a deterministic fixture harness case (no live providers/tools)
+    /// Try a workflow safely with recorded test results instead of real agents and tools
     Test {
         /// Registry name or path to a definition pair
         target: String,
         /// Fixture case path
         #[arg(long = "case", value_name = "FIXTURE")]
         case: std::path::PathBuf,
-        #[arg(long, value_enum, default_value_t = WorkflowOutputFormat::Text)]
-        output: WorkflowOutputFormat,
-    },
-    /// Launch a named workflow (waits by default; `--detach` after durable create)
-    Run {
-        name: String,
-        /// Inline JSON object arguments
-        #[arg(
-            long = "args-json",
-            value_name = "OBJECT",
-            conflicts_with = "args_file"
-        )]
-        args_json: Option<String>,
-        /// Path to a JSON object arguments file
-        #[arg(long = "args-file", value_name = "PATH", conflicts_with = "args_json")]
-        args_file: Option<std::path::PathBuf>,
-        /// Return after durable creation instead of waiting for terminal state
+        /// Output in JSON format
         #[arg(long)]
-        detach: bool,
-        #[arg(long, value_enum, default_value_t = WorkflowRunOutputFormat::Text)]
-        output: WorkflowRunOutputFormat,
-    },
-    /// Save a definition from a run id or pair path (no-clobber unless `--force`)
-    Save {
-        /// Run id, run directory, or definition pair path
-        target: String,
-        #[arg(long, value_enum)]
-        scope: WorkflowSaveScopeArg,
-        /// Override the saved definition name
-        #[arg(long)]
-        name: Option<String>,
-        /// Overwrite an existing different definition
-        #[arg(long)]
-        force: bool,
-        #[arg(long, value_enum, default_value_t = WorkflowOutputFormat::Text)]
-        output: WorkflowOutputFormat,
-    },
-    /// Answer a durable AwaitingUser request
-    Answer {
-        /// Run id or human handle
-        run: String,
-        request_id: String,
-        /// Inline JSON answer value
-        #[arg(long = "json", value_name = "VALUE", conflicts_with = "file")]
-        json: Option<String>,
-        /// Path to a JSON answer value
-        #[arg(long = "file", value_name = "PATH", conflicts_with = "json")]
-        file: Option<std::path::PathBuf>,
-        #[arg(long, value_enum, default_value_t = WorkflowOutputFormat::Text)]
-        output: WorkflowOutputFormat,
-    },
-    /// Create a linked V2 run from a verified parent checkpoint
-    Fork {
-        /// Parent run id or human handle
-        run: String,
-        /// Parent journal sequence boundary
-        #[arg(long, value_name = "SEQ")]
-        checkpoint: u64,
-        /// Optional name for the forked run's launch request
-        #[arg(long)]
-        name: Option<String>,
-        #[arg(
-            long = "args-json",
-            value_name = "OBJECT",
-            conflicts_with = "args_file"
-        )]
-        args_json: Option<String>,
-        #[arg(long = "args-file", value_name = "PATH", conflicts_with = "args_json")]
-        args_file: Option<std::path::PathBuf>,
-        #[arg(long, value_enum, default_value_t = WorkflowOutputFormat::Text)]
-        output: WorkflowOutputFormat,
-    },
-    /// Preview or delete terminal, unreferenced, unpinned workflow storage
-    Prune {
-        /// Minimum terminal age (e.g. `7d`, `24h`, `30m`)
-        #[arg(long = "older-than", value_name = "DURATION")]
-        older_than: Option<String>,
-        /// Optional reclaim byte target (e.g. `100M`, `1G`, or raw bytes)
-        #[arg(long = "max-bytes", value_name = "BYTES")]
-        max_bytes: Option<String>,
-        /// Explicit dry-run (default when `--yes` is absent)
-        #[arg(long = "dry-run", conflicts_with = "yes")]
-        dry_run: bool,
-        /// Perform deletion of reclaimable candidates
-        #[arg(long = "yes", conflicts_with = "dry_run")]
-        yes: bool,
-        #[arg(long, value_enum, default_value_t = WorkflowOutputFormat::Text)]
-        output: WorkflowOutputFormat,
+        json: bool,
     },
 }
 
@@ -292,7 +196,7 @@ pub enum SessionCommand {
     /// Fork a session
     Fork {
         session_id: String,
-        /// Name for the forked session
+        /// Name for the linked session
         #[arg(long)]
         name: Option<String>,
     },

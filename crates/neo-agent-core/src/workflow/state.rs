@@ -319,6 +319,10 @@ pub enum WorkflowState {
     Running,
     /// Durable human/model input required; independent of `Paused`.
     AwaitingUser,
+    /// Pause requested; currently-approved children may finish, but no new
+    /// children will be started. Transitions to `Paused` once all children
+    /// have drained.
+    Pausing,
     Paused,
     Completed,
     Failed,
@@ -338,13 +342,13 @@ impl WorkflowState {
     /// Whether ordinary resume may transition this state without a typed answer.
     #[must_use]
     pub fn allows_ordinary_resume(self) -> bool {
-        matches!(self, Self::Paused)
+        matches!(self, Self::Paused | Self::Pausing)
     }
 
     /// Whether rehydration projects this state as paused(host_exit) until resume.
     #[must_use]
     pub fn rehydrates_as_paused_host_exit(self) -> bool {
-        matches!(self, Self::Queued | Self::Running)
+        matches!(self, Self::Queued | Self::Running | Self::Pausing)
     }
 
     /// Snake_case wire/label form.
@@ -354,6 +358,7 @@ impl WorkflowState {
             Self::Queued => "queued",
             Self::Running => "running",
             Self::AwaitingUser => "awaiting_user",
+            Self::Pausing => "pausing",
             Self::Paused => "paused",
             Self::Completed => "completed",
             Self::Failed => "failed",
@@ -366,7 +371,8 @@ impl WorkflowState {
     #[must_use]
     pub fn can_transition_to(self, to: Self) -> bool {
         use WorkflowState::{
-            AwaitingUser, Cancelled, Completed, Failed, Paused, Queued, ResourceLimited, Running,
+            AwaitingUser, Cancelled, Completed, Failed, Paused, Pausing, Queued, ResourceLimited,
+            Running,
         };
         if self.is_terminal() {
             return false;
@@ -378,8 +384,10 @@ impl WorkflowState {
                 Running | Paused | Cancelled | Failed | ResourceLimited
             ) | (
                 Running,
-                AwaitingUser | Paused | Completed | Failed | Cancelled | ResourceLimited
-            ) | (AwaitingUser, Queued | Cancelled | ResourceLimited)
+                AwaitingUser | Pausing | Paused | Completed | Failed | Cancelled
+                    | ResourceLimited
+            ) | (Pausing, Paused | Cancelled | Failed | ResourceLimited)
+                | (AwaitingUser, Queued | Cancelled | ResourceLimited)
                 | (Paused, Queued | Cancelled)
         )
     }
@@ -419,7 +427,8 @@ impl WorkflowState {
     #[must_use]
     pub fn allowed_transitions() -> &'static [(Self, Self)] {
         use WorkflowState::{
-            AwaitingUser, Cancelled, Completed, Failed, Paused, Queued, ResourceLimited, Running,
+            AwaitingUser, Cancelled, Completed, Failed, Paused, Pausing, Queued, ResourceLimited,
+            Running,
         };
         &[
             (Queued, Running),
@@ -428,11 +437,16 @@ impl WorkflowState {
             (Queued, Failed),
             (Queued, ResourceLimited),
             (Running, AwaitingUser),
+            (Running, Pausing),
             (Running, Paused),
             (Running, Completed),
             (Running, Failed),
             (Running, Cancelled),
             (Running, ResourceLimited),
+            (Pausing, Paused),
+            (Pausing, Cancelled),
+            (Pausing, Failed),
+            (Pausing, ResourceLimited),
             (AwaitingUser, Queued),
             (AwaitingUser, Cancelled),
             (AwaitingUser, ResourceLimited),
@@ -445,12 +459,14 @@ impl WorkflowState {
     #[must_use]
     pub fn all_states() -> &'static [Self] {
         use WorkflowState::{
-            AwaitingUser, Cancelled, Completed, Failed, Paused, Queued, ResourceLimited, Running,
+            AwaitingUser, Cancelled, Completed, Failed, Paused, Pausing, Queued, ResourceLimited,
+            Running,
         };
         &[
             Queued,
             Running,
             AwaitingUser,
+            Pausing,
             Paused,
             Completed,
             Failed,

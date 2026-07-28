@@ -100,6 +100,7 @@ impl WorkflowCardComponent {
         let status_label = match self.snapshot.state {
             WorkflowState::Running => "running",
             WorkflowState::Queued => "queued",
+            WorkflowState::Pausing => "finishing work",
             WorkflowState::AwaitingUser => "awaiting user",
             WorkflowState::Completed => "completed",
             WorkflowState::Failed => "failed",
@@ -128,7 +129,7 @@ impl WorkflowCardComponent {
         let elapsed_ms = self.snapshot.started_at_ms.map(|started| {
             let end = if matches!(
                 self.snapshot.state,
-                WorkflowState::Running | WorkflowState::Queued | WorkflowState::AwaitingUser
+                WorkflowState::Running | WorkflowState::Queued | WorkflowState::Pausing | WorkflowState::AwaitingUser
             ) {
                 self.now_ms.or(self.snapshot.updated_at_ms)
             } else {
@@ -188,7 +189,7 @@ fn workflow_state_color(state: WorkflowState, theme: &TuiTheme) -> Color {
     match state {
         WorkflowState::Completed => theme.status_ok,
         WorkflowState::Failed => theme.status_error,
-        WorkflowState::Running | WorkflowState::Queued | WorkflowState::AwaitingUser => {
+        WorkflowState::Running | WorkflowState::Queued | WorkflowState::Pausing | WorkflowState::AwaitingUser => {
             theme.status_warn
         }
         WorkflowState::Paused => theme.status_warn,
@@ -199,7 +200,9 @@ fn workflow_state_color(state: WorkflowState, theme: &TuiTheme) -> Color {
 
 fn workflow_controls(state: WorkflowState) -> Option<&'static str> {
     match state {
-        WorkflowState::Running | WorkflowState::Queued => Some("TaskPause · TaskStop"),
+        WorkflowState::Running | WorkflowState::Queued | WorkflowState::Pausing => {
+            Some("TaskPause · TaskStop")
+        }
         WorkflowState::Paused | WorkflowState::AwaitingUser => Some("TaskResume · TaskStop"),
         WorkflowState::Completed
         | WorkflowState::Failed
@@ -217,6 +220,7 @@ impl Component for WorkflowCardComponent {
         match self.snapshot.state {
             WorkflowState::Running
             | WorkflowState::Queued
+            | WorkflowState::Pausing
             | WorkflowState::AwaitingUser
             | WorkflowState::Paused => Finalization::Live,
             WorkflowState::Completed

@@ -92,6 +92,10 @@ fn heterogeneous_plans() -> Vec<ChildPlan> {
             worktree: ChildWorktreePolicy::Shared,
             tool_allow: Some(vec!["read".to_owned()]),
             output_schema: Some(sample_schema()),
+                    display_name: None,
+                    input_schema: None,
+                    definition_origin: None,
+                    inline_unsaved: false,
         },
     ]
 }

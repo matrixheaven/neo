@@ -867,7 +867,7 @@ impl BackgroundTaskManager {
     /// Prune-safe removal of a terminal workflow task registration.
     ///
     /// Only removes the background-task projection for terminal runs. Durable
-    /// journal/storage deletion remains the headless `workflow prune` path;
+    /// journal/storage deletion is handled by automatic retention;
     /// this method never deletes run directories.
     pub async fn prune_workflow_if_safe(
         &self,
@@ -2292,6 +2292,7 @@ fn workflow_status(state: crate::workflow::WorkflowState) -> BackgroundTaskStatu
     match state {
         crate::workflow::WorkflowState::Queued => BackgroundTaskStatus::Running,
         crate::workflow::WorkflowState::Running => BackgroundTaskStatus::Running,
+        crate::workflow::WorkflowState::Pausing => BackgroundTaskStatus::Running,
         crate::workflow::WorkflowState::AwaitingUser => BackgroundTaskStatus::WaitingForUser,
         crate::workflow::WorkflowState::Paused => BackgroundTaskStatus::Paused,
         crate::workflow::WorkflowState::Completed => BackgroundTaskStatus::Completed,
@@ -2747,7 +2748,7 @@ impl Tool for TaskAnswerTool {
     }
 
     fn description(&self) -> &'static str {
-        "Answer a durable workflow AwaitingUser question. Only usable for workflow tasks where the answer policy allows the model actor. Human-only gates must be answered by the user through the TUI or `neo workflow answer` CLI."
+        "Answer a durable workflow AwaitingUser question. Only usable for workflow tasks where the answer policy allows the model actor. Human-only gates must be answered by the user through the TUI Workflow Operator."
     }
 
     fn input_schema(&self) -> serde_json::Value {
@@ -3119,6 +3120,10 @@ mod tests {
                     launch_source: "test".to_owned(),
                     parent_run_id: None,
                     output_schema: None,
+                    display_name: None,
+                    input_schema: None,
+                    definition_origin: None,
+                    inline_unsaved: false,
                 },
             )
             .await
@@ -3236,6 +3241,10 @@ mod tests {
                     launch_source: "test".to_owned(),
                     parent_run_id: None,
                     output_schema: None,
+                    display_name: None,
+                    input_schema: None,
+                    definition_origin: None,
+                    inline_unsaved: false,
                 },
             )
             .await

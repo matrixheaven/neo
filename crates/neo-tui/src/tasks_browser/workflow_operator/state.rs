@@ -6,6 +6,8 @@
 
 use neo_agent_core::workflow::{WorkflowChildKey, WorkflowOperatorSnapshot, WorkflowStepKey};
 
+use super::answer::AnswerForm;
+
 /// Focus target within the Workflow Operator overlay.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum OperatorFocus {
@@ -58,6 +60,18 @@ pub struct WorkflowOperatorState {
     pub dismissals: DismissalMemory,
     /// Narrow-screen current page.
     pub narrow_page: NarrowPage,
+    /// Active answer form when the user is editing a typed answer.
+    pub answer_form: Option<AnswerForm>,
+    /// Whether the answer form is visible (may be dismissed).
+    pub answer_form_open: bool,
+    /// Stop confirmation pending.
+    pub stop_confirmation_pending: bool,
+    /// Save dialog pending (only for inline unsaved runs).
+    pub save_dialog_open: bool,
+    /// Save dialog: editable definition name.
+    pub save_name: Option<String>,
+    /// Save dialog: selected destination index (0 = project, 1 = user).
+    pub save_destination: Option<usize>,
 }
 
 impl Default for WorkflowOperatorState {
@@ -73,6 +87,12 @@ impl Default for WorkflowOperatorState {
             details_open: false,
             dismissals: DismissalMemory::default(),
             narrow_page: NarrowPage::Summary,
+            answer_form: None,
+            answer_form_open: false,
+            stop_confirmation_pending: false,
+            save_dialog_open: false,
+            save_name: None,
+            save_destination: None,
         }
     }
 }
@@ -89,6 +109,8 @@ impl WorkflowOperatorState {
         self.follow_active_step = true;
         self.manual_step_pin = false;
         self.details_open = false;
+        self.stop_confirmation_pending = false;
+        self.save_dialog_open = false;
     }
 
     /// Dismiss the current request; prevents auto-reopen on refresh.

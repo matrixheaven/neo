@@ -96,8 +96,9 @@ pub use output::{
     reconstruct_canonical_final_result, render_task_output_page, serialize_canonical_json_bytes,
 };
 pub use retention::{
-    RetentionExclusion, RetentionPolicy, RetentionPreview, RetentionSubject, classify_subject,
-    preview_mark_sweep,
+    RetentionExclusion, RetentionOutcome, RetentionPolicy, RetentionPreview, RetentionSubject,
+    classify_subject, collect_retention_subjects, current_unix_ms, dir_byte_size, file_age_ms,
+    infer_run_state, perform_retention, preview_mark_sweep,
 };
 pub use runtime::{
     ChildIsolationRequest, ChildSchemaAcceptResult, ChildSchemaRepairRequest, ParentChildAuthority,

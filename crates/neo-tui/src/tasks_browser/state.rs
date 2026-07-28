@@ -63,10 +63,6 @@ pub enum TaskBrowserAction {
     ConfirmStop,
     RequestAnswer,
     ConfirmAnswer,
-    RequestFork,
-    ConfirmFork,
-    RequestPrune,
-    ConfirmPrune,
     /// Request next list page from the host (query-bound cursor).
     RequestNextPage,
     /// Request previous list page from the host.
@@ -96,8 +92,6 @@ pub struct TaskBrowserState {
     resume_confirmation_task_id: Option<String>,
     stop_confirmation_task_id: Option<String>,
     answer_confirmation_task_id: Option<String>,
-    fork_confirmation_task_id: Option<String>,
-    prune_confirmation_task_id: Option<String>,
     footer_message: Option<String>,
     /// Cursor used to fetch the current page (None = first page).
     list_cursor: Option<String>,
@@ -125,8 +119,6 @@ impl TaskBrowserState {
             resume_confirmation_task_id: None,
             stop_confirmation_task_id: None,
             answer_confirmation_task_id: None,
-            fork_confirmation_task_id: None,
-            prune_confirmation_task_id: None,
             footer_message: None,
             list_cursor: None,
             list_prev_cursors: Vec::new(),
@@ -171,16 +163,6 @@ impl TaskBrowserState {
     #[must_use]
     pub fn answer_confirmation_task_id(&self) -> Option<&str> {
         self.answer_confirmation_task_id.as_deref()
-    }
-
-    #[must_use]
-    pub fn fork_confirmation_task_id(&self) -> Option<&str> {
-        self.fork_confirmation_task_id.as_deref()
-    }
-
-    #[must_use]
-    pub fn prune_confirmation_task_id(&self) -> Option<&str> {
-        self.prune_confirmation_task_id.as_deref()
     }
 
     #[must_use]
@@ -428,47 +410,6 @@ impl TaskBrowserState {
                 self.footer_message = None;
                 return self.answer_confirmation_task_id.take();
             }
-            TaskBrowserAction::RequestFork => {
-                let item = self.selected_item()?;
-                if item.kind != TaskBrowserKind::Workflow {
-                    self.footer_message = Some("Only workflow tasks can be forked.".to_owned());
-                    return None;
-                }
-                let task_id = item.id.clone();
-                let label = item.human_handle.clone().unwrap_or_else(|| task_id.clone());
-                self.clear_confirmations();
-                self.fork_confirmation_task_id = Some(task_id.clone());
-                self.footer_message = Some(format!("Fork {label}? Enter confirm   Esc cancel"));
-                return Some(task_id);
-            }
-            TaskBrowserAction::ConfirmFork => {
-                self.footer_message = None;
-                return self.fork_confirmation_task_id.take();
-            }
-            TaskBrowserAction::RequestPrune => {
-                let item = self.selected_item()?;
-                if item.kind != TaskBrowserKind::Workflow {
-                    self.footer_message = Some("Only workflow tasks can be pruned.".to_owned());
-                    return None;
-                }
-                if item.status.is_active() {
-                    self.footer_message =
-                        Some("Only terminal workflows can be prune-safe removed.".to_owned());
-                    return None;
-                }
-                let task_id = item.id.clone();
-                let label = item.human_handle.clone().unwrap_or_else(|| task_id.clone());
-                self.clear_confirmations();
-                self.prune_confirmation_task_id = Some(task_id.clone());
-                self.footer_message = Some(format!(
-                    "Prune-safe remove {label} registration? Enter confirm   Esc cancel"
-                ));
-                return Some(task_id);
-            }
-            TaskBrowserAction::ConfirmPrune => {
-                self.footer_message = None;
-                return self.prune_confirmation_task_id.take();
-            }
             TaskBrowserAction::RequestNextPage => {
                 if !self.list_has_more {
                     self.footer_message = Some("No more pages.".to_owned());
@@ -513,8 +454,6 @@ impl TaskBrowserState {
             | self.resume_confirmation_task_id.take().is_some()
             | self.stop_confirmation_task_id.take().is_some()
             | self.answer_confirmation_task_id.take().is_some()
-            | self.fork_confirmation_task_id.take().is_some()
-            | self.prune_confirmation_task_id.take().is_some()
     }
 
     fn reconcile_selection(&mut self) {

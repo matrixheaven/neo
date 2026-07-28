@@ -43,7 +43,7 @@ use tokio_util::sync::CancellationToken;
 
 use crate::{
     cli::RunOutput,
-    config::{AppConfig, neo_home},
+    config::{AppConfig, neo_home, workspace_sessions_dir},
     modes::{
         interactive::{TurnChannels, TurnRequest},
         sessions,
@@ -424,8 +424,24 @@ async fn run_prompt_in_session(
     )
     .await?;
     let notification_queue = config.workflow_runtime.notification_queue();
-    for id in neo_agent_core::session::workflow_notification_projection_ids(&turn.events) {
+    let notification_ids =
+        neo_agent_core::session::workflow_notification_projection_ids(&turn.events);
+    let has_terminal = !notification_ids.is_empty();
+    for id in notification_ids {
         let _ = notification_queue.mark_projected(&id);
+    }
+    // After a terminal workflow whose transcript summary is persisted,
+    // run automatic retention to reclaim eligible old runs.
+    if has_terminal {
+        let sessions_root = workspace_sessions_dir(config);
+        let outcome = config.workflow_runtime.try_auto_retention(&sessions_root);
+        if outcome.reclaimed_count > 0 {
+            tracing::info!(
+                "auto-retention after workflow completion: reclaimed {} runs ({} bytes)",
+                outcome.reclaimed_count,
+                outcome.reclaimed_bytes
+            );
+        }
     }
     Ok(turn)
 }
@@ -711,6 +727,24 @@ fn skill_store_reloader(
         resources::load_skill_store(neo_home.as_deref(), &extra_skill_dirs, &skill_path)
             .map_err(|err| err.to_string())
     })
+}
+
+/// Set up the workflow dispatch resolver for a headless CLI workflow run.
+///
+/// Creates a minimal AgentRuntime so the workflow dispatch resolver has a bound
+/// snapshot, then binds the workflow runtime to that resolver. This enables
+/// real Lua execution during `neo workflow run`.
+pub async fn setup_workflow_dispatch(
+    config: &AppConfig,
+    session_dir: &std::path::Path,
+) -> anyhow::Result<()> {
+    let runtime = runtime_for_config(config, Some(session_dir.to_path_buf()), None, None).await?;
+    runtime.refresh_workflow_dispatch(&AgentContext::new())?;
+    config
+        .workflow_dispatch_resolver
+        .bind_workflow_runtime(&config.workflow_runtime)
+        .map_err(|e| anyhow::anyhow!("{e}"))?;
+    Ok(())
 }
 
 #[cfg(test)]
@@ -3311,6 +3345,10 @@ mod tests {
                         launch_source: "test".to_owned(),
                         parent_run_id: None,
                         output_schema: None,
+                                display_name: None,
+                                input_schema: None,
+                                definition_origin: None,
+                                inline_unsaved: false,
                     },
                 )
                 .await

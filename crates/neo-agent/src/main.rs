@@ -31,7 +31,7 @@ use crate::{
     cli::{
         CatalogCommand, Cli, Command, McpCommand, ModelCommand, ProviderCommand, SessionCommand,
     },
-    config::{AppConfig, ConfigOverrides},
+    config::{AppConfig, ConfigOverrides, workspace_sessions_dir},
 };
 
 use neo_tui::terminal_image::ImageProtocolPreference;
@@ -135,6 +135,22 @@ async fn dispatch(
     }
     resolve_resume_workspace(&cli)?;
     let config = AppConfig::load(overrides)?;
+
+    // Automatic retention at startup — reclaim oldest eligible terminal runs.
+    {
+        let sessions_root = workspace_sessions_dir(&config);
+        let outcome = config.workflow_runtime.try_auto_retention(&sessions_root);
+        if outcome.reclaimed_count > 0 {
+            tracing::info!(
+                "auto-retention: reclaimed {} runs ({} bytes)",
+                outcome.reclaimed_count,
+                outcome.reclaimed_bytes
+            );
+        }
+        if outcome.storage_full {
+            tracing::warn!("workflow storage is full and no eligible runs can be reclaimed");
+        }
+    }
 
     let session_options = RunSessionOptions::from_cli(&cli);
     let interactive_options = modes::interactive::InteractiveOptions {

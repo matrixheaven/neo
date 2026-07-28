@@ -21,6 +21,7 @@ use super::journal::{
     canonical_input_hash, find_incomplete_invocations_v2,
 };
 use super::limits::WorkflowLimits;
+use super::{RetentionOutcome, perform_retention};
 use super::output::{
     CanonicalFinalResult, PreparedFinalBody, TaskOutputMaterials, TaskOutputPage,
     TaskOutputRequest, prepare_final_body, reconstruct_canonical_final_result,
@@ -393,6 +394,15 @@ impl WorkflowRuntime {
         &self.admission
     }
 
+    /// Run automatic retention on the given sessions root.
+    ///
+    /// Deletes eligible terminal runs older than 30 days until global storage
+    /// is at or below 80% of the configured limit. Returns the outcome
+    /// (count and bytes reclaimed).
+    pub fn try_auto_retention(&self, sessions_root: &Path) -> RetentionOutcome {
+        perform_retention(sessions_root, Some(&self.admission), &self.limits)
+    }
+
     /// Validate every pure launch boundary before durable creation.
     pub fn validate_launch_request(
         &self,
@@ -481,9 +491,33 @@ impl WorkflowRuntime {
         };
         let metadata = metadata_for_request(run_id.clone(), request);
 
-        let storage_reservation = self
+        // Attempt storage reservation with one retry after auto-retention.
+        let storage_reservation = match self
             .admission
-            .try_reserve_storage(run_id.as_str(), self.limits.run_storage_reservation_bytes())?;
+            .try_reserve_storage(run_id.as_str(), self.limits.run_storage_reservation_bytes())
+        {
+            Ok(reservation) => reservation,
+            Err(e) if e.code() == WorkflowErrorCode::StorageAdmissionDenied => {
+                // Try auto-retention before final denial.
+                if let Some(sessions_root) = session_dir.parent().and_then(Path::parent) {
+                    let outcome = perform_retention(
+                        sessions_root,
+                        Some(&self.admission),
+                        &self.limits,
+                    );
+                    if outcome.reclaimed_count > 0 {
+                        tracing::info!(
+                            "auto-retention before run create: reclaimed {} runs ({} bytes)",
+                            outcome.reclaimed_count,
+                            outcome.reclaimed_bytes
+                        );
+                    }
+                }
+                self.admission
+                    .try_reserve_storage(run_id.as_str(), self.limits.run_storage_reservation_bytes())?
+            }
+            Err(e) => return Err(e),
+        };
         // Commit so create holds storage for the durable run lifetime.
         storage_reservation.commit();
 
