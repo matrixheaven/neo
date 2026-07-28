@@ -496,7 +496,9 @@ impl TranscriptEntry {
             Self::ApprovalPrompt(ApprovalPromptData {
                 request: ApprovalRequest {
                     presentation: ApprovalPresentation::Edit { .. }
-                        | ApprovalPresentation::Write { .. },
+                        | ApprovalPresentation::Write { .. }
+                        | ApprovalPresentation::Workflow { .. }
+                        | ApprovalPresentation::WorkflowSave { .. },
                     ..
                 },
                 ..
@@ -543,6 +545,19 @@ impl TranscriptEntry {
                 if matches!(
                     data.request.presentation,
                     ApprovalPresentation::Edit { .. } | ApprovalPresentation::Write { .. }
+                ) =>
+            {
+                if data.expanded == expanded {
+                    return false;
+                }
+                data.expanded = expanded;
+                true
+            }
+            Self::ApprovalPrompt(data)
+                if matches!(
+                    data.request.presentation,
+                    ApprovalPresentation::Workflow { .. }
+                        | ApprovalPresentation::WorkflowSave { .. }
                 ) =>
             {
                 if data.expanded == expanded {
@@ -968,15 +983,21 @@ fn render_approval_prompt(data: &ApprovalPromptData, width: usize, theme: &TuiTh
     let body = Style::default().fg(theme.text_primary);
     let muted = Style::default().fg(theme.text_muted);
     let selected = Style::default().fg(theme.status_ok).bold();
-    match &data.state {
-        ApprovalDisplayState::Resolved(resolution) => {
-            let label = resolution_display_label(resolution);
-            return vec![Line::styled(format!("approval: {label}"), muted)];
-        }
-        ApprovalDisplayState::Abandoned => {
-            return vec![Line::styled("approval: Abandoned", muted)];
-        }
-        ApprovalDisplayState::Pending => {}
+    let resolved_label = match &data.state {
+        ApprovalDisplayState::Resolved(resolution) => Some(resolution_display_label(resolution)),
+        ApprovalDisplayState::Abandoned => Some("Abandoned".to_owned()),
+        ApprovalDisplayState::Pending => None,
+    };
+    let keeps_workflow_source = resolved_label.as_ref().is_some_and(|_| {
+        matches!(
+            data.request.presentation,
+            ApprovalPresentation::Workflow { .. } | ApprovalPresentation::WorkflowSave { .. }
+        )
+    });
+    if let Some(label) = resolved_label.as_deref()
+        && !keeps_workflow_source
+    {
+        return vec![Line::styled(format!("approval: {label}"), muted)];
     }
 
     let line = "\u{2500}".repeat(width.max(1));
@@ -989,30 +1010,36 @@ fn render_approval_prompt(data: &ApprovalPromptData, width: usize, theme: &TuiTh
         title,
     ));
     rows.push(Line::raw(""));
+    if let Some(label) = resolved_label {
+        rows.push(Line::styled(format!("approval: {label}"), muted));
+        rows.push(Line::raw(""));
+    }
     render_approval_body(data, width, theme, body, &mut rows);
-    render_approval_options(data, width, body, muted, selected, &mut rows);
-    if data.queued_count > 0 {
-        let suffix = if data.queued_count == 1 {
-            "approval"
-        } else {
-            "approvals"
-        };
+    if data.is_pending() {
+        render_approval_options(data, width, body, muted, selected, &mut rows);
+        if data.queued_count > 0 {
+            let suffix = if data.queued_count == 1 {
+                "approval"
+            } else {
+                "approvals"
+            };
+            rows.extend(styled_wrap_with_indent(
+                &format!("queued: {} {suffix} waiting", data.queued_count),
+                width,
+                2,
+                2,
+                muted,
+            ));
+            rows.push(Line::raw(""));
+        }
         rows.extend(styled_wrap_with_indent(
-            &format!("queued: {} {suffix} waiting", data.queued_count),
+            "  ↑/↓ select · number keys choose · ↵ confirm",
             width,
-            2,
+            0,
             2,
             muted,
         ));
-        rows.push(Line::raw(""));
     }
-    rows.extend(styled_wrap_with_indent(
-        "  ↑/↓ select · number keys choose · ↵ confirm",
-        width,
-        0,
-        2,
-        muted,
-    ));
     rows.push(Line::styled(line, border));
     rows
 }

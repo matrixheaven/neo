@@ -8426,6 +8426,33 @@ fn replay_background_bash_request() -> ApprovalRequest {
     }
 }
 
+fn replay_workflow_request() -> ApprovalRequest {
+    ApprovalRequest {
+        turn: 1,
+        id: "workflow-replay".to_owned(),
+        operation: PermissionOperation::WorkflowLaunch,
+        presentation: ApprovalPresentation::Workflow {
+            title: "Launch workflow?".to_owned(),
+            workflow: neo_agent_core::WorkflowApprovalPresentation {
+                name: "reviewed".to_owned(),
+                description: "A reviewed workflow".to_owned(),
+                phases: vec!["work: Do the work".to_owned()],
+                args: "{}".to_owned(),
+                line_count: 2,
+                byte_count: 27,
+                source: "neo.phase('work')\nreturn {}".to_owned(),
+                warning: "Launch approval authorizes orchestration only.".to_owned(),
+            },
+        },
+        options: vec![ApprovalOption {
+            label: "Launch".to_owned(),
+            description: None,
+            action: ApprovalAction::LaunchWorkflow,
+        }],
+        workflow_origin: None,
+    }
+}
+
 #[test]
 fn replay_renders_resolved_approval_without_reopening_it() {
     let request = replay_background_bash_request();
@@ -8463,6 +8490,43 @@ fn replay_renders_resolved_approval_without_reopening_it() {
         }),
         "replay must not leave a pending approval card"
     );
+}
+
+#[test]
+fn replay_restores_resolved_workflow_source_from_durable_request() {
+    let request = replay_workflow_request();
+    let loaded = LoadedSessionTranscript::new("alpha", Vec::new(), Vec::new()).with_events([
+        AgentEvent::ApprovalRequested {
+            request: request.clone(),
+        },
+        AgentEvent::ApprovalResolved {
+            turn: 1,
+            request_id: request.id.clone(),
+            resolution: ApprovalResolution::Selected {
+                action: ApprovalAction::LaunchWorkflow,
+                label: "Launch".to_owned(),
+                feedback: None,
+            },
+        },
+    ]);
+    let mut transcript = TranscriptPane::new(100, 80);
+    replay_session_into_transcript(&mut transcript, &loaded);
+
+    let card = transcript
+        .transcript()
+        .approval("workflow-replay")
+        .expect("replayed workflow approval");
+    assert_eq!(card.request, request);
+    let rendered = transcript
+        .render_frame(100, 80)
+        .expect("render replay")
+        .into_iter()
+        .map(|line| neo_tui::primitive::strip_ansi(&line))
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(rendered.contains("approval: Launch"), "frame: {rendered}");
+    assert!(rendered.contains("neo.phase('work')"), "frame: {rendered}");
+    assert!(rendered.contains("return {}"), "frame: {rendered}");
 }
 
 #[test]

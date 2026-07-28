@@ -92,6 +92,33 @@ fn edit_request(id: &str, prefix: &str, files: usize) -> ApprovalRequest {
     }
 }
 
+fn workflow_request(id: &str) -> ApprovalRequest {
+    ApprovalRequest {
+        turn: 1,
+        id: id.to_owned(),
+        operation: PermissionOperation::WorkflowLaunch,
+        presentation: ApprovalPresentation::Workflow {
+            title: "Launch workflow?".to_owned(),
+            workflow: neo_agent_core::WorkflowApprovalPresentation {
+                name: "reviewed".to_owned(),
+                description: "A reviewed workflow".to_owned(),
+                phases: vec!["work: Do the work".to_owned()],
+                args: "{}".to_owned(),
+                line_count: 2,
+                byte_count: 27,
+                source: "neo.phase('work')\nreturn {}".to_owned(),
+                warning: "Launch approval authorizes orchestration only.".to_owned(),
+            },
+        },
+        options: vec![ApprovalOption {
+            label: "Launch".to_owned(),
+            description: None,
+            action: ApprovalAction::LaunchWorkflow,
+        }],
+        workflow_origin: None,
+    }
+}
+
 /// Strip ANSI + trim from a frame line, for content assertions.
 fn plain(line: &str) -> String {
     strip_ansi(line).trim_end().to_owned()
@@ -669,6 +696,40 @@ fn approval_resolution_updates_the_matching_inline_card() {
         !frame.iter().any(|line| line.contains("↑/↓ select")),
         "resolved card must not keep the interactive prompt: {frame:?}"
     );
+}
+
+#[test]
+fn resolved_workflow_approval_keeps_source_and_expansion() {
+    let mut pane = TranscriptPane::new(100, 80);
+    let request = workflow_request("workflow-1");
+    pane.apply_agent_event(neo_agent_core::AgentEvent::ApprovalRequested {
+        request: request.clone(),
+    });
+    pane.set_tool_output_expanded(true);
+    pane.apply_agent_event(neo_agent_core::AgentEvent::ApprovalResolved {
+        turn: 1,
+        request_id: request.id.clone(),
+        resolution: ApprovalResolution::Selected {
+            action: ApprovalAction::LaunchWorkflow,
+            label: "Launch".to_owned(),
+            feedback: None,
+        },
+    });
+
+    let card = pane
+        .transcript()
+        .approval("workflow-1")
+        .expect("workflow approval card");
+    assert!(card.expanded);
+    assert_eq!(card.request, request);
+    assert!(pane.toggle_tool_output_expanded());
+    assert!(!pane.tool_output_expanded());
+
+    let frame = plain_frame(&mut pane, 100, 80).join("\n");
+    assert!(frame.contains("approval: Launch"), "{frame}");
+    assert!(frame.contains("neo.phase('work')"), "{frame}");
+    assert!(frame.contains("return {}"), "{frame}");
+    assert!(!frame.contains("↵ confirm"), "resolved frame: {frame}");
 }
 
 #[test]
