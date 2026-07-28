@@ -106,6 +106,12 @@ impl NeoChromeState {
         }
     }
 
+    pub fn apply_background_agent_event(&mut self, event: AgentEvent) {
+        let mode = self.mode;
+        self.apply_agent_event(event);
+        self.mode = mode;
+    }
+
     fn apply_agent_event_mode(&mut self, event: &AgentEvent) -> bool {
         match event {
             AgentEvent::MessageStarted { .. }

@@ -48,6 +48,24 @@ fn display_name_pool_combines_names_after_default_names() {
 }
 
 #[test]
+fn child_runtime_deps_seed_permission_from_the_live_mode() {
+    let harness = FakeHarness::from_turns([]);
+    let live_mode = Arc::new(std::sync::RwLock::new(PermissionMode::Ask));
+    let config = AgentConfig::for_model(harness.model())
+        .with_permission_mode(PermissionMode::Yolo)
+        .with_live_permission_mode(Arc::clone(&live_mode));
+    *live_mode.write().expect("live permission mode") = PermissionMode::Auto;
+
+    let deps = neo_agent_core::multi_agent::ChildRuntimeDeps::new(
+        config,
+        harness.client(),
+        Arc::new(ToolRegistry::new()),
+    );
+
+    assert_eq!(deps.config.permission_mode, PermissionMode::Auto);
+}
+
+#[test]
 fn foreground_delegate_lifecycle_records_running_and_completed_state() {
     let runtime = MultiAgentRuntime::new();
 

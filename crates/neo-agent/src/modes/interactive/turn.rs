@@ -150,6 +150,7 @@ impl InteractiveController {
         let mut frame_request = self.drain_turn_channels(&mut turn);
 
         if turn.task.is_finished() {
+            frame_request = frame_request.merge(self.drain_completed_turn_channels(&mut turn));
             let turn_result = turn
                 .task
                 .await
@@ -196,7 +197,8 @@ impl InteractiveController {
                     if self.active_session_id.as_deref() == Some(envelope.session_id.as_str())
                         && self.workflow_event_generation == envelope.generation =>
                 {
-                    frame_request = frame_request.merge(self.apply_turn_event(envelope.event));
+                    frame_request =
+                        frame_request.merge(self.apply_background_workflow_event(envelope.event));
                 }
                 crate::modes::run::PersistedSessionWorkflowEvent::Error {
                     session_id,
@@ -265,6 +267,23 @@ impl InteractiveController {
             let Ok(event) = turn.events.try_recv() else {
                 break;
             };
+            match event {
+                Ok(event) => {
+                    self.notify_for_event(&event);
+                    frame_request = frame_request.merge(self.apply_turn_event(event));
+                }
+                Err(error) => {
+                    self.push_status(format!("Error: {error}"));
+                    frame_request = frame_request.merge(FrameRequest::Coalesced);
+                }
+            }
+        }
+        frame_request
+    }
+
+    fn drain_completed_turn_channels(&mut self, turn: &mut RunningTurn) -> FrameRequest {
+        let mut frame_request = FrameRequest::None;
+        while let Ok(event) = turn.events.try_recv() {
             match event {
                 Ok(event) => {
                     self.notify_for_event(&event);
