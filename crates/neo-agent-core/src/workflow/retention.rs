@@ -48,7 +48,33 @@ pub struct RetentionSubject {
     pub pinned: bool,
 }
 
-/// Host-configured automatic retention policy (user-global only).
+/// Trigger retention when actual storage reaches 90% of the global limit.
+pub const STORAGE_HIGH_WATERMARK_PCT: f64 = 0.90;
+/// Reclaim until actual storage is at or below 80% of the global limit.
+pub const STORAGE_LOW_WATERMARK_PCT: f64 = 0.80;
+/// Minimum terminal age before a run becomes reclaimable (30 days in ms).
+pub const MIN_RUN_AGE_MS: u64 = 30 * 24 * 60 * 60 * 1000;
+
+/// Whether automatic retention should run given current byte usage.
+#[must_use]
+pub fn should_trigger(global_storage_bytes: u64, current_bytes: u64) -> bool {
+    let limit = (global_storage_bytes as f64 * STORAGE_HIGH_WATERMARK_PCT) as u64;
+    current_bytes >= limit
+}
+
+/// Calculate the target byte count after retention (low watermark).
+#[must_use]
+pub fn target_after_reclaim(global_storage_bytes: u64) -> u64 {
+    (global_storage_bytes as f64 * STORAGE_LOW_WATERMARK_PCT) as u64
+}
+
+#[must_use]
+pub fn default_retention_policy() -> RetentionPolicy {
+    RetentionPolicy {
+        min_age_ms: Some(MIN_RUN_AGE_MS),
+        reclaim_target_bytes: None,
+    }
+}
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct RetentionPolicy {
     /// Minimum terminal age before a run is reclaimable.
