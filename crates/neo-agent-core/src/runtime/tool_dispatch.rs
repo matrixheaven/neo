@@ -592,8 +592,7 @@ fn skill_batch_blocked_outcome(
     tool_calls: &[AgentToolCall],
     emitter: &mut EventEmitter,
 ) -> ToolBatchOutcome {
-    let message =
-        "Tool batch rejected: Skill activation must be the only call in its batch. No tool executed. Retry with only the matching Skill call.";
+    let message = "Tool batch rejected: Skill activation must be the only call in its batch. No tool executed. Retry with only the matching Skill call.";
     let results = tool_calls
         .iter()
         .cloned()

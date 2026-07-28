@@ -123,11 +123,12 @@ fn workflow_run_executes_real_lua_and_returns_actual_result() {
     assert!(!stdout.trim().is_empty(), "run prints a result");
 
     // JSON output returns the final result.
-    let (ok, stdout, stderr) =
-        run_args(&["workflow", "run", "real-run", "--output", "json"]);
-    assert!(ok, "json run should succeed\nstdout:\n{stdout}\nstderr:\n{stderr}");
-    let value: serde_json::Value =
-        serde_json::from_str(stdout.trim()).expect("json output");
+    let (ok, stdout, stderr) = run_args(&["workflow", "run", "real-run", "--output", "json"]);
+    assert!(
+        ok,
+        "json run should succeed\nstdout:\n{stdout}\nstderr:\n{stderr}"
+    );
+    let value: serde_json::Value = serde_json::from_str(stdout.trim()).expect("json output");
     assert_eq!(value["state"], "completed");
     assert!(value.get("final_result").is_some());
 }
@@ -149,13 +150,11 @@ fn workflow_run_non_tty_streams_events_and_returns_exact_exit_codes() {
     assert!(!lines.is_empty(), "must emit at least one JSONL line");
 
     // First line should be started event.
-    let first: serde_json::Value =
-        serde_json::from_str(lines[0]).expect("jsonl line 1");
+    let first: serde_json::Value = serde_json::from_str(lines[0]).expect("jsonl line 1");
     assert_eq!(first["type"], "started");
 
     // Last line should be terminal event.
-    let last: serde_json::Value =
-        serde_json::from_str(lines[lines.len() - 1]).expect("jsonl last");
+    let last: serde_json::Value = serde_json::from_str(lines[lines.len() - 1]).expect("jsonl last");
     assert_eq!(last["type"], "terminal");
     assert_eq!(last["state"], "completed");
 
@@ -301,8 +300,7 @@ fn workflow_run_jsonl_streams_before_terminal() {
         "jsonl must have at least started + terminal events: {stdout}"
     );
 
-    let started: serde_json::Value =
-        serde_json::from_str(lines[0]).expect("started jsonl");
+    let started: serde_json::Value = serde_json::from_str(lines[0]).expect("started jsonl");
     assert_eq!(started["type"], "started");
 
     let terminal: serde_json::Value =

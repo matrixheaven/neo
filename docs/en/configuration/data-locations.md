@@ -87,7 +87,7 @@ Workflow **runs** live under the session directory, not under transcript or back
 | `$NEO_HOME/workflows/<name>.{lua,workflow.toml}` | user |
 | `<trusted-workspace>/.neo/workflows/<name>.{lua,workflow.toml}` | project (trust-gated) |
 
-Precedence is `builtin < user < trusted project`. Historical sessions remain readable; cards without durable `workflows/<run_id>/` files are projections only and cannot be resumed. Prune with `neo workflow prune` (dry-run by default; `--yes` deletes only terminal, unreferenced, unpinned storage). See [Workflows](../guides/workflows.md).
+Precedence is `builtin < user < trusted project`. Historical sessions remain readable; cards without durable `workflows/<run_id>/` files are projections only and cannot be resumed. Automatic retention reclaims terminal, unreferenced, unpinned storage older than 30 days. See [Workflows](../guides/workflows.md).
 
 ## Other Configuration File Locations
 

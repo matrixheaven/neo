@@ -1,6 +1,6 @@
 # 本地 Workflow 平台
 
-Neo 将 **可持久化的 Lua workflow** 作为一等本地后台任务运行。一个 workflow 是「已审查脚本 + 结构化元数据」：可以扇出子 agent、调用普通工具、等待类型化用户回答，并留下可检查、暂停、恢复、回答、停止、分叉或清理的 journal 轨迹。
+Neo 将 **可持久化的 Lua workflow** 作为一等本地后台任务运行。一个 workflow 是「已审查脚本 + 结构化元数据」：可以扇出子 agent、调用普通工具、等待类型化用户回答，并留下可检查、暂停、恢复或停止的 journal 轨迹。
 
 本指南覆盖定义编写、启动方式、Lua 宿主 API、schema、机器上限与运维面。**只描述已落地行为**。
 
@@ -87,7 +87,7 @@ $NEO_HOME/workflows                  # 用户定义
 
 项目发现与项目保存复用 Neo 已有的 **工作区信任**（`trust.json`）。未信任或禁用项目发现时不会出现 project 候选。符号链接/reparse point 定义文件与父路径逃逸会被拒绝；不跟随目录链接。
 
-供人类/脚本使用的 `neo workflow save` 会先校验，默认 **no-clobber**；覆盖不同定义需要 `--force`。builtin scope 不可写。assistant 通过 `Workflow(save)` 保存。
+assistant 通过 `Workflow(save)` 保存。builtin scope 不可写。
 
 ## Assistant-native workflow 路径
 
@@ -141,25 +141,18 @@ assistant 才以这些精确 ID 调用 `TaskAnswer(task_id, request_id, answer)`
 ### Headless CLI（仅人类和脚本）
 
 ```text
-neo workflow list [--scope builtin|user|project|effective] [--output text|json]
-neo workflow show <name> [--scope ...] [--output text|json]
-neo workflow check <name-or-path> [--output text|json]
-neo workflow test <name-or-path> --case <fixture> [--output text|json]
-neo workflow run <name> [--args-json <object> | --args-file <path>]
-                  [--detach] [--output text|json|jsonl]
-neo workflow save <run-id-or-path> --scope user|project [--name <name>] [--force]
-neo workflow answer <run-id-or-handle> <request-id> (--json <value> | --file <path>)
-neo workflow fork <run-id-or-handle> --checkpoint <seq>
-                  [--name <name>] [--args-json <object> | --args-file <path>]
-neo workflow prune [--older-than <duration>] [--max-bytes <bytes>] [--dry-run] [--yes]
+neo workflow list [--output text|json]
+neo workflow check <name-or-path> [--json]
+neo workflow test <name-or-path> --case <fixture> [--json]
+neo workflow run <name> [--args <object> | --args-file <path>]
+                  [--output text|json|jsonl]
 ```
 
 规则：
 
-- `list` / `show` / `check` / `test` 为只读。
-- `run` 默认等待终态；`--detach` 在持久化创建后返回。
-- `--args-json` 与 `--args-file` 互斥。
-- `prune` 默认 **dry-run**；真正删除需要 `--yes`，且只考虑终态、无引用、未 pin 的存储。
+- `list`、`check`、`test` 为只读。
+- `run` 等待终态。
+- `--args` 与 `--args-file` 互斥。
 
 这些命令仅说明人类与脚本的操作方式，不是 assistant workflow 路径。
 
@@ -280,13 +273,9 @@ answer_policy?  # human | human_or_model；默认 human
 
 过大的最终结果、报告与 schema 原始输出可能以 artifact 引用存储。读取会重新校验 size/digest。默认保留策略非破坏性：终态 run 会一直保留到显式 prune。
 
-## Linked run 与 fork
+## Linked run
 
-终态 run 不可变。重试、改定义、改参数、提高机器上限，或从更早 checkpoint 分叉，都需要 **新的 linked run**：
-
-```text
-neo workflow fork <run> --checkpoint <seq> [--args-json ...]
-```
+终态 run 不可变。重试、改定义、改参数、提高机器上限，都需要 **新的 linked run**。
 
 子 run 导入已验证的完成 invocation 前缀作为 lineage seed。回放必须在任何新外部 effect 之前匹配 seed；不匹配则以 `lineage_mismatch` 失败关闭。继承用量仅用于展示，不计入新 run 的 actual usage。
 
@@ -338,9 +327,9 @@ assistant 用 `Workflow(list)`、`Workflow(show)` 与 `Workflow(run_saved)`。�
 2. 声明有序 `phases` 与必需的最终 `output_schema`。
 3. 每个 `neo.delegate` / `neo.swarm` child 都给 `output_schema`。
 4. 绝不通过 `neo.await_user` 索取密钥。
-5. 保存前用 `neo workflow check` 校验；fixture 用 `neo workflow test --case`。
+5. 用 `neo workflow check` 校验；fixture 用 `neo workflow test --case`。
 6. 交互式宿主直启使用命名 `/workflow <name>`；脚本化操作使用 headless CLI。
-7. 用 `TaskOutput` 视图/cursor 检查；prune 前先 dry-run。
+7. 用 `TaskOutput` 视图/cursor 检查。
 
 ## 下一步
 

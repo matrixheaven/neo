@@ -93,7 +93,9 @@ pub struct JournalPayloadRef {
 }
 
 /// Stable child identity key (no random UUID).
-#[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord, serde::Serialize, serde::Deserialize)]
+#[derive(
+    Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord, serde::Serialize, serde::Deserialize,
+)]
 pub enum WorkflowChildKey {
     #[serde(rename = "direct_delegate")]
     DirectDelegate { invocation_id: String },

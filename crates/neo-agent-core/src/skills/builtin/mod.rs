@@ -308,9 +308,13 @@ mod tests {
             "create-workflow description must not enforce mandatory routing: {description}"
         );
         assert!(
-            !create_workflow.body.contains("One-off evaluation is an immediate execution path")
+            !create_workflow
+                .body
+                .contains("One-off evaluation is an immediate execution path")
                 && !create_workflow.body.contains("first business tool call")
-                && !create_workflow.body.contains("Immediate next action after activation"),
+                && !create_workflow
+                    .body
+                    .contains("Immediate next action after activation"),
             "create-workflow must not teach mandatory validate-before-run ordering"
         );
         assert!(

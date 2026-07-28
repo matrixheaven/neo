@@ -21,7 +21,6 @@ use super::journal::{
     canonical_input_hash, find_incomplete_invocations_v2,
 };
 use super::limits::WorkflowLimits;
-use super::{RetentionOutcome, perform_retention};
 use super::output::{
     CanonicalFinalResult, PreparedFinalBody, TaskOutputMaterials, TaskOutputPage,
     TaskOutputRequest, prepare_final_body, reconstruct_canonical_final_result,
@@ -33,10 +32,10 @@ use super::schema::{
 use super::state::{
     WorkflowActor, WorkflowExecutionOrigin, WorkflowFinalResultMetadata, WorkflowId,
     WorkflowInvocationKind, WorkflowInvocationOutcome, WorkflowOutcomeStatus, WorkflowPhase,
-    WorkflowRevision, WorkflowRunMetadata, WorkflowSnapshot, WorkflowSourceOrigin,
-    WorkflowState,
+    WorkflowRevision, WorkflowRunMetadata, WorkflowSnapshot, WorkflowSourceOrigin, WorkflowState,
 };
 use super::user_input::{AwaitUserInput, PendingUserInput, request_id_for_call_index};
+use super::{RetentionOutcome, perform_retention};
 use crate::AgentTokenUsage;
 use crate::multi_agent::{
     AgentId, AgentRole, AgentRunMode, ChildPlan, ChildRunOutput, ChildRuntimeDeps,
@@ -500,11 +499,8 @@ impl WorkflowRuntime {
             Err(e) if e.code() == WorkflowErrorCode::StorageAdmissionDenied => {
                 // Try auto-retention before final denial.
                 if let Some(sessions_root) = session_dir.parent().and_then(Path::parent) {
-                    let outcome = perform_retention(
-                        sessions_root,
-                        Some(&self.admission),
-                        &self.limits,
-                    );
+                    let outcome =
+                        perform_retention(sessions_root, Some(&self.admission), &self.limits);
                     if outcome.reclaimed_count > 0 {
                         tracing::info!(
                             "auto-retention before run create: reclaimed {} runs ({} bytes)",
@@ -513,8 +509,10 @@ impl WorkflowRuntime {
                         );
                     }
                 }
-                self.admission
-                    .try_reserve_storage(run_id.as_str(), self.limits.run_storage_reservation_bytes())?
+                self.admission.try_reserve_storage(
+                    run_id.as_str(),
+                    self.limits.run_storage_reservation_bytes(),
+                )?
             }
             Err(e) => return Err(e),
         };

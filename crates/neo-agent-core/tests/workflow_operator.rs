@@ -1,9 +1,9 @@
 //! Tests for the Workflow Operator projection types and paging.
 
 use neo_agent_core::workflow::{
-    ChildCounts, StepRowState, WorkflowChildPage, WorkflowOperatorRequest,
-    WorkflowOperatorSnapshot, WorkflowStepKey, WorkflowStepRow, PendingUserRequest,
-    WorkflowChildRow, WorkflowChildState, WorkflowChildKey, WorkflowChildKind,
+    ChildCounts, PendingUserRequest, StepRowState, WorkflowChildKey, WorkflowChildKind,
+    WorkflowChildPage, WorkflowChildRow, WorkflowChildState, WorkflowOperatorRequest,
+    WorkflowOperatorSnapshot, WorkflowStepKey, WorkflowStepRow,
 };
 
 #[test]
@@ -21,7 +21,10 @@ fn operator_projection_types_construct_and_inspect() {
         queued: 3,
         failed: 1,
     };
-    assert_eq!(counts.done + counts.working + counts.queued + counts.failed, 11);
+    assert_eq!(
+        counts.done + counts.working + counts.queued + counts.failed,
+        11
+    );
 
     let step = WorkflowStepRow {
         key: key.clone(),

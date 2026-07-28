@@ -129,7 +129,10 @@ impl WorkflowCardComponent {
         let elapsed_ms = self.snapshot.started_at_ms.map(|started| {
             let end = if matches!(
                 self.snapshot.state,
-                WorkflowState::Running | WorkflowState::Queued | WorkflowState::Pausing | WorkflowState::AwaitingUser
+                WorkflowState::Running
+                    | WorkflowState::Queued
+                    | WorkflowState::Pausing
+                    | WorkflowState::AwaitingUser
             ) {
                 self.now_ms.or(self.snapshot.updated_at_ms)
             } else {
@@ -189,9 +192,10 @@ fn workflow_state_color(state: WorkflowState, theme: &TuiTheme) -> Color {
     match state {
         WorkflowState::Completed => theme.status_ok,
         WorkflowState::Failed => theme.status_error,
-        WorkflowState::Running | WorkflowState::Queued | WorkflowState::Pausing | WorkflowState::AwaitingUser => {
-            theme.status_warn
-        }
+        WorkflowState::Running
+        | WorkflowState::Queued
+        | WorkflowState::Pausing
+        | WorkflowState::AwaitingUser => theme.status_warn,
         WorkflowState::Paused => theme.status_warn,
         WorkflowState::Cancelled => theme.status_error,
         WorkflowState::ResourceLimited => theme.status_error,

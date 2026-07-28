@@ -120,20 +120,12 @@ impl WorkflowOperatorState {
 
     /// Whether the given request_id is currently dismissed.
     pub fn is_dismissed(&self, request_id: &str) -> bool {
-        self.dismissals
-            .dismissed_request_id
-            .as_deref()
-            == Some(request_id)
+        self.dismissals.dismissed_request_id.as_deref() == Some(request_id)
     }
 
     /// Clear dismissal if the request changed.
     pub fn clear_dismissal_if_changed(&mut self, current_request_id: Option<&str>) {
-        if self
-            .dismissals
-            .dismissed_request_id
-            .as_deref()
-            != current_request_id
-        {
+        if self.dismissals.dismissed_request_id.as_deref() != current_request_id {
             self.dismissals.dismissed_request_id = None;
         }
     }

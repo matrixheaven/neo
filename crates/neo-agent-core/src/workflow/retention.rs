@@ -181,7 +181,6 @@ pub fn preview_mark_sweep(
     }
 }
 
-
 /// Outcome of an automatic retention pass.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct RetentionOutcome {
@@ -282,11 +281,9 @@ pub fn dir_byte_size(path: &Path) -> io::Result<u64> {
 /// Age of a file or directory in milliseconds since last modification.
 pub fn file_age_ms(path: &Path, now_ms: u64) -> io::Result<u64> {
     let modified = fs::metadata(path)?.modified()?;
-    let modified_ms = modified
-        .duration_since(UNIX_EPOCH)
-        .map_or(0, |duration| {
-            u64::try_from(duration.as_millis()).unwrap_or(u64::MAX)
-        });
+    let modified_ms = modified.duration_since(UNIX_EPOCH).map_or(0, |duration| {
+        u64::try_from(duration.as_millis()).unwrap_or(u64::MAX)
+    });
     Ok(now_ms.saturating_sub(modified_ms))
 }
 
@@ -326,8 +323,7 @@ pub fn perform_retention(
         return RetentionOutcome::default();
     }
 
-    let subjects_only: Vec<RetentionSubject> =
-        subjects.iter().map(|(s, _)| s.clone()).collect();
+    let subjects_only: Vec<RetentionSubject> = subjects.iter().map(|(s, _)| s.clone()).collect();
     let preview = preview_mark_sweep(
         &subjects_only,
         &RetentionPolicy {

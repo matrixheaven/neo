@@ -14,7 +14,10 @@ pub enum AnswerDraft {
     /// Boolean choice (yes/no).
     Boolean { value: bool },
     /// Single-choice from a list of string options.
-    SingleChoice { options: Vec<String>, selected: usize },
+    SingleChoice {
+        options: Vec<String>,
+        selected: usize,
+    },
     /// Multi-choice from a list of string options.
     MultiChoice {
         options: Vec<String>,
@@ -173,11 +176,11 @@ fn build_draft(schema: &Value, default: Option<&Value>) -> AnswerDraft {
                 .and_then(|v| v.as_str())
                 .map(String::from)
                 .unwrap_or_default();
-            if schema.get("multiline").and_then(|v| v.as_bool()).unwrap_or(false)
-                || schema
-                    .get("format")
-                    .and_then(|v| v.as_str())
-                    == Some("multiline")
+            if schema
+                .get("multiline")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false)
+                || schema.get("format").and_then(|v| v.as_str()) == Some("multiline")
             {
                 AnswerDraft::Multiline {
                     value: default_text,
@@ -216,9 +219,7 @@ fn build_draft(schema: &Value, default: Option<&Value>) -> AnswerDraft {
                                 options
                                     .iter()
                                     .map(|o| {
-                                        defaults
-                                            .iter()
-                                            .any(|d| d.as_str() == Some(o.as_str()))
+                                        defaults.iter().any(|d| d.as_str() == Some(o.as_str()))
                                     })
                                     .collect()
                             })
@@ -239,9 +240,7 @@ fn build_draft(schema: &Value, default: Option<&Value>) -> AnswerDraft {
             }
         }
         Some("object") => {
-            let properties = schema
-                .get("properties")
-                .and_then(|v| v.as_object());
+            let properties = schema.get("properties").and_then(|v| v.as_object());
             if let Some(props) = properties {
                 let required: Vec<String> = schema
                     .get("required")
@@ -255,8 +254,7 @@ fn build_draft(schema: &Value, default: Option<&Value>) -> AnswerDraft {
                 let fields: Vec<AnswerField> = props
                     .iter()
                     .map(|(name, field_schema)| {
-                        let field_default = default
-                            .and_then(|d| d.get(name));
+                        let field_default = default.and_then(|d| d.get(name));
                         AnswerField {
                             name: name.clone(),
                             title: field_schema
@@ -308,9 +306,9 @@ fn build_draft(schema: &Value, default: Option<&Value>) -> AnswerDraft {
 fn collect_draft_value(draft: &AnswerDraft) -> Value {
     match draft {
         AnswerDraft::Boolean { value } => Value::Bool(*value),
-        AnswerDraft::SingleChoice { options, selected } => {
-            options.get(*selected).map_or(Value::Null, |s| Value::String(s.clone()))
-        }
+        AnswerDraft::SingleChoice { options, selected } => options
+            .get(*selected)
+            .map_or(Value::Null, |s| Value::String(s.clone())),
         AnswerDraft::MultiChoice { options, selected } => {
             let arr: Vec<Value> = options
                 .iter()
@@ -337,7 +335,11 @@ fn collect_draft_value(draft: &AnswerDraft) -> Value {
                     .unwrap_or(Value::String(value.clone()))
             }
         }
-        AnswerDraft::Object { fields, focused_field, .. } => {
+        AnswerDraft::Object {
+            fields,
+            focused_field,
+            ..
+        } => {
             if let Some(idx) = focused_field {
                 // When drilling into a nested object, return just that field's value.
                 if let Some(field) = fields.get(*idx) {
@@ -364,8 +366,6 @@ fn collect_draft_value(draft: &AnswerDraft) -> Value {
                 Value::Null
             }
         }
-        AnswerDraft::Structured { value } => {
-            serde_json::from_str(value).unwrap_or(Value::Null)
-        }
+        AnswerDraft::Structured { value } => serde_json::from_str(value).unwrap_or(Value::Null),
     }
 }

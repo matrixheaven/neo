@@ -521,8 +521,7 @@ async fn invalid_saved_run_args_fail_before_approval_opens() {
                     "properties": { "target": { "type": "integer" } },
                     "required": ["target"]
                 })),
-                output_schema: json!({"type": "object"})meta
-,
+                output_schema: json!({"type": "object"}),
             },
             false,
         )
@@ -567,11 +566,10 @@ fn base_launch_request(
         launch_source: launch_source.to_owned(),
         parent_run_id: None,
         output_schema: None,
-                display_name: None,
-                input_schema: None,
-                definition_origin: None,
-                inline_unsaved: false,
-launch
+        display_name: None,
+        input_schema: None,
+        definition_origin: None,
+        inline_unsaved: false,
     }
 }
 

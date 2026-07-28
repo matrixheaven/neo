@@ -1,6 +1,6 @@
 # Local Workflow Platform
 
-Neo runs **durable Lua workflows** as first-class local background tasks. A workflow is a reviewed script plus structured metadata: it can fan out children, call ordinary tools, wait for typed user answers, and leave a journaled trail you can inspect, pause, resume, answer, stop, fork, or prune.
+Neo runs **durable Lua workflows** as first-class local background tasks. A workflow is a reviewed script plus structured metadata: it can fan out children, call ordinary tools, wait for typed user answers, and leave a journaled trail you can inspect, pause, resume, or stop.
 
 This guide covers authoring definitions, launching them, the Lua host API, schemas, machine limits, and operator surfaces. Only landed behavior is described.
 
@@ -87,7 +87,7 @@ $NEO_HOME/workflows              # user definitions
 
 Project discovery and project save reuse Neo's existing **workspace trust** (`trust.json`). Untrusted or disabled project discovery yields no project candidates. Symlink/reparse-point definition files and parent escapes are rejected; directory links are not followed.
 
-The human/script `neo workflow save` command validates first and defaults to **no-clobber**; `--force` is required to overwrite a different definition. Builtin scope is not writable. The assistant saves through `Workflow(save)`.
+The assistant saves through `Workflow(save)`. Builtin scope is not writable.
 
 ## Assistant-native workflow route
 
@@ -144,25 +144,18 @@ not activate the skill.
 ### Headless CLI (humans and scripts only)
 
 ```text
-neo workflow list [--scope builtin|user|project|effective] [--output text|json]
-neo workflow show <name> [--scope ...] [--output text|json]
-neo workflow check <name-or-path> [--output text|json]
-neo workflow test <name-or-path> --case <fixture> [--output text|json]
-neo workflow run <name> [--args-json <object> | --args-file <path>]
-                  [--detach] [--output text|json|jsonl]
-neo workflow save <run-id-or-path> --scope user|project [--name <name>] [--force]
-neo workflow answer <run-id-or-handle> <request-id> (--json <value> | --file <path>)
-neo workflow fork <run-id-or-handle> --checkpoint <seq>
-                  [--name <name>] [--args-json <object> | --args-file <path>]
-neo workflow prune [--older-than <duration>] [--max-bytes <bytes>] [--dry-run] [--yes]
+neo workflow list [--output text|json]
+neo workflow run <name> [--args <object> | --args-file <path>]
+                  [--output text|json|jsonl]
+neo workflow check <name-or-path> [--json]
+neo workflow test <name-or-path> --case <fixture> [--json]
 ```
 
 Rules:
 
-- `list` / `show` / `check` / `test` are read-only.
-- `run` waits for a terminal state by default; `--detach` returns after durable create.
-- `--args-json` and `--args-file` are mutually exclusive.
-- `prune` defaults to **dry-run**; deletion requires `--yes` and only considers terminal, unreferenced, unpinned storage.
+- `list`, `check`, and `test` are read-only.
+- `run` waits for a terminal state.
+- `--args` and `--args-file` are mutually exclusive.
 
 These commands document human and script operation. They are not an assistant
 workflow path.
@@ -289,10 +282,6 @@ Large final results, reports, and raw schema-attempt output may be stored as art
 
 Terminal runs are immutable. Retry, definition change, argument change, raised machine limits, or an earlier checkpoint requires a **new linked run**:
 
-```text
-neo workflow fork <run> --checkpoint <seq> [--args-json ...]
-```
-
 The child imports a verified completed-invocation prefix as lineage seed. Replay must match the seed before any new external effect; mismatch fails closed as `lineage_mismatch`. Inherited usage is display-only and is not charged to the new run's actual usage.
 
 V1 runs without durable V2 files remain readable as historical projections and cannot be resumed as live workflows.
@@ -343,9 +332,9 @@ The assistant uses `Workflow(list)`, `Workflow(show)`, and `Workflow(run_saved)`
 2. Declare ordered `phases` and a required final `output_schema`.
 3. Give every `neo.delegate` / `neo.swarm` child an `output_schema`.
 4. Never request secrets through `neo.await_user`.
-5. Validate with `neo workflow check` before save; use `neo workflow test --case` for fixture harness cases.
+5. Validate with `neo workflow check`; use `neo workflow test --case` for fixture harness cases.
 6. Use named `/workflow <name>` for a host-direct interactive launch, or the headless CLI for scripted operation.
-7. Inspect with `TaskOutput` views/cursors; prune only after dry-run preview.
+7. Inspect with `TaskOutput` views/cursors.
 
 ## Next steps
 

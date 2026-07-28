@@ -164,7 +164,10 @@ async fn invalid_final_lua_result_fails_without_hidden_model_repair() {
                 launch_source: "test".to_owned(),
                 parent_run_id: None,
                 output_schema: None,
-launch
+                display_name: None,
+                input_schema: None,
+                definition_origin: None,
+                inline_unsaved: false,
             },
         )
         .await
@@ -274,8 +277,7 @@ async fn running_workflow_handle(
                 args: json!({}),
                 launch_source: "test".to_owned(),
                 parent_run_id: None,
-                output_schema: Nonemeta
-,
+                output_schema: None,
             },
         )
         .await
@@ -321,10 +323,10 @@ async fn child_schema_invalid_output_gets_exactly_one_tools_disabled_repair() {
         mode: AgentRunMode::Foreground,
         context: DelegateContext::None,
         output_schema: Some(child_schema_doc()),
-                display_name: None,
-                input_schema: None,
-                definition_origin: None,
-                inline_unsaved: false,
+        display_name: None,
+        input_schema: None,
+        definition_origin: None,
+        inline_unsaved: false,
     };
     let first = multi
         .run_child_turn(deps.clone(), &request, AgentRunMode::Foreground)
@@ -472,10 +474,10 @@ async fn schema_repair_tool_attempt_is_forbidden() {
         mode: AgentRunMode::Foreground,
         context: DelegateContext::None,
         output_schema: Some(child_schema_doc()),
-                display_name: None,
-                input_schema: None,
-                definition_origin: None,
-                inline_unsaved: false,
+        display_name: None,
+        input_schema: None,
+        definition_origin: None,
+        inline_unsaved: false,
     };
     let first = multi
         .run_child_turn(deps.clone(), &request, AgentRunMode::Foreground)
@@ -587,10 +589,10 @@ async fn crash_during_repair_never_repeats_model_effect() {
         mode: AgentRunMode::Foreground,
         context: DelegateContext::None,
         output_schema: Some(child_schema_doc()),
-                display_name: None,
-                input_schema: None,
-                definition_origin: None,
-                inline_unsaved: false,
+        display_name: None,
+        input_schema: None,
+        definition_origin: None,
+        inline_unsaved: false,
     };
     let first = multi
         .run_child_turn(deps.clone(), &request, AgentRunMode::Foreground)

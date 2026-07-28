@@ -29,11 +29,11 @@ fn launch_request() -> WorkflowLaunchRequest {
         launch_source: "/workflow".to_owned(),
         parent_run_id: None,
         output_schema: None,
-                display_name: None,
-                input_schema: None,
-                definition_origin: None,
-                inline_unsaved: false,
-launch
+        display_name: None,
+        input_schema: None,
+        definition_origin: None,
+        inline_unsaved: false,
+        launch,
     }
 }
 

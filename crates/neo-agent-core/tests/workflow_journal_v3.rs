@@ -2,8 +2,7 @@
 
 use neo_agent_core::workflow::{
     JOURNAL_FORMAT_V2, JOURNAL_FORMAT_V3, JournalEnvelope, JournalPayload, JournalPayloadRef,
-    WorkflowArtifactId, WorkflowChildKey, WorkflowChildKind, WorkflowId,
-    validate_v2_envelope,
+    WorkflowArtifactId, WorkflowChildKey, WorkflowChildKind, WorkflowId, validate_v2_envelope,
 };
 
 fn test_run_id() -> WorkflowId {
@@ -45,7 +44,10 @@ fn journal_v3_generic_child_lifecycle_round_trips_and_replays() {
     assert_eq!(queued.version, JOURNAL_FORMAT_V3);
     let q_json = serde_json::to_string(&queued).expect("serialize");
     let q_parsed: JournalEnvelope = serde_json::from_str(&q_json).expect("deserialize");
-    assert!(matches!(q_parsed.payload, JournalPayload::ChildQueued { .. }));
+    assert!(matches!(
+        q_parsed.payload,
+        JournalPayload::ChildQueued { .. }
+    ));
 
     let started = JournalEnvelope::new_v3(
         1,
@@ -58,7 +60,10 @@ fn journal_v3_generic_child_lifecycle_round_trips_and_replays() {
     );
     let s_json = serde_json::to_string(&started).expect("serialize started");
     let s_parsed: JournalEnvelope = serde_json::from_str(&s_json).expect("deserialize started");
-    assert!(matches!(s_parsed.payload, JournalPayload::ChildStarted { .. }));
+    assert!(matches!(
+        s_parsed.payload,
+        JournalPayload::ChildStarted { .. }
+    ));
 
     let finished = JournalEnvelope::new_v3(
         2,
@@ -85,7 +90,10 @@ fn journal_v3_generic_child_lifecycle_round_trips_and_replays() {
     );
     let f_json = serde_json::to_string(&finished).expect("serialize finished");
     let f_parsed: JournalEnvelope = serde_json::from_str(&f_json).expect("deserialize finished");
-    assert!(matches!(f_parsed.payload, JournalPayload::ChildFinished { .. }));
+    assert!(matches!(
+        f_parsed.payload,
+        JournalPayload::ChildFinished { .. }
+    ));
 }
 
 #[test]
@@ -131,7 +139,10 @@ fn started_without_finished_projects_recovering() {
     assert_eq!(started.version, JOURNAL_FORMAT_V3);
     let json = serde_json::to_string(&started).expect("serialize");
     let parsed: JournalEnvelope = serde_json::from_str(&json).expect("deserialize");
-    assert!(matches!(parsed.payload, JournalPayload::ChildStarted { .. }));
+    assert!(matches!(
+        parsed.payload,
+        JournalPayload::ChildStarted { .. }
+    ));
     // Projection will mark this as Recovering when no ChildFinished exists.
 }
 
@@ -141,13 +152,15 @@ fn unknown_or_torn_v3_data_remains_fail_closed() {
         r#"{"version":99,"seq":0,"timestamp_ms":1000,"run_id":"wf_test","payload":{"type":"run_created","name":"bad"}}"#,
     );
     let envelope = result.expect("serde deserialization");
-    validate_v2_envelope(&envelope)
-        .expect_err("unknown version 99 must be rejected");
+    validate_v2_envelope(&envelope).expect_err("unknown version 99 must be rejected");
 
     let bad: Result<JournalEnvelope, _> = serde_json::from_str(
         r#"{"version":3,"seq":0,"timestamp_ms":1000,"run_id":"wf_test","payload":{"type":"bogus_event","data":42}}"#,
     );
-    assert!(bad.is_err(), "unknown payload type must fail deserialization");
+    assert!(
+        bad.is_err(),
+        "unknown payload type must fail deserialization"
+    );
 }
 
 #[test]
@@ -162,7 +175,10 @@ fn direct_and_swarm_children_replay_exactly_once_with_unresolved_started_as_reco
     };
 
     // Direct delegate lifecycle: queued -> started -> finished
-    let q = JournalEnvelope::new_v3(0, 1000, run_id.clone(),
+    let q = JournalEnvelope::new_v3(
+        0,
+        1000,
+        run_id.clone(),
         JournalPayload::ChildQueued {
             child_key: delegate_key.clone(),
             child_kind: WorkflowChildKind::Delegate,
@@ -183,7 +199,10 @@ fn direct_and_swarm_children_replay_exactly_once_with_unresolved_started_as_reco
     );
     assert!(matches!(q.payload, JournalPayload::ChildQueued { .. }));
 
-    let s = JournalEnvelope::new_v3(1, 2000, run_id.clone(),
+    let s = JournalEnvelope::new_v3(
+        1,
+        2000,
+        run_id.clone(),
         JournalPayload::ChildStarted {
             child_key: delegate_key.clone(),
             agent_id: "agent-d".to_owned(),
@@ -191,7 +210,10 @@ fn direct_and_swarm_children_replay_exactly_once_with_unresolved_started_as_reco
     );
     assert!(matches!(s.payload, JournalPayload::ChildStarted { .. }));
 
-    let f = JournalEnvelope::new_v3(2, 3000, run_id.clone(),
+    let f = JournalEnvelope::new_v3(
+        2,
+        3000,
+        run_id.clone(),
         JournalPayload::ChildFinished {
             child_key: delegate_key.clone(),
             agent_id: Some("agent-d".to_owned()),
@@ -211,7 +233,10 @@ fn direct_and_swarm_children_replay_exactly_once_with_unresolved_started_as_reco
     assert!(matches!(f.payload, JournalPayload::ChildFinished { .. }));
 
     // Swarm item lifecycle: queued -> started -> finished
-    let sq = JournalEnvelope::new_v3(3, 4000, run_id.clone(),
+    let sq = JournalEnvelope::new_v3(
+        3,
+        4000,
+        run_id.clone(),
         JournalPayload::ChildQueued {
             child_key: swarm_key.clone(),
             child_kind: WorkflowChildKind::SwarmItem,
@@ -232,7 +257,10 @@ fn direct_and_swarm_children_replay_exactly_once_with_unresolved_started_as_reco
     );
     assert!(matches!(sq.payload, JournalPayload::ChildQueued { .. }));
 
-    let ss = JournalEnvelope::new_v3(4, 5000, run_id.clone(),
+    let ss = JournalEnvelope::new_v3(
+        4,
+        5000,
+        run_id.clone(),
         JournalPayload::ChildStarted {
             child_key: swarm_key.clone(),
             agent_id: "agent-s".to_owned(),
@@ -241,7 +269,10 @@ fn direct_and_swarm_children_replay_exactly_once_with_unresolved_started_as_reco
     assert!(matches!(ss.payload, JournalPayload::ChildStarted { .. }));
 
     // Simulate: swarm item finishes (terminal), then replay would see it once
-    let sf = JournalEnvelope::new_v3(5, 6000, run_id,
+    let sf = JournalEnvelope::new_v3(
+        5,
+        6000,
+        run_id,
         JournalPayload::ChildFinished {
             child_key: swarm_key,
             agent_id: Some("agent-s".to_owned()),

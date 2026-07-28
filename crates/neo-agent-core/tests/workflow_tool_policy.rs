@@ -211,7 +211,9 @@ fn workflow_tool_is_root_only_and_description_has_no_choreography() {
     assert!(description.contains("no slash capability"));
     assert!(description.contains("known saved workflow may use list/show/run_saved directly"));
     assert!(description.contains("each perform their complete validation internally"));
-    assert!(!description.contains("MUST call Workflow(validate_inline), then Workflow(run_inline)"));
+    assert!(
+        !description.contains("MUST call Workflow(validate_inline), then Workflow(run_inline)")
+    );
     assert!(!description.contains("do not inspect Neo source"));
     assert!(!description.contains("REQUIRED FIRST ACTION"));
 

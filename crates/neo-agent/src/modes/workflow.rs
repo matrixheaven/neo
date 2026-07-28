@@ -12,16 +12,16 @@ use std::{
 };
 
 use anyhow::{Context as _, bail};
+use neo_agent_core::workflow::FinalResultBody;
+use neo_agent_core::workflow::journal::canonicalize_json;
 use neo_agent_core::workflow::{
     MANIFEST_SUFFIX, SOURCE_SUFFIX, WorkflowActor, WorkflowDefinitionRegistry, WorkflowError,
     WorkflowLaunchBinding, WorkflowLaunchCoordinator, WorkflowLaunchHosts, WorkflowLaunchIntent,
-    WorkflowLaunchRequest, WorkflowSourceOrigin, WorkflowState, check_definition,
-    load_fixture, resolve_paired_definition, run_fixture,
+    WorkflowLaunchRequest, WorkflowSourceOrigin, WorkflowState, check_definition, load_fixture,
+    resolve_paired_definition, run_fixture,
 };
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
-use neo_agent_core::workflow::journal::canonicalize_json;
-use neo_agent_core::workflow::FinalResultBody;
 
 use crate::{
     cli::{WorkflowCommand, WorkflowOutputFormat},
@@ -33,19 +33,15 @@ pub async fn execute(command: WorkflowCommand, config: &AppConfig) -> anyhow::Re
     match command {
         WorkflowCommand::List { json } => list(config, json),
         WorkflowCommand::Check { target, json } => check(config, &target, json),
-        WorkflowCommand::Test {
-            target,
-            case,
-            json,
-        } => test_fixture(config, &target, &case, json).await,
+        WorkflowCommand::Test { target, case, json } => {
+            test_fixture(config, &target, &case, json).await
+        }
         WorkflowCommand::Run {
             name,
             args,
             args_file,
             output,
-        } => {
-            run(config, &name, args.as_deref(), args_file.as_deref(), output).await
-        }
+        } => run(config, &name, args.as_deref(), args_file.as_deref(), output).await,
     }
 }
 
@@ -296,7 +292,10 @@ async fn stream_run(
             last_state = snapshot.state;
             if matches!(last_state, WorkflowState::AwaitingUser) && !is_tty {
                 // Non-interactive: emit awaiting_user and exit 3.
-                let pending = handle.pending_user_input().await.map_err(map_workflow_error)?;
+                let pending = handle
+                    .pending_user_input()
+                    .await
+                    .map_err(map_workflow_error)?;
                 emit_jsonl(&json!({
                     "type": "awaiting_user",
                     "run_id": run_id,
@@ -342,23 +341,32 @@ async fn stream_run(
 
         // Handle TTY awaiting-user.
         if snapshot.state == WorkflowState::AwaitingUser && is_tty {
-            let pending = handle.pending_user_input().await.map_err(map_workflow_error)?;
+            let pending = handle
+                .pending_user_input()
+                .await
+                .map_err(map_workflow_error)?;
             if let Some(pending) = pending {
                 eprintln!("\nWorkflow needs your input:");
                 eprintln!("  {}", pending.prompt);
-                eprintln!("  Schema: {}", serde_json::to_string_pretty(&pending.answer_schema).unwrap_or_default());
+                eprintln!(
+                    "  Schema: {}",
+                    serde_json::to_string_pretty(&pending.answer_schema).unwrap_or_default()
+                );
                 eprint!("Answer (JSON value): ");
                 use std::io::Write as _;
                 let _ = std::io::stderr().flush();
 
                 let mut answer = String::new();
                 if std::io::stdin().read_line(&mut answer).is_err() {
-                    handle.stop(WorkflowActor::Human).await.map_err(map_workflow_error)?;
+                    handle
+                        .stop(WorkflowActor::Human)
+                        .await
+                        .map_err(map_workflow_error)?;
                     std::process::exit(130);
                 }
                 let answer = answer.trim().to_owned();
-                let value: Value = serde_json::from_str(&answer)
-                    .context("answer must be valid JSON")?;
+                let value: Value =
+                    serde_json::from_str(&answer).context("answer must be valid JSON")?;
                 handle
                     .answer(&pending.request_id, value, WorkflowActor::Human)
                     .await
@@ -395,23 +403,32 @@ async fn wait_run(
 
         // Handle awaiting-user for TTY.
         if snapshot.state == WorkflowState::AwaitingUser && is_tty {
-            let pending = handle.pending_user_input().await.map_err(map_workflow_error)?;
+            let pending = handle
+                .pending_user_input()
+                .await
+                .map_err(map_workflow_error)?;
             if let Some(pending) = pending {
                 eprintln!("\nWorkflow needs your input:");
                 eprintln!("  {}", pending.prompt);
-                eprintln!("  Schema: {}", serde_json::to_string_pretty(&pending.answer_schema).unwrap_or_default());
+                eprintln!(
+                    "  Schema: {}",
+                    serde_json::to_string_pretty(&pending.answer_schema).unwrap_or_default()
+                );
                 eprint!("Answer (JSON value): ");
                 use std::io::Write as _;
                 let _ = std::io::stderr().flush();
 
                 let mut answer = String::new();
                 if std::io::stdin().read_line(&mut answer).is_err() {
-                    handle.stop(WorkflowActor::Human).await.map_err(map_workflow_error)?;
+                    handle
+                        .stop(WorkflowActor::Human)
+                        .await
+                        .map_err(map_workflow_error)?;
                     std::process::exit(130);
                 }
                 let answer = answer.trim().to_owned();
-                let value: Value = serde_json::from_str(&answer)
-                    .context("answer must be valid JSON")?;
+                let value: Value =
+                    serde_json::from_str(&answer).context("answer must be valid JSON")?;
                 handle
                     .answer(&pending.request_id, value, WorkflowActor::Human)
                     .await
@@ -422,7 +439,10 @@ async fn wait_run(
 
         // Non-interactive awaiting-user: exit 3.
         if snapshot.state == WorkflowState::AwaitingUser && !is_tty {
-            let pending = handle.pending_user_input().await.map_err(map_workflow_error)?;
+            let pending = handle
+                .pending_user_input()
+                .await
+                .map_err(map_workflow_error)?;
             let body = json!({
                 "run_id": run_id,
                 "state": "awaiting_user",

@@ -1843,8 +1843,7 @@ fn workflow_cli_exposes_exactly_four_commands_and_plain_language_list() {
     );
     let stderr = String::from_utf8_lossy(&conflict.stderr);
     assert!(
-        stderr.contains("cannot be used with")
-            || stderr.contains("conflict"),
+        stderr.contains("cannot be used with") || stderr.contains("conflict"),
         "unexpected conflict stderr: {stderr}"
     );
 
@@ -1896,7 +1895,10 @@ fn workflow_list_and_check_have_stable_output() {
     let list_text = run_workflow_args(&temp, &["workflow", "list"]);
     assert!(list_text.contains("stable-demo"), "text: {list_text}");
     assert!(list_text.contains("Stable Demo"), "text: {list_text}");
-    assert!(list_text.contains("stable list example"), "text: {list_text}");
+    assert!(
+        list_text.contains("stable list example"),
+        "text: {list_text}"
+    );
 
     // Empty list is still valid.
     let empty_home = std::env::temp_dir().join(format!(

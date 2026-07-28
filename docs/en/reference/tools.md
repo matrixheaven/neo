@@ -166,8 +166,6 @@ a task ID (also the `run_id`).
 | Pause / resume / stop | `TaskPause`, `TaskResume`, `TaskStop` at durable boundaries |
 | Answer `awaiting_user` | Follow `TaskOutput.pending_user.next_action`; call `TaskAnswer` with the exact IDs only when it says `TaskAnswer`. Resume alone is not enough. |
 
-`neo workflow answer`, `fork`, and `prune` are human/script CLI operations, not assistant workflow instructions.
-
 Child agents from workflow Lua use required per-child `output_schema` values. Invalid child JSON receives **exactly one** tools-disabled repair turn in the same child session; no fuzzy JSON extraction. Swarm fan-out is heterogeneous and has no hard-coded total child cap; host `swarm_concurrency` is default concurrency only. Ask / Auto / Yolo govern every child and tool effect; launch approval never bypasses them.
 
 Usage accounting is **actual provider usage only**. There is no predictive token budget, agent budget, or workflow wall-clock timeout used to pause or degrade a run. Global admission is actual occupancy (VMs, workers, executors, storage). Historical cards without durable `workflows/<run_id>/` files remain readable but cannot be resumed. Full authoring guide: [Workflows](../guides/workflows.md).

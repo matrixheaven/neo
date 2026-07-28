@@ -384,8 +384,7 @@ impl WorkflowState {
                 Running | Paused | Cancelled | Failed | ResourceLimited
             ) | (
                 Running,
-                AwaitingUser | Pausing | Paused | Completed | Failed | Cancelled
-                    | ResourceLimited
+                AwaitingUser | Pausing | Paused | Completed | Failed | Cancelled | ResourceLimited
             ) | (Pausing, Paused | Cancelled | Failed | ResourceLimited)
                 | (AwaitingUser, Queued | Cancelled | ResourceLimited)
                 | (Paused, Queued | Cancelled)

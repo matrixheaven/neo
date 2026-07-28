@@ -67,6 +67,9 @@ pub use artifacts::{
 pub use error::{WorkflowError, WorkflowErrorCode};
 pub mod child_projection;
 
+pub use child_projection::{
+    ChildProjection, WorkflowChildRow, WorkflowChildState, project_children,
+};
 pub use journal::{
     JOURNAL_FORMAT_V1, JOURNAL_FORMAT_V2, JOURNAL_FORMAT_V3, JournalEnvelope, JournalPayload,
     JournalPayloadRef, JournalRecord, JournalWriter, WorkflowChildKey, WorkflowChildKind,
@@ -79,12 +82,9 @@ pub use launch::{
 };
 pub use limits::WorkflowLimits;
 pub use lua::LuaWorkflowRunner;
-pub use child_projection::{
-    ChildProjection, WorkflowChildRow, WorkflowChildState, project_children,
-};
 pub use operator::{
-    ChildCounts, PendingUserRequest, StepRowState, WorkflowChildPage,
-    WorkflowOperatorRequest, WorkflowOperatorSnapshot, WorkflowStepKey, WorkflowStepRow,
+    ChildCounts, PendingUserRequest, StepRowState, WorkflowChildPage, WorkflowOperatorRequest,
+    WorkflowOperatorSnapshot, WorkflowStepKey, WorkflowStepRow,
 };
 pub use output::{
     ArtifactContentPage, CanonicalFinalResult, FINAL_RESULT_LOGICAL_NAME, FinalResultBody,

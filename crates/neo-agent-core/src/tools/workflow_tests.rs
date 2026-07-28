@@ -506,7 +506,10 @@ async fn run_inline_starts_without_prevalidation_and_returns_completion_contract
     assert_eq!(details["action"], "run_inline");
     assert_eq!(details["status"], "started");
     assert_eq!(details["task"]["status"], "started");
-    assert!(details["task"]["display_name"].is_string(), "expected display_name");
+    assert!(
+        details["task"]["display_name"].is_string(),
+        "expected display_name"
+    );
     assert!(details["task"]["purpose"].is_string(), "expected purpose");
     assert_eq!(details["task"]["automatic_notification"], true);
     assert_eq!(details["task"]["next_action"], "wait_for_completion");

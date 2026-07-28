@@ -87,7 +87,7 @@ Workflow **run** 位于 session 目录下，不属于 transcript 或 background-
 | `$NEO_HOME/workflows/<name>.{lua,workflow.toml}` | user |
 | `<trusted-workspace>/.neo/workflows/<name>.{lua,workflow.toml}` | project（信任门控） |
 
-优先级为 `builtin < user < trusted project`。历史 session 仍可读取；没有持久化 `workflows/<run_id>/` 的卡片只是投影，不能恢复。用 `neo workflow prune` 清理（默认 dry-run；`--yes` 仅删除终态、无引用、未 pin 的存储）。见 [Workflows](../guides/workflows.md)。
+优先级为 `builtin < user < trusted project`。历史 session 仍可读取；没有持久化 `workflows/<run_id>/` 的卡片只是投影，不能恢复。自动保留策略将回收超过 30 天的终态、无引用、未 pin 的存储。见 [Workflows](../guides/workflows.md)。
 
 ## 其他配置文件位置
 

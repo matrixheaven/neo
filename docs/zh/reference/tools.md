@@ -151,7 +151,6 @@ CLI。每次 run action 都在后台，返回 task ID（亦即 `run_id`）。
 | 暂停 / 恢复 / 停止 | `TaskPause`、`TaskResume`、`TaskStop`（持久化边界） |
 | 回答 `awaiting_user` | 遵循 `TaskOutput.pending_user.next_action`；仅当其为 `TaskAnswer` 时才使用精确 ID 调用。仅 resume 不够。 |
 
-`neo workflow answer`、`fork` 与 `prune` 是人类/脚本 CLI 操作，不是 assistant workflow 指令。
 
 Workflow Lua 创建的 child 必须带每 child 的 `output_schema`。无效 child JSON 在同一 child session 上获得 **恰好一次** 禁用工具的 repair 回合；无模糊 JSON 提取。Swarm 扇出支持异构且无硬编码总 child 上限；宿主 `swarm_concurrency` 只是默认并发。Ask / Auto / Yolo 控制每个 child 与 tool effect；launch 审批不能绕过它们。
 

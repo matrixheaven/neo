@@ -592,9 +592,9 @@ pub(super) fn observe_v2_envelope(
         | JournalPayload::RecoveryActionApplied { .. }
         | JournalPayload::UsageRecorded { .. }
         | JournalPayload::ProvenanceRecorded { .. } => {}
-            JournalPayload::ChildQueued { .. } => {}
-            JournalPayload::ChildStarted { .. } => {}
-            JournalPayload::ChildFinished { .. } => {}
+        JournalPayload::ChildQueued { .. } => {}
+        JournalPayload::ChildStarted { .. } => {}
+        JournalPayload::ChildFinished { .. } => {}
         JournalPayload::FinalResultRecorded { .. } => {
             if index.final_result_seq.is_some() {
                 return Err(journal_corrupt("duplicate final_result_recorded"));

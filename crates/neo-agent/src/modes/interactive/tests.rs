@@ -11234,10 +11234,10 @@ async fn spawn_workflow_approval_invocation(
                 launch_source: "test".to_owned(),
                 parent_run_id: None,
                 output_schema: None,
-            display_name: None,
-                        input_schema: None,
-                        definition_origin: None,
-                        inline_unsaved: false,
+                display_name: None,
+                input_schema: None,
+                definition_origin: None,
+                inline_unsaved: false,
             },
         )
         .await
@@ -16334,10 +16334,10 @@ async fn task_browser_workflow_controls_use_human_handle() {
                 launch_source: "test".to_owned(),
                 parent_run_id: None,
                 output_schema: None,
-            display_name: None,
-                        input_schema: None,
-                        definition_origin: None,
-                        inline_unsaved: false,
+                display_name: None,
+                input_schema: None,
+                definition_origin: None,
+                inline_unsaved: false,
             },
         )
         .await

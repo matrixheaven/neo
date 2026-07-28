@@ -25,11 +25,11 @@ fn launch_request(name: &str) -> WorkflowLaunchRequest {
         launch_source: "/workflow".to_owned(),
         parent_run_id: None,
         output_schema: None,
-                display_name: None,
-                input_schema: None,
-                definition_origin: None,
-                inline_unsaved: false,
-        }
+        display_name: None,
+        input_schema: None,
+        definition_origin: None,
+        inline_unsaved: false,
+    }
 }
 
 fn limits_one_worker() -> WorkflowLimits {
@@ -566,8 +566,7 @@ fn try_admit_reports_capacity_reason_without_rejecting_by_child_count() {
 #[test]
 fn automatic_retention_reclaims_only_old_terminal_unreferenced_runs_to_low_watermark() {
     use neo_agent_core::workflow::{
-        WorkflowAdmission, WorkflowLimits, WorkflowRunMetadata, WorkflowState,
-        perform_retention,
+        WorkflowAdmission, WorkflowLimits, WorkflowRunMetadata, WorkflowState, perform_retention,
     };
 
     let sessions_root = tempfile::tempdir().expect("tempdir");
@@ -616,10 +615,10 @@ fn automatic_retention_reclaims_only_old_terminal_unreferenced_runs_to_low_water
         // For non-terminal states, write a journal with the state.
         // Terminal runs don't need a journal (infer_run_state defaults to Completed).
         if !state.is_terminal() {
-            use neo_agent_core::workflow::journal::{JournalEnvelope, JournalPayload, JournalV2Writer,
-                JOURNAL_FORMAT_V2,
-            };
             use neo_agent_core::workflow::WorkflowId;
+            use neo_agent_core::workflow::journal::{
+                JOURNAL_FORMAT_V2, JournalEnvelope, JournalPayload, JournalV2Writer,
+            };
             let wid = WorkflowId::from_existing(run_id);
             let limits_journal = WorkflowLimits::default();
             let mut writer = JournalV2Writer::open(&run_dir.join("journal.jsonl"), wid.clone())
@@ -664,13 +663,61 @@ fn automatic_retention_reclaims_only_old_terminal_unreferenced_runs_to_low_water
 
     // Terminal runs — candidates for reclamation (they are current-time, so under 30 days).
     // With a 20 KiB limit, even small runs will trigger retention.
-    make_run(root, bucket, session, "terminal-1", WorkflowState::Completed, None, 4096);
-    make_run(root, bucket, session, "terminal-2", WorkflowState::Failed, None, 4096);
-    make_run(root, bucket, session, "terminal-3", WorkflowState::Cancelled, None, 4096);
+    make_run(
+        root,
+        bucket,
+        session,
+        "terminal-1",
+        WorkflowState::Completed,
+        None,
+        4096,
+    );
+    make_run(
+        root,
+        bucket,
+        session,
+        "terminal-2",
+        WorkflowState::Failed,
+        None,
+        4096,
+    );
+    make_run(
+        root,
+        bucket,
+        session,
+        "terminal-3",
+        WorkflowState::Cancelled,
+        None,
+        4096,
+    );
     // Non-terminal runs — should be preserved.
-    make_run(root, bucket, session, "running", WorkflowState::Running, None, 2048);
-    make_run(root, bucket, session, "queued", WorkflowState::Queued, None, 2048);
-    make_run(root, bucket, session, "paused", WorkflowState::Paused, None, 2048);
+    make_run(
+        root,
+        bucket,
+        session,
+        "running",
+        WorkflowState::Running,
+        None,
+        2048,
+    );
+    make_run(
+        root,
+        bucket,
+        session,
+        "queued",
+        WorkflowState::Queued,
+        None,
+        2048,
+    );
+    make_run(
+        root,
+        bucket,
+        session,
+        "paused",
+        WorkflowState::Paused,
+        None,
+        2048,
+    );
     make_run(
         root,
         bucket,
@@ -707,7 +754,10 @@ fn automatic_retention_reclaims_only_old_terminal_unreferenced_runs_to_low_water
 
     // All runs should be preserved since none are 30+ days old.
     // The function returns storage_full if eligible candidates exist but none qualify by age.
-    assert_eq!(outcome.reclaimed_count, 0, "no runs should be reclaimed (under 30 days)");
+    assert_eq!(
+        outcome.reclaimed_count, 0,
+        "no runs should be reclaimed (under 30 days)"
+    );
 
     // Verify all non-terminal runs are preserved.
     assert!(run_dir_path(root, bucket, session, "running").exists());
@@ -729,12 +779,7 @@ fn automatic_retention_reclaims_only_old_terminal_unreferenced_runs_to_low_water
     );
 }
 
-fn run_dir_path(
-    sessions_root: &Path,
-    bucket: &str,
-    session_id: &str,
-    run_id: &str,
-) -> PathBuf {
+fn run_dir_path(sessions_root: &Path, bucket: &str, session_id: &str, run_id: &str) -> PathBuf {
     sessions_root
         .join(bucket)
         .join(session_id)
@@ -745,8 +790,7 @@ fn run_dir_path(
 #[test]
 fn automatic_retention_preserves_protected_runs_and_fails_closed_on_path_escape() {
     use neo_agent_core::workflow::{
-        WorkflowAdmission, WorkflowLimits, WorkflowRunMetadata, WorkflowState,
-        perform_retention,
+        WorkflowAdmission, WorkflowLimits, WorkflowRunMetadata, WorkflowState, perform_retention,
     };
 
     let sessions_root = tempfile::tempdir().expect("tempdir");
@@ -771,7 +815,14 @@ fn automatic_retention_preserves_protected_runs_and_fails_closed_on_path_escape(
     let bucket = "wd_test_00220011bbbb";
     let session = "session-1";
 
-    fn create_run(root: &Path, bucket: &str, session: &str, run_id: &str, state: WorkflowState, extra_bytes: usize) {
+    fn create_run(
+        root: &Path,
+        bucket: &str,
+        session: &str,
+        run_id: &str,
+        state: WorkflowState,
+        extra_bytes: usize,
+    ) {
         let run_dir = run_dir_path(root, bucket, session, run_id);
         fs::create_dir_all(&run_dir).expect("create run dir");
         let metadata = WorkflowRunMetadata {
@@ -800,10 +851,10 @@ fn automatic_retention_preserves_protected_runs_and_fails_closed_on_path_escape(
 
         // Only write journal for non-terminal states to pass validation.
         if !state.is_terminal() {
-            use neo_agent_core::workflow::journal::{JournalEnvelope, JournalPayload, JournalV2Writer,
-                JOURNAL_FORMAT_V2,
-            };
             use neo_agent_core::workflow::WorkflowId;
+            use neo_agent_core::workflow::journal::{
+                JOURNAL_FORMAT_V2, JournalEnvelope, JournalPayload, JournalV2Writer,
+            };
             let wid = WorkflowId::from_existing(run_id);
             let limits_journal = WorkflowLimits::default();
             let mut writer = JournalV2Writer::open(&run_dir.join("journal.jsonl"), wid.clone())
@@ -835,20 +886,39 @@ fn automatic_retention_preserves_protected_runs_and_fails_closed_on_path_escape(
     }
 
     // Only terminal runs (but under 30 days, so not eligible).
-    create_run(root, bucket, session, "terminal-x", WorkflowState::Completed, 2048);
+    create_run(
+        root,
+        bucket,
+        session,
+        "terminal-x",
+        WorkflowState::Completed,
+        2048,
+    );
     // A running run.
-    create_run(root, bucket, session, "running-x", WorkflowState::Running, 1024);
+    create_run(
+        root,
+        bucket,
+        session,
+        "running-x",
+        WorkflowState::Running,
+        1024,
+    );
 
     let outcome = perform_retention(root, Some(&admission), &limits);
 
     // The sentinel file outside candidate directories must be preserved.
     assert!(sentinel.exists(), "sentinel file must never be deleted");
-    assert!(outside_dir.exists(), "outside directory must never be deleted");
+    assert!(
+        outside_dir.exists(),
+        "outside directory must never be deleted"
+    );
 
     // Non-terminal runs are preserved.
     assert!(run_dir_path(root, bucket, session, "running-x").exists());
 
     // With young runs, nothing should be reclaimed.
-    assert_eq!(outcome.reclaimed_count, 0, "young runs should never be reclaimed");
+    assert_eq!(
+        outcome.reclaimed_count, 0,
+        "young runs should never be reclaimed"
+    );
 }
-

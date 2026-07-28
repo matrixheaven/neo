@@ -151,11 +151,7 @@ pub enum WorkflowCommand {
         /// Registry name of the workflow
         name: String,
         /// Inline JSON object arguments
-        #[arg(
-            long = "args",
-            value_name = "OBJECT",
-            conflicts_with = "args_file"
-        )]
+        #[arg(long = "args", value_name = "OBJECT", conflicts_with = "args_file")]
         args: Option<String>,
         /// Path to a JSON object arguments file
         #[arg(long = "args-file", value_name = "PATH", conflicts_with = "args")]

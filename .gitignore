@@ -6,6 +6,7 @@ target
 .worktrees/
 docs/aegis/work/
 .mimocode
+.grok/
 .codegraph/
 docs/node_modules/
 docs/.vitepress/cache/
