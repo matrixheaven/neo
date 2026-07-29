@@ -706,26 +706,29 @@ fn inline_action_arguments(
     })
 }
 
-#[allow(clippy::too_many_arguments)]
-fn result(
-    action: WorkflowAction,
-    status: &'static str,
-    content: impl Into<String>,
+struct WorkflowResultDetails {
     workflow: Option<Value>,
     validation: Option<Value>,
     items: Option<Value>,
     task: Option<Value>,
     next_actions: Value,
+}
+
+fn result(
+    action: WorkflowAction,
+    status: &'static str,
+    content: impl Into<String>,
+    details: WorkflowResultDetails,
 ) -> ToolResult {
     ToolResult::ok(content).with_details(json!({
         "ok": true,
         "action": action.as_str(),
         "status": status,
-        "workflow": workflow,
-        "validation": validation,
-        "items": items,
-        "task": task,
-        "next_actions": next_actions,
+        "workflow": details.workflow,
+        "validation": details.validation,
+        "items": details.items,
+        "task": details.task,
+        "next_actions": details.next_actions,
     }))
 }
 
@@ -740,7 +743,6 @@ fn permission_mode(ctx: &ToolContext) -> crate::PermissionMode {
         })
 }
 
-#[allow(clippy::too_many_arguments)]
 fn launch_intent_parts(
     definition: &ResolvedWorkflowDefinition,
     args: Value,
@@ -893,23 +895,25 @@ async fn launch_definition(
             "Workflow '{display_name}' started as task {task_id}. \
              Completion arrives automatically; use TaskOutput for optional details."
         ),
-        Some(workflow_details(definition, false)),
-        None,
-        None,
-        Some(json!({
-            "task_id": task_id,
-            "kind": "workflow",
-            "status": "started",
-            "display_name": display_name,
-            "purpose": purpose,
-            "automatic_notification": true,
-            "next_action": "wait_for_completion",
-        })),
-        json!([{
-            "tool": "TaskOutput",
-            "arguments": {"task_id": task_id},
-            "reason": "Optional: check the running workflow for details. Terminal completion arrives automatically."
-        }]),
+        WorkflowResultDetails {
+            workflow: Some(workflow_details(definition, false)),
+            validation: None,
+            items: None,
+            task: Some(json!({
+                "task_id": task_id,
+                "kind": "workflow",
+                "status": "started",
+                "display_name": display_name,
+                "purpose": purpose,
+                "automatic_notification": true,
+                "next_action": "wait_for_completion",
+            })),
+            next_actions: json!([{
+                "tool": "TaskOutput",
+                "arguments": {"task_id": task_id},
+                "reason": "Optional: check the running workflow for details. Terminal completion arrives automatically."
+            }]),
+        },
     )
 }
 
@@ -1022,15 +1026,17 @@ async fn dispatch_prepared(
                 action,
                 "listed",
                 format!("Listed {} workflow(s).", items.len()),
-                None,
-                None,
-                Some(json!({
-                    "entries": items,
-                    "cursor": next_cursor,
-                    "total": summaries.len(),
-                })),
-                None,
-                next_actions,
+                WorkflowResultDetails {
+                    workflow: None,
+                    validation: None,
+                    items: Some(json!({
+                        "entries": items,
+                        "cursor": next_cursor,
+                        "total": summaries.len(),
+                    })),
+                    task: None,
+                    next_actions,
+                },
             )
         }
         PreparedWorkflowAction::Show { name } => {
@@ -1042,22 +1048,24 @@ async fn dispatch_prepared(
                 action,
                 "shown",
                 format!("Showing workflow `{}`.", definition.name.as_str()),
-                Some(workflow_details(&definition, true)),
-                None,
-                None,
-                None,
-                json!([
-                    {
-                        "tool": "Workflow",
-                        "arguments": {"action": "validate_saved", "name": definition.name.as_str()},
-                        "reason": "Validate this saved workflow without side effects."
-                    },
-                    {
-                        "tool": "Workflow",
-                        "arguments": {"action": "run_saved", "name": definition.name.as_str()},
-                        "reason": "Run this saved workflow."
-                    }
-                ]),
+                WorkflowResultDetails {
+                    workflow: Some(workflow_details(&definition, true)),
+                    validation: None,
+                    items: None,
+                    task: None,
+                    next_actions: json!([
+                        {
+                            "tool": "Workflow",
+                            "arguments": {"action": "validate_saved", "name": definition.name.as_str()},
+                            "reason": "Validate this saved workflow without side effects."
+                        },
+                        {
+                            "tool": "Workflow",
+                            "arguments": {"action": "run_saved", "name": definition.name.as_str()},
+                            "reason": "Run this saved workflow."
+                        }
+                    ]),
+                },
             )
         }
         PreparedWorkflowAction::ValidateInline { definition } => {
@@ -1077,22 +1085,24 @@ async fn dispatch_prepared(
                 action,
                 "valid",
                 format!("Workflow `{}` is valid.", definition.name.as_str()),
-                Some(workflow_details(&definition, false)),
-                Some(json!({"valid": true})),
-                None,
-                None,
-                json!([
-                    {
-                        "tool": "Workflow",
-                        "arguments": inline_action_arguments(&definition, WorkflowAction::RunInline),
-                        "reason": "Run the validated inline workflow."
-                    },
-                    {
-                        "tool": "Workflow",
-                        "arguments": save_arguments,
-                        "reason": "Save the validated workflow in user scope."
-                    }
-                ]),
+                WorkflowResultDetails {
+                    workflow: Some(workflow_details(&definition, false)),
+                    validation: Some(json!({"valid": true})),
+                    items: None,
+                    task: None,
+                    next_actions: json!([
+                        {
+                            "tool": "Workflow",
+                            "arguments": inline_action_arguments(&definition, WorkflowAction::RunInline),
+                            "reason": "Run the validated inline workflow."
+                        },
+                        {
+                            "tool": "Workflow",
+                            "arguments": save_arguments,
+                            "reason": "Save the validated workflow in user scope."
+                        }
+                    ]),
+                },
             )
         }
         PreparedWorkflowAction::ValidateSaved { name } => {
@@ -1107,22 +1117,24 @@ async fn dispatch_prepared(
                 action,
                 "valid",
                 format!("Workflow `{}` is valid.", definition.name.as_str()),
-                Some(workflow_details(&definition, false)),
-                Some(json!({"valid": true})),
-                None,
-                None,
-                json!([
-                    {
-                        "tool": "Workflow",
-                        "arguments": {"action": "run_saved", "name": definition.name.as_str()},
-                        "reason": "Run the validated saved workflow."
-                    },
-                    {
-                        "tool": "Workflow",
-                        "arguments": {"action": "show", "name": definition.name.as_str()},
-                        "reason": "Show the saved definition."
-                    }
-                ]),
+                WorkflowResultDetails {
+                    workflow: Some(workflow_details(&definition, false)),
+                    validation: Some(json!({"valid": true})),
+                    items: None,
+                    task: None,
+                    next_actions: json!([
+                        {
+                            "tool": "Workflow",
+                            "arguments": {"action": "run_saved", "name": definition.name.as_str()},
+                            "reason": "Run the validated saved workflow."
+                        },
+                        {
+                            "tool": "Workflow",
+                            "arguments": {"action": "show", "name": definition.name.as_str()},
+                            "reason": "Show the saved definition."
+                        }
+                    ]),
+                },
             )
         }
         PreparedWorkflowAction::Save {
@@ -1179,22 +1191,24 @@ async fn dispatch_prepared(
                 action,
                 "saved",
                 format!("Saved workflow `{}`.", definition.name.as_str()),
-                Some(workflow_details(&definition, false)),
-                Some(json!({"valid": true})),
-                None,
-                None,
-                json!([
-                    {
-                        "tool": "Workflow",
-                        "arguments": {"action": "run_saved", "name": definition.name.as_str()},
-                        "reason": "Run the saved workflow."
-                    },
-                    {
-                        "tool": "Workflow",
-                        "arguments": {"action": "show", "name": definition.name.as_str()},
-                        "reason": "Show the durable saved definition."
-                    }
-                ]),
+                WorkflowResultDetails {
+                    workflow: Some(workflow_details(&definition, false)),
+                    validation: Some(json!({"valid": true})),
+                    items: None,
+                    task: None,
+                    next_actions: json!([
+                        {
+                            "tool": "Workflow",
+                            "arguments": {"action": "run_saved", "name": definition.name.as_str()},
+                            "reason": "Run the saved workflow."
+                        },
+                        {
+                            "tool": "Workflow",
+                            "arguments": {"action": "show", "name": definition.name.as_str()},
+                            "reason": "Show the durable saved definition."
+                        }
+                    ]),
+                },
             )
         }
         PreparedWorkflowAction::RunInline { definition, args } => {
