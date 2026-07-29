@@ -23,6 +23,12 @@ export class SessionRegistry {
     }, 60_000);
   }
 
+  // ── get ──────────────────────────────────────────────────────────────
+
+  get(sessionId: string): SessionEntry | undefined {
+    return this.sessions.get(sessionId);
+  }
+
   // ── ensure ────────────────────────────────────────────────────────────
 
   async ensure(sessionId: string): Promise<SessionEntry> {
