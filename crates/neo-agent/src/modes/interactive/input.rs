@@ -547,7 +547,7 @@ impl InteractiveController {
                 .tui
                 .chrome()
                 .task_browser_state()
-                .map_or(None, |state| {
+                .and_then(|state| {
                     if state.stop_confirmation_task_id().is_some() {
                         Some(TaskBrowserAction::ConfirmStop)
                     } else if state

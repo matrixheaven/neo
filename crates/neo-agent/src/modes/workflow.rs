@@ -299,7 +299,7 @@ async fn stream_run(
                     "run_id": run_id,
                     "state": "awaiting_user",
                     "task_id": handle.run_id.0,
-                    "prompt": pending.as_ref().and_then(|p| Some(p.prompt.as_str())),
+                    "prompt": pending.as_ref().map(|p| p.prompt.as_str()),
                     "next_action": "open /tasks to answer in an interactive session",
                 }));
                 std::process::exit(3);
@@ -445,7 +445,7 @@ async fn wait_run(
                 "run_id": run_id,
                 "state": "awaiting_user",
                 "task_id": handle.run_id.0,
-                "prompt": pending.as_ref().and_then(|p| Some(p.prompt.as_str())),
+                "prompt": pending.as_ref().map(|p| p.prompt.as_str()),
                 "next_action": "open /tasks to answer in an interactive session",
             });
             match output {
@@ -477,14 +477,14 @@ async fn wait_run(
                         if let Some(ref reason) = final_output.terminal_reason {
                             lines.push(format!("  result: {reason}"));
                         }
-                        if let Some(ref result) = final_output.final_result {
-                            if let FinalResultBody::Inline { value } = &result.body {
-                                lines.push(format!(
-                                    "  final: {}",
-                                    serde_json::to_string_pretty(value)
-                                        .unwrap_or_else(|_| format!("{:?}", value))
-                                ));
-                            }
+                        if let Some(ref result) = final_output.final_result
+                            && let FinalResultBody::Inline { value } = &result.body
+                        {
+                            lines.push(format!(
+                                "  final: {}",
+                                serde_json::to_string_pretty(value)
+                                    .unwrap_or_else(|_| format!("{:?}", value))
+                            ));
                         }
                         return Ok(format!("{}\n", lines.join("\n")));
                     } else {
