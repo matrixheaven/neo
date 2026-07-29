@@ -131,23 +131,12 @@ pub struct TaskBrowserWorkflowStep {
     pub failed_count: u64,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct TaskBrowserWorkflowChildPage {
     pub items: Vec<TaskBrowserWorkflowChild>,
     pub next_cursor: Option<String>,
     pub has_more: bool,
     pub query_hash: String,
-}
-
-impl Default for TaskBrowserWorkflowChildPage {
-    fn default() -> Self {
-        Self {
-            items: Vec::new(),
-            next_cursor: None,
-            has_more: false,
-            query_hash: String::new(),
-        }
-    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

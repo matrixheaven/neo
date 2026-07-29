@@ -52,7 +52,7 @@ impl WorkflowAnswerForm {
     pub fn from_schema(schema: &Value, title: Option<String>, prompt: String) -> Self {
         let mut fields = Vec::new();
         let structured_fallback =
-            !append_fields(schema, "", "", &[], false, None, None, &mut fields);
+            !append_fields(schema, "", "", &[], false, (None, None), &mut fields);
         if structured_fallback {
             fields = vec![WorkflowAnswerField {
                 path: String::new(),
@@ -194,10 +194,13 @@ fn append_fields(
     label: &str,
     parent_breadcrumb: &[String],
     required: bool,
-    branch_scope: Option<WorkflowAnswerBranchScope>,
-    array_scope: Option<WorkflowAnswerArrayScope>,
+    scopes: (
+        Option<WorkflowAnswerBranchScope>,
+        Option<WorkflowAnswerArrayScope>,
+    ),
     fields: &mut Vec<WorkflowAnswerField>,
 ) -> bool {
+    let (branch_scope, array_scope) = scopes;
     if schema.get("pattern").is_some()
         || schema.get("allOf").is_some()
         || schema.get("not").is_some()
@@ -390,8 +393,7 @@ fn append_object_fields(
             name,
             breadcrumb,
             required_names.contains(&name.as_str()),
-            branch_scope.clone(),
-            array_scope.clone(),
+            (branch_scope.clone(), array_scope.clone()),
             fields,
         )
     })
