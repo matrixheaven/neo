@@ -67,7 +67,9 @@ struct BashInput {
     max_output_bytes: Option<usize>,
 }
 
-const DESCRIPTION: &str = r#"Execute a `bash` command. Use this for shell semantics — pipes, environment variables, processes, git, package managers, build/test runners, anything genuinely interactive or multi-step.
+const DESCRIPTION: &str = r#"Execute a non-interactive `bash` command. Use this for shell semantics — pipes, environment variables, processes, git, package managers, build/test runners, and multi-step shell logic.
+
+Standard input is always closed. If a command needs prompts, terminal state, keystrokes, or control bytes, use `Terminal` instead.
 
 **Translate these to a dedicated tool instead:**
 - `cat` / `head` / `tail` (known path) → `Read`
@@ -86,7 +88,7 @@ If `run_in_background=true`, the command will be started as a background task an
 
 **Guidelines for safety and security:**
 - Each shell tool call will be executed in a fresh shell environment. The shell variables, current working directory changes, and the shell history is not preserved between calls.
-- The tool call will return after the command is finished. You shall not use this tool to execute an interactive command or a command that may run forever. For long-running or uncertain-duration work, prefer omitting `timeout_secs`; when set, it must be between 300 and 3600 seconds.
+- A foreground tool call remains pending until the command finishes, is cancelled, or reaches an explicit timeout. For long-running or uncertain-duration work, prefer omitting `timeout_secs`; when set, it must be between 300 and 3600 seconds.
 - Avoid using `..` to access files or directories outside the working directory.
 - Avoid modifying files outside the working directory unless explicitly instructed to do so.
 - Never run commands that require superuser privileges unless explicitly instructed to do so.

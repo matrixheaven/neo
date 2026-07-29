@@ -41,6 +41,19 @@ fn bash_model_schema_matches_kimi_style_shape() {
 }
 
 #[test]
+fn bash_description_routes_input_requiring_commands_to_terminal() {
+    let bash = ToolRegistry::with_builtin_tools()
+        .specs()
+        .into_iter()
+        .find(|spec| spec.name == "Bash")
+        .expect("Bash tool spec");
+
+    assert!(bash.description.contains("Standard input is always closed"));
+    assert!(bash.description.contains("use `Terminal` instead"));
+    assert!(!bash.description.contains("anything genuinely interactive"));
+}
+
+#[test]
 fn builtin_tool_names_use_model_facing_kimi_style_casing() {
     let mut names = ToolRegistry::with_builtin_tools()
         .specs()

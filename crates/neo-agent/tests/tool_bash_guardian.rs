@@ -124,6 +124,44 @@ async fn bash_foreground_cancellation_kills_descendant_process_group() {
     assert_eq!(result.outcome, ShellCommandOutcome::Cancelled);
 }
 
+#[cfg(unix)]
+#[tokio::test]
+async fn bash_foreground_cancellation_allows_term_cleanup_before_force_kill() {
+    let workspace = tempfile::tempdir().expect("workspace");
+    let ctx = guarded_context(&workspace, ShellLimits::default());
+    let cancel = CancellationToken::new();
+    let task_cancel = cancel.clone();
+    let task = tokio::spawn(execute_shell_command(ShellExecutionRequest {
+        id: "shell-term-cleanup".to_owned(),
+        command: "trap 'sleep 0.1; printf handled > term.marker; exit 0' TERM; printf ready > ready.marker; while :; do sleep 1; done".to_owned(),
+        cwd: ctx.cwd.clone(),
+        origin: ShellCommandOrigin::UserShellMode,
+        timeout: None,
+        max_output_bytes: 1_024,
+        cancel_token: task_cancel,
+        stream_update: None,
+        background_tasks: None,
+        shell_runtime: ctx.shell_runtime.clone(),
+        admission: user_admission(),
+        admission_callback: None,
+    }));
+    for _ in 0..500 {
+        if workspace.path().join("ready.marker").exists() {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    assert!(workspace.path().join("ready.marker").exists());
+    cancel.cancel();
+
+    let result = task.await.expect("join shell").expect("cancel shell");
+    assert_eq!(result.outcome, ShellCommandOutcome::Cancelled);
+    assert_eq!(
+        std::fs::read_to_string(workspace.path().join("term.marker")).expect("TERM cleanup marker"),
+        "handled"
+    );
+}
+
 #[tokio::test]
 async fn user_shell_runner_registers_foreground_task_for_detach() {
     let workspace = tempfile::tempdir().expect("workspace");
