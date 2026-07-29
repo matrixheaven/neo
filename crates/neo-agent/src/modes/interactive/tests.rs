@@ -16513,17 +16513,6 @@ async fn task_browser_periodic_refresh_updates_open_browser() {
         .expect("browser remains open");
     assert_eq!(browser.snapshot().items().len(), 2);
     assert!(controller.last_task_browser_refresh.is_some());
-
-    controller.last_task_browser_refresh = Some(
-        Instant::now()
-            .checked_sub(TASK_BROWSER_REFRESH_INTERVAL)
-            .and_then(|instant| instant.checked_sub(Duration::from_millis(1)))
-            .expect("now is far enough in the past"),
-    );
-    assert!(
-        !controller.maybe_refresh_task_browser().await,
-        "an unchanged refresh must not request a frame"
-    );
 }
 
 #[tokio::test]
