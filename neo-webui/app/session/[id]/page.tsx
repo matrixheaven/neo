@@ -1,22 +1,29 @@
 'use client';
 import React, { use } from 'react';
 import { AppShell } from '@/components/AppShell';
+import { ChatWindow } from '@/components/ChatWindow';
+import { ChatInput } from '@/components/ChatInput';
+import { useAgentSession } from '@/hooks/useAgentSession';
 
 export default function SessionPage({ params }: { params: Promise<{ id: string }> }) {
   const { id } = use(params);
+  const { messages, isStreaming, error, sendMessage } = useAgentSession(id);
 
   return (
     <AppShell>
-      <div style={{
-        display: 'flex',
-        flexDirection: 'column',
-        alignItems: 'center',
-        justifyContent: 'center',
-        height: '100%',
-        color: 'var(--color-text-tertiary)',
-      }}>
-        <p>Session: {id}</p>
-        <p style={{ marginTop: 'var(--space-md)' }}>Chat interface coming soon...</p>
+      <div style={{ display: 'flex', flexDirection: 'column', height: '100%' }}>
+        <ChatWindow messages={messages} isStreaming={isStreaming} />
+        {error && (
+          <div style={{
+            padding: 'var(--space-sm) var(--space-md)',
+            background: 'var(--color-diff-removed)',
+            color: 'var(--color-error)',
+            fontSize: 'var(--font-size-sm)',
+          }}>
+            {error}
+          </div>
+        )}
+        <ChatInput onSend={sendMessage} disabled={isStreaming} />
       </div>
     </AppShell>
   );
