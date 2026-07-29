@@ -9,7 +9,8 @@ export async function GET(
   const format = request.nextUrl.searchParams.get('format') ?? 'html';
   const proc = new NeoRpcProcess();
   try {
-    const result = await proc.call('sessions.export', { session_id: id, format }) as { content: string };
+    const method = format === 'json' ? 'sessions.export_json' : 'sessions.export_html';
+    const result = await proc.call(method, { session_id: id }) as { content: string };
     if (format === 'json') {
       return NextResponse.json(JSON.parse(result.content));
     }

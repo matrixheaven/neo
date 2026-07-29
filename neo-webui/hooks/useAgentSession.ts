@@ -8,6 +8,8 @@ export interface ToolCallInfo {
   arguments: string;
   result?: { content: string; isError: boolean; duration_ms?: number };
   status: 'pending' | 'running' | 'done';
+  startedAt?: number;
+  duration_ms?: number;
 }
 
 export interface Message {
@@ -105,20 +107,29 @@ export function useAgentSession(sessionId: string): UseAgentSessionReturn {
         if (tc) {
           tc.arguments = event.ToolCallFinished.tool_call.arguments;
         }
+      } else if ('ToolExecutionStarted' in event) {
+        const last = msgs[msgs.length - 1];
+        const tc = last?.toolCalls?.find(t => t.id === event.ToolExecutionStarted.id);
+        if (tc) {
+          tc.status = 'running';
+          tc.startedAt = Date.now();
+        }
       } else if ('ToolExecutionFinished' in event) {
         const last = msgs[msgs.length - 1];
         const tc = last?.toolCalls?.find(t => t.id === event.ToolExecutionFinished.id);
         if (tc) {
           tc.status = 'done';
+          tc.duration_ms = tc.startedAt ? Date.now() - tc.startedAt : undefined;
           tc.result = {
             content: event.ToolExecutionFinished.result.content,
             isError: event.ToolExecutionFinished.result.isError,
-            duration_ms: undefined,
           };
         }
       } else if ('ApprovalRequested' in event) {
         setPendingApproval(event.ApprovalRequested.request);
         setMessages([...msgs]);
+      } else if ('ApprovalResolved' in event) {
+        setPendingApproval(null);
       } else if ('Error' in event) {
         setError(event.Error.message);
         setIsStreaming(false);

@@ -4,6 +4,7 @@ import { SessionSidebar } from './SessionSidebar';
 import { TabBar, type Tab } from './TabBar';
 import { FileExplorer } from './FileExplorer';
 import { ModelsConfig } from './ModelsConfig';
+import { FileViewer } from './FileViewer';
 import { useTheme } from '@/hooks/useTheme';
 
 export function AppShell({ children }: { children: React.ReactNode }) {
@@ -67,7 +68,13 @@ export function AppShell({ children }: { children: React.ReactNode }) {
             onCloseTab={handleCloseTab}
           />
           <div style={{ flex: 1, overflow: 'hidden' }}>
-            {children}
+            {(() => {
+              const activeTab = tabs.find(t => t.id === activeTabId);
+              if (activeTab?.type === 'file' && activeTab.path) {
+                return <FileViewer filePath={activeTab.path} />;
+              }
+              return children;
+            })()}
           </div>
         </div>
       </div>

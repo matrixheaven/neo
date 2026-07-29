@@ -20,7 +20,8 @@ export function readConfig(): { config: any; skills: UserSkill[] } {
   if (fs.existsSync(configPath)) {
     const raw = fs.readFileSync(configPath, 'utf-8');
     // Simple TOML-like parser for our needs (just read as-is, frontend will parse)
-    config = { raw };
+    const masked = raw.replace(/(api_key\s*=\s*")[^"]+(")/g, '$1sk-****$2');
+    config = { raw: masked };
   }
 
   const skills: UserSkill[] = [];

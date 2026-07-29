@@ -50,6 +50,13 @@ export function ToolCallCard({ toolCall }: ToolCallCardProps) {
         >
           {argsExpanded ? 'Hide args' : 'Show args'}
         </span>
+        {toolCall.duration_ms !== undefined && (
+          <span style={{ marginLeft: 'auto', fontSize: 'var(--font-size-xs, 11px)', color: 'var(--color-text-tertiary)' }}>
+            {toolCall.duration_ms > 1000
+              ? `${(toolCall.duration_ms / 1000).toFixed(1)}s`
+              : `${toolCall.duration_ms}ms`}
+          </span>
+        )}
       </div>
 
       {argsExpanded && (
