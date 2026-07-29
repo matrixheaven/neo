@@ -20,7 +20,8 @@ use super::queue::*;
 use super::skill_dispatch::*;
 use super::turn_loop::{
     AgentTurnRuntime, append_available_skills_snapshot, append_runtime_reminders,
-    emit_run_finished, establish_instruction_baseline, run_agent_turn,
+    emit_run_finished, establish_instruction_baseline,
+    rehydrate_instruction_context_after_compaction, run_agent_turn,
 };
 use crate::compaction::projection::ProjectionPlan;
 use crate::compaction::summary::{FullCompactionInput, run_full_compaction};
@@ -410,6 +411,30 @@ impl AgentRuntime {
             return;
         }
         append_available_skills_snapshot(skills.as_ref(), &mut emitter);
+        if config.turn_system_context.is_some() {
+            append_runtime_reminders(&config, &mut emitter);
+            rehydrate_instruction_context_after_compaction(&mut emitter, false).await;
+
+            let (projection_sender, _projection_receiver) = mpsc::unbounded_channel();
+            let mut projected_emitter =
+                EventEmitter::new(projection_sender, emitter.context.clone());
+            projected_emitter.emit(AgentEvent::MessageAppended {
+                message: message.clone(),
+            });
+            if natural_user_turn {
+                append_pending_workflow_notifications(&config, &mut projected_emitter);
+            }
+            if !context_fits_after_compaction(&config, &projected_emitter.context) {
+                process_supervisor.cleanup_all().await;
+                emitter.emit(AgentEvent::RunFinished {
+                    turn: emitter.context.turns.saturating_add(1),
+                    stop_reason: StopReason::Error,
+                });
+                let _ = emitter.send_error(AgentRuntimeError::WorkflowContextTooLarge);
+                let _ = final_sender.send(emitter.context);
+                return;
+            }
+        }
         emitter.emit(AgentEvent::MessageAppended { message });
         if natural_user_turn {
             append_pending_workflow_notifications(&config, &mut emitter);
@@ -674,6 +699,12 @@ mod tests {
             events.last(),
             Some(Err(AgentRuntimeError::WorkflowContextTooLarge))
         ));
+        assert!(!events.iter().any(|event| matches!(
+            event,
+            Ok(AgentEvent::MessageAppended {
+                message: AgentMessage::User { .. }
+            })
+        )));
     }
 
     #[tokio::test]

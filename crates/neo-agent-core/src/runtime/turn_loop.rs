@@ -325,12 +325,6 @@ pub(super) async fn run_agent_turn(
         append_available_skills_snapshot(skills.as_ref(), emitter);
         append_runtime_reminders(&config, emitter);
         rehydrate_instruction_context_after_compaction(emitter, false).await;
-        if config.turn_system_context.is_some()
-            && !super::agent::context_fits_after_compaction(&config, &emitter.context)
-        {
-            return Err(AgentRuntimeError::WorkflowContextTooLarge);
-        }
-
         let next_turn = run_next_model_turn(
             &model,
             &config,
@@ -635,7 +629,10 @@ pub(super) async fn establish_instruction_baseline(
 /// so the first live boundary re-runs rehydration against current disk. The
 /// typed authority generation keeps an already-intact context untouched while
 /// ensuring a retained Blocked notice cannot impersonate the full snapshot.
-async fn rehydrate_instruction_context_after_compaction(emitter: &mut EventEmitter, force: bool) {
+pub(super) async fn rehydrate_instruction_context_after_compaction(
+    emitter: &mut EventEmitter,
+    force: bool,
+) {
     let Some(registry) = emitter.context.instruction_registry() else {
         return;
     };

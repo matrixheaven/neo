@@ -2062,6 +2062,58 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn oversized_workflow_context_does_not_persist_user_message() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let session_path = temp.path().join("session.jsonl");
+        let fake = FakeModelClient::default();
+        let runtime = AgentRuntime::new(
+            AgentConfig::for_model(ModelSpec {
+                provider: ProviderId("test-provider".to_owned()),
+                model: "test-model".to_owned(),
+                api: ApiKind::Local,
+                capabilities: ModelCapabilities::tool_chat()
+                    .with_max_context_tokens(100_000)
+                    .with_max_output_tokens(4_096),
+            })
+            .with_turn_system_context("workflow catalog ".repeat(400_000)),
+            Arc::new(fake.clone()),
+        );
+        let mut writer = JsonlSessionWriter::create(&session_path)
+            .await
+            .expect("session writer");
+
+        let error = match run_prompt_with_runtime(
+            "/workflow:oversized run this workflow".to_owned(),
+            AgentContext::new(),
+            &mut writer,
+            runtime,
+        )
+        .await
+        {
+            Ok(_) => panic!("oversized workflow context must fail"),
+            Err(error) => error,
+        };
+        assert_eq!(
+            error.to_string(),
+            crate::modes::interactive::workflow_slash::WORKFLOW_CONTEXT_TOO_LARGE
+        );
+        writer.flush().await.expect("flush rejected turn");
+        drop(writer);
+
+        let messages = JsonlSessionReader::replay_messages(&session_path)
+            .await
+            .expect("replay messages");
+        assert!(messages.iter().all(|message| {
+            !matches!(
+                message,
+                AgentMessage::User { content, .. }
+                    if content == &vec![Content::text("/workflow:oversized run this workflow")]
+            )
+        }));
+        assert!(fake.requests().is_empty());
+    }
+
+    #[tokio::test]
     async fn workflow_turn_context_is_system_role_and_user_slash_is_persisted_exactly() {
         let temp = tempfile::tempdir().expect("tempdir");
         let session_path = temp.path().join("session.jsonl");
