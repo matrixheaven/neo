@@ -54,7 +54,7 @@ export class NeoRpcProcess extends EventEmitter {
       options.cwd = workspaceDir;
     }
 
-    this.process = spawn(neoBinary, args, options);
+    this.process = spawn(neoBinary, args, options) as ChildProcessWithoutNullStreams;
 
     this.process.stdout.on("data", (chunk: Buffer) => {
       this.handleStdout(chunk.toString("utf-8"));

@@ -2,14 +2,15 @@
 import React, { useState, useCallback } from 'react';
 import { SessionSidebar } from './SessionSidebar';
 import { TabBar, type Tab } from './TabBar';
-import { StatusBar } from './StatusBar';
 import { FileExplorer } from './FileExplorer';
+import { ModelsConfig } from './ModelsConfig';
 import { useTheme } from '@/hooks/useTheme';
 
 export function AppShell({ children }: { children: React.ReactNode }) {
-  const { toggle } = useTheme();
+  const { isDark, toggle } = useTheme();
   const [activeSessionId, setActiveSessionId] = useState<string | null>(null);
   const [showFileExplorer, setShowFileExplorer] = useState(false);
+  const [showConfig, setShowConfig] = useState(false);
   const [tabs, setTabs] = useState<Tab[]>([
     { id: 'home', label: 'Home', type: 'chat' },
   ]);
@@ -70,7 +71,24 @@ export function AppShell({ children }: { children: React.ReactNode }) {
           </div>
         </div>
       </div>
-      <StatusBar connected={true} />
+      <div style={{ display: 'flex', borderTop: '1px solid var(--color-border)' }}>
+        <div style={{ flex: 1, display: 'flex', alignItems: 'center', padding: '0 var(--space-md)', height: 'var(--statusbar-height)', background: 'var(--color-bg-tertiary)', fontSize: 'var(--font-size-sm)', color: 'var(--color-text-tertiary)' }}>
+          <span>Neo WebUI</span>
+          <button onClick={toggle} style={{ marginLeft: 'var(--space-md)', background: 'none', border: 'none', cursor: 'pointer', fontSize: 'var(--font-size-sm)' }}>
+            {isDark ? '☀️' : '🌙'}
+          </button>
+          <button onClick={() => setShowConfig(true)} style={{ marginLeft: 'var(--space-sm)', background: 'none', border: 'none', cursor: 'pointer', fontSize: 'var(--font-size-sm)' }}>
+            ⚙️
+          </button>
+        </div>
+        <div style={{ padding: '0 var(--space-md)', display: 'flex', alignItems: 'center', height: 'var(--statusbar-height)', background: 'var(--color-bg-tertiary)', fontSize: 'var(--font-size-sm)', color: 'var(--color-text-tertiary)' }}>
+          <span style={{ display: 'inline-flex', alignItems: 'center', gap: '4px' }}>
+            <span style={{ width: 6, height: 6, borderRadius: '50%', background: 'var(--color-success)', display: 'inline-block' }} />
+            Ready
+          </span>
+        </div>
+      </div>
+      {showConfig && <ModelsConfig onClose={() => setShowConfig(false)} />}
     </div>
   );
 }

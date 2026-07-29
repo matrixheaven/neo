@@ -1,6 +1,6 @@
 'use client';
 import { useState, useCallback, useRef, useEffect } from 'react';
-import type { AgentEvent } from '@/lib/types';
+import type { AgentEvent, ApprovalRequest } from '@/lib/types';
 
 export interface ToolCallInfo {
   id: string;
@@ -24,6 +24,9 @@ interface UseAgentSessionReturn {
   error: string | null;
   sendMessage: (text: string) => Promise<void>;
   clearMessages: () => void;
+  pendingApproval: ApprovalRequest | null;
+  approveTool: (action: string) => Promise<void>;
+  rejectTool: () => Promise<void>;
 }
 
 const generateId = (): string => {
@@ -37,6 +40,7 @@ export function useAgentSession(sessionId: string): UseAgentSessionReturn {
   const [messages, setMessages] = useState<Message[]>([]);
   const [isStreaming, setIsStreaming] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [pendingApproval, setPendingApproval] = useState<ApprovalRequest | null>(null);
   const eventSourceRef = useRef<EventSource | null>(null);
   const messagesRef = useRef<Message[]>([]);
 
@@ -112,6 +116,9 @@ export function useAgentSession(sessionId: string): UseAgentSessionReturn {
             duration_ms: undefined,
           };
         }
+      } else if ('ApprovalRequested' in event) {
+        setPendingApproval(event.ApprovalRequested.request);
+        setMessages([...msgs]);
       } else if ('Error' in event) {
         setError(event.Error.message);
         setIsStreaming(false);
@@ -156,5 +163,25 @@ export function useAgentSession(sessionId: string): UseAgentSessionReturn {
     setMessages([]);
   }, []);
 
-  return { messages, isStreaming, error, sendMessage, clearMessages };
+  const approveTool = useCallback(async (action: string) => {
+    if (!pendingApproval) return;
+    await fetch(`/api/sessions/${sessionId}/approve`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ request_id: pendingApproval.id, action }),
+    });
+    setPendingApproval(null);
+  }, [sessionId, pendingApproval]);
+
+  const rejectTool = useCallback(async () => {
+    if (!pendingApproval) return;
+    await fetch(`/api/sessions/${sessionId}/approve`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ request_id: pendingApproval.id, action: 'reject' }),
+    });
+    setPendingApproval(null);
+  }, [sessionId, pendingApproval]);
+
+  return { messages, isStreaming, error, sendMessage, clearMessages, pendingApproval, approveTool, rejectTool };
 }

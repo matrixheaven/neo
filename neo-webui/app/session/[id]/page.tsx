@@ -3,11 +3,12 @@ import React, { use } from 'react';
 import { AppShell } from '@/components/AppShell';
 import { ChatWindow } from '@/components/ChatWindow';
 import { ChatInput } from '@/components/ChatInput';
+import { PermissionDialog } from '@/components/PermissionDialog';
 import { useAgentSession } from '@/hooks/useAgentSession';
 
 export default function SessionPage({ params }: { params: Promise<{ id: string }> }) {
   const { id } = use(params);
-  const { messages, isStreaming, error, sendMessage } = useAgentSession(id);
+  const { messages, isStreaming, error, sendMessage, pendingApproval, approveTool, rejectTool } = useAgentSession(id);
 
   return (
     <AppShell>
@@ -23,8 +24,15 @@ export default function SessionPage({ params }: { params: Promise<{ id: string }
             {error}
           </div>
         )}
-        <ChatInput onSend={sendMessage} disabled={isStreaming} />
+        <ChatInput onSend={sendMessage} disabled={isStreaming || !!pendingApproval} />
       </div>
+      {pendingApproval && (
+        <PermissionDialog
+          request={pendingApproval}
+          onApprove={approveTool}
+          onReject={rejectTool}
+        />
+      )}
     </AppShell>
   );
 }
