@@ -6,7 +6,6 @@
 
 use std::{
     fs,
-    io::Write as _,
     path::PathBuf,
     process::{Command, Stdio},
     sync::atomic::{AtomicU64, Ordering},
