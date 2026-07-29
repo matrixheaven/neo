@@ -9,38 +9,62 @@ use skim::fuzzy_matcher::{FuzzyMatcher, skim::SkimMatcherV2};
 
 use crate::prompt::templates::{PromptTemplate, load_project_prompt_templates};
 use neo_agent_core::skills::SkillStore;
-use neo_agent_core::workflow::{
-    WorkflowLimits, WorkflowSourceOrigin, builtin_workflow_definitions, resolve_paired_definition,
-};
+use neo_agent_core::workflow::WorkflowDefinitionRegistry;
 use neo_tui::shell::PickerItem;
 
 pub(super) const MAX_FILE_REFERENCE_COMPLETIONS: usize = 100;
 pub(super) const MAX_FILE_REFERENCE_INSPECTED_ENTRIES: usize = 2000;
 
+#[cfg(test)]
 pub(super) fn prompt_completions(
     root: &Path,
     prefix: &str,
     skill_store: Option<&SkillStore>,
     project_trusted: bool,
 ) -> Result<Vec<PickerItem>> {
+    prompt_completions_with_registry(root, prefix, skill_store, project_trusted, None)
+}
+
+pub(super) fn prompt_completions_with_registry(
+    root: &Path,
+    prefix: &str,
+    skill_store: Option<&SkillStore>,
+    project_trusted: bool,
+    workflow_registry: Option<&WorkflowDefinitionRegistry>,
+) -> Result<Vec<PickerItem>> {
     let catalog = if prefix.starts_with('/') {
-        slash_completion_catalog(root, skill_store, project_trusted)?
+        slash_completion_catalog_with_registry(
+            root,
+            skill_store,
+            project_trusted,
+            workflow_registry,
+        )?
     } else {
         CompletionCatalog::default()
     };
     prompt_completions_from_catalog(root, prefix, &catalog)
 }
 
+#[cfg(test)]
 pub(super) fn slash_completion_catalog(
     root: &Path,
     skill_store: Option<&SkillStore>,
     project_trusted: bool,
 ) -> Result<CompletionCatalog> {
+    slash_completion_catalog_with_registry(root, skill_store, project_trusted, None)
+}
+
+pub(super) fn slash_completion_catalog_with_registry(
+    root: &Path,
+    skill_store: Option<&SkillStore>,
+    project_trusted: bool,
+    workflow_registry: Option<&WorkflowDefinitionRegistry>,
+) -> Result<CompletionCatalog> {
     let templates = load_project_prompt_templates(root, project_trusted)?;
     Ok(CompletionCatalog {
         slash_prompts: slash_prompt_template_completion_items(root, &templates),
         prompt_packages: prompt_package_completion_items(root, &templates),
-        session_commands: session_completion_items(skill_store),
+        session_commands: session_completion_items_with_registry(skill_store, workflow_registry),
     })
 }
 
@@ -90,10 +114,7 @@ static STATIC_SLASH_COMMANDS: &[(&str, &str)] = &[
     ("/mcp", "View and manage MCP servers"),
     ("/add-workspace", "Manage additional workspace directories"),
     ("/tasks", "View active background tasks"),
-    (
-        "/workflow",
-        "Launch named workflow or grant one dynamic launch",
-    ),
+    ("/workflow", "Choose or run a workflow"),
     ("/plan", "Toggle plan mode (on / off / clear)"),
     ("/compact", "Request manual context compaction"),
     ("/permissions", "select permission mode"),
@@ -103,14 +124,30 @@ static STATIC_SLASH_COMMANDS: &[(&str, &str)] = &[
     ("/btw", "Open a temporary side-question panel"),
 ];
 
+#[cfg(test)]
 pub(super) fn session_completion_items(skill_store: Option<&SkillStore>) -> Vec<PickerItem> {
+    session_completion_items_with_registry(skill_store, None)
+}
+
+pub(super) fn session_completion_items_with_registry(
+    skill_store: Option<&SkillStore>,
+    workflow_registry: Option<&WorkflowDefinitionRegistry>,
+) -> Vec<PickerItem> {
     let mut items: Vec<PickerItem> = STATIC_SLASH_COMMANDS
         .iter()
         .map(|(value, description)| {
             PickerItem::new((*value).to_owned(), (*value).to_owned(), Some(*description))
         })
         .collect();
-    items.extend(builtin_workflow_completion_items());
+    if let Some(registry) = workflow_registry
+        && let Ok(catalog) = super::workflow_slash::effective_workflow_catalog(registry)
+    {
+        items.extend(catalog.into_iter().map(|item| {
+            let value = format!("/workflow:{}", item.name);
+            let description = format!("{}: {}", item.display_name, item.description);
+            PickerItem::new(value.clone(), value, Some(description))
+        }));
+    }
     if let Some(skill_store) = skill_store {
         for skill in skill_store.iter() {
             let value = format!("/skill:{}", skill.name);
@@ -126,27 +163,6 @@ pub(super) fn session_completion_items(skill_store: Option<&SkillStore>) -> Vec<
         }
     }
     items
-}
-
-fn builtin_workflow_completion_items() -> Vec<PickerItem> {
-    let limits = WorkflowLimits::default();
-    builtin_workflow_definitions()
-        .into_iter()
-        .filter_map(|definition| {
-            let resolved = resolve_paired_definition(
-                &definition.name,
-                &definition.manifest_bytes,
-                &definition.source_bytes,
-                WorkflowSourceOrigin::Builtin,
-                None,
-                &limits,
-            )
-            .ok()?;
-            let value = format!("/workflow {}", definition.name);
-            let description = format!("{}: {}", resolved.display_name, resolved.description);
-            Some(PickerItem::new(value.clone(), value, Some(description)))
-        })
-        .collect()
 }
 
 fn slash_prompt_template_completion_items(
@@ -350,6 +366,39 @@ fn slash_source_candidates(prefix: &str, catalog: &CompletionCatalog) -> Vec<Com
         .into_iter()
         .map(|candidate| candidate.candidate)
         .collect()
+}
+
+pub(super) fn reliable_slash_suggestion(query: &str, values: &[String]) -> Option<String> {
+    let query = query.trim();
+    if query.is_empty() {
+        return None;
+    }
+    let matcher = SkimMatcherV2::default().smart_case();
+    let mut scored = values
+        .iter()
+        .filter_map(|value| {
+            slash_search_keys(value)
+                .into_iter()
+                .filter_map(|key| score_slash_key(&key, query, &matcher))
+                .min_by(|left, right| left.0.cmp(&right.0).then_with(|| right.1.cmp(&left.1)))
+                .map(|(tier, score)| (value, tier, score))
+        })
+        .collect::<Vec<_>>();
+    scored.sort_by(|left, right| {
+        left.1
+            .cmp(&right.1)
+            .then_with(|| right.2.cmp(&left.2))
+            .then_with(|| left.0.cmp(right.0))
+    });
+    let &(value, tier, score) = scored.first()?;
+    if scored
+        .iter()
+        .skip(1)
+        .any(|(_, other_tier, other_score)| *other_tier == tier && *other_score == score)
+    {
+        return None;
+    }
+    Some(value.clone())
 }
 
 fn slash_query(prefix: &str) -> &str {

@@ -255,8 +255,9 @@ mod tests {
             "testing",
             "evaluating",
             "running",
-            "Neo repository",
+            "Neo's own workflow",
             "known saved workflow",
+            "not this skill",
             "implementation",
         ] {
             assert!(

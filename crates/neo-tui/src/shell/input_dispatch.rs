@@ -27,6 +27,7 @@ impl NeoChromeState {
             OverlayKind::WorkspaceManager(state) => state.handle_input(&input),
             OverlayKind::ConfirmDialog(state) => state.handle_input(&input),
             OverlayKind::ChoicePicker(state) => state.handle_input(&input),
+            OverlayKind::WorkflowPicker(state) => state.handle_input(&input),
             OverlayKind::ApiKeyInput(state) => state.handle_input(&input),
             OverlayKind::TextInput(state) => state.handle_input(&input),
             OverlayKind::CustomEndpointWizard(state) => state.handle_input(&input),
@@ -167,6 +168,14 @@ impl NeoChromeState {
     #[must_use]
     pub fn choice_picker_result(&self) -> Option<&crate::dialogs::ChoiceResult> {
         let OverlayKind::ChoicePicker(state) = &self.focused_overlay()?.kind else {
+            return None;
+        };
+        state.result()
+    }
+
+    #[must_use]
+    pub fn workflow_picker_result(&self) -> Option<&crate::dialogs::WorkflowPickerResult> {
+        let OverlayKind::WorkflowPicker(state) = &self.focused_overlay()?.kind else {
             return None;
         };
         state.result()

@@ -9,7 +9,7 @@ use crate::dialogs::{
     ApiKeyInputState, ChoicePickerState, ConfirmDialogState, CustomEndpointWizardState,
     CustomRegistryImportState, HelpPanelState, McpAddFormState, McpManagerState,
     ModelSelectorState, ProviderManagerState, TabbedModelSelectorState, TextInputState,
-    TrustDialogState, WorkspaceManagerState,
+    TrustDialogState, WorkflowPickerState, WorkspaceManagerState,
 };
 use crate::input::KeybindingAction;
 use crate::tasks_browser::{TaskBrowserRenderer, TaskBrowserState};
@@ -137,6 +137,7 @@ pub enum OverlayKind {
     ConfirmDialog(ConfirmDialogState),
     McpAddForm(McpAddFormState),
     ChoicePicker(ChoicePickerState),
+    WorkflowPicker(WorkflowPickerState),
     ApiKeyInput(ApiKeyInputState),
     TextInput(TextInputState),
     CustomEndpointWizard(CustomEndpointWizardState),
@@ -160,6 +161,7 @@ impl OverlayKind {
         match self {
             Self::ModelPicker(state) => Some(OverlayListSelection::ModelPicker(state)),
             Self::PromptCompletion(state) => Some(OverlayListSelection::PromptCompletion(state)),
+            Self::WorkflowPicker(state) => Some(OverlayListSelection::WorkflowPicker(state)),
             _ => None,
         }
     }
@@ -179,6 +181,7 @@ impl OverlayKind {
             Self::SessionPicker(_) => self.session_picker_lines(width, theme),
             Self::ModelPicker(picker) => Some(picker.render_lines(width, theme)),
             Self::PromptCompletion(completions) => Some(completions.render_lines(width, theme)),
+            Self::WorkflowPicker(picker) => Some(picker.render_lines(width)),
             _ => None,
         }
     }
@@ -201,6 +204,7 @@ impl OverlayKind {
     fn input_dialog_lines(&self, width: usize) -> Option<Vec<String>> {
         match self {
             Self::ChoicePicker(state) => Some(state.render_lines(width)),
+            Self::WorkflowPicker(state) => Some(state.render_lines(width)),
             Self::ApiKeyInput(state) => Some(state.render_lines(width)),
             Self::ConfirmDialog(state) => Some(state.render_lines(width)),
             Self::TextInput(state) => Some(state.render_lines(width)),
@@ -258,6 +262,7 @@ impl OverlayKind {
             | Self::ConfirmDialog(_)
             | Self::McpAddForm(_)
             | Self::ChoicePicker(_)
+            | Self::WorkflowPicker(_)
             | Self::TrustDialog(_)
             | Self::HelpPanel(_) => Some(16),
             Self::TaskBrowser(_) | Self::TranscriptBrowser(_) => Some(0),
@@ -271,6 +276,7 @@ enum OverlayListSelection<'a> {
     SessionPicker(&'a mut SessionPickerState),
     ModelPicker(&'a mut ModelPickerState),
     PromptCompletion(&'a mut PromptCompletionState),
+    WorkflowPicker(&'a mut WorkflowPickerState),
 }
 
 impl OverlayListSelection<'_> {
@@ -280,6 +286,11 @@ impl OverlayListSelection<'_> {
             Self::SessionPicker(state) => state.move_up(),
             Self::ModelPicker(state) => state.move_up(),
             Self::PromptCompletion(state) => state.move_up(),
+            Self::WorkflowPicker(state) => {
+                let _ = state.handle_input(&crate::input::InputEvent::Action(
+                    KeybindingAction::SelectUp,
+                ));
+            }
         }
     }
 
@@ -289,6 +300,11 @@ impl OverlayListSelection<'_> {
             Self::SessionPicker(state) => state.move_down(),
             Self::ModelPicker(state) => state.move_down(),
             Self::PromptCompletion(state) => state.move_down(),
+            Self::WorkflowPicker(state) => {
+                let _ = state.handle_input(&crate::input::InputEvent::Action(
+                    KeybindingAction::SelectDown,
+                ));
+            }
         }
     }
 
@@ -298,6 +314,11 @@ impl OverlayListSelection<'_> {
             Self::SessionPicker(state) => state.page_up(),
             Self::ModelPicker(state) => state.page_up(),
             Self::PromptCompletion(state) => state.page_up(),
+            Self::WorkflowPicker(state) => {
+                let _ = state.handle_input(&crate::input::InputEvent::Action(
+                    KeybindingAction::SelectPageUp,
+                ));
+            }
         }
     }
 
@@ -307,6 +328,11 @@ impl OverlayListSelection<'_> {
             Self::SessionPicker(state) => state.page_down(),
             Self::ModelPicker(state) => state.page_down(),
             Self::PromptCompletion(state) => state.page_down(),
+            Self::WorkflowPicker(state) => {
+                let _ = state.handle_input(&crate::input::InputEvent::Action(
+                    KeybindingAction::SelectPageDown,
+                ));
+            }
         }
     }
 }

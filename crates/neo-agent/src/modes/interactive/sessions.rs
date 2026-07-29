@@ -219,6 +219,8 @@ impl InteractiveController {
         self.pending_question_prompts.clear();
         self.pending_background_question_followups.clear();
         self.pending_skill_context = None;
+        self.pending_workflow_context = None;
+        self.pending_workflow_restore_prompt = None;
         self.pending_skill_user_message_to_suppress = None;
         self.clear_pending_exit_confirmation();
         self.close_inline_prompt_completion();

@@ -9,11 +9,12 @@ use std::{
 
 use clap::Parser as _;
 use neo_agent_core::{
-    AgentEvent, AgentMessage, ApprovalAction, ApprovalCancelReason, ApprovalOption,
-    ApprovalPresentation, ApprovalRequest, ApprovalResolution, ApprovalResponse, Content,
-    FileWriteApprovalOperation, MessageOrigin, PendingQuestion, PermissionMode,
-    PermissionOperation, PrefixApprovalRule, SessionApprovalKey, SessionApprovalScope,
-    ShellCommandOrigin, StopReason, ToolResult,
+    AgentConfig, AgentContext, AgentEvent, AgentMessage, AgentRuntime, ApprovalAction,
+    ApprovalCancelReason, ApprovalOption, ApprovalPresentation, ApprovalRequest,
+    ApprovalResolution, ApprovalResponse, Content, FileWriteApprovalOperation, MessageOrigin,
+    PendingQuestion, PermissionMode, PermissionOperation, PrefixApprovalRule, SessionApprovalKey,
+    SessionApprovalScope, ShellCommandOrigin, StopReason, ToolRegistry, ToolResult,
+    harness::FakeHarness,
     skills::{
         LoadedSkill, SkillHostMetadata, SkillInterface, SkillManifest, SkillSource, SkillStore,
         SkillToolDependency,
@@ -924,14 +925,14 @@ fn transcript_scrollback(controller: &InteractiveController) -> usize {
 }
 
 /// Replay the active session's JSONL to recover `AgentMessage` values for
-/// assertions.  Used in place of the removed `session_messages` field.
+/// assertions in tests that use a real session-backed driver.
 async fn replay_session_messages(controller: &InteractiveController) -> Vec<AgentMessage> {
     let config = controller.local_config.as_ref().expect("config");
     let session_id = controller.active_session_id.as_ref().expect("session id");
     let path = crate::modes::sessions::session_path(session_id, config).expect("session path");
     neo_agent_core::session::JsonlSessionReader::replay_context(&path)
         .await
-        .map(|ctx| ctx.messages().to_vec())
+        .map(|context| context.messages().to_vec())
         .unwrap_or_default()
 }
 
@@ -12041,21 +12042,82 @@ async fn slash_clear_alias_resets_to_unsaved_fresh_session() {
 }
 
 #[tokio::test]
-async fn workflow_slash_arguments_start_no_model_turn() {
+async fn automatic_workflow_slash_starts_visible_model_turn_with_complete_context() {
     let temp = tempfile::tempdir().expect("tempdir");
-    let config = test_config(temp.path(), temp.path().join("sessions"));
-    let mut controller = controller_for_config(&config);
+    let mut config = demo_named_workflow_config(&temp, PermissionMode::Yolo);
+    let prompt_dir = config.project_dir.join(".neo/prompts");
+    fs::create_dir_all(&prompt_dir).expect("prompt template directory");
+    fs::write(
+        prompt_dir.join("workflow.md"),
+        "This template must not rewrite workflow intent: $ARGUMENTS",
+    )
+    .expect("prompt template");
+    config.prompt_templates = vec!["workflow".to_owned()];
+    let requests = std::sync::Arc::new(std::sync::Mutex::new(Vec::<TurnRequest>::new()));
+    let seen_requests = std::sync::Arc::clone(&requests);
+    let mut controller = InteractiveController::new_for_test(
+        "neo",
+        "test-session",
+        "openai/gpt-4.1",
+        temp.path(),
+        move |request| {
+            seen_requests.lock().expect("requests lock").push(request);
+            async {
+                Ok(vec![AgentEvent::TurnFinished {
+                    turn: 1,
+                    stop_reason: StopReason::EndTurn,
+                }])
+            }
+        },
+    );
+    controller.local_config = Some(config);
 
-    controller.type_text("/workflow anything");
+    controller.type_text("/workflow Research this API");
     controller
         .handle_input_event(InputEvent::Action(KeybindingAction::InputSubmit))
         .await
-        .expect("slash submits");
+        .expect("automatic workflow slash submits");
+    controller
+        .wait_for_active_turn()
+        .await
+        .expect("turn completes");
 
-    assert!(
-        controller.active_turn.is_none(),
-        "named workflow slash must not enter a model turn"
-    );
+    {
+        let requests = requests.lock().expect("requests lock");
+        assert_eq!(requests.len(), 1);
+        assert_eq!(
+            requests[0].prompt,
+            vec![Content::text("/workflow Research this API")]
+        );
+        assert!(
+            requests[0]
+                .workflow_context
+                .as_deref()
+                .is_some_and(|context| {
+                    context.contains("<workflow-catalog complete=\"true\">")
+                        && context.contains("demo")
+                })
+        );
+        assert_eq!(
+            requests[0].prompt_display_text.as_deref(),
+            Some("/workflow Research this API")
+        );
+        assert_eq!(requests[0].skill_context, None);
+    }
+
+    controller.type_text("ordinary follow-up");
+    controller
+        .handle_input_event(InputEvent::Action(KeybindingAction::InputSubmit))
+        .await
+        .expect("ordinary follow-up submits");
+    controller
+        .wait_for_active_turn()
+        .await
+        .expect("follow-up completes");
+    let requests_after_follow_up = requests.lock().expect("requests lock");
+    assert_eq!(requests_after_follow_up.len(), 2);
+    assert_eq!(requests_after_follow_up[1].workflow_context, None);
+    assert_eq!(requests_after_follow_up[1].skill_context, None);
 }
 
 #[tokio::test]
@@ -12077,6 +12139,47 @@ async fn workflowish_is_not_workflow() {
         .await;
     assert!(!handled_text);
     assert!(controller.active_turn.is_none());
+}
+
+#[tokio::test]
+async fn workflow_intent_slash_no_match_asks_before_authoring() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let mut config = demo_named_workflow_config(&temp, PermissionMode::Yolo);
+    config.workflow_definitions = neo_agent_core::workflow::WorkflowDefinitionRegistry::empty();
+    let requests = std::sync::Arc::new(std::sync::Mutex::new(Vec::<TurnRequest>::new()));
+    let seen_requests = std::sync::Arc::clone(&requests);
+    let mut controller = InteractiveController::new_for_test(
+        "neo",
+        "test-session",
+        "openai/gpt-4.1",
+        temp.path(),
+        move |request| {
+            seen_requests.lock().expect("requests lock").push(request);
+            async {
+                Ok(vec![AgentEvent::TurnFinished {
+                    turn: 1,
+                    stop_reason: StopReason::EndTurn,
+                }])
+            }
+        },
+    );
+    controller.local_config = Some(config);
+
+    controller.type_text("/workflow find a matching workflow");
+    controller
+        .handle_input_event(InputEvent::Action(KeybindingAction::InputSubmit))
+        .await
+        .expect("automatic no-match request submits");
+    controller
+        .wait_for_active_turn()
+        .await
+        .expect("turn completes");
+
+    let requests = requests.lock().expect("requests lock");
+    let context = requests[0].workflow_context.as_deref().expect("context");
+    assert!(context.contains("If no definition fits, ask whether to create one."));
+    assert!(context.contains("<workflow-catalog complete=\"true\">\n</workflow-catalog>"));
+    assert_eq!(requests[0].skill_context, None);
 }
 
 fn demo_named_workflow_config(temp: &tempfile::TempDir, mode: PermissionMode) -> AppConfig {
@@ -12110,6 +12213,13 @@ required = ["ok"]
 
 [output_schema.properties.ok]
 type = "boolean"
+
+[input_schema]
+type = "object"
+required = ["topic"]
+
+[input_schema.properties.topic]
+type = "string"
 "#
     );
     let mut config = test_config(&project_dir, temp.path().join("sessions"));
@@ -12135,23 +12245,25 @@ type = "boolean"
 }
 
 #[tokio::test]
-async fn named_workflow_slash_launches_without_model_call() {
-    let turn_count = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
-    let turn_count_clone = std::sync::Arc::clone(&turn_count);
+async fn named_workflow_slash_starts_visible_model_turn_with_full_schema() {
     let temp = tempfile::tempdir().expect("tempdir");
     let project_dir = temp.path().join("workspace");
     let config = demo_named_workflow_config(&temp, PermissionMode::Yolo);
+    let requests = std::sync::Arc::new(std::sync::Mutex::new(Vec::<TurnRequest>::new()));
+    let seen_requests = std::sync::Arc::clone(&requests);
 
     let mut controller = InteractiveController::new_for_test(
         "neo",
         "test-session",
         "openai/gpt-4.1",
         &project_dir,
-        move |_request| {
-            let turn_count = std::sync::Arc::clone(&turn_count_clone);
-            async move {
-                turn_count.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-                Ok(Vec::<AgentEvent>::new())
+        move |request| {
+            seen_requests.lock().expect("requests lock").push(request);
+            async {
+                Ok(vec![AgentEvent::TurnFinished {
+                    turn: 1,
+                    stop_reason: StopReason::EndTurn,
+                }])
             }
         },
     );
@@ -12162,200 +12274,336 @@ async fn named_workflow_slash_launches_without_model_call() {
         .expect("permission lock") = PermissionMode::Yolo;
     controller.local_config = Some(config.clone());
 
-    controller.type_text("/workflow demo");
+    controller.type_text("/workflow:demo Research battery recycling");
     controller
         .handle_input_event(InputEvent::Action(KeybindingAction::InputSubmit))
         .await
-        .expect("named slash submits");
+        .expect("named workflow slash submits");
+    controller
+        .wait_for_active_turn()
+        .await
+        .expect("turn completes");
 
+    let requests = requests.lock().expect("requests lock");
+    assert_eq!(requests.len(), 1);
     assert_eq!(
-        turn_count.load(std::sync::atomic::Ordering::SeqCst),
-        0,
-        "named slash must perform zero model calls"
+        requests[0].prompt,
+        vec![Content::text("/workflow:demo Research battery recycling")]
     );
+    let context = requests[0]
+        .workflow_context
+        .as_deref()
+        .expect("workflow context");
+    assert!(context.contains("name=\"demo\""), "{context}");
     assert!(
-        controller.active_turn.is_none(),
-        "named slash must not start a model turn"
+        context.contains("&quot;required&quot;:[&quot;topic&quot;]"),
+        "{context}"
     );
-    let tasks = config.background_tasks.list(false, 10).await;
-    assert_eq!(tasks.len(), 1, "named launch registers one background task");
-    assert_eq!(tasks[0].kind, neo_agent_core::BackgroundTaskKind::Workflow);
+    assert!(!context.contains("lua_source"), "{context}");
+    assert_eq!(requests[0].skill_context, None);
 }
 
 #[tokio::test]
-async fn named_workflow_slash_ask_review_supports_launch_revise_cancel() {
-    for (action, feedback, expect_task, expected_status) in [
-        (
-            ApprovalAction::LaunchWorkflow,
-            None,
-            true,
-            "launched as task",
-        ),
-        (
-            ApprovalAction::ReviseWorkflow {
-                preset_feedback: None,
-            },
-            Some("split the phases"),
-            false,
-            "Workflow launch revised",
-        ),
-        (
-            ApprovalAction::CancelWorkflow,
-            None,
-            false,
-            "Workflow launch cancelled",
-        ),
-    ] {
-        let turn_count = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
-        let turn_count_clone = std::sync::Arc::clone(&turn_count);
-        let temp = tempfile::tempdir().expect("tempdir");
-        let project_dir = temp.path().join("workspace");
-        let config = demo_named_workflow_config(&temp, PermissionMode::Ask);
-
-        let mut controller = InteractiveController::new_for_test(
-            "neo",
-            "test-session",
-            "openai/gpt-4.1",
-            &project_dir,
-            move |_request| {
-                let turn_count = std::sync::Arc::clone(&turn_count_clone);
-                async move {
-                    turn_count.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-                    Ok(Vec::<AgentEvent>::new())
-                }
-            },
-        );
-        controller.permission_mode = PermissionMode::Ask;
-        *controller
-            .live_permission_mode
-            .write()
-            .expect("permission lock") = PermissionMode::Ask;
-        controller.local_config = Some(config.clone());
-
-        controller.type_text("/workflow demo");
-        controller
-            .handle_input_event(InputEvent::Action(KeybindingAction::InputSubmit))
-            .await
-            .expect("named slash submits");
-
-        assert!(
-            controller.chrome().approval_is_pending(),
-            "Ask mode opens the typed launch review"
-        );
-        assert_eq!(
-            turn_count.load(std::sync::atomic::Ordering::SeqCst),
-            0,
-            "named slash review performs zero model calls"
-        );
-        let request_id = controller
-            .chrome()
-            .pending_approval()
-            .expect("pending approval request")
-            .request
-            .id
-            .clone();
-        controller
-            .resolve_approval_response(ApprovalResponse::Selected {
-                request_id,
-                action,
-                feedback: feedback.map(str::to_owned),
-            })
-            .await;
-
-        let tasks = config.background_tasks.list(false, 10).await;
-        assert_eq!(
-            tasks.is_empty(),
-            !expect_task,
-            "task expectation for {expected_status}"
-        );
-        assert!(
-            transcript_has_status(&controller, expected_status),
-            "transcript shows `{expected_status}`"
-        );
-        assert!(
-            controller.pending_approvals.is_empty(),
-            "review resolves after the decision"
-        );
-    }
-}
-
-#[tokio::test]
-async fn bare_workflow_slash_activates_create_workflow_and_starts_model_turn() {
+async fn workflow_intent_slash_end_to_end_selects_runs_and_persists() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let config = demo_named_workflow_config(&temp, PermissionMode::Yolo);
+    let session_id = "session_00000000-0000-4000-8000-000000000701";
+    let session_path =
+        crate::modes::sessions::session_path(session_id, &config).expect("session path");
+    let run_session_path = session_path.clone();
     let requests = std::sync::Arc::new(std::sync::Mutex::new(Vec::<TurnRequest>::new()));
     let seen_requests = std::sync::Arc::clone(&requests);
+    let harness = FakeHarness::from_turns([
+        vec![
+            neo_ai::AiStreamEvent::MessageStart {
+                id: "workflow-call".to_owned(),
+            },
+            neo_ai::AiStreamEvent::ToolCallStart {
+                id: "workflow-call-1".to_owned(),
+                name: "Workflow".to_owned(),
+            },
+            neo_ai::AiStreamEvent::ToolCallEnd {
+                id: "workflow-call-1".to_owned(),
+                raw_arguments: serde_json::json!({
+                    "action": "run_saved",
+                    "name": "demo",
+                    "args": {"topic": "battery recycling"}
+                })
+                .to_string(),
+            },
+            neo_ai::AiStreamEvent::MessageEnd {
+                stop_reason: neo_ai::StopReason::ToolUse,
+                usage: None,
+            },
+        ],
+        vec![
+            neo_ai::AiStreamEvent::MessageStart {
+                id: "workflow-answer".to_owned(),
+            },
+            neo_ai::AiStreamEvent::TextDelta {
+                text: "done".to_owned(),
+            },
+            neo_ai::AiStreamEvent::MessageEnd {
+                stop_reason: neo_ai::StopReason::EndTurn,
+                usage: None,
+            },
+        ],
+    ]);
+    let driver_harness = harness.clone();
+    let driver_config = config.clone();
+    let run_turn = move |request: TurnRequest| {
+        let session_path = run_session_path.clone();
+        let seen_requests = std::sync::Arc::clone(&seen_requests);
+        let harness = driver_harness.clone();
+        let config = driver_config.clone();
+        async move {
+            seen_requests
+                .lock()
+                .expect("requests lock")
+                .push(request.clone());
+            std::fs::create_dir_all(session_path.parent().expect("session parent"))
+                .expect("session directory");
+            let mut writer = neo_agent_core::session::JsonlSessionWriter::create(&session_path)
+                .await
+                .expect("session writer");
+            let agent_config = AgentConfig::for_model(harness.model())
+                .with_workspace_root(&config.project_dir)
+                .expect("workspace root")
+                .with_session_directory(session_path.parent().expect("session parent"))
+                .with_permission_mode(PermissionMode::Yolo)
+                .with_turn_system_context(
+                    request.workflow_context.clone().expect("workflow context"),
+                )
+                .with_workflow_runtime(config.workflow_runtime.clone())
+                .with_workflow_definitions(config.workflow_definitions.clone());
+            let runtime = AgentRuntime::with_tools(
+                agent_config,
+                harness.client(),
+                ToolRegistry::with_builtin_tools(),
+            );
+            let turn = crate::modes::run::run_prompt_with_runtime_message(
+                request.prompt.clone(),
+                request.prompt_origin.clone(),
+                request.prompt_display_text.clone(),
+                AgentContext::new(),
+                &mut writer,
+                runtime,
+            )
+            .await
+            .expect("run workflow turn");
+            assert!(turn.events.iter().any(|event| {
+                matches!(event, AgentEvent::WorkflowStarted { workflow, .. } if workflow.display_name == "Demo")
+            }));
+            assert!(turn.events.iter().any(|event| {
+                matches!(event, AgentEvent::ToolExecutionFinished { name, result, .. } if name == "Workflow" && !result.is_error)
+            }));
+            Ok(turn.events)
+        }
+    };
+    let mut controller = InteractiveController::new_with_event_driver(
+        "neo",
+        "new",
+        "openai/gpt-4.1",
+        config.project_dir.clone(),
+        run_turn,
+        PickerCatalogs::default(),
+        |_session_id| async { Err(anyhow::anyhow!("session loader unused")) },
+    );
+    controller.local_config = Some(config.clone());
+
+    controller.type_text("/workflow");
+    controller
+        .handle_input_event(InputEvent::Action(KeybindingAction::InputSubmit))
+        .await
+        .expect("open workflow picker");
+    controller
+        .handle_input_event(InputEvent::Action(KeybindingAction::SelectConfirm))
+        .await
+        .expect("select workflow");
+    assert_eq!(controller.chrome().prompt().text, "/workflow:demo ");
+
+    controller.type_text("Research battery recycling");
+    controller
+        .handle_input_event(InputEvent::Action(KeybindingAction::InputSubmit))
+        .await
+        .expect("submit selected workflow");
+    controller
+        .wait_for_active_turn()
+        .await
+        .expect("workflow turn completes");
+
+    let requests = requests.lock().expect("requests lock");
+    assert_eq!(requests.len(), 1);
+    assert_eq!(
+        requests[0].prompt,
+        vec![Content::text("/workflow:demo Research battery recycling")]
+    );
+    assert!(requests[0].workflow_context.is_some());
+    assert_eq!(requests[0].skill_context, None);
+    drop(requests);
+
+    let model_requests = harness.requests();
+    assert_eq!(model_requests.len(), 2);
+    assert_eq!(
+        chat_message_text(
+            model_requests[0]
+                .messages
+                .last()
+                .expect("slash user message"),
+        ),
+        "/workflow:demo Research battery recycling"
+    );
+    assert!(
+        model_requests[0]
+            .messages
+            .iter()
+            .any(|message| chat_message_text(message).contains("neo-workflow-request"))
+    );
+    assert!(
+        model_requests[0]
+            .tools
+            .iter()
+            .any(|tool| tool.name == "Workflow")
+    );
+    assert!(
+        model_requests[1]
+            .messages
+            .iter()
+            .all(|message| !chat_message_text(message).contains("neo-workflow-request"))
+    );
+
+    let messages = neo_agent_core::session::JsonlSessionReader::replay_messages(&session_path)
+        .await
+        .expect("replay session");
+    assert!(messages.iter().any(|message| {
+        matches!(
+            message,
+            AgentMessage::User { content, .. }
+                if content == &vec![Content::text("/workflow:demo Research battery recycling")]
+        )
+    }));
+}
+
+#[tokio::test]
+async fn workflow_slash_local_errors_preserve_composer_and_start_nothing() {
     let temp = tempfile::tempdir().expect("tempdir");
+    let config = demo_named_workflow_config(&temp, PermissionMode::Yolo);
+    let requests = std::sync::Arc::new(std::sync::Mutex::new(Vec::<TurnRequest>::new()));
+    let seen_requests = std::sync::Arc::clone(&requests);
     let mut controller = InteractiveController::new_for_test(
         "neo",
         "test-session",
         "openai/gpt-4.1",
         temp.path(),
         move |request| {
-            let seen_requests = std::sync::Arc::clone(&seen_requests);
-            async move {
-                seen_requests.lock().expect("requests lock").push(request);
-                Ok(vec![AgentEvent::TurnFinished {
-                    turn: 1,
-                    stop_reason: StopReason::EndTurn,
-                }])
-            }
+            seen_requests.lock().expect("requests lock").push(request);
+            async { Ok(Vec::<AgentEvent>::new()) }
         },
     );
-    controller.skill_store = Some(SkillStore::load(
-        &[],
-        &[],
-        vec![LoadedSkill {
-            name: "create-workflow".to_owned(),
-            root: test_workspace_root().join("builtin/create-workflow"),
-            manifest: SkillManifest {
-                name: "create-workflow".to_owned(),
-                description: "Author Neo workflows".to_owned(),
-                when_to_use: None,
-                disable_model_invocation: false,
-                arguments: Vec::new(),
-            },
-            body: "CREATE: $ARGUMENTS".to_owned(),
-            source: SkillSource::Builtin,
-            host_metadata: SkillHostMetadata::default(),
-        }],
-    ));
+    controller.local_config = Some(config);
+
+    for prompt in ["/workflow:", "/workflow:demo", "/workflow:missing task"] {
+        controller
+            .tui
+            .chrome_mut()
+            .prompt_mut()
+            .clear_after_submit();
+        controller.type_text(prompt);
+        controller
+            .handle_input_event(InputEvent::Action(KeybindingAction::InputSubmit))
+            .await
+            .expect("local workflow error is handled");
+        assert_eq!(controller.chrome().prompt().text, prompt);
+        assert!(controller.active_turn.is_none());
+    }
+    assert!(requests.lock().expect("requests lock").is_empty());
+}
+
+#[tokio::test]
+async fn workflow_slash_unknown_name_offers_only_a_unique_suggestion() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let config = demo_named_workflow_config(&temp, PermissionMode::Yolo);
+    let mut controller = controller_for_config(&config);
+
+    controller.type_text("/workflow:dem Research this API");
+    controller
+        .handle_input_event(InputEvent::Action(KeybindingAction::InputSubmit))
+        .await
+        .expect("unknown workflow name is handled locally");
+
+    assert_eq!(
+        controller.chrome().prompt().text,
+        "/workflow:dem Research this API"
+    );
+    assert!(
+        controller
+            .render_snapshot()
+            .contains("Did you mean `demo`?")
+    );
+    assert!(controller.active_turn.is_none());
+}
+
+#[tokio::test]
+async fn bare_workflow_slash_opens_picker_and_selection_only_fills_composer() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let config = demo_named_workflow_config(&temp, PermissionMode::Yolo);
+    let mut controller = controller_for_config(&config);
 
     controller.type_text("/workflow");
     controller
         .handle_input_event(InputEvent::Action(KeybindingAction::InputSubmit))
         .await
-        .expect("bare /workflow submits");
+        .expect("bare /workflow opens picker");
+    assert!(matches!(
+        controller
+            .chrome()
+            .focused_overlay()
+            .map(|overlay| &overlay.kind),
+        Some(OverlayKind::WorkflowPicker(_))
+    ));
+    assert!(controller.active_turn.is_none());
+
     controller
-        .wait_for_active_turn()
+        .handle_input_event(InputEvent::Action(KeybindingAction::SelectConfirm))
         .await
-        .expect("authoring turn completes");
+        .expect("picker selection is handled");
+    assert_eq!(controller.chrome().prompt().text, "/workflow:demo ");
+    assert!(controller.active_turn.is_none());
+}
 
-    let requests = requests.lock().expect("requests lock");
-    assert_eq!(
-        requests.len(),
-        1,
-        "bare slash starts exactly one visible model turn"
+#[tokio::test]
+async fn workflow_slash_is_rejected_while_busy_without_queueing_as_prose() {
+    let mut controller = InteractiveController::new_for_test(
+        "neo",
+        "test-session",
+        "openai/gpt-4.1",
+        test_workspace_root(),
+        |_request| async { std::future::pending::<Result<Vec<AgentEvent>>>().await },
     );
-    assert_eq!(
-        requests[0].prompt,
-        vec![Content::text("Create a workflow.")]
-    );
-    let skill_context = requests[0].skill_context.as_deref().expect("skill context");
-    assert!(skill_context.contains("create-workflow"), "{skill_context}");
+    controller.type_text("first prompt");
+    controller
+        .handle_input_event(InputEvent::Action(KeybindingAction::InputSubmit))
+        .await
+        .expect("first prompt starts");
+    assert!(controller.active_turn.is_some());
 
-    let entries = transcript_entries(&controller);
-    assert!(
-        entries.iter().any(|entry| matches!(
-            entry,
-            TranscriptEntry::SkillActivation { names, source, .. }
-                if names == &vec!["create-workflow".to_owned()]
-                    && *source == neo_agent_core::SkillInvocationSource::Manual
-        )),
-        "bare slash shows manual create-workflow activation"
+    controller.type_text("/workflow use an existing workflow");
+    controller
+        .handle_input_event(InputEvent::Action(KeybindingAction::InputSubmit))
+        .await
+        .expect("busy workflow slash is handled");
+    assert_eq!(
+        controller.chrome().prompt().text,
+        "/workflow use an existing workflow"
     );
     assert!(
-        !controller.chrome().approval_is_pending(),
-        "bare slash creates no hidden approval or launch state"
+        controller
+            .chrome()
+            .pending_input()
+            .queued_follow_ups()
+            .is_empty()
     );
+    controller.abort_active_turn();
 }
 
 #[tokio::test]
@@ -12864,7 +13112,7 @@ async fn slash_new_preserves_old_session_for_resume_picker_and_next_prompt_creat
 
 #[test]
 fn slash_completions_include_new_clear_and_workflow() {
-    let items = session_completion_items(None);
+    let items = super::prompt_completion::session_completion_items(None);
     let values: Vec<&str> = items.iter().map(|item| item.value.as_str()).collect();
     assert!(values.contains(&"/new"), "completions include /new");
     assert!(values.contains(&"/clear"), "completions include /clear");
@@ -12875,36 +13123,36 @@ fn slash_completions_include_new_clear_and_workflow() {
 }
 
 #[test]
-fn slash_completions_include_builtin_workflows_in_registry_order() {
-    let items = session_completion_items(None);
+fn slash_completions_include_effective_workflows_in_colon_form() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let config = demo_named_workflow_config(&temp, PermissionMode::Yolo);
+    let items = super::prompt_completion::session_completion_items_with_registry(
+        None,
+        Some(&config.workflow_definitions),
+    );
     let workflows: Vec<_> = items
         .iter()
-        .filter(|item| item.value.starts_with("/workflow "))
+        .filter(|item| item.value.starts_with("/workflow:"))
         .map(|item| (item.value.as_str(), item.description.as_deref()))
         .collect();
-
     assert_eq!(
         workflows,
-        vec![
-            (
-                "/workflow code-review",
-                Some(
-                    "Code Review: Read-only multi-domain code review with structured findings-first output. Never modifies code."
-                ),
-            ),
-            (
-                "/workflow deep-research",
-                Some(
-                    "Deep Research: Plan, fan out heterogeneous research children, verify gaps, and synthesize a structured report with durable artifacts."
-                ),
-            ),
-            (
-                "/workflow large-refactor",
-                Some(
-                    "Large Refactor: Partition approved refactor work into isolated-worktree slices, preserve verification artifacts, and await explicit human merge/retirement decisions. Never auto-merges or deletes worktrees."
-                ),
-            ),
-        ]
+        vec![("/workflow:demo", Some("Demo: named slash fixture"))]
+    );
+}
+
+#[test]
+fn slash_completions_remove_space_form_workflows() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let config = demo_named_workflow_config(&temp, PermissionMode::Yolo);
+    let items = super::prompt_completion::session_completion_items_with_registry(
+        None,
+        Some(&config.workflow_definitions),
+    );
+    assert!(
+        items
+            .iter()
+            .all(|item| !item.value.starts_with("/workflow "))
     );
 }
 
@@ -15672,6 +15920,51 @@ async fn shell_mode_bang_empty_prompt_enters_and_empty_cancel_exits() {
         .expect("empty cancel exits shell mode");
 
     assert!(!controller.chrome().shell_mode_active());
+}
+
+#[tokio::test]
+async fn idle_shell_mode_workflow_slash_returns_to_model_mode() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let config = demo_named_workflow_config(&temp, PermissionMode::Yolo);
+    let requests = Arc::new(std::sync::Mutex::new(Vec::<TurnRequest>::new()));
+    let seen_requests = Arc::clone(&requests);
+    let mut controller = InteractiveController::new_for_test(
+        "neo",
+        "test-session",
+        "openai/gpt-4.1",
+        config.project_dir.clone(),
+        move |request| {
+            seen_requests.lock().expect("requests lock").push(request);
+            async {
+                Ok(vec![AgentEvent::TurnFinished {
+                    turn: 1,
+                    stop_reason: StopReason::EndTurn,
+                }])
+            }
+        },
+    );
+    controller.local_config = Some(config);
+
+    controller.type_text("!");
+    controller
+        .handle_input_event(InputEvent::Submit)
+        .await
+        .expect("enter shell mode");
+    controller.type_text("/workflow run this");
+    controller
+        .handle_input_event(InputEvent::Submit)
+        .await
+        .expect("submit workflow slash");
+    controller
+        .wait_for_active_turn()
+        .await
+        .expect("workflow turn completes");
+
+    assert!(!controller.chrome().shell_mode_active());
+    assert_eq!(
+        requests.lock().expect("requests lock")[0].prompt,
+        vec![Content::text("/workflow run this")]
+    );
 }
 
 #[tokio::test]

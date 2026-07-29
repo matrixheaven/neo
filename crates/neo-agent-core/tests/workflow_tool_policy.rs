@@ -203,13 +203,17 @@ fn workflow_tool_is_root_only_and_description_has_no_choreography() {
     assert!(!is_workflow_tool_eligible(&root, "Workflow"));
     assert!(!root.is_workflow_eligible("Workflow"));
 
-    // The model-visible description teaches self-contained actions and never
-    // enforces mandatory ordering or a CLI prerequisite.
+    // The model-visible description routes existing-workflow use to discovery
+    // and authoring intent to the authoring skill.
     let description = neo_agent_core::tools::WorkflowTool.description();
     assert!(description.contains("create-workflow"));
     assert!(description.contains("TaskOutput"));
     assert!(description.contains("no slash capability"));
-    assert!(description.contains("known saved workflow may use list/show/run_saved directly"));
+    assert!(description.contains("Workflow(list)"));
+    assert!(description.contains("Workflow(run_saved)"));
+    assert!(description.contains("without naming one"));
+    assert!(description.contains("creation, change, adaptation"));
+    assert!(!description.contains("Use list/show only when the user explicitly asks"));
     assert!(description.contains("each perform their complete validation internally"));
     assert!(
         !description.contains("MUST call Workflow(validate_inline), then Workflow(run_inline)")

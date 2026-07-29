@@ -5,8 +5,11 @@ use anyhow::Result;
 use super::{
     Content, InputEvent, InteractiveController, KeybindingAction, OverlayKind, PickerItem,
     PromptCompletionPrefix, PromptEdit, frame_content_width, longest_common_completion_prefix,
-    prompt_completion::{prompt_completions_from_catalog, slash_completion_catalog},
-    prompt_completions, size,
+    prompt_completion::{
+        prompt_completions_from_catalog, prompt_completions_with_registry,
+        slash_completion_catalog_with_registry,
+    },
+    size,
 };
 
 pub(super) fn content_to_display_text(content: &[Content]) -> String {
@@ -716,8 +719,18 @@ impl InteractiveController {
         let requested = prefix.clone();
         let trusted = self.project_trusted();
         let skill_store = self.skill_store.clone();
+        let workflow_registry = self
+            .local_config
+            .as_ref()
+            .map(|config| config.workflow_definitions.clone());
         let handle = tokio::task::spawn_blocking(move || {
-            prompt_completions(&root, &requested.text, skill_store.as_ref(), trusted)
+            prompt_completions_with_registry(
+                &root,
+                &requested.text,
+                skill_store.as_ref(),
+                trusted,
+                workflow_registry.as_ref(),
+            )
         });
         self.pending_file_completion = Some(super::PendingFileCompletion {
             prefix,
@@ -802,19 +815,25 @@ impl InteractiveController {
 
     fn prompt_completions_for_prefix(&mut self, prefix: &str) -> Result<Vec<PickerItem>> {
         if !prefix.starts_with('/') {
-            return prompt_completions(
+            return prompt_completions_with_registry(
                 &self.completion_root,
                 prefix,
                 self.skill_store.as_ref(),
                 self.project_trusted(),
+                self.local_config
+                    .as_ref()
+                    .map(|config| &config.workflow_definitions),
             );
         }
         if self.slash_completion_catalog.is_none() {
             self.refresh_skill_store_for_completion();
-            self.slash_completion_catalog = Some(slash_completion_catalog(
+            self.slash_completion_catalog = Some(slash_completion_catalog_with_registry(
                 &self.completion_root,
                 self.skill_store.as_ref(),
                 self.project_trusted(),
+                self.local_config
+                    .as_ref()
+                    .map(|config| &config.workflow_definitions),
             )?);
         }
         prompt_completions_from_catalog(

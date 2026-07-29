@@ -31,13 +31,30 @@ pub(super) async fn chat_request(
     // trailing tool turns and against compaction boundaries that accidentally
     // orphan such a message.
     let context_messages = sanitize_tool_exchange_messages(&context_messages);
-    messages.extend(context_messages.iter().map(|message| {
-        if config.replay_reasoning {
+    let turn_system_context = config
+        .turn_system_context
+        .as_deref()
+        .map(|context| AgentMessage::system_text(context).to_chat_message());
+    let last_user_index = context_messages
+        .iter()
+        .rposition(|message| matches!(message, AgentMessage::User { .. }));
+    for (index, message) in context_messages.iter().enumerate() {
+        if Some(index) == last_user_index
+            && let Some(turn_system_context) = &turn_system_context
+        {
+            messages.push(turn_system_context.clone());
+        }
+        messages.push(if config.replay_reasoning {
             message.to_chat_message()
         } else {
             without_reasoning_content(message.to_chat_message())
-        }
-    }));
+        });
+    }
+    if last_user_index.is_none()
+        && let Some(turn_system_context) = turn_system_context
+    {
+        messages.push(turn_system_context);
+    }
     if let Some(todo_context) = todo_context_message(context) {
         messages.push(todo_context.to_chat_message());
     }
@@ -424,5 +441,38 @@ mod tests {
         let system_text = system_texts(&request);
 
         assert!(!system_text.contains("Review Mode"), "{system_text}");
+    }
+
+    #[tokio::test]
+    async fn chat_request_places_workflow_context_before_latest_user_message() {
+        let config = AgentConfig::for_model(tool_model())
+            .with_turn_system_context("Workflow guidance")
+            .with_system_prompt("Base system");
+        let mut context = AgentContext::new();
+        context.append_message(AgentMessage::user_text("Earlier request"));
+        context.append_message(AgentMessage::assistant(
+            vec![Content::text("Earlier answer")],
+            Vec::new(),
+            crate::StopReason::EndTurn,
+        ));
+        context.append_message(AgentMessage::user_text("Current request"));
+
+        let request = chat_request(&config, &context, &ProjectionPlan::disabled()).await;
+        let latest_user_index = request
+            .messages
+            .iter()
+            .rposition(|message| matches!(message, ChatMessage::User { .. }))
+            .expect("current user message");
+        let Some(ChatMessage::System { content }) = request.messages.get(latest_user_index - 1)
+        else {
+            panic!("workflow guidance must directly precede the current user message");
+        };
+        assert!(
+            content.iter().any(|part| matches!(
+                part,
+                ContentPart::Text { text } if text == "Workflow guidance"
+            )),
+            "{request:?}"
+        );
     }
 }

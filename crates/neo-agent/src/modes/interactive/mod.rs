@@ -114,19 +114,18 @@ use interactive_preflight::{
 };
 
 mod prompt_completion;
-use prompt_completion::{
-    CompletionCatalog, longest_common_completion_prefix, prompt_completions,
-    session_completion_items,
-};
+use prompt_completion::{CompletionCatalog, longest_common_completion_prefix};
 
 #[cfg(test)]
-use prompt_completion::{CompletionSource, completion_source_candidates};
+use prompt_completion::{CompletionSource, completion_source_candidates, prompt_completions};
 
 mod mode_state;
 
 mod approval;
 
 mod slash_commands;
+
+pub(crate) mod workflow_slash;
 
 mod command_palette;
 
@@ -455,8 +454,11 @@ pub(crate) struct InteractiveController {
     /// single-page add form is open so submission can build the right input.
     pending_mcp_add_transport: Option<&'static str>,
     pending_interactive_workflow: Option<PendingInteractiveWorkflow>,
-    /// Named `/workflow <name>` Ask-mode launch awaiting Launch/Revise/Cancel.
-    pending_named_workflow_launch: Option<slash_commands::PendingNamedWorkflowLaunch>,
+    /// Turn-local workflow guidance prepared by an intent slash.
+    pending_workflow_context: Option<String>,
+    /// Original workflow slash restored when capacity rejects the turn before
+    /// the provider is called.
+    pending_workflow_restore_prompt: Option<String>,
     /// Sync approval paths (number keys) defer into the next async input tick.
     deferred_approval_response: Option<neo_agent_core::ApprovalResponse>,
     pending_preflight: Option<InteractivePreflightSpec>,
@@ -568,6 +570,8 @@ pub(crate) struct TurnRequest {
     pub reasoning: neo_ai::ReasoningSelection,
     /// Expanded skill body to inject as context before the user prompt.
     pub skill_context: Option<String>,
+    /// Complete workflow guidance for one intent slash turn.
+    pub workflow_context: Option<String>,
     /// Permission mode to use for this turn.
     pub permission_mode: PermissionMode,
     /// Shared live permission state for this turn. Updated by `/ask` `/auto`
@@ -610,6 +614,7 @@ impl TurnRequest {
             model,
             reasoning,
             skill_context: None,
+            workflow_context: None,
             permission_mode: PermissionMode::default(),
             live_permission_mode: Arc::new(RwLock::new(PermissionMode::default())),
             workspace_policy: Arc::new(RwLock::new(None)),
@@ -626,6 +631,12 @@ impl TurnRequest {
     #[must_use]
     pub(crate) fn with_skill_context(mut self, skill_context: impl Into<String>) -> Self {
         self.skill_context = Some(skill_context.into());
+        self
+    }
+
+    #[must_use]
+    pub(crate) fn with_workflow_context(mut self, workflow_context: impl Into<String>) -> Self {
+        self.workflow_context = Some(workflow_context.into());
         self
     }
 }
@@ -934,7 +945,8 @@ impl InteractiveController {
             pending_mcp_probe: None,
             pending_mcp_add_transport: None,
             pending_interactive_workflow: None,
-            pending_named_workflow_launch: None,
+            pending_workflow_context: None,
+            pending_workflow_restore_prompt: None,
             deferred_approval_response: None,
             pending_preflight: None,
             mcp_manager: Some(mcp_manager_with_oauth_service()),
@@ -1660,7 +1672,15 @@ impl InteractiveController {
         }
 
         let prompt = self.tui.chrome_mut().prompt().text.trim_end().to_owned();
-        if self.submit_shell_prompt_if_needed(&prompt).await? {
+        let is_workflow_slash =
+            crate::modes::interactive::workflow_slash::parse_workflow_slash(&prompt).is_some();
+        if is_workflow_slash
+            && self.tui.chrome().shell_mode_active()
+            && self.active_shell_command.is_none()
+        {
+            self.tui.chrome_mut().exit_shell_mode();
+        }
+        if !is_workflow_slash && self.submit_shell_prompt_if_needed(&prompt).await? {
             return Ok(());
         }
         if prompt.trim().is_empty() {
@@ -1707,6 +1727,12 @@ impl InteractiveController {
         // the user switch posture mid-turn without interrupting it.
         if is_live_permission_slash(&prompt) {
             self.handle_permission_slash_command(&prompt);
+            return Ok(());
+        }
+
+        if is_workflow_slash && (self.active_turn.is_some() || self.active_shell_command.is_some())
+        {
+            self.push_status("Finish or interrupt the current turn before starting a workflow.");
             return Ok(());
         }
 
@@ -1763,8 +1789,24 @@ impl InteractiveController {
         prompt: String,
         render_local_user_message: bool,
     ) -> Result<()> {
-        let prompt =
-            resolve_submitted_prompt(prompt, self.local_config.as_ref(), &self.completion_root)?;
+        let workflow_context_pending = self.pending_workflow_context.is_some();
+        let prompt = match resolve_submitted_prompt(
+            prompt,
+            self.local_config.as_ref(),
+            &self.completion_root,
+        ) {
+            Ok(prompt) => prompt,
+            Err(error) => {
+                if workflow_context_pending {
+                    self.pending_workflow_context = None;
+                }
+                return Err(error);
+            }
+        };
+        let workflow_prompt = self
+            .pending_workflow_context
+            .as_ref()
+            .map(|_| prompt.clone());
         let content = crate::prompt::parts::expand_prompt_markers(
             &prompt,
             &self.paste_store,
@@ -1772,7 +1814,11 @@ impl InteractiveController {
             &self.file_reference_store,
             &self.completion_root,
         );
-        let transcript_text = neo_tui::paste::markers_as_chips(&prompt);
+        let transcript_text = if workflow_context_pending {
+            prompt.clone()
+        } else {
+            neo_tui::paste::markers_as_chips(&prompt)
+        };
         let transcript_images = crate::prompt::parts::transcript_image_attachments(
             &prompt,
             &self.image_attachment_store,
@@ -1795,6 +1841,11 @@ impl InteractiveController {
             self.pending_local_user_message_to_suppress = Some(transcript_text.clone());
         }
         self.start_turn_with_prompt_display(content, transcript_text);
+        if let Some(prompt) = workflow_prompt
+            && self.active_turn.is_some()
+        {
+            self.pending_workflow_restore_prompt = Some(prompt);
+        }
         Ok(())
     }
 
@@ -2491,6 +2542,9 @@ fn expand_interactive_prompt(
     config: Option<&AppConfig>,
     fallback_project_dir: &Path,
 ) -> Result<String> {
+    if crate::modes::interactive::workflow_slash::parse_workflow_slash(prompt).is_some() {
+        return Ok(prompt.to_owned());
+    }
     let Some(args) = slash_prompt_args(prompt) else {
         return Ok(prompt.to_owned());
     };

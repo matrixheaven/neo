@@ -51,6 +51,8 @@ impl InteractiveController {
             self.handle_custom_endpoint_wizard_action();
         } else if self.tui.chrome_mut().choice_picker_result().is_some() {
             self.handle_choice_picker_result().await;
+        } else if self.tui.chrome_mut().workflow_picker_result().is_some() {
+            self.handle_workflow_picker_result();
         } else if self.tui.chrome_mut().text_input_result().is_some() {
             self.handle_text_input_result();
         } else if self.tui.chrome_mut().api_key_input_result().is_some() {
@@ -235,6 +237,25 @@ impl InteractiveController {
             neo_tui::dialogs::ChoiceResult::Cancelled => {
                 self.pending_interactive_workflow = None;
                 self.pending_preflight = None;
+            }
+        }
+    }
+
+    pub(super) fn handle_workflow_picker_result(&mut self) {
+        let result = self.tui.chrome_mut().workflow_picker_result().cloned();
+        let Some(result) = result else {
+            return;
+        };
+        self.tui.chrome_mut().close_focused_overlay();
+        match result {
+            neo_tui::dialogs::WorkflowPickerResult::Selected(item) => {
+                self.tui
+                    .chrome_mut()
+                    .prompt_mut()
+                    .set_text(format!("/workflow:{} ", item.name));
+            }
+            neo_tui::dialogs::WorkflowPickerResult::Cancelled => {
+                self.tui.chrome_mut().prompt_mut().set_text("");
             }
         }
     }

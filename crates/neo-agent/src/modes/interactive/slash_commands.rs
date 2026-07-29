@@ -4,10 +4,15 @@ use std::process::Command;
 use std::time::Instant;
 
 use anyhow::{Context, Result};
+use neo_agent_core::workflow::WorkflowErrorCode;
 use neo_tui::dialogs::HelpPanelCommand;
 
 use super::InteractiveController;
 use super::task_browser;
+use super::workflow_slash::{
+    WorkflowSlashError, WorkflowSlashRequest, effective_workflow_catalog, parse_workflow_slash,
+    render_automatic_workflow_context, render_named_workflow_context, suggest_workflow_name,
+};
 use super::{
     InlineSkillDirectives, InlineSkillInvocation, content_to_display_text, expand_slash_skill,
     parse_inline_skill_directives, slash_arg, slash_permission_mode,
@@ -59,12 +64,8 @@ impl InteractiveController {
     }
 
     pub(super) async fn handle_simple_slash_command(&mut self, prompt: &str) -> bool {
-        // Strict slash_arg boundary: `/workflow` and `/workflow <args>` only.
-        // `/workflowish` does not match and must not start a launch or turn.
-        if let Some(arg) = slash_arg(prompt, "/workflow") {
-            self.clear_submitted_prompt();
-            self.handle_workflow_slash(arg).await;
-            return true;
+        if let Some(request) = parse_workflow_slash(prompt) {
+            return self.handle_workflow_slash(request);
         }
         match prompt {
             "/new" | "/clear" => {
@@ -103,144 +104,104 @@ impl InteractiveController {
         true
     }
 
-    /// Bare `/workflow` activates `create-workflow` through the canonical
-    /// manual skill path and submits a normal visible model turn. Named
-    /// `/workflow <name> [JSON_OBJECT]` resolves the registry and launches via
-    /// the shared coordinator with zero model turns. Neither path creates a
-    /// grant, nonce, reservation, or hidden launch entitlement.
-    async fn handle_workflow_slash(&mut self, arg: &str) {
-        if arg.is_empty() {
-            let directives = InlineSkillDirectives {
-                invocations: vec![InlineSkillInvocation {
-                    name: "create-workflow".to_owned(),
-                    args: String::new(),
-                }],
-                body: "Create a workflow.".to_owned(),
-            };
-            if let Err(error) = self.submit_skill_directives(directives).await {
-                self.push_status(format!("Workflow authoring failed: {error}"));
+    fn handle_workflow_slash(
+        &mut self,
+        request: Result<WorkflowSlashRequest, WorkflowSlashError>,
+    ) -> bool {
+        let Some(registry) = self
+            .local_config
+            .as_ref()
+            .map(|config| config.workflow_definitions.clone())
+        else {
+            self.push_status("Workflow discovery failed: no config available");
+            return true;
+        };
+        match request {
+            Err(WorkflowSlashError::MissingName) => {
+                self.push_status("Choose a workflow with /workflow.");
+                true
             }
-            return;
-        }
-        if let Err(error) = self.launch_named_workflow_slash(arg).await {
-            self.push_status(format!("Workflow launch failed: {error}"));
-        }
-    }
-
-    async fn launch_named_workflow_slash(&mut self, arg: &str) -> Result<(), String> {
-        let (name, args) = parse_named_workflow_slash_args(arg)?;
-        let Some(config) = self.local_config.clone() else {
-            return Err("No config available".to_owned());
-        };
-
-        let definition = config
-            .workflow_definitions
-            .resolve(&name)
-            .map_err(|error| error.to_string())?;
-
-        if let Some(schema) = &definition.compiled_input_schema {
-            schema
-                .validate_instance(&args)
-                .map_err(|error| format!("args failed input_schema validation: {error}"))?;
-        }
-
-        self.ensure_shell_session_path(&config)
-            .await
-            .map_err(|error| error.to_string())?;
-        let session_dir = self
-            .active_session_directory()
-            .ok_or_else(|| "session directory missing after materialization".to_owned())?;
-
-        let permission_mode = self.permission_mode;
-        let prepared = PreparedNamedWorkflowLaunch {
-            definition,
-            args,
-            session_dir,
-            workspace: config.project_dir.clone(),
-            permission_mode,
-        };
-
-        if permission_mode == super::PermissionMode::Ask {
-            self.open_named_workflow_launch_review(prepared);
-            return Ok(());
-        }
-
-        self.execute_named_workflow_launch(prepared).await
-    }
-
-    fn open_named_workflow_launch_review(&mut self, prepared: PreparedNamedWorkflowLaunch) {
-        let request_id = uuid::Uuid::new_v4().to_string();
-        let workflow = named_workflow_approval_presentation(&prepared);
-        let request = neo_agent_core::ApprovalRequest {
-            turn: 0,
-            id: request_id.clone(),
-            operation: neo_agent_core::PermissionOperation::WorkflowLaunch,
-            presentation: neo_agent_core::ApprovalPresentation::Workflow {
-                title: "Launch workflow?".to_owned(),
-                workflow,
+            Err(WorkflowSlashError::MissingTask { .. }) => {
+                self.push_status("Describe what you want this workflow to do.");
+                true
+            }
+            Ok(WorkflowSlashRequest::Picker) => {
+                match effective_workflow_catalog(&registry) {
+                    Ok(items) => {
+                        self.clear_submitted_prompt();
+                        let theme = self.tui.chrome().theme();
+                        let items =
+                            items
+                                .into_iter()
+                                .map(|item| neo_tui::dialogs::WorkflowPickerItem {
+                                    name: item.name,
+                                    display_name: item.display_name,
+                                    description: item.description,
+                                    source: item.source_label.to_owned(),
+                                    required_inputs: item.required_inputs,
+                                });
+                        self.tui.chrome_mut().open_workflow_picker(
+                            neo_tui::dialogs::WorkflowPickerOptions {
+                                items: items.collect(),
+                                theme,
+                            },
+                        );
+                    }
+                    Err(error) => self.push_status(format!("Workflow discovery failed: {error}")),
+                }
+                true
+            }
+            Ok(WorkflowSlashRequest::Automatic { .. }) => {
+                match effective_workflow_catalog(&registry) {
+                    Ok(catalog) => {
+                        self.pending_workflow_context =
+                            Some(render_automatic_workflow_context(&catalog));
+                        false
+                    }
+                    Err(error) => {
+                        self.push_status(format!("Workflow discovery failed: {error}"));
+                        true
+                    }
+                }
+            }
+            Ok(WorkflowSlashRequest::Named { name, .. }) => match registry.resolve(&name) {
+                Ok(definition) => {
+                    self.pending_workflow_context =
+                        Some(render_named_workflow_context(&definition));
+                    false
+                }
+                Err(error)
+                    if matches!(
+                        error.code(),
+                        WorkflowErrorCode::DefinitionNotFound | WorkflowErrorCode::InvalidInput
+                    ) =>
+                {
+                    match suggest_workflow_name(&registry, &name) {
+                        Ok(Some(suggestion)) => self.push_status(format!(
+                            "Workflow `{name}` was not found. Did you mean `{suggestion}`?"
+                        )),
+                        Ok(None) => self.push_status(format!(
+                            "Workflow `{name}` was not found. Use /workflow to choose one."
+                        )),
+                        Err(error) => {
+                            self.push_status(format!("Workflow discovery failed: {error}"))
+                        }
+                    }
+                    true
+                }
+                Err(error) => {
+                    self.push_status(format!("Workflow discovery failed: {error}"));
+                    true
+                }
             },
-            options: named_workflow_approval_options(),
-            workflow_origin: None,
-        };
-        let (response_tx, _response_rx) = tokio::sync::oneshot::channel();
-        self.register_pending_approval(crate::modes::run::PendingApproval {
-            request,
-            response_tx,
-        });
-        self.pending_named_workflow_launch = Some(PendingNamedWorkflowLaunch {
-            request_id,
-            prepared,
-        });
+        }
     }
 
     pub(super) async fn resolve_approval_response(
         &mut self,
         response: neo_agent_core::ApprovalResponse,
     ) {
-        let request_id = match &response {
-            neo_agent_core::ApprovalResponse::Selected { request_id, .. }
-            | neo_agent_core::ApprovalResponse::Cancelled { request_id, .. } => request_id.clone(),
-        };
-        let pending = self
-            .pending_named_workflow_launch
-            .take_if(|pending| pending.request_id == request_id);
-        // Always complete the chrome/transcript responder first.
-        self.resolve_approval(response.clone());
-        let Some(pending) = pending else {
-            return;
-        };
-        match response {
-            neo_agent_core::ApprovalResponse::Selected {
-                action: neo_agent_core::ApprovalAction::LaunchWorkflow,
-                ..
-            } => {
-                if let Err(error) = self.execute_named_workflow_launch(pending.prepared).await {
-                    self.push_status(format!("Workflow launch failed: {error}"));
-                }
-            }
-            neo_agent_core::ApprovalResponse::Selected {
-                action: neo_agent_core::ApprovalAction::ReviseWorkflow { .. },
-                feedback,
-                ..
-            } => {
-                let feedback = feedback.unwrap_or_default();
-                if feedback.trim().is_empty() {
-                    self.push_status("Workflow launch revised.".to_owned());
-                } else {
-                    self.push_status(format!("Workflow launch revised. Feedback: {feedback}"));
-                }
-            }
-            neo_agent_core::ApprovalResponse::Selected {
-                action: neo_agent_core::ApprovalAction::CancelWorkflow,
-                ..
-            }
-            | neo_agent_core::ApprovalResponse::Cancelled { .. } => {
-                self.push_status("Workflow launch cancelled.".to_owned());
-            }
-            neo_agent_core::ApprovalResponse::Selected { .. } => {
-                self.push_status("Workflow launch cancelled.".to_owned());
-            }
-        }
+        self.resolve_approval(response);
     }
 
     pub(super) fn queue_approval_response(&mut self, response: neo_agent_core::ApprovalResponse) {
@@ -253,85 +214,16 @@ impl InteractiveController {
         }
     }
 
-    async fn execute_named_workflow_launch(
-        &mut self,
-        prepared: PreparedNamedWorkflowLaunch,
-    ) -> Result<(), String> {
-        let Some(config) = self.local_config.as_ref() else {
-            return Err("No config available".to_owned());
-        };
-
-        // Production workers resolve through the shared dispatch owner.
-        config
-            .workflow_dispatch_resolver
-            .bind_workflow_runtime(&config.workflow_runtime)
-            .map_err(|error| error.to_string())?;
-
-        let schema_sha256 = prepared
-            .definition
-            .input_schema
-            .as_ref()
-            .map(neo_agent_core::workflow::canonical_input_hash)
-            .unwrap_or_default();
-
-        let request = neo_agent_core::workflow::WorkflowLaunchRequest {
-            name: prepared.definition.name.as_str().to_owned(),
-            description: prepared.definition.description.clone(),
-            phases: prepared.definition.phases.clone(),
-            script: prepared.definition.lua_source.clone(),
-            args: prepared.args.clone(),
-            launch_source: format!("named:{}", prepared.definition.name.as_str()),
-            output_schema: Some(prepared.definition.output_schema.clone()),
-            display_name: Some(prepared.definition.display_name.clone()),
-            input_schema: prepared.definition.input_schema.clone(),
-            definition_origin: Some(prepared.definition.source_origin),
-            inline_unsaved: false,
-        };
-
-        let mut intent = neo_agent_core::workflow::WorkflowLaunchIntent::from_parts(
-            request,
-            neo_agent_core::workflow::WorkflowLaunchBinding {
-                session_identity: prepared.session_dir.display().to_string(),
-                workspace_identity: prepared.workspace.display().to_string(),
-                actor: neo_agent_core::workflow::WorkflowActor::Human,
-                permission_mode: prepared.permission_mode,
-                compiled_input_schema: prepared.definition.compiled_input_schema.clone(),
-                schema_sha256,
-            },
-        );
-        // Prefer the registry content revision over the script-byte fallback.
-        intent.definition_revision = prepared.definition.revision.clone();
-
-        let outcome = match neo_agent_core::workflow::WorkflowLaunchCoordinator
-            .launch(
-                &intent,
-                neo_agent_core::workflow::WorkflowLaunchHosts {
-                    runtime: &config.workflow_runtime,
-                    background_tasks: &config.background_tasks,
-                    session_dir: &prepared.session_dir,
-                },
-            )
-            .await
-        {
-            Ok(outcome) => outcome,
-            Err(error) => {
-                return Err(error.to_string());
-            }
-        };
-
-        self.push_status(format!(
-            "Workflow `{}` launched as task `{}`.",
-            prepared.definition.name.as_str(),
-            outcome.task_id
-        ));
-        Ok(())
-    }
-
     fn open_help_panel(&mut self) {
-        let commands = super::session_completion_items(self.skill_store.as_ref())
-            .into_iter()
-            .map(|item| HelpPanelCommand::new(item.value, item.description))
-            .collect();
+        let commands = super::prompt_completion::session_completion_items_with_registry(
+            self.skill_store.as_ref(),
+            self.local_config
+                .as_ref()
+                .map(|config| &config.workflow_definitions),
+        )
+        .into_iter()
+        .map(|item| HelpPanelCommand::new(item.value, item.description))
+        .collect();
         self.tui.chrome_mut().open_help_panel(commands);
     }
 
@@ -769,88 +661,4 @@ fn escape_xml_text(text: &str) -> String {
     text.replace('&', "&amp;")
         .replace('<', "&lt;")
         .replace('>', "&gt;")
-}
-
-/// Host-parsed named slash launch payload awaiting Ask review or execution.
-#[derive(Clone)]
-pub(super) struct PreparedNamedWorkflowLaunch {
-    definition: neo_agent_core::workflow::ResolvedWorkflowDefinition,
-    args: serde_json::Value,
-    session_dir: std::path::PathBuf,
-    workspace: std::path::PathBuf,
-    permission_mode: super::PermissionMode,
-}
-
-pub(super) struct PendingNamedWorkflowLaunch {
-    pub(super) request_id: String,
-    prepared: PreparedNamedWorkflowLaunch,
-}
-
-fn parse_named_workflow_slash_args(arg: &str) -> Result<(String, serde_json::Value), String> {
-    let arg = arg.trim();
-    if arg.is_empty() {
-        return Err("workflow name is required".to_owned());
-    }
-    let mut parts = arg.splitn(2, char::is_whitespace);
-    let name = parts.next().unwrap_or("").trim();
-    if name.is_empty() {
-        return Err("workflow name is required".to_owned());
-    }
-    let rest = parts.next().map_or("", str::trim);
-    let args = if rest.is_empty() {
-        serde_json::json!({})
-    } else {
-        let value: serde_json::Value = serde_json::from_str(rest).map_err(|error| {
-            format!("workflow arguments must be one complete JSON object: {error}")
-        })?;
-        if !value.is_object() {
-            return Err("workflow arguments must be one complete JSON object".to_owned());
-        }
-        value
-    };
-    Ok((name.to_owned(), args))
-}
-
-fn named_workflow_approval_presentation(
-    prepared: &PreparedNamedWorkflowLaunch,
-) -> neo_agent_core::WorkflowApprovalPresentation {
-    let args = serde_json::to_string_pretty(&prepared.args).unwrap_or_else(|_| "{}".to_owned());
-    neo_agent_core::WorkflowApprovalPresentation {
-        name: prepared.definition.name.as_str().to_owned(),
-        description: prepared.definition.description.clone(),
-        phases: prepared
-            .definition
-            .phases
-            .iter()
-            .map(|phase| format!("{}: {}", phase.id, phase.description))
-            .collect(),
-        args,
-        line_count: prepared.definition.lua_source.split('\n').count().max(1),
-        byte_count: prepared.definition.lua_source.len(),
-        source: prepared.definition.lua_source.clone(),
-        warning: "Launch approval authorizes orchestration only; child tool effects remain independently authorized."
-            .to_owned(),
-    }
-}
-
-fn named_workflow_approval_options() -> Vec<neo_agent_core::ApprovalOption> {
-    vec![
-        neo_agent_core::ApprovalOption {
-            label: "Launch".to_owned(),
-            description: None,
-            action: neo_agent_core::ApprovalAction::LaunchWorkflow,
-        },
-        neo_agent_core::ApprovalOption {
-            label: "Revise".to_owned(),
-            description: Some("Return feedback without creating a run.".to_owned()),
-            action: neo_agent_core::ApprovalAction::ReviseWorkflow {
-                preset_feedback: None,
-            },
-        },
-        neo_agent_core::ApprovalOption {
-            label: "Cancel".to_owned(),
-            description: Some("Cancel without creating a run.".to_owned()),
-            action: neo_agent_core::ApprovalAction::CancelWorkflow,
-        },
-    ]
 }

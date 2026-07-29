@@ -236,6 +236,14 @@ impl NeoChromeState {
         self.push_overlay(Overlay::new("choice", OverlayKind::ChoicePicker(state)))
     }
 
+    pub fn open_workflow_picker(
+        &mut self,
+        opts: crate::dialogs::WorkflowPickerOptions,
+    ) -> OverlayId {
+        let state = crate::dialogs::WorkflowPickerState::new(opts);
+        self.push_overlay(Overlay::new("workflow", OverlayKind::WorkflowPicker(state)))
+    }
+
     pub fn open_confirm_dialog(&mut self, opts: crate::dialogs::ConfirmDialogOptions) -> OverlayId {
         let state = crate::dialogs::ConfirmDialogState::new(opts);
         self.push_overlay(Overlay::new("confirm", OverlayKind::ConfirmDialog(state)))
@@ -381,6 +389,7 @@ impl NeoChromeState {
                 | OverlayKind::ConfirmDialog(_)
                 | OverlayKind::McpAddForm(_)
                 | OverlayKind::ChoicePicker(_)
+                | OverlayKind::WorkflowPicker(_)
                 | OverlayKind::ApiKeyInput(_)
                 | OverlayKind::TextInput(_)
                 | OverlayKind::CustomEndpointWizard(_)

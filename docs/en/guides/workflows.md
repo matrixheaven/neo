@@ -119,31 +119,26 @@ workflow waits: `request_id`, `prompt`, `answer_schema`, optional `default`,
 does the assistant call `TaskAnswer(task_id, request_id, answer)` with those
 exact IDs. `wait_for_human` means the user must answer in the TUI or human CLI.
 
-## Human launch and operator surfaces
-
-### Slash: named (host-direct)
-
-```text
-/workflow <name> [JSON_OBJECT]
-```
-
-- Resolves the name through the effective registry.
-- Validates args against the optional `input_schema`.
-- Launches **directly on the host** — **zero model round-trips**.
-- In Ask mode, shows a launch review (Launch / Revise / Cancel). Auto / Yolo still require the explicit slash action but do not add a second approval dialog beyond ordinary child permissions.
-
-### Slash: bare (manual skill activation)
+## Manual workflow entries
 
 ```text
 /workflow
+/workflow <natural-language task>
+/workflow:<name> <natural-language task>
+/skill:create-workflow <authoring request>
 ```
 
-Activates `create-workflow` through the normal manual-skill path and begins a
-normal model turn. The skill routes the assistant through `Workflow`; it grants
-no capability.
+`/workflow` opens a searchable picker. Choosing a row only fills
+`/workflow:<name> ` in the composer. The automatic and named forms each start
+one visible model turn and preserve the exact slash input in the transcript.
+The automatic form receives the complete effective catalog; the named form
+receives the selected definition and full input schema. Neither form accepts
+workflow argument JSON or launches directly from the host.
 
-Exact slash parsing only: `/workflowish` and prose containing `/workflow` do
-not activate the skill.
+Use `/skill:create-workflow` for creation, change, adaptation, or confirmed
+one-off authoring. `/workflowish` and prose containing `/workflow` remain
+ordinary prompts. Existing permissions, workflow cards, task controls, and
+headless CLI behavior are unchanged after model selection.
 
 ### Headless CLI (humans and scripts only)
 
@@ -314,7 +309,7 @@ Shipped ordinary definitions (same public Lua APIs, no privileged host functions
 | `deep-research` | Structured multi-step research |
 | `large-refactor` | Phased refactor orchestration |
 
-The assistant uses `Workflow(list)`, `Workflow(show)`, and `Workflow(run_saved)`. Humans may use the named slash launch or the headless CLI described above.
+The assistant uses `Workflow(list)`, `Workflow(show)`, and `Workflow(run_saved)`. Humans may use the slash entries above or the headless CLI described above.
 
 ## Author checklist
 
@@ -326,14 +321,14 @@ The assistant uses `Workflow(list)`, `Workflow(show)`, and `Workflow(run_saved)`
 4. Use `TaskAnswer` only for a `human_or_model` gate; leave human-only answers to the user.
 5. Never ask the user for a bare slash, invoke `neo workflow`, or hand-author a manifest/hash.
 
-### Human/script file authoring
+### Manual script file authoring
 
 1. Pair `.lua` + `.workflow.toml` with matching stem and `source_sha256`.
 2. Declare ordered `phases` and a required final `output_schema`.
 3. Give every `neo.delegate` / `neo.swarm` child an `output_schema`.
 4. Never request secrets through `neo.await_user`.
 5. Validate with `neo workflow check`; use `neo workflow test --case` for fixture harness cases.
-6. Use named `/workflow <name>` for a host-direct interactive launch, or the headless CLI for scripted operation.
+6. Use `/workflow` to browse, `/workflow <task>` for automatic selection, or `/workflow:<name> <task>` for an explicit definition; use the headless CLI for scripted operation.
 7. View results with `TaskOutput` views/cursors.
 
 ## Next steps

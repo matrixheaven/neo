@@ -12,6 +12,7 @@ pub mod question_dialog;
 pub mod tabbed_model_selector;
 pub mod text_input;
 pub mod trust;
+pub mod workflow_picker;
 pub mod workspace_manager;
 
 pub use api_key_input::{ApiKeyInputOptions, ApiKeyInputResult, ApiKeyInputState};
@@ -47,6 +48,9 @@ pub use text_input::{TextInputOptions, TextInputResult, TextInputState};
 pub use trust::{
     TrustDialogChoice, TrustDialogData, TrustDialogInput, TrustDialogInputKind, TrustDialogResult,
     TrustDialogState,
+};
+pub use workflow_picker::{
+    WorkflowPickerItem, WorkflowPickerOptions, WorkflowPickerResult, WorkflowPickerState,
 };
 pub use workspace_manager::{
     WorkspaceManagerAction, WorkspaceManagerOptions, WorkspaceManagerState, WorkspaceRow,

@@ -91,6 +91,10 @@ pub struct AgentConfig {
     #[serde(skip)]
     #[schemars(skip)]
     pub context_append_transform: Option<ContextAppendTransform>,
+    /// One-turn system guidance that is sent before the durable context.
+    #[serde(skip)]
+    #[schemars(skip)]
+    pub turn_system_context: Option<String>,
     #[serde(skip)]
     #[schemars(skip)]
     pub before_tool_call: Option<BeforeToolCallHook>,
@@ -267,6 +271,7 @@ impl AgentConfig {
             compaction: None,
             observed_max_context_tokens: Arc::new(Mutex::new(None)),
             context_append_transform: None,
+            turn_system_context: None,
             before_tool_call: None,
             async_before_tool_call: None,
             after_tool_call: None,
@@ -382,6 +387,12 @@ impl AgentConfig {
         transform: impl Fn(&[AgentMessage]) -> Vec<AgentMessage> + Send + Sync + 'static,
     ) -> Self {
         self.context_append_transform = Some(Arc::new(transform));
+        self
+    }
+
+    #[must_use]
+    pub fn with_turn_system_context(mut self, context: impl Into<String>) -> Self {
+        self.turn_system_context = Some(context.into());
         self
     }
 

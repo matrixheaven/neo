@@ -13,7 +13,10 @@
 | `/resume` | — | 打开 session 选择器，恢复某个本地会话。 |
 | `/compact` | — | 请求手动压缩上下文；可附加指令 `/compact <instruction>`。 |
 | `/tasks` | — | 打开任务浏览器：后台任务与 workflow run（phase、准入等待、等待输入、用量）。 |
-| `/workflow` | — | 裸命令：激活 `create-workflow` skill 并开始普通模型回合。命名：`/workflow <name> [JSON_OBJECT]` 解析 registry 并由宿主直启（零次模型调用）。 |
+| `/workflow` | — | 打开可搜索的有效工作流选择器。 |
+| `/workflow <task>` | — | 开始普通模型回合，并提供完整有效工作流目录，由模型选择已有工作流。 |
+| `/workflow:<name> <task>` | — | 开始普通模型回合，并提供指定工作流定义和完整输入 schema。 |
+| `/skill:create-workflow <request>` | — | 通过现有 skill 路径编写或修改工作流。 |
 | `/fork` | — | 为当前会话创建一个新的分支并跳转。 |
 | `/init [instruction]` | — | 仅创建或刷新工作区根目录的 `AGENTS.md`；嵌套的 `AGENTS.md` 由用户自行编写，`/init` 绝不生成或修改。后续文本会作为自然语言指导传入 init 工作流。 |
 
@@ -23,10 +26,12 @@
 
 | 形态 | 行为 |
 | --- | --- |
-| `/workflow` | 通过普通手动 skill 路径激活 `create-workflow` 并开始模型回合。skill 使用 `Workflow`；不会授予 capability。 |
-| `/workflow <name> [JSON_OBJECT]` | 宿主按 effective 优先级（`builtin < user < trusted project`）解析 `<name>`，校验 args，并在后台启动，**无模型往返**。Ask 显示 launch 审阅；Auto/Yolo 仍需显式 slash。 |
+| `/workflow` | 打开可搜索选择器。选择后只把 `/workflow:<name> ` 写入 composer，不启动回合。 |
+| `/workflow <自然语言任务>` | 把完整有效目录交给一次可见模型回合。没有合适定义时，assistant 会先询问是否编写或改为普通执行。 |
+| `/workflow:<name> <自然语言任务>` | 把指定定义和完整输入 schema 交给一次可见模型回合，由模型把任务转换为工作流输入。 |
+| `/skill:create-workflow <编写请求>` | 单独进入工作流编写路径；使用已有保存工作流不需要先激活它。 |
 
-Slash 匹配是精确的：`/workflowish` 不会激活 skill。Launch 审批只授权编排；之后每个 child 或 tool effect 仍走 Ask / Auto / Yolo。assistant 用 `TaskPause`、`TaskResume`、`TaskStop`、`TaskOutput`（分页视图/cursor）控制并查看结果；workflow 显式允许模型回答时用 `TaskAnswer`。headless `neo workflow` 命令只供人类和脚本使用。见 [Workflows](../guides/workflows.md)。
+Slash 匹配是精确的：`/workflowish` 和正文中的 `/workflow` 都是普通提示。语法或 registry 本地错误会保留原输入，不启动模型回合。模型选择工作流后，现有 Ask / Auto / Yolo 权限和工作流卡片继续生效。headless `neo workflow` 命令仍只供人类和脚本使用。见 [Workflows](../guides/workflows.md)。
 
 ## 模式控制
 

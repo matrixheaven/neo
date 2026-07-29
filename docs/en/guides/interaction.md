@@ -46,7 +46,10 @@ Typing `/` at the start of the prompt triggers command completion. Common comman
 | `/provider` | Show configured providers |
 | `/mcp` | View/manage MCP servers |
 | `/tasks` | View background tasks and workflow runs (phase, queue reason, awaiting input), including while a turn is running |
-| `/workflow` | Bare: activate `create-workflow` for a normal model turn. Named: `/workflow <name> [JSON]` host-direct launch |
+| `/workflow` | Open the searchable workflow picker |
+| `/workflow <task>` | Let one visible model turn choose an existing workflow from the complete effective catalog |
+| `/workflow:<name> <task>` | Use one visible model turn with the named workflow definition and full input schema |
+| `/skill:create-workflow <request>` | Author or change a workflow |
 | `/plan [on\|off\|clear]` | Toggle plan mode |
 | `/goal <objective>` | Start/manage goal mode |
 | `/compact [instruction]` | Request a manual context compaction |

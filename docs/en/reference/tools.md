@@ -123,6 +123,12 @@ validate their definitions internally. Use `validate_inline` or
 persisting. No route needs a slash command, capability, or CLI. Every run action
 is background and returns a task ID (also the `run_id`).
 
+Interactive users can browse or request workflow use with `/workflow`,
+`/workflow <natural-language task>`, or
+`/workflow:<name> <natural-language task>`. These forms prepare a normal model
+turn and never accept workflow argument JSON or launch directly from the host.
+Use `/skill:create-workflow <request>` for authoring.
+
 | Action | How |
 | --- | --- |
 | Discover, validate, save, or run | `Workflow(list|show|validate_inline|validate_saved|save|run_inline|run_saved)` |

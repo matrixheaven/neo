@@ -295,7 +295,7 @@ pub(super) async fn run_agent_turn(
 ) -> Result<(), AgentRuntimeError> {
     let AgentTurnRuntime {
         model,
-        config,
+        mut config,
         tools,
         skills,
         goal_manager,
@@ -326,15 +326,18 @@ pub(super) async fn run_agent_turn(
         append_runtime_reminders(&config, emitter);
         rehydrate_instruction_context_after_compaction(emitter, false).await;
 
-        let (turn, assistant) = match run_next_model_turn(
+        let next_turn = run_next_model_turn(
             &model,
             &config,
             emitter,
             &cancel_token,
             pending_compaction_debt.take(),
         )
-        .await
-        {
+        .await;
+        // Workflow guidance applies to the initial request and its recovery
+        // retry only. Follow-up requests use the normal conversation state.
+        config.turn_system_context = None;
+        let (turn, assistant) = match next_turn {
             Ok(ModelTurnOutcome::Assistant { turn, message }) => (turn, message),
             Ok(ModelTurnOutcome::Stop { turn, reason }) => {
                 final_turn = turn;

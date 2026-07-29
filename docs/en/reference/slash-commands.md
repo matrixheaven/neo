@@ -13,7 +13,10 @@ Source location: [`crates/neo-agent/src/modes/interactive/slash_commands.rs`](..
 | `/resume` | — | Open the session picker to restore a local session. |
 | `/compact` | — | Request a manual context compaction; an instruction may be appended as `/compact <instruction>`. |
 | `/tasks` | — | Open the task browser: background tasks and workflow runs (phase, admission wait, awaiting input, usage). |
-| `/workflow` | — | Bare: activate the `create-workflow` skill and begin a normal model turn. Named: `/workflow <name> [JSON_OBJECT]` resolves the registry and launches host-direct (zero model calls). |
+| `/workflow` | — | Open the searchable effective-workflow picker. |
+| `/workflow <task>` | — | Start a normal model turn with the complete effective workflow catalog so the model can choose an existing workflow. |
+| `/workflow:<name> <task>` | — | Start a normal model turn with the selected workflow definition and full input schema. |
+| `/skill:create-workflow <request>` | — | Author or change a workflow through the existing skill path. |
 | `/fork` | — | Create a new branch from the current session and switch to it. |
 | `/init [instruction]` | — | Create or refresh the workspace-root `AGENTS.md` only; nested `AGENTS.md` files are user-authored and never generated or modified by `/init`. Extra text is passed to the init workflow as natural-language guidance. |
 
@@ -23,10 +26,12 @@ Source location: [`crates/neo-agent/src/modes/interactive/slash_commands.rs`](..
 
 | Form | Behavior |
 | --- | --- |
-| `/workflow` | Activates `create-workflow` through the normal manual-skill path and starts a model turn. The skill uses `Workflow`; no capability is granted. |
-| `/workflow <name> [JSON_OBJECT]` | Host resolves `<name>` through effective registry precedence (`builtin < user < trusted project`), validates args, and launches in the background with **no model round-trip**. Ask mode shows launch review; Auto/Yolo still require the explicit slash. |
+| `/workflow` | Opens a searchable picker. Choosing an item only fills `/workflow:<name> ` in the composer; it does not start a turn. |
+| `/workflow <natural-language task>` | Sends the complete effective catalog to one visible model turn. If nothing fits, the assistant asks before authoring or continuing without a workflow. |
+| `/workflow:<name> <natural-language task>` | Sends the resolved definition and full input schema to one visible model turn. The model maps the task to workflow inputs. |
+| `/skill:create-workflow <authoring request>` | Separately enters workflow authoring. It is not required to use an existing saved workflow. |
 
-Slash matching is exact: `/workflowish` does not activate the skill. Launch approval authorizes orchestration only; every later child or tool effect still follows Ask / Auto / Yolo. The assistant controls and views workflow output with `TaskPause`, `TaskResume`, `TaskStop`, `TaskOutput` (paged views/cursors), and `TaskAnswer` when a workflow explicitly allows a model answer. Headless `neo workflow` commands are for humans and scripts. See [Workflows](../guides/workflows.md).
+Slash matching is exact: `/workflowish` and prose containing `/workflow` are ordinary prompts. Local grammar or registry errors keep the original input in the composer and start no model turn. After the model chooses a workflow, existing Ask / Auto / Yolo permissions and workflow cards apply. Headless `neo workflow` commands remain for humans and scripts. See [Workflows](../guides/workflows.md).
 
 ## Mode Control
 

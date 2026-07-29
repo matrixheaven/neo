@@ -198,6 +198,33 @@ impl AgentRuntime {
         &self.config
     }
 
+    /// Check a minimal post-compaction turn against the existing request budget.
+    #[must_use]
+    pub fn turn_messages_fit_after_compaction(&self, messages: &[AgentMessage]) -> bool {
+        let mut context = AgentContext::new();
+        for message in messages {
+            context.append_message(message.clone());
+        }
+        let snapshot = ContextBudgetEstimator::snapshot(
+            &self.config,
+            &context,
+            crate::compaction::projection::ProjectionPlan::disabled(),
+        );
+        let Some(cap) = [
+            snapshot.effective_max_context_tokens,
+            snapshot.absolute_max_tokens,
+        ]
+        .into_iter()
+        .flatten()
+        .min() else {
+            return true;
+        };
+        snapshot
+            .projected_tokens
+            .saturating_add(snapshot.reserved_headroom_tokens)
+            <= cap
+    }
+
     /// Publish this runtime's canonical dependencies for recovered workflows.
     ///
     /// This prepares dispatch only; it does not start a model turn or workflow.
@@ -545,6 +572,34 @@ mod tests {
             max_retry_attempts: 5,
         });
         config
+    }
+
+    #[test]
+    fn turn_messages_fit_after_compaction_uses_existing_budget_and_headroom() {
+        let mut config = fake_compaction_config();
+        config.turn_system_context = Some("workflow catalog ".repeat(400_000));
+        let runtime = AgentRuntime::new(
+            config,
+            Arc::new(neo_ai::providers::fake::FakeModelClient::default()),
+        );
+
+        assert!(
+            !runtime.turn_messages_fit_after_compaction(&[AgentMessage::user_text(
+                "run this workflow"
+            )])
+        );
+
+        let mut small_config = fake_compaction_config();
+        small_config.turn_system_context = Some("complete workflow catalog".to_owned());
+        let small_runtime = AgentRuntime::new(
+            small_config,
+            Arc::new(neo_ai::providers::fake::FakeModelClient::default()),
+        );
+        assert!(
+            small_runtime.turn_messages_fit_after_compaction(&[AgentMessage::user_text(
+                "run this workflow"
+            )])
+        );
     }
 
     #[tokio::test]

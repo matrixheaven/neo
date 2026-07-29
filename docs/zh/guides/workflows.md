@@ -115,30 +115,26 @@ workflow 等待输入时，每个 `TaskOutput` view 都会暴露可执行的
 `pending_user`：`request_id`、`prompt`、`answer_schema`、可选 `default`、
 `answer_policy` 与 `next_action`。仅当 `next_action` 为 `TaskAnswer` 时，
 assistant 才以这些精确 ID 调用 `TaskAnswer(task_id, request_id, answer)`；
-`wait_for_human` 表示必须由用户在 TUI 或人类 CLI 中回答。
+`wait_for_human` 表示必须由用户在 TUI 或 CLI 中回答。
 
-## 人类启动与运维面
-
-### 斜杠：命名（宿主直启）
-
-```text
-/workflow <name> [JSON_OBJECT]
-```
-
-- 通过 effective registry 解析名称。
-- 用可选 `input_schema` 校验 args。
-- **宿主直接启动** — **零次模型往返**。
-- Ask 模式显示 launch 审阅（Launch / Revise / Cancel）。Auto / Yolo 仍需要显式 slash，但不会在普通 child 权限之外再叠第二层 launch 对话框。
-
-### 斜杠：裸命令（手动 skill 激活）
+## 手动触发工作流入口
 
 ```text
 /workflow
+/workflow <自然语言任务>
+/workflow:<name> <自然语言任务>
+/skill:create-workflow <编写请求>
 ```
 
-通过普通手动 skill 路径激活 `create-workflow` 并开始普通模型回合。skill 会让 assistant 经由 `Workflow` 执行；不会授予 capability。
+`/workflow` 打开可搜索选择器。选择一行只会把
+`/workflow:<name> ` 写入 composer。自动选择和指定名称两种形式各自只
+启动一次可见模型回合，并在 transcript 中保留完整原始斜杠输入。自动形式
+收到完整有效目录；指定形式收到所选定义和完整输入 schema。两种形式都不
+接受工作流参数 JSON，也不会由宿主直接启动。
 
-仅精确 slash 解析：`/workflowish` 以及正文中的 `/workflow` 不会激活 skill。
+创建、修改、适配或确认后的一次性编写使用 `/skill:create-workflow`。
+`/workflowish` 和正文中的 `/workflow` 仍是普通提示。模型完成选择后，现有
+权限、工作流卡片、任务控制和 headless CLI 行为保持不变。
 
 ### Headless CLI（仅人类和脚本）
 
@@ -249,7 +245,7 @@ prompt（必需）, answer_schema（必需）, default?, title?,
 answer_policy?  # human | human_or_model；默认 human
 ```
 
-**不要通过该接口索取密码、API key 或其他密钥。** 回答会写入本地 journal，重启后仍可读取。Run 进入持久化 `awaiting_user`，释放活动 VM/worker 准入，并继续在 `/tasks` 与 CLI 中可见。assistant 只对 `human_or_model` 使用 `TaskAnswer`；仅人类请求由用户通过 `/tasks` 回答。
+**不要通过该接口索取密码、API key 或其他密钥。** 回答会写入本地 journal，重启后仍可读取。Run 进入持久化 `awaiting_user`，释放活动 VM/worker 准入，并继续在 `/tasks` 与 CLI 中可见。assistant 只对 `human_or_model` 使用 `TaskAnswer`；仅手动请求由用户通过 `/tasks` 回答。
 
 没有 answer 的 `TaskResume` **不能** 解除 `awaiting_user`。
 
@@ -307,26 +303,26 @@ answer_policy?  # human | human_or_model；默认 human
 | `deep-research` | 结构化多步研究 |
 | `large-refactor` | 分阶段重构编排 |
 
-assistant 用 `Workflow(list)`、`Workflow(show)` 与 `Workflow(run_saved)`。人类可使用前述命名 slash 启动或 headless CLI。
+assistant 用 `Workflow(list)`、`Workflow(show)` 与 `Workflow(run_saved)`。人类可使用上面的 slash 入口或 headless CLI。
 
-## 作者检查清单
+## Workflow检查清单
 
 ### Assistant 路径
 
 1. 通过 `Workflow` 编写；需要编写指导时再激活 `create-workflow`。
 2. 仅通过 `Workflow(save)` 持久化，并通过 `Workflow(run_inline)` 或 `Workflow(run_saved)` 运行。
 3. 只有需要状态、结果、artifact 或待回答输入时才使用 `TaskOutput`。
-4. 只在 `human_or_model` gate 使用 `TaskAnswer`；仅人类回答留给用户。
+4. 只在 `human_or_model` gate 使用 `TaskAnswer`；仅手动回答留给用户。
 5. 不要要求用户先输入裸 slash、调用 `neo workflow`，或手写 manifest/hash。
 
-### 人类/脚本文件编写
+### 手动脚本文件编写
 
 1. 成对放置 `.lua` + `.workflow.toml`，stem 与 `source_sha256` 一致。
 2. 声明有序 `phases` 与必需的最终 `output_schema`。
 3. 每个 `neo.delegate` / `neo.swarm` child 都给 `output_schema`。
 4. 绝不通过 `neo.await_user` 索取密钥。
 5. 用 `neo workflow check` 校验；fixture 用 `neo workflow test --case`。
-6. 交互式宿主直启使用命名 `/workflow <name>`；脚本化操作使用 headless CLI。
+6. 浏览使用 `/workflow`，自动选择使用 `/workflow <task>`，明确指定使用 `/workflow:<name> <task>`；脚本化操作使用 headless CLI。
 7. 用 `TaskOutput` 视图/cursor 检查。
 
 ## 下一步

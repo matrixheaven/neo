@@ -1,6 +1,6 @@
 //! Stateless workflow launch normalization and sequencing.
 //!
-//! All adapters (model `Workflow` tool, named slash, headless CLI) build one
+//! All adapters (model `Workflow` tool and headless CLI) build one
 //! immutable [`WorkflowLaunchIntent`] and call [`WorkflowLaunchCoordinator`].
 //! The coordinator never writes `run.json`/journal, never owns admission
 //! state, and never registers tasks itself beyond calling the existing owners

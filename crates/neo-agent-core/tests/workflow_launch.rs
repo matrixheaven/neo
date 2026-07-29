@@ -587,7 +587,7 @@ fn intent_for(
     )
 }
 
-/// All launch adapters (model Workflow tool, named slash, headless CLI) must
+/// All launch adapters (model Workflow tool and headless CLI) must
 /// call the single stateless coordinator — never a private create/register/
 /// start path — and none of them needs capability state.
 #[tokio::test]
@@ -624,17 +624,17 @@ async fn all_launch_adapters_reach_one_coordinator() {
         .await
         .expect("model adapter");
 
-    // Adapter 2: named slash path (human actor).
-    let named_intent = intent_for(
-        base_launch_request("named", "named:demo"),
+    // Adapter 2: another model Workflow action.
+    let saved_intent = intent_for(
+        base_launch_request("saved", "model:Workflow(run_saved)"),
         session.path(),
         workspace.path(),
-        WorkflowActor::Human,
-        PermissionMode::Yolo,
+        WorkflowActor::Model,
+        PermissionMode::Auto,
     );
-    let named = WorkflowLaunchCoordinator
+    let saved = WorkflowLaunchCoordinator
         .launch(
-            &named_intent,
+            &saved_intent,
             WorkflowLaunchHosts {
                 runtime: &runtime,
                 background_tasks: &background_tasks,
@@ -642,7 +642,7 @@ async fn all_launch_adapters_reach_one_coordinator() {
             },
         )
         .await
-        .expect("named adapter");
+        .expect("saved model adapter");
 
     // Adapter 3: headless CLI path.
     let headless_intent = intent_for(
@@ -667,7 +667,7 @@ async fn all_launch_adapters_reach_one_coordinator() {
     // Three independent launches share no one-shot authorization state.
     let tasks = background_tasks.list(false, 10).await;
     assert_eq!(tasks.len(), 3);
-    for outcome in [&dynamic, &named, &headless] {
+    for outcome in [&dynamic, &saved, &headless] {
         assert!(
             background_tasks
                 .workflow_handle(&outcome.task_id)

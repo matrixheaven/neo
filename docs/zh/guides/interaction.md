@@ -46,7 +46,10 @@ Neo 支持把剪贴板里的图片作为多模态附件随 prompt 一起发送�
 | `/provider` | 查看已配置供应商 |
 | `/mcp` | 查看/管理 MCP 服务器 |
 | `/tasks` | 查看后台任务与 workflow run（phase、排队原因、等待输入），包括对话轮次运行期间 |
-| `/workflow` | 裸命令：为普通模型回合激活 `create-workflow`。命名：`/workflow <name> [JSON]` 宿主直启 |
+| `/workflow` | 打开可搜索工作流选择器 |
+| `/workflow <task>` | 由一次可见模型回合从完整有效目录中选择已有工作流 |
+| `/workflow:<name> <task>` | 由一次可见模型回合使用指定定义和完整输入 schema |
+| `/skill:create-workflow <request>` | 编写或修改工作流 |
 | `/plan [on\|off\|clear]` | 切换计划模式 |
 | `/goal <objective>` | 启动/管理目标模式 |
 | `/compact [instruction]` | 请求手动上下文压缩 |

@@ -451,6 +451,7 @@ pub async fn run_prompt_streaming(
     channels: TurnChannels,
     config: &AppConfig,
 ) -> anyhow::Result<PromptTurn> {
+    ensure_new_workflow_context_capacity(&request, &channels, config).await?;
     let prepared = prepare_new_streaming_turn(
         &request.prompt,
         request.prompt_origin.clone(),
@@ -503,6 +504,7 @@ pub async fn run_prompt_in_session_streaming(
         Some(&channels),
     )
     .await?;
+    ensure_workflow_context_capacity(&runtime, &request, &prepared.user_message)?;
     runtime.restore_plan_mode(&prepared.context);
     run_prepared_streaming_turn(
         prepared,
@@ -672,6 +674,9 @@ async fn runtime_for_config(
     );
     if let Some(request) = request {
         agent_config = agent_config.with_plan_mode(Arc::clone(&request.plan_mode));
+        if let Some(workflow_context) = &request.workflow_context {
+            agent_config = agent_config.with_turn_system_context(workflow_context.clone());
+        }
     }
     if request.is_some_and(|request| request.goal_mode_authoring) {
         agent_config = agent_config.with_goal_mode_authoring(true);
@@ -717,6 +722,43 @@ async fn runtime_for_config(
     Ok(runtime)
 }
 
+fn ensure_workflow_context_capacity(
+    runtime: &AgentRuntime,
+    request: &TurnRequest,
+    user_message: &AgentMessage,
+) -> anyhow::Result<()> {
+    if request.workflow_context.is_some()
+        && !runtime.turn_messages_fit_after_compaction(std::slice::from_ref(user_message))
+    {
+        anyhow::bail!(crate::modes::interactive::workflow_slash::WORKFLOW_CONTEXT_TOO_LARGE);
+    }
+    Ok(())
+}
+
+async fn ensure_new_workflow_context_capacity(
+    request: &TurnRequest,
+    channels: &TurnChannels,
+    config: &AppConfig,
+) -> anyhow::Result<()> {
+    if request.workflow_context.is_none() {
+        return Ok(());
+    }
+    let temp_session = tempfile::tempdir()?;
+    let runtime = runtime_for_config(
+        config,
+        Some(temp_session.path().to_path_buf()),
+        Some(request),
+        Some(channels),
+    )
+    .await?;
+    let user_message = user_message(
+        request.prompt.clone(),
+        request.prompt_origin.clone(),
+        request.prompt_display_text.clone(),
+    );
+    ensure_workflow_context_capacity(&runtime, request, &user_message)
+}
+
 fn skill_store_reloader(
     config: &AppConfig,
 ) -> Arc<dyn Fn() -> Result<neo_agent_core::skills::SkillStore, String> + Send + Sync> {
@@ -748,14 +790,16 @@ pub async fn setup_workflow_dispatch(
 }
 
 #[cfg(test)]
-async fn run_prompt_with_runtime(
-    prompt: String,
+pub(crate) async fn run_prompt_with_runtime_message(
+    content: Vec<Content>,
+    origin: MessageOrigin,
+    display_text: Option<String>,
     context: AgentContext,
     writer: &mut JsonlSessionWriter,
     runtime: AgentRuntime,
 ) -> anyhow::Result<PromptTurn> {
     let mut writer = SessionEventWriter::jsonl(writer);
-    let user_message = user_message(vec![Content::text(prompt)], MessageOrigin::User, None);
+    let user_message = user_message(content, origin, display_text);
     finish_prompt_turn(
         user_message,
         context,
@@ -764,6 +808,24 @@ async fn run_prompt_with_runtime(
         Vec::new(),
         "test-session".to_owned(),
         false,
+    )
+    .await
+}
+
+#[cfg(test)]
+async fn run_prompt_with_runtime(
+    prompt: String,
+    context: AgentContext,
+    writer: &mut JsonlSessionWriter,
+    runtime: AgentRuntime,
+) -> anyhow::Result<PromptTurn> {
+    run_prompt_with_runtime_message(
+        vec![Content::text(prompt)],
+        MessageOrigin::User,
+        None,
+        context,
+        writer,
+        runtime,
     )
     .await
 }
@@ -1136,8 +1198,8 @@ mod tests {
         latest_session_id, session_id_from_path, session_root_from_wire_path,
     };
     use super::{
-        PendingApproval, TurnChannels, TurnRequest, run_prompt_with_runtime, runtime_for_config,
-        user_message,
+        PendingApproval, TurnChannels, TurnRequest, run_prompt_streaming, run_prompt_with_runtime,
+        runtime_for_config, user_message,
     };
     use crate::config::{
         AppConfig, Defaults, McpConfig, McpTransport, ModelConfig, ProviderConfig,
@@ -1927,6 +1989,271 @@ mod tests {
             } => assert_eq!(feedback, "tighten the implementation scope"),
             other => panic!("expected revise response, got {other:?}"),
         }
+    }
+
+    #[tokio::test]
+    async fn oversized_workflow_catalog_starts_no_provider_call() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let mut config = test_config(temp.path());
+        config.default_provider = "test-provider".to_owned();
+        config.default_model = "test-model".to_owned();
+        config.providers.insert(
+            "test-provider".to_owned(),
+            ProviderConfig {
+                display_name: None,
+                provider_type: Some(ApiType::OpenAiResponse),
+                base_url: Some("https://example.test/v1".to_owned()),
+                api_key: Some("test-key".to_owned()),
+                api_key_env: None,
+            },
+        );
+        config.models.insert(
+            "test-model".to_owned(),
+            ModelConfig {
+                provider: "test-provider".to_owned(),
+                model: "test-model".to_owned(),
+                max_context_tokens: Some(128),
+                max_output_tokens: Some(32),
+                capabilities: vec!["streaming".to_owned(), "tools".to_owned()],
+                ..ModelConfig::default()
+            },
+        );
+
+        let (events, _event_rx) = tokio::sync::mpsc::unbounded_channel();
+        let (approvals, _approval_rx) = tokio::sync::mpsc::unbounded_channel();
+        let (session_ids, _session_id_rx) = tokio::sync::mpsc::unbounded_channel();
+        let (questions, _question_rx) = tokio::sync::mpsc::unbounded_channel();
+        let request = TurnRequest::new(
+            vec![Content::text("/workflow use the catalog")],
+            None,
+            None,
+            neo_ai::ReasoningSelection::Off,
+        )
+        .with_workflow_context("catalog ".repeat(100_000));
+        let channels = TurnChannels {
+            events,
+            approvals,
+            session_ids,
+            cancel_token: CancellationToken::new(),
+            questions,
+            steer_input: SteerInputHandle::new(),
+        };
+
+        let error = match run_prompt_streaming(request, channels, &config).await {
+            Ok(_) => panic!("oversized workflow context must fail before session creation"),
+            Err(error) => error,
+        };
+
+        assert_eq!(
+            error.to_string(),
+            crate::modes::interactive::workflow_slash::WORKFLOW_CONTEXT_TOO_LARGE
+        );
+        assert!(
+            !crate::config::workspace_sessions_dir(&config).exists(),
+            "capacity rejection must not leave an empty session"
+        );
+    }
+
+    #[tokio::test]
+    async fn workflow_turn_context_is_system_role_and_user_slash_is_persisted_exactly() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let session_path = temp.path().join("session.jsonl");
+        let fake = FakeModelClient::new(vec![
+            AiStreamEvent::MessageStart {
+                id: "msg-workflow".to_owned(),
+            },
+            AiStreamEvent::TextDelta {
+                text: "done".to_owned(),
+            },
+            AiStreamEvent::MessageEnd {
+                stop_reason: StopReason::EndTurn,
+                usage: None,
+            },
+        ]);
+        let runtime = AgentRuntime::new(
+            AgentConfig::for_model(fake_model())
+                .with_turn_system_context("complete workflow guidance"),
+            Arc::new(fake.clone()),
+        );
+        let mut writer = JsonlSessionWriter::create(&session_path)
+            .await
+            .expect("session writer");
+
+        run_prompt_with_runtime(
+            "/workflow:demo Research battery recycling".to_owned(),
+            AgentContext::new(),
+            &mut writer,
+            runtime,
+        )
+        .await
+        .expect("workflow turn");
+
+        let request = fake.requests().remove(0);
+        assert!(matches!(
+            request.messages.first(),
+            Some(ChatMessage::System { content })
+                if chat_message_text(&request.messages[0]) == "complete workflow guidance"
+                    && content.len() == 1
+        ));
+        assert_eq!(
+            chat_message_text(request.messages.last().expect("user message")),
+            "/workflow:demo Research battery recycling"
+        );
+        let messages = JsonlSessionReader::replay_messages(&session_path)
+            .await
+            .expect("replay messages");
+        assert!(messages.iter().any(|message| {
+            matches!(
+                message,
+                AgentMessage::User { content, .. }
+                    if content == &vec![Content::text("/workflow:demo Research battery recycling")]
+            )
+        }));
+        assert!(messages.iter().all(|message| {
+            !matches!(
+                message,
+                AgentMessage::System { content } if content
+                    .iter()
+                    .any(|part| part.as_text() == Some("complete workflow guidance"))
+            )
+        }));
+    }
+
+    #[tokio::test]
+    async fn workflow_runtime_dispatches_saved_run_from_model_tool_call() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let workspace = temp.path().join("workspace");
+        let session_dir = temp.path().join("session");
+        std::fs::create_dir_all(&workspace).expect("workspace");
+        std::fs::create_dir_all(&session_dir).expect("session directory");
+        let source = "return { ok = true }\n";
+        let source_sha = neo_agent_core::workflow::source_sha256_hex(source.as_bytes());
+        let manifest = format!(
+            r#"
+name = "demo"
+display_name = "Demo"
+description = "runtime workflow fixture"
+source_sha256 = "{source_sha}"
+
+[[phases]]
+id = "run"
+description = "run"
+
+[output_schema]
+type = "object"
+"#
+        );
+        let definitions = neo_agent_core::workflow::WorkflowDefinitionRegistry::new(
+            neo_agent_core::workflow::WorkflowDefinitionRegistryConfig {
+                neo_home: temp.path().join("neo_home"),
+                workspace: workspace.clone(),
+                project_trusted: true,
+                limits: neo_agent_core::workflow::WorkflowLimits::default(),
+                builtins: vec![neo_agent_core::workflow::BuiltinWorkflowDefinition {
+                    name: "demo".to_owned(),
+                    manifest_bytes: manifest.into_bytes(),
+                    source_bytes: source.as_bytes().to_vec(),
+                }],
+            },
+        );
+        let workflow_runtime = neo_agent_core::workflow::WorkflowRuntime::new(
+            neo_agent_core::workflow::WorkflowLimits::default(),
+        );
+        workflow_runtime
+            .bind_runner(|_handle, _metadata, _session_dir| async { Ok(()) })
+            .expect("bind workflow runner");
+        let harness = FakeHarness::from_turns([
+            vec![
+                AiStreamEvent::MessageStart {
+                    id: "workflow-call".to_owned(),
+                },
+                AiStreamEvent::ToolCallStart {
+                    id: "workflow-call-1".to_owned(),
+                    name: "Workflow".to_owned(),
+                },
+                AiStreamEvent::ToolCallEnd {
+                    id: "workflow-call-1".to_owned(),
+                    raw_arguments: serde_json::json!({
+                        "action": "run_saved",
+                        "name": "demo",
+                        "args": {}
+                    })
+                    .to_string(),
+                },
+                AiStreamEvent::MessageEnd {
+                    stop_reason: StopReason::ToolUse,
+                    usage: None,
+                },
+            ],
+            vec![
+                AiStreamEvent::MessageStart {
+                    id: "workflow-answer".to_owned(),
+                },
+                AiStreamEvent::TextDelta {
+                    text: "done".to_owned(),
+                },
+                AiStreamEvent::MessageEnd {
+                    stop_reason: StopReason::EndTurn,
+                    usage: None,
+                },
+            ],
+        ]);
+        let config = AgentConfig::for_model(harness.model())
+            .with_workspace_root(&workspace)
+            .expect("workspace root")
+            .with_session_directory(&session_dir)
+            .with_permission_mode(PermissionMode::Yolo)
+            .with_turn_system_context("workflow slash guidance")
+            .with_workflow_runtime(workflow_runtime.clone())
+            .with_workflow_definitions(definitions.clone());
+        let tools = ToolRegistry::with_builtin_tools();
+        let runtime = AgentRuntime::with_tools(config, harness.client(), tools);
+        let session_path = neo_agent_core::session::main_agent_wire_path(&session_dir);
+        std::fs::create_dir_all(session_path.parent().expect("session wire parent"))
+            .expect("session wire directory");
+        let mut writer = JsonlSessionWriter::create(&session_path)
+            .await
+            .expect("session writer");
+
+        let turn = run_prompt_with_runtime(
+            "/workflow:demo run it".to_owned(),
+            AgentContext::new(),
+            &mut writer,
+            runtime,
+        )
+        .await
+        .expect("model workflow turn");
+
+        let requests = harness.requests();
+        assert_eq!(requests.len(), 2);
+        assert!(requests[0].messages.iter().any(|message| {
+            matches!(message, ChatMessage::System { .. })
+                && chat_message_text(message) == "workflow slash guidance"
+        }));
+        assert_eq!(
+            chat_message_text(requests[0].messages.last().expect("slash user")),
+            "/workflow:demo run it"
+        );
+        assert!(requests[0].tools.iter().any(|tool| tool.name == "Workflow"));
+        assert!(
+            !requests[1]
+                .messages
+                .iter()
+                .any(|message| chat_message_text(message) == "workflow slash guidance")
+        );
+        let workflow_result = turn.events.iter().find_map(|event| match event {
+            AgentEvent::ToolExecutionFinished { name, result, .. } if name == "Workflow" => {
+                Some(result)
+            }
+            _ => None,
+        });
+        let workflow_result = workflow_result.expect("Workflow tool result");
+        assert!(!workflow_result.is_error, "{workflow_result:?}");
+        assert_eq!(
+            workflow_result.details.as_ref().expect("workflow details")["task"]["kind"],
+            "workflow"
+        );
+        assert_eq!(turn.assistant_text, "done");
     }
 
     #[tokio::test]

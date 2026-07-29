@@ -52,6 +52,7 @@ impl InteractiveController {
         let instruction_registry = match self.instruction_registry_for_turn() {
             Ok(registry) => registry,
             Err(error) => {
+                self.pending_workflow_context = None;
                 self.push_status(format!("Failed to load project instructions: {error}"));
                 return;
             }
@@ -88,6 +89,11 @@ impl InteractiveController {
         request.manual_compact_request = std::sync::Arc::clone(&self.manual_compact_request);
         let request = if let Some(skill_context) = self.pending_skill_context.take() {
             request.with_skill_context(skill_context)
+        } else {
+            request
+        };
+        let request = if let Some(workflow_context) = self.pending_workflow_context.take() {
+            request.with_workflow_context(workflow_context)
         } else {
             request
         };
@@ -159,6 +165,7 @@ impl InteractiveController {
             // and rendered into the transcript. Keep the interactive shell alive.
             match turn_result {
                 Ok(outcome) => {
+                    self.pending_workflow_restore_prompt = None;
                     if let Some(session_id) = outcome.session_id {
                         // `turn.task` was moved by `.await`; remaining fields are accessible.
                         self.bind_instruction_registry_to_session(
@@ -170,6 +177,15 @@ impl InteractiveController {
                     }
                 }
                 Err(error) => {
+                    if error.to_string()
+                        == crate::modes::interactive::workflow_slash::WORKFLOW_CONTEXT_TOO_LARGE
+                    {
+                        if let Some(prompt) = self.pending_workflow_restore_prompt.take() {
+                            self.tui.chrome_mut().prompt_mut().set_text(prompt);
+                        }
+                    } else {
+                        self.pending_workflow_restore_prompt = None;
+                    }
                     self.tui
                         .chrome_mut()
                         .apply_stream_update(StreamUpdate::Error {

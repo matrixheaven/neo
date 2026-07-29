@@ -124,6 +124,9 @@ fn fixed_overhead_tokens(config: &AgentConfig, context: &AgentContext) -> usize 
     });
     let workspace_tokens =
         workspace_context_message(config).map_or(0, |message| estimate_message_tokens(&message));
+    let turn_system_tokens = config.turn_system_context.as_ref().map_or(0, |context| {
+        estimate_message_tokens(&crate::AgentMessage::system_text(context.as_str()))
+    });
     let todo_tokens =
         todo_context_message(context).map_or(0, |message| estimate_message_tokens(&message));
     let transform_tokens = config
@@ -133,7 +136,7 @@ fn fixed_overhead_tokens(config: &AgentConfig, context: &AgentContext) -> usize 
             estimate_messages_tokens(&transform(context.messages()))
         });
 
-    system_tokens + workspace_tokens + todo_tokens + transform_tokens
+    system_tokens + workspace_tokens + turn_system_tokens + todo_tokens + transform_tokens
 }
 
 fn projected_effective_tokens(

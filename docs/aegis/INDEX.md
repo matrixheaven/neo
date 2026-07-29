@@ -5,6 +5,8 @@ Entries are workspace records, not authoritative runtime decisions.
 
 | Date | Kind | Path | Title |
 | --- | --- | --- | --- |
+| 2026-07-30 | baseline | docs/aegis/baseline/2026-07-30-workflow-intent-slash.md | Workflow Intent Slash Entry Landed Baseline |
+| 2026-07-30 | adr | docs/aegis/adr/ADR-0009-workflow-intent-slash-entry.md | ADR-0009: Workflow Intent Slash Entry |
 | 2026-07-30 | plan | docs/aegis/plans/2026-07-30-workflow-intent-slash.md | Neo Workflow Intent Slash Implementation Plan |
 | 2026-07-30 | spec | docs/aegis/specs/2026-07-30-workflow-intent-slash-design.md | Neo Workflow Intent Slash Design |
 | 2026-07-28 | handoff | docs/aegis/handoffs/2026-07-28-workflow-product-surface-redesign.md | Implement Neo Workflow Product Surface Redesign Handoff Prompt |
@@ -290,3 +292,14 @@ Entries are workspace records, not authoritative runtime decisions.
 | 2026-07-27 | artifact | docs/aegis/work/2026-07-27-assistant-native-workflow-tool/gate-input-pack.json | 2026-07-27-assistant-native-workflow-tool gate input pack |
 | 2026-07-27 | work | docs/aegis/work/2026-07-27-assistant-native-workflow-tool/proof-bundle.md | 2026-07-27-assistant-native-workflow-tool proof bundle |
 | 2026-07-28 | spec | docs/aegis/specs/2026-07-28-edit-mismatch-compact-recovery-brief.md | Edit match-mismatch compact recovery spec brief |
+| 2026-07-30 | work | docs/aegis/work/2026-07-30-workflow-intent-slash/10-intent.md | Workflow intent slash execution intent |
+| 2026-07-30 | work | docs/aegis/work/2026-07-30-workflow-intent-slash/20-checkpoint.md | Workflow intent slash execution checkpoint |
+| 2026-07-30 | work | docs/aegis/work/2026-07-30-workflow-intent-slash/90-evidence.md | Workflow intent slash execution evidence |
+| 2026-07-30 | work | docs/aegis/work/2026-07-30-workflow-intent-slash/99-reflection.md | Workflow intent slash execution reflection |
+| 2026-07-30 | artifact | docs/aegis/work/2026-07-30-workflow-intent-slash/task-intent-draft.json | Workflow intent slash execution task intent draft |
+| 2026-07-30 | artifact | docs/aegis/work/2026-07-30-workflow-intent-slash/baseline-read-set-hint.json | Workflow intent slash execution baseline read-set hint |
+| 2026-07-30 | artifact | docs/aegis/work/2026-07-30-workflow-intent-slash/baseline-usage-draft.json | Workflow intent slash execution baseline usage draft |
+| 2026-07-30 | artifact | docs/aegis/work/2026-07-30-workflow-intent-slash/impact-statement-draft.json | Workflow intent slash execution impact statement draft |
+| 2026-07-30 | artifact | docs/aegis/work/2026-07-30-workflow-intent-slash/todo-checkpoint-draft.json | Workflow intent slash execution todo checkpoint draft |
+| 2026-07-30 | artifact | docs/aegis/work/2026-07-30-workflow-intent-slash/drift-check-draft.json | Workflow intent slash execution drift check draft |
+| 2026-07-30 | artifact | docs/aegis/work/2026-07-30-workflow-intent-slash/resume-state-hint.json | 2026-07-30-workflow-intent-slash resume state hint |

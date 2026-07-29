@@ -66,7 +66,7 @@ enum WorkflowScope {
 #[serde(deny_unknown_fields)]
 pub(crate) struct WorkflowInput {
     #[schemars(
-        description = "Workflow action. \"list\" discovers saved workflows; \"show\" returns a saved definition; \"validate_inline\"/\"validate_saved\" check a definition without running it; \"save\" persists a new definition; \"run_inline\"/\"run_saved\" validate internally and then launch directly. Use list/show only when the user explicitly asks to discover saved workflows."
+        description = "Workflow action. For an existing-workflow request without a name, use \"list\" to choose a definition, optionally \"show\" its full schema, then use \"run_saved\". For a named saved workflow, use \"show\" only when needed and then \"run_saved\". Use \"validate_inline\"/\"validate_saved\" for explicit check-only requests; use \"save\" or \"run_inline\" after Skill(create-workflow) for creation, change, adaptation, or one-off authoring. run_inline, run_saved, and save validate internally."
     )]
     action: WorkflowAction,
     #[serde(default)]
@@ -936,15 +936,7 @@ impl Tool for WorkflowTool {
     }
 
     fn description(&self) -> &'static str {
-        "Canonical first-party tool to validate and run Neo workflows, and to save, show, or run saved definitions. \
-         run_inline, run_saved, and save each perform their complete validation internally (metadata, source, schema, Lua compile, args when applicable, and typed permission when applicable); \
-         no validation action is required before run_inline, run_saved, or save. \
-         validate_inline and validate_saved remain available for an explicit check-only request with zero side effects. \
-         For inline authoring, creation, or one-off evaluation, Skill(create-workflow) provides authoring guidance for Lua, schemas, and host APIs unless already active; \
-         known saved workflow may use list/show/run_saved directly without skill activation. \
-         Saved and inline runs require no slash capability, return a task handle, and deliver terminal completion automatically via TaskOutput. \
-         For assistant-native workflow use, do not read Neo source, run Cargo, or invoke `neo workflow` through Bash/Terminal. \
-         Child tool effects remain independently authorized."
+        "Canonical first-party tool for every Neo workflow action. If the user asks to use a workflow without naming one, call Workflow(list), choose a suitable definition, call Workflow(show) only when its full input schema is needed, then call Workflow(run_saved). If the user names a saved workflow, call Workflow(show) only when needed and then Workflow(run_saved). For creation, change, adaptation, or one-off authoring, activate Skill(create-workflow) and use the appropriate Workflow(save), Workflow(validate_inline), or Workflow(run_inline) action. run_inline, run_saved, and save each perform their complete validation internally; validate_inline and validate_saved are explicit check-only actions. Do not read Neo source, run Cargo, invoke the workflow CLI through Bash or Terminal. Saved and inline runs require no slash capability; do not ask for slash capability. They return a task handle; use TaskOutput to inspect details or answer pending workflow questions; terminal completion arrives automatically."
     }
 
     fn input_schema(&self) -> Value {

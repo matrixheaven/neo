@@ -116,6 +116,11 @@ assistant 的每个 workflow 生命周期动作都通过 `Workflow`。需要编�
 这些路径均不需要 slash、capability 或 CLI。每次 run action 都在后台，返回
 task ID（亦即 `run_id`）。
 
+交互用户可用 `/workflow` 浏览，或用 `/workflow <自然语言任务>` 自动选择，
+也可用 `/workflow:<name> <自然语言任务>` 明确指定。这些入口都会准备普通
+模型回合，不接受 workflow 参数 JSON，也不会由宿主直接启动。编写工作流使用
+`/skill:create-workflow <request>`。
+
 | 动作 | 方式 |
 | --- | --- |
 | 发现、校验、保存或运行 | `Workflow(list|show|validate_inline|validate_saved|save|run_inline|run_saved)` |

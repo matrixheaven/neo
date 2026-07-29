@@ -257,7 +257,6 @@ impl InteractiveController {
         // Interrupt rejects every visible approval (and any pending runtime
         // channels) instead of being swallowed by the dialog handler.
         if matches!(event, InputEvent::Interrupt) {
-            self.pending_named_workflow_launch.take();
             self.reject_all_pending_approvals();
             if self.active_turn.is_some() {
                 self.cancel_active_turn().await?;

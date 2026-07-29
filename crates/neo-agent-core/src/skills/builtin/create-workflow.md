@@ -1,6 +1,6 @@
 ---
 name: create-workflow
-description: "Authoring guidance for creating, designing, writing, adapting, evaluating, testing, or running a custom Neo workflow. Covers the Lua dialect, definition schemas, and the `neo.*` host APIs used to orchestrate child agents and tools. Does not grant workflow execution capability -- `Workflow(run_inline)`, `Workflow(run_saved)`, and `Workflow(save)` each validate the definition internally. known saved workflows may be discovered or launched with `Workflow(list)`, `Workflow(show)`, or `Workflow(run_saved)` without this skill active, even when the current directory is the Neo repository. Not for modifying or debugging Neo's own workflow implementation or CLI -- that is ordinary repository work."
+description: "Authoring guidance for creating, designing, writing, adapting, evaluating, testing, or running a custom Neo workflow. Covers the Lua dialect, definition schemas, and the `neo.*` host APIs used to orchestrate child agents and tools. Use this skill for creation, change, adaptation, or confirmed one-off authoring; it does not grant workflow execution capability. Existing saved-workflow use starts with `Workflow(list)` or a known saved workflow through `Workflow(run_saved)`, not this skill. `Workflow(run_inline)`, `Workflow(run_saved)`, and `Workflow(save)` each validate the definition internally. Not for modifying or debugging Neo's own workflow implementation or CLI -- that is ordinary repository work."
 disableModelInvocation: false
 ---
 
@@ -38,6 +38,7 @@ compile the definition and Lua without persisting, running, or creating tasks.
 | Explicit check-only | author -> `Workflow(validate_inline)` / `Workflow(validate_saved)` -> report |
 | Run a known saved workflow | `Workflow(run_saved)`; use `TaskOutput` only for requested details or pending input |
 | Discover saved workflows | `Workflow(list)` / `Workflow(show)` -> `Workflow(run_saved)` |
+| Use a workflow without naming one | `Workflow(list)` -> choose a suitable definition -> `Workflow(show)` only when needed -> `Workflow(run_saved)` |
 | Modify/debug Neo's workflow implementation | leave this skill; use normal repository diagnosis |
 
 Rules when the user is using workflows as a **product feature** (even inside
@@ -393,10 +394,18 @@ neo workflow check <name-or-path> --output json
 neo workflow test <name-or-path> --case <fixture.json>
 ```
 
-Interactive users may also launch a saved definition host-direct with the exact
-`/workflow <name> [JSON_OBJECT]` slash command (zero model calls before
-execution). Never tell the user a slash command is required for the assistant
-to act; it is optional convenience only.
+Interactive users have separate workflow-use and authoring entries:
+
+```text
+/workflow
+/workflow <natural-language task>
+/workflow:<name> <natural-language task>
+/skill:create-workflow <authoring request>
+```
+
+The first three forms prepare a normal model turn. They never accept workflow
+argument JSON and never launch a workflow directly from the host. The skill
+entry is the explicit authoring path.
 
 ## Done criteria
 

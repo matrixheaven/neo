@@ -290,6 +290,7 @@ impl NeoChromeState {
                 | OverlayKind::ConfirmDialog(_)
                 | OverlayKind::McpAddForm(_)
                 | OverlayKind::ChoicePicker(_)
+                | OverlayKind::WorkflowPicker(_)
                 | OverlayKind::ApiKeyInput(_)
                 | OverlayKind::TextInput(_)
                 | OverlayKind::CustomEndpointWizard(_)

@@ -75,6 +75,11 @@ impl SelectListState {
             .and_then(|index| self.items.get(*index))
     }
 
+    #[must_use]
+    pub fn selected_position(&self) -> Option<usize> {
+        (self.selected_index < self.filtered_len()).then_some(self.selected_index)
+    }
+
     pub fn move_up(&mut self) {
         let len = self.filtered_len();
         if len == 0 {
