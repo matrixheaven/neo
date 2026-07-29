@@ -1139,7 +1139,7 @@ async fn rehydrate_isolates_recovery_append_failure() {
     let bad_handle = create_run(&runtime, dir.path()).await;
     let bad_id = bad_handle.run_id.clone();
     let bad_path = journal_path(dir.path(), &bad_id);
-    let input = serde_json::json!({"task": "stuck"});
+    let input = serde_json::json!({"task": "x".repeat(1_024)});
     let existing = collect_journal(&bad_path, None).unwrap();
     let next_seq = existing.last().map_or(0, |e| e.seq + 1);
     let run_id = existing
@@ -1187,13 +1187,17 @@ async fn rehydrate_isolates_recovery_append_failure() {
     good_writer
         .append(&changed, &WorkflowLimits::default())
         .unwrap();
+    drop(writer);
+    drop(good_writer);
+    let bad_journal_bytes = std::fs::metadata(&bad_path).unwrap().len();
+    assert!(std::fs::metadata(&good_path).unwrap().len() <= bad_journal_bytes);
     drop(bad_handle);
     drop(good_handle);
     drop(runtime);
 
     // Force recovery append to hit journal total limit for the bad run only.
     let recovered = WorkflowRuntime::new(WorkflowLimits {
-        journal_total_bytes: 1,
+        journal_total_bytes: bad_journal_bytes,
         ..WorkflowLimits::default()
     });
     let handles = recovered

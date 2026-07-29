@@ -3698,7 +3698,7 @@ mod tests {
         assert_eq!(workflow.projection_sequence, None);
         assert_eq!(
             workflow.terminal_reason.as_deref(),
-            Some("corrupt journal: missing initial state")
+            Some("recovery append failed: journal_corrupt: journal is missing run_created")
         );
     }
 

@@ -42,6 +42,22 @@ fn limits_small_inline() -> WorkflowLimits {
     }
 }
 
+fn append_run_created(writer: &mut JournalWriter, run_id: &WorkflowId) {
+    let created = JournalEnvelope::new(
+        writer.next_seq(),
+        1,
+        run_id.clone(),
+        JournalPayload::RunCreated {
+            name: "artifact-test".to_owned(),
+            description: None,
+            launch_source: Some("test".to_owned()),
+        },
+    );
+    writer
+        .append(&created, &WorkflowLimits::default())
+        .expect("append RunCreated");
+}
+
 async fn wait_running(handle: &neo_agent_core::workflow::WorkflowHandle) {
     for _ in 0..200 {
         if handle.snapshot().await.state == WorkflowState::Running {
@@ -463,9 +479,10 @@ async fn staged_orphan_is_not_listed() {
     let journal_path = run_dir.join("journal.jsonl");
     let mut writer =
         JournalWriter::open(&journal_path, run_id.clone(), &WorkflowLimits::default()).unwrap();
+    append_run_created(&mut writer, &run_id);
     let env = JournalEnvelope::new(
-        0,
-        1,
+        writer.next_seq(),
+        2,
         run_id.clone(),
         JournalPayload::ArtifactCommitted {
             artifact_id: staged.artifact_id.clone(),
@@ -543,9 +560,10 @@ fn artifact_replace_and_integrity_are_platform_safe() {
     let journal_path = run_dir.join("journal.jsonl");
     let mut writer =
         JournalWriter::open(&journal_path, run_id.clone(), &WorkflowLimits::default()).unwrap();
+    append_run_created(&mut writer, &run_id);
     let env = JournalEnvelope::new(
-        0,
-        1,
+        writer.next_seq(),
+        2,
         run_id.clone(),
         JournalPayload::ArtifactCommitted {
             artifact_id: staged.artifact_id.clone(),

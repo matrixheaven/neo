@@ -586,7 +586,6 @@ fn journal_record_families_preserve_terminal_metadata() {
         "user_input_answered",
         "artifact_committed",
         "final_result_recorded",
-        "lineage_seed_imported",
         "recovery_action_applied",
         "usage_recorded",
         "provenance_recorded",

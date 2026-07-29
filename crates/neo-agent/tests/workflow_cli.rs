@@ -16,7 +16,9 @@ use sha2::{Digest, Sha256};
 
 fn neo() -> Command {
     let mut command = Command::new(env!("CARGO_BIN_EXE_neo"));
-    command.env("NEO_HOME", neo_home_for_test());
+    command
+        .env("NEO_HOME", neo_home_for_test())
+        .env("OPENAI_API_KEY", "test-key");
     command
 }
 

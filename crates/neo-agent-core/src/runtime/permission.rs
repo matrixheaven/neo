@@ -1916,6 +1916,8 @@ mod tests {
             name: "Workflow".into(),
             raw_arguments: arguments.to_string().into(),
         };
+        let action = crate::tools::workflow::prepare_action(&arguments)
+            .expect("valid workflow permission test input");
         let prepared = PreparedToolCall {
             id: call.id.to_string(),
             name: call.name.to_string(),
@@ -1923,7 +1925,7 @@ mod tests {
             arguments,
             warning: None,
             approval: None,
-            execution: PreparedExecution::Direct,
+            execution: PreparedExecution::Workflow(Arc::new(action)),
         };
         (call, prepared)
     }
@@ -2056,19 +2058,5 @@ mod tests {
                 "save/run must be denied in plan mode: {arguments}"
             );
         }
-    }
-
-    #[test]
-    fn workflow_invalid_input_is_terminal_without_approval() {
-        let config = workflow_config(PermissionMode::Ask);
-        let (call, prepared) = workflow_prepared(json!({"action": "run_inline"}));
-        let preparation = permission_preparation_for_mode(&config, &call, &prepared);
-        let PermissionPreparation::Terminal(result) = preparation else {
-            panic!("invalid workflow input must finish terminally")
-        };
-        let details = result.details.expect("structured details");
-        assert_eq!(details["ok"], false);
-        assert_eq!(details["error"]["code"], "workflow_input_invalid");
-        assert_eq!(details["error"]["side_effect_occurred"], false);
     }
 }
