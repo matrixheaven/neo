@@ -560,7 +560,9 @@ pub enum WorkflowInterruptionReason {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct WorkflowPhase {
+    /// Stable phase identifier used by the Lua workflow source.
     pub id: String,
+    /// Plain-language purpose of this workflow phase.
     pub description: String,
 }
 

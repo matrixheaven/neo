@@ -2746,8 +2746,11 @@ pub struct TaskAnswerTool;
 #[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
 struct TaskAnswerInput {
+    /// Workflow task waiting for an answer.
     task_id: String,
+    /// Pending request identifier returned by the workflow.
     request_id: String,
+    /// JSON answer matching the pending request schema.
     answer: serde_json::Value,
 }
 
