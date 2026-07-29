@@ -4,8 +4,6 @@ use futures::StreamExt;
 use std::future::Future;
 use std::path::{Path, PathBuf};
 use std::pin::Pin;
-#[cfg(test)]
-use std::sync::atomic::AtomicBool;
 use std::sync::atomic::Ordering;
 use std::sync::{Arc, Mutex as StdMutex, RwLock};
 
@@ -17,8 +15,8 @@ use super::admission::{AdmitOutcome, WorkerPermit, WorkflowAdmission};
 use super::artifacts::{ArtifactKind, ArtifactMetadata, ArtifactStore, ArtifactValue};
 use super::error::{WorkflowError, WorkflowErrorCode};
 use super::journal::{
-    self, IncompleteInvocation, JournalEnvelope, JournalPayload, JournalRecord, JournalWriter,
-    canonical_input_hash, find_incomplete_invocations,
+    self, IncompleteInvocation, JournalEnvelope, JournalPayload, JournalWriter, WorkflowChildKey,
+    WorkflowChildKind, canonical_input_hash, find_incomplete_invocations,
 };
 use super::limits::WorkflowLimits;
 use super::output::{
@@ -50,25 +48,18 @@ pub mod lineage;
 #[path = "runtime_support.rs"]
 mod support;
 pub use lineage::{
-    ChildIsolationRequest, LineageSeedInvocation, ParentChildAuthority, ResolvedChildContext,
-    ResolvedChildIsolation, ResolvedWorktreeBinding, SeedArtifactRef, VerifiedPrefix,
-    child_isolation_provenance, cleanup_isolated_worktree, compute_prefix_digest,
-    compute_prefix_digest_v1, extract_verified_prefix, extract_verified_prefix_v1,
-    host_bounded_context_summary, import_seed_artifact, latest_eligible_sequence,
-    latest_eligible_sequence_v1, permission_rank, resolve_child_context, resolve_child_isolation,
+    ChildIsolationRequest, ParentChildAuthority, ResolvedChildContext, ResolvedChildIsolation,
+    ResolvedWorktreeBinding, child_isolation_provenance, cleanup_isolated_worktree,
+    host_bounded_context_summary, permission_rank, resolve_child_context, resolve_child_isolation,
     resolve_child_model, resolve_child_permission, resolve_child_tool_ceiling,
-    resolve_child_worktree, seed_pair_count_from_journal, split_usage_for_seed,
+    resolve_child_worktree,
 };
 use support::{
-    ReplayEntry, RunControl, add_usage, aggregate_record_usage, aggregate_usage, bounded_summary,
-    compact_resource_limited_outcome, current_timestamp_ms, failure_count, final_result,
-    interrupted_outcome, invocation_count, last_record_state, latest_log_summary,
-    latest_record_report_summary, latest_report_summary, projection_timestamps,
-    record_projection_timestamps, recovered_phase, recovered_record_phase,
-    recovered_record_reports, recovered_reports, replay_entries, replay_record_entries,
-    report_summary,
+    ReplayEntry, RunControl, add_usage, aggregate_usage, bounded_resource_limited_outcome,
+    bounded_summary, current_timestamp_ms, failure_count, final_result, interrupted_outcome,
+    invocation_count, latest_log_summary, latest_report_summary, projection_timestamps,
+    recovered_phase, recovered_reports, replay_entries, report_summary,
 };
-pub use support::{ReplayPrefix, compute_replay_prefix};
 
 type RunnerFuture = Pin<Box<dyn Future<Output = Result<(), WorkflowError>> + Send>>;
 type Runner = dyn Fn(WorkflowHandle, WorkflowRunMetadata, PathBuf) -> RunnerFuture + Send + Sync;
@@ -132,11 +123,10 @@ pub struct WorkflowLaunchRequest {
     pub script: String,
     pub args: serde_json::Value,
     pub launch_source: String,
-    pub parent_run_id: Option<WorkflowId>,
     /// Pinned final `output_schema` JSON for the production Lua runner.
     ///
-    /// Required for V2 definition-backed launches; optional only for legacy
-    /// fixture/harness paths that attach schemas via [`LuaWorkflowRunner::with_final_schema`].
+    /// Required for definition-backed launches; optional only for fixture/harness
+    /// paths that attach schemas via [`LuaWorkflowRunner::with_final_schema`].
     pub output_schema: Option<serde_json::Value>,
     /// Optional user-facing display name for the Operator and completion delivery.
     pub display_name: Option<String>,
@@ -148,23 +138,12 @@ pub struct WorkflowLaunchRequest {
     pub inline_unsaved: bool,
 }
 
-/// Explicit linked-run / V2-upgrade launch (design §34). Requires fresh authorization.
-#[derive(Debug, Clone)]
-pub struct LinkedRunRequest {
-    pub parent_run_id: WorkflowId,
-    /// When `None`, imports the latest eligible completed checkpoint.
-    pub checkpoint: Option<super::state::WorkflowCheckpoint>,
-    pub link_reason: String,
-    pub launch: WorkflowLaunchRequest,
-}
-
 fn metadata_for_request(run_id: WorkflowId, request: WorkflowLaunchRequest) -> WorkflowRunMetadata {
     use sha2::{Digest, Sha256};
 
     let script_sha256 = format!("{:x}", Sha256::digest(request.script.as_bytes()));
     WorkflowRunMetadata {
         run_id,
-        parent_run_id: request.parent_run_id,
         name: request.name,
         description: request.description,
         phases: request.phases,
@@ -172,7 +151,6 @@ fn metadata_for_request(run_id: WorkflowId, request: WorkflowLaunchRequest) -> W
         script_sha256,
         args: request.args,
         launch_source: request.launch_source,
-        journal_format_version: journal::JOURNAL_FORMAT_V3,
         output_schema: request.output_schema,
         display_name: request.display_name,
         input_schema: request.input_schema,
@@ -186,13 +164,8 @@ pub struct WorkflowOutput {
     pub metadata: WorkflowRunMetadata,
     pub state: WorkflowState,
     pub current_phase: Option<String>,
-    /// V1 journal projection only; V2 runs leave this empty (use journal scan APIs).
-    pub invocations: Vec<JournalRecord>,
     pub failure_count: u64,
     pub actual_usage: Option<AgentTokenUsage>,
-    /// Usage imported from lineage seed; never charged to actual_usage.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub inherited_usage: Option<AgentTokenUsage>,
     pub terminal_reason: Option<String>,
     pub reports: Vec<serde_json::Value>,
     /// Canonical final result (inline or artifact-backed). Never synthesized from reports.
@@ -210,10 +183,6 @@ struct RunState {
     invocation_count: u64,
     failure_count: u64,
     actual_usage: Option<AgentTokenUsage>,
-    /// Token usage inherited from lineage seed (display only).
-    inherited_usage: Option<AgentTokenUsage>,
-    /// Completed seed host-call pairs that must match before any new effect.
-    seed_entry_count: usize,
     projection_sequence: Option<u64>,
     started_at_ms: Option<u64>,
     updated_at_ms: Option<u64>,
@@ -229,10 +198,11 @@ struct RunState {
     /// Active worker+VM admission permit; released on every exit path.
     worker_permit: Option<WorkerPermit>,
     current_invocation: Option<String>,
+    current_invocation_kind: Option<WorkflowInvocationKind>,
     replay_entries: Vec<ReplayEntry>,
     replay_cursor: usize,
     replay_live: bool,
-    /// V2 journal writer. Taken out of this field for the duration of blocking
+    /// Journal writer. Taken out of this field for the duration of blocking
     /// journal I/O so the async run mutex never crosses file sync.
     journal: Option<SharedJournal>,
     final_result: Option<WorkflowFinalResultMetadata>,
@@ -240,8 +210,6 @@ struct RunState {
     pending_user_input: Option<PendingUserInput>,
     /// Run-scoped immutable artifact store (visibility requires journal commit).
     artifacts: ArtifactStore,
-    /// V1 durable artifacts are inspectable projections only; no append path.
-    v1_read_only: bool,
 }
 
 impl RunState {
@@ -252,7 +220,7 @@ impl RunState {
             state: self.state,
             current_phase: self.current_phase.clone(),
             projection_sequence: self.projection_sequence,
-            recovery_failure: self.journal.is_none() && !self.v1_read_only,
+            recovery_failure: self.journal.is_none(),
             started_at_ms: self.started_at_ms,
             updated_at_ms: self.updated_at_ms,
             invocation_count: self.invocation_count,
@@ -261,7 +229,6 @@ impl RunState {
             latest_log_summary: self.latest_log_summary.clone(),
             latest_report_summary: self.latest_report_summary.clone(),
             terminal_reason: self.terminal_reason.clone(),
-            steps: Vec::new(),
             display_name: self
                 .metadata
                 .display_name
@@ -285,8 +252,6 @@ pub struct WorkflowRuntime {
     runner: Arc<RwLock<Option<Arc<Runner>>>>,
     recovery_resolver: Arc<RwLock<Option<Arc<RecoveryResolver>>>>,
     projection_emitter: Arc<RwLock<Option<Arc<ProjectionEmitter>>>>,
-    #[cfg(test)]
-    rollback_remove_failure: Arc<AtomicBool>,
     /// When set, TaskOutput I/O sleeps this long after releasing the run lock.
     /// Integration tests inject delay to prove I/O does not hold the run mutex.
     output_io_delay_ms: Arc<std::sync::atomic::AtomicU64>,
@@ -319,8 +284,6 @@ impl WorkflowRuntime {
             runner: Arc::new(RwLock::new(None)),
             recovery_resolver: Arc::new(RwLock::new(None)),
             projection_emitter: Arc::new(RwLock::new(None)),
-            #[cfg(test)]
-            rollback_remove_failure: Arc::new(AtomicBool::new(false)),
             output_io_delay_ms: Arc::new(std::sync::atomic::AtomicU64::new(0)),
         }
     }
@@ -472,7 +435,7 @@ impl WorkflowRuntime {
         Ok(())
     }
 
-    /// Create a V2 run: durable `run.json` + `RunCreated` + `Queued` before any
+    /// Create a run: durable `run.json` + `RunCreated` + `Queued` before any
     /// task registration or worker start. Failure rolls back only a never-started
     /// directory (nothing is registered in the runtime map until durability).
     pub async fn create_run(
@@ -522,7 +485,8 @@ impl WorkflowRuntime {
 
         let durable_create = (|| {
             journal::write_run_metadata(&run_dir, &metadata, &self.limits)?;
-            let mut writer = JournalWriter::open(&run_dir.join("journal.jsonl"), run_id.clone())?;
+            let mut writer =
+                JournalWriter::open(&run_dir.join("journal.jsonl"), run_id.clone(), &self.limits)?;
             let timestamp_ms = current_timestamp_ms();
             let created = effect::prepare_run_created(
                 &writer,
@@ -551,9 +515,10 @@ impl WorkflowRuntime {
         };
 
         let control = Arc::new(RunControl::new());
-        let artifacts = ArtifactStore::open(&run_dir, run_id.clone()).inspect_err(|_error| {
+        let artifacts = ArtifactStore::open(&run_dir, run_id.clone()).map_err(|error| {
             self.admission.release_storage_owner(run_id.as_str());
             let _ = std::fs::remove_dir_all(&run_dir);
+            error
         })?;
         let state = Arc::new(Mutex::new(RunState {
             metadata,
@@ -562,8 +527,6 @@ impl WorkflowRuntime {
             invocation_count: 0,
             failure_count: 0,
             actual_usage: None,
-            inherited_usage: None,
-            seed_entry_count: 0,
             projection_sequence: Some(projection_sequence),
             started_at_ms: Some(started_at_ms),
             updated_at_ms: Some(started_at_ms),
@@ -577,6 +540,7 @@ impl WorkflowRuntime {
             worker_join: None,
             worker_permit: None,
             current_invocation: None,
+            current_invocation_kind: None,
             replay_entries: Vec::new(),
             replay_cursor: 0,
             replay_live: false,
@@ -584,266 +548,6 @@ impl WorkflowRuntime {
             final_result: None,
             pending_user_input: None,
             artifacts,
-            v1_read_only: false,
-        }));
-        self.runs
-            .lock()
-            .await
-            .insert(run_id.0.clone(), Arc::clone(&state));
-
-        Ok(WorkflowHandle {
-            run_id,
-            control,
-            runtime: self.clone(),
-        })
-    }
-
-    /// Create a linked V2 run from a verified parent checkpoint (design §34).
-    ///
-    /// Imports the completed invocation prefix and referenced artifacts into the
-    /// new journal. Never mutates the parent run (terminal or V1 read-only).
-    pub async fn create_linked_run(
-        &self,
-        session_dir: &Path,
-        request: LinkedRunRequest,
-    ) -> Result<WorkflowHandle, WorkflowError> {
-        self.validate_launch_request(&request.launch)?;
-
-        let parent_run_dir = journal::run_dir(session_dir, &request.parent_run_id);
-        if !parent_run_dir.exists() {
-            return Err(WorkflowError::NotFound(format!(
-                "parent workflow run {} not found",
-                request.parent_run_id.as_str()
-            )));
-        }
-
-        // Snapshot parent durable bytes before any child work (immutability proof).
-        let parent_meta_path = parent_run_dir.join("run.json");
-        let parent_journal_path = parent_run_dir.join("journal.jsonl");
-        let parent_meta_before = std::fs::read(&parent_meta_path)
-            .map_err(|e| WorkflowError::Journal(format!("read parent run.json: {e}")))?;
-        let parent_journal_before = std::fs::read(&parent_journal_path)
-            .map_err(|e| WorkflowError::Journal(format!("read parent journal: {e}")))?;
-
-        let parent_meta = journal::read_run_metadata(&parent_run_dir)?;
-        if parent_meta.run_id != request.parent_run_id {
-            return Err(WorkflowError::coded(
-                super::error::WorkflowErrorCode::LineageMismatch,
-                "parent run.json id does not match request parent_run_id",
-            ));
-        }
-
-        let verified = if parent_meta.journal_format_version == journal::JOURNAL_FORMAT_V1 {
-            let records = journal::read_journal(&parent_journal_path)?;
-            lineage::extract_verified_prefix_v1(
-                &parent_meta,
-                &records,
-                request.checkpoint.as_ref(),
-                &request.link_reason,
-            )?
-        } else {
-            let envelopes =
-                journal::collect_journal(&parent_journal_path, Some(&parent_meta.run_id))?;
-            lineage::extract_verified_prefix(
-                &parent_meta,
-                &parent_run_dir,
-                &envelopes,
-                request.checkpoint.as_ref(),
-                &request.link_reason,
-            )?
-        };
-
-        // Parent bytes must still match the pre-import snapshot (no parent mutation).
-        let parent_meta_after = std::fs::read(&parent_meta_path)
-            .map_err(|e| WorkflowError::Journal(format!("re-read parent run.json: {e}")))?;
-        let parent_journal_after = std::fs::read(&parent_journal_path)
-            .map_err(|e| WorkflowError::Journal(format!("re-read parent journal: {e}")))?;
-        if parent_meta_before != parent_meta_after || parent_journal_before != parent_journal_after
-        {
-            return Err(WorkflowError::coded(
-                super::error::WorkflowErrorCode::LineageMismatch,
-                "parent run mutated during linked import",
-            ));
-        }
-
-        // Optionally verify in-memory parent state is unchanged when loaded.
-        if let Ok(parent_state) = self.run_state(&request.parent_run_id).await {
-            let guard = parent_state.lock().await;
-            let _parent_state_snapshot = (guard.state, guard.metadata.clone());
-            drop(guard);
-            // no writes to parent_state
-            let _ = _parent_state_snapshot;
-        }
-
-        let mut launch = request.launch;
-        launch.parent_run_id = Some(request.parent_run_id.clone());
-
-        let (run_id, run_dir) = loop {
-            let run_id = WorkflowId::generate();
-            let run_dir = journal::run_dir(session_dir, &run_id);
-            if !run_dir.exists() {
-                break (run_id, run_dir);
-            }
-        };
-        let metadata = metadata_for_request(run_id.clone(), launch);
-
-        let storage_reservation = self
-            .admission
-            .try_reserve_storage(run_id.as_str(), self.limits.run_storage_reservation_bytes())?;
-        storage_reservation.commit();
-
-        let seed_entry_count = verified.seed_invocations.len();
-        let inherited_usage = verified.inherited_usage;
-        let replay_entries: Vec<ReplayEntry> = verified
-            .seed_invocations
-            .iter()
-            .map(|seed| ReplayEntry {
-                invocation_id: seed.invocation_id.clone(),
-                call_index: seed.call_index,
-                kind: seed.kind,
-                canonical_input_hash: seed.canonical_input_hash.clone(),
-                outcome: seed.outcome.clone(),
-            })
-            .collect();
-
-        let durable_create = (|| {
-            journal::write_run_metadata(&run_dir, &metadata, &self.limits)?;
-            let mut writer = JournalWriter::open(&run_dir.join("journal.jsonl"), run_id.clone())?;
-            let timestamp_ms = current_timestamp_ms();
-            let created = effect::prepare_run_created(
-                &writer,
-                run_id.clone(),
-                metadata.name.clone(),
-                Some(metadata.description.clone()).filter(|s| !s.is_empty()),
-                Some(metadata.launch_source.clone()),
-                timestamp_ms,
-            );
-            writer.append(&created, &self.limits)?;
-
-            let seed_envelope = JournalEnvelope::new(
-                writer.next_seq(),
-                timestamp_ms,
-                run_id.clone(),
-                JournalPayload::LineageSeedImported {
-                    lineage: verified.lineage.clone(),
-                    prefix_digest: Some(verified.checkpoint.prefix_digest.clone()),
-                },
-            );
-            writer.append(&seed_envelope, &self.limits)?;
-
-            for seed in &verified.seed_invocations {
-                let mut started = JournalEnvelope::new(
-                    writer.next_seq(),
-                    timestamp_ms,
-                    run_id.clone(),
-                    JournalPayload::InvocationStarted {
-                        invocation_id: seed.invocation_id.clone(),
-                        call_index: seed.call_index,
-                        kind: seed.kind,
-                        canonical_input: seed.canonical_input.clone(),
-                    },
-                );
-                started = started.with_canonical_input_hash(seed.canonical_input_hash.clone());
-                writer.append(&started, &self.limits)?;
-
-                let finished = JournalEnvelope::new(
-                    writer.next_seq(),
-                    timestamp_ms,
-                    run_id.clone(),
-                    JournalPayload::InvocationFinished {
-                        invocation_id: seed.invocation_id.clone(),
-                        outcome: seed.outcome.clone(),
-                    },
-                );
-                writer.append(&finished, &self.limits)?;
-            }
-
-            let mut store = ArtifactStore::open(&run_dir, run_id.clone())?;
-            for artifact in &verified.artifacts {
-                let staged = lineage::import_seed_artifact(&store, &self.limits, artifact)?;
-                let commit = JournalEnvelope::new(
-                    writer.next_seq(),
-                    timestamp_ms,
-                    run_id.clone(),
-                    JournalPayload::ArtifactCommitted {
-                        artifact_id: staged.artifact_id.clone(),
-                        sha256: staged.sha256.clone(),
-                        byte_len: staged.byte_len,
-                        media_type: Some(staged.media_type.clone()),
-                        logical_name: Some(staged.logical_name.clone()),
-                    },
-                );
-                writer.append(&commit, &self.limits)?;
-                store.mark_committed(staged.metadata())?;
-            }
-
-            let sequence = writer.next_seq().saturating_sub(1);
-            Ok::<_, WorkflowError>((writer, store, sequence, timestamp_ms))
-        })();
-
-        let (writer, artifacts, projection_sequence, started_at_ms) = match durable_create {
-            Ok(durable) => durable,
-            Err(error) => {
-                self.admission.release_storage_owner(run_id.as_str());
-                let _ = std::fs::remove_dir_all(&run_dir);
-                return Err(error);
-            }
-        };
-
-        // Final parent immutability check after child durable write.
-        let parent_meta_final = std::fs::read(&parent_meta_path).unwrap_or_default();
-        let parent_journal_final = std::fs::read(&parent_journal_path).unwrap_or_default();
-        if parent_meta_before != parent_meta_final || parent_journal_before != parent_journal_final
-        {
-            self.admission.release_storage_owner(run_id.as_str());
-            let _ = std::fs::remove_dir_all(&run_dir);
-            return Err(WorkflowError::coded(
-                super::error::WorkflowErrorCode::LineageMismatch,
-                "parent run mutated during linked create",
-            ));
-        }
-
-        let control = Arc::new(RunControl::new());
-        let reports = recovered_reports(
-            &journal::collect_journal(&run_dir.join("journal.jsonl"), Some(&run_id))
-                .unwrap_or_default(),
-        );
-        let state = Arc::new(Mutex::new(RunState {
-            metadata,
-            state: WorkflowState::Queued,
-            current_phase: recovered_phase(
-                &journal::collect_journal(&run_dir.join("journal.jsonl"), Some(&run_id))
-                    .unwrap_or_default(),
-            ),
-            invocation_count: seed_entry_count as u64,
-            failure_count: 0,
-            actual_usage: None,
-            inherited_usage,
-            seed_entry_count,
-            projection_sequence: Some(projection_sequence),
-            started_at_ms: Some(started_at_ms),
-            updated_at_ms: Some(started_at_ms),
-            latest_log_summary: latest_log_summary(&replay_entries),
-            latest_report_summary: latest_report_summary(
-                &journal::collect_journal(&run_dir.join("journal.jsonl"), Some(&run_id))
-                    .unwrap_or_default(),
-            ),
-            terminal_reason: None,
-            reports,
-            run_dir,
-            control: Arc::clone(&control),
-            worker_active: false,
-            worker_join: None,
-            worker_permit: None,
-            current_invocation: None,
-            replay_entries,
-            replay_cursor: 0,
-            replay_live: false,
-            journal: Some(Arc::new(StdMutex::new(writer))),
-            final_result: None,
-            pending_user_input: None,
-            artifacts,
-            v1_read_only: false,
         }));
         self.runs
             .lock()
@@ -876,12 +580,6 @@ impl WorkflowRuntime {
             }
             guard.run_dir.clone()
         };
-        #[cfg(test)]
-        if self.rollback_remove_failure.load(Ordering::Acquire) {
-            return Err(WorkflowError::Journal(
-                "injected rollback removal failure".to_owned(),
-            ));
-        }
         std::fs::remove_dir_all(&run_dir)
             .map_err(|error| WorkflowError::Journal(error.to_string()))?;
         self.admission.release_storage_owner(run_id.as_str());
@@ -891,13 +589,8 @@ impl WorkflowRuntime {
         Ok(())
     }
 
-    #[cfg(test)]
-    pub(crate) fn inject_rollback_remove_failure(&self) {
-        self.rollback_remove_failure.store(true, Ordering::Release);
-    }
-
     /// Persist a terminal failure if worker startup fails after durable
-    /// creation. The registered task remains inspectable through `TaskOutput`.
+    /// creation. The registered task remains available through `TaskOutput`.
     pub async fn fail_worker_start(
         &self,
         run_id: &WorkflowId,
@@ -963,6 +656,7 @@ impl WorkflowRuntime {
                 } else {
                     guard.worker_active = false;
                     guard.current_invocation = None;
+                    guard.current_invocation_kind = None;
                     self.release_worker_admission_locked(&mut guard);
                     return Err(WorkflowError::Host(
                         "workflow run directory has no session parent".to_owned(),
@@ -1013,6 +707,51 @@ impl WorkflowRuntime {
         Ok(self.run_state(run_id).await?.lock().await.snapshot())
     }
 
+    pub async fn operator_snapshot(
+        &self,
+        run_id: &WorkflowId,
+        task_id: &str,
+    ) -> Result<super::WorkflowOperatorSnapshot, WorkflowError> {
+        let state = self.run_state(run_id).await?;
+        let guard = state.lock().await;
+        let pending_user = guard.pending_user_input.clone().filter(|pending| {
+            guard.state == WorkflowState::AwaitingUser && pending.answer.is_none()
+        });
+        let snapshot = guard.snapshot();
+        let metadata = guard.metadata.clone();
+        let journal_path = guard.journal_path();
+        drop(guard);
+        super::operator::project_snapshot(
+            task_id,
+            &snapshot,
+            &metadata,
+            pending_user,
+            &journal_path,
+            self.limits.journal_record_bytes,
+            self.limits.journal_total_bytes,
+        )
+    }
+
+    pub async fn operator_child_page(
+        &self,
+        run_id: &WorkflowId,
+        request: &super::WorkflowOperatorRequest,
+    ) -> Result<super::WorkflowChildPage, WorkflowError> {
+        let state = self.run_state(run_id).await?;
+        let guard = state.lock().await;
+        let metadata = guard.metadata.clone();
+        let journal_path = guard.journal_path();
+        drop(guard);
+        super::operator::project_child_page(
+            run_id,
+            &metadata,
+            request,
+            &journal_path,
+            self.limits.journal_record_bytes,
+            self.limits.journal_total_bytes,
+        )
+    }
+
     pub async fn output(&self, run_id: &WorkflowId) -> Result<WorkflowOutput, WorkflowError> {
         // Bounded projection only: never load or return a complete journal here.
         // Use `task_output` for paged journal/artifact views (design §35).
@@ -1021,10 +760,8 @@ impl WorkflowRuntime {
             metadata: materials.metadata,
             state: materials.state,
             current_phase: materials.current_phase,
-            invocations: Vec::new(),
             failure_count: materials.failure_count,
             actual_usage: materials.actual_usage,
-            inherited_usage: materials.inherited_usage,
             terminal_reason: materials.terminal_reason,
             reports: materials.reports,
             final_result: materials.final_result,
@@ -1060,10 +797,12 @@ impl WorkflowRuntime {
         } else {
             None
         };
-        Ok(TaskOutputMaterials {
+        let journal = guard.journal.clone();
+        let mut materials = TaskOutputMaterials {
             run_id: guard.metadata.run_id.clone(),
             journal_path: guard.journal_path(),
-            journal_format_version: guard.metadata.journal_format_version,
+            journal_record_bytes: self.limits.journal_record_bytes,
+            journal_total_bytes: self.limits.journal_total_bytes,
             metadata: guard.metadata.clone(),
             state: guard.state,
             current_phase: guard.current_phase.clone(),
@@ -1071,7 +810,6 @@ impl WorkflowRuntime {
             invocation_count: guard.invocation_count,
             failure_count: guard.failure_count,
             actual_usage: guard.actual_usage,
-            inherited_usage: guard.inherited_usage,
             terminal_reason: guard.terminal_reason.clone(),
             latest_log_summary: guard.latest_log_summary.clone(),
             latest_report_summary: guard.latest_report_summary.clone(),
@@ -1085,7 +823,30 @@ impl WorkflowRuntime {
             queued_child_count: 0,
             terminal_child_count: 0,
             admission_wait_reason,
-        })
+        };
+        drop(guard);
+
+        if let Some(journal) = journal {
+            let writer = journal
+                .lock()
+                .map_err(|_| WorkflowError::Host("workflow journal lock poisoned".to_owned()))?;
+            let index = writer.index();
+            materials.started_child_count =
+                index.started_children.len().try_into().unwrap_or(u64::MAX);
+            materials.terminal_child_count =
+                index.finished_children.len().try_into().unwrap_or(u64::MAX);
+            materials.queued_child_count = index
+                .queued_children
+                .iter()
+                .filter(|key| {
+                    !index.started_children.contains(*key)
+                        && !index.finished_children.contains(*key)
+                })
+                .count()
+                .try_into()
+                .unwrap_or(u64::MAX);
+        }
+        Ok(materials)
     }
 
     /// Bounded TaskOutput page. Journal/artifact I/O runs outside the run lock.
@@ -1157,11 +918,6 @@ impl WorkflowRuntime {
         let state = self.run_state(run_id).await?;
         {
             let guard = state.lock().await;
-            if guard.v1_read_only {
-                return Err(WorkflowError::InvalidOperation(
-                    "linked_upgrade_required".to_owned(),
-                ));
-            }
             // Ordinary resume cannot bypass durable AwaitingUser.
             if guard.state == WorkflowState::AwaitingUser {
                 return Err(WorkflowError::coded(
@@ -1183,9 +939,12 @@ impl WorkflowRuntime {
         {
             let mut guard = state.lock().await;
             guard.control.clear_pause()?;
-            if let Ok(envelopes) =
-                journal::collect_journal(&guard.journal_path(), Some(&guard.metadata.run_id))
-            {
+            if let Ok(envelopes) = journal::collect_journal(
+                &guard.journal_path(),
+                Some(&guard.metadata.run_id),
+                self.limits.journal_record_bytes,
+                self.limits.journal_total_bytes,
+            ) {
                 guard.replay_entries = replay_entries(&envelopes);
             }
             guard.replay_cursor = 0;
@@ -1268,11 +1027,6 @@ impl WorkflowRuntime {
         let state = self.run_state(run_id).await?;
         {
             let guard = state.lock().await;
-            if guard.v1_read_only {
-                return Err(WorkflowError::InvalidOperation(
-                    "v1 workflow projections are read-only".to_owned(),
-                ));
-            }
             if guard.state != WorkflowState::Running {
                 return Err(WorkflowError::InvalidInput(
                     "await_user requires running state".to_owned(),
@@ -1315,7 +1069,11 @@ impl WorkflowRuntime {
                 run_id_owned,
                 JournalPayload::UserInputRequested {
                     request_id: request_id.clone(),
-                    prompt: Some(encode_user_input_prompt(&prepared)),
+                    prompt: prepared.prompt.clone(),
+                    answer_schema: prepared.answer_schema.clone(),
+                    default: prepared.default.clone(),
+                    title: prepared.title.clone(),
+                    answer_policy: prepared.answer_policy,
                 },
             )
         };
@@ -1389,11 +1147,6 @@ impl WorkflowRuntime {
 
         {
             let guard = state.lock().await;
-            if guard.v1_read_only {
-                return Err(WorkflowError::InvalidOperation(
-                    "v1 workflow projections are read-only".to_owned(),
-                ));
-            }
             if guard.state != WorkflowState::AwaitingUser {
                 return Err(WorkflowError::coded(
                     WorkflowErrorCode::InvalidOperation,
@@ -1458,9 +1211,12 @@ impl WorkflowRuntime {
                 pending.answer = Some(value.clone());
             }
             // Reset replay so the next worker pass can return the journaled answer.
-            if let Ok(envelopes) =
-                journal::collect_journal(&guard.journal_path(), Some(&guard.metadata.run_id))
-            {
+            if let Ok(envelopes) = journal::collect_journal(
+                &guard.journal_path(),
+                Some(&guard.metadata.run_id),
+                self.limits.journal_record_bytes,
+                self.limits.journal_total_bytes,
+            ) {
                 guard.replay_entries = replay_entries(&envelopes);
             }
             guard.replay_cursor = 0;
@@ -1497,7 +1253,12 @@ impl WorkflowRuntime {
             let guard = state.lock().await;
             guard.journal_path()
         };
-        let envelopes = journal::collect_journal(&journal_path, Some(run_id))?;
+        let envelopes = journal::collect_journal(
+            &journal_path,
+            Some(run_id),
+            self.limits.journal_record_bytes,
+            self.limits.journal_total_bytes,
+        )?;
         Ok(user_input_from_envelopes(&envelopes, request_id))
     }
 
@@ -1560,11 +1321,6 @@ impl WorkflowRuntime {
         // Artifact I/O must not hold the async run mutex (design §23 / §35).
         let (journal, store) = {
             let guard = state.lock().await;
-            if guard.v1_read_only {
-                return Err(WorkflowError::InvalidOperation(
-                    "v1 workflow projections are read-only".to_owned(),
-                ));
-            }
             if guard.state.is_terminal() {
                 return Err(WorkflowError::InvalidInput(
                     "cannot commit artifact on terminal run".to_owned(),
@@ -1711,11 +1467,6 @@ impl WorkflowRuntime {
         let state = self.run_state(run_id).await?;
         let (journal, run_id_owned) = {
             let guard = state.lock().await;
-            if guard.v1_read_only {
-                return Err(WorkflowError::InvalidOperation(
-                    "v1 workflow projections are read-only".to_owned(),
-                ));
-            }
             (
                 guard.journal.clone().ok_or_else(|| {
                     WorkflowError::Journal("workflow journal is unavailable".to_owned())
@@ -1804,8 +1555,8 @@ impl WorkflowRuntime {
         Ok(())
     }
 
-    /// Durable heterogeneous swarm batch: one outer Swarm invocation plus per-item
-    /// `SwarmItemQueued` / `SwarmItemStarted` / `SwarmItemFinished` records.
+    /// Durable heterogeneous swarm batch: one outer Swarm invocation plus one
+    /// generic child lifecycle for every item.
     ///
     /// Children are created solely through [`MultiAgentRuntime::prepare_swarm_batch`].
     /// Completed items (durable finished) are never replayed; pause blocks new starts;
@@ -1836,7 +1587,7 @@ impl WorkflowRuntime {
             WorkflowInvocationKind::Swarm,
             request.canonical_input,
             true,
-            move |_invocation| {
+            move |invocation| {
                 let runtime = runtime;
                 let run_id = run_id_for_effect;
                 let multi_agent = multi_agent_for_effect;
@@ -1844,7 +1595,13 @@ impl WorkflowRuntime {
                 let request = effect_request;
                 async move {
                     match runtime
-                        .run_swarm_batch_effect(&run_id, request, multi_agent, deps)
+                        .run_swarm_batch_effect(
+                            &run_id,
+                            &invocation.invocation_id,
+                            request,
+                            multi_agent,
+                            deps,
+                        )
                         .await
                     {
                         Ok(outcome) => outcome,
@@ -1867,6 +1624,7 @@ impl WorkflowRuntime {
     async fn run_swarm_batch_effect(
         &self,
         run_id: &WorkflowId,
+        parent_invocation_id: &str,
         request: SwarmBatchRequest,
         multi_agent: MultiAgentRuntime,
         deps: ChildRuntimeDeps,
@@ -1879,14 +1637,21 @@ impl WorkflowRuntime {
             ..
         } = request;
         let swarm_id = multi_agent.new_swarm_id();
+        let phase_id = self.current_phase(run_id).await?;
         // Queue all items durably before any dispatch.
         for plan in &plans {
-            self.append_swarm_item(
+            self.append_child_event(
                 run_id,
-                JournalPayload::SwarmItemQueued {
-                    swarm_id: swarm_id.clone(),
-                    item_id: plan.item_id.clone(),
-                    canonical_input: Some(serde_json::to_value(plan).unwrap_or_default()),
+                JournalPayload::ChildQueued {
+                    child_key: WorkflowChildKey::SwarmItem {
+                        swarm_id: swarm_id.clone(),
+                        item_id: plan.item_id.clone(),
+                    },
+                    child_kind: WorkflowChildKind::SwarmItem,
+                    invocation_id: parent_invocation_id.to_owned(),
+                    phase_id: phase_id.clone(),
+                    title: plan.title.clone().or_else(|| Some(plan.item_label.clone())),
+                    role: plan.role.map(|role| role.as_str().to_owned()),
                 },
             )
             .await?;
@@ -1942,7 +1707,7 @@ impl WorkflowRuntime {
                 }
                 let item_id = plan.item_id.clone();
                 // Resolve context/ceiling/worktree before any child start or
-                // SwarmItemStarted append (design §32). Unsupported isolation
+                // Durable child start. Unsupported isolation
                 // fails closed; tool_allow may only reduce; permission cannot escalate.
                 let workspace = deps
                     .config
@@ -1997,12 +1762,14 @@ impl WorkflowRuntime {
                         );
                         let invocation_id =
                             format!("swarm_item_{}", uuid::Uuid::new_v4().as_simple());
-                        self.append_swarm_item(
+                        self.append_child_event(
                             run_id,
-                            JournalPayload::SwarmItemStarted {
-                                swarm_id: swarm_id.clone(),
-                                item_id: item_id.clone(),
-                                invocation_id: invocation_id.clone(),
+                            JournalPayload::ChildStarted {
+                                child_key: WorkflowChildKey::SwarmItem {
+                                    swarm_id: swarm_id.clone(),
+                                    item_id: item_id.clone(),
+                                },
+                                agent_id: Some(child.agent.id.as_str().to_owned()),
                             },
                         )
                         .await?;
@@ -2028,8 +1795,6 @@ impl WorkflowRuntime {
                     }
                     Err(error) => {
                         // Fail before child start: durable item finish with isolation error.
-                        let invocation_id =
-                            format!("swarm_item_{}", uuid::Uuid::new_v4().as_simple());
                         let outcome = WorkflowInvocationOutcome {
                             ok: false,
                             status: WorkflowOutcomeStatus::Failed,
@@ -2043,22 +1808,29 @@ impl WorkflowRuntime {
                             actual_usage: None,
                             child_refs: Vec::new(),
                         };
-                        self.append_swarm_item(
+                        self.append_child_event(
                             run_id,
-                            JournalPayload::SwarmItemStarted {
-                                swarm_id: swarm_id.clone(),
-                                item_id: item_id.clone(),
-                                invocation_id: invocation_id.clone(),
+                            JournalPayload::ChildStarted {
+                                child_key: WorkflowChildKey::SwarmItem {
+                                    swarm_id: swarm_id.clone(),
+                                    item_id: item_id.clone(),
+                                },
+                                agent_id: Some(child.agent.id.as_str().to_owned()),
                             },
                         )
                         .await?;
-                        self.append_swarm_item(
+                        self.append_child_event(
                             run_id,
-                            JournalPayload::SwarmItemFinished {
-                                swarm_id: swarm_id.clone(),
-                                item_id: item_id.clone(),
-                                invocation_id,
-                                outcome: outcome.clone(),
+                            JournalPayload::ChildFinished {
+                                child_key: WorkflowChildKey::SwarmItem {
+                                    swarm_id: swarm_id.clone(),
+                                    item_id: item_id.clone(),
+                                },
+                                agent_id: Some(child.agent.id.as_str().to_owned()),
+                                status: outcome.status,
+                                summary: outcome.summary.clone(),
+                                actual_usage: outcome.actual_usage,
+                                error: (!outcome.ok).then(|| outcome.summary.clone()),
                             },
                         )
                         .await?;
@@ -2086,13 +1858,18 @@ impl WorkflowRuntime {
                         &output,
                     )
                     .await?;
-                self.append_swarm_item(
+                self.append_child_event(
                     run_id,
-                    JournalPayload::SwarmItemFinished {
-                        swarm_id: swarm_id.clone(),
-                        item_id: item_id.clone(),
-                        invocation_id,
-                        outcome: outcome.clone(),
+                    JournalPayload::ChildFinished {
+                        child_key: WorkflowChildKey::SwarmItem {
+                            swarm_id: swarm_id.clone(),
+                            item_id: item_id.clone(),
+                        },
+                        agent_id: Some(output.snapshot.id.as_str().to_owned()),
+                        status: outcome.status,
+                        summary: outcome.summary.clone(),
+                        actual_usage: outcome.actual_usage,
+                        error: (!outcome.ok).then(|| outcome.summary.clone()),
                     },
                 )
                 .await?;
@@ -2129,13 +1906,18 @@ impl WorkflowRuntime {
                             interruption: None,
                         });
                     let _ = self
-                        .append_swarm_item(
+                        .append_child_event(
                             run_id,
-                            JournalPayload::SwarmItemFinished {
-                                swarm_id: swarm_id.clone(),
-                                item_id: item_id.clone(),
-                                invocation_id,
-                                outcome: outcome.clone(),
+                            JournalPayload::ChildFinished {
+                                child_key: WorkflowChildKey::SwarmItem {
+                                    swarm_id: swarm_id.clone(),
+                                    item_id: item_id.clone(),
+                                },
+                                agent_id: Some(output.snapshot.id.as_str().to_owned()),
+                                status: outcome.status,
+                                summary: outcome.summary.clone(),
+                                actual_usage: outcome.actual_usage,
+                                error: (!outcome.ok).then(|| outcome.summary.clone()),
                             },
                         )
                         .await;
@@ -2172,19 +1954,78 @@ impl WorkflowRuntime {
                             interruption: None,
                         });
                     let _ = self
-                        .append_swarm_item(
+                        .append_child_event(
                             run_id,
-                            JournalPayload::SwarmItemFinished {
-                                swarm_id: swarm_id.clone(),
-                                item_id: item_id.clone(),
-                                invocation_id,
-                                outcome: outcome.clone(),
+                            JournalPayload::ChildFinished {
+                                child_key: WorkflowChildKey::SwarmItem {
+                                    swarm_id: swarm_id.clone(),
+                                    item_id: item_id.clone(),
+                                },
+                                agent_id: Some(output.snapshot.id.as_str().to_owned()),
+                                status: outcome.status,
+                                summary: outcome.summary.clone(),
+                                actual_usage: outcome.actual_usage,
+                                error: (!outcome.ok).then(|| outcome.summary.clone()),
                             },
                         )
                         .await;
                     item_outcomes.push((item_id, outcome));
                 }
                 break;
+            }
+        }
+
+        let stopped = self.is_stop_requested(run_id).await;
+        let paused = self.is_pause_requested(run_id).await;
+        if stopped || paused {
+            for plan in &plans {
+                if finished.contains(&plan.item_id)
+                    || item_outcomes
+                        .iter()
+                        .any(|(item_id, _)| item_id == &plan.item_id)
+                {
+                    continue;
+                }
+                let status = if stopped {
+                    WorkflowOutcomeStatus::Cancelled
+                } else {
+                    WorkflowOutcomeStatus::Interrupted
+                };
+                let summary = if stopped {
+                    "cancelled before start"
+                } else {
+                    "paused before start"
+                };
+                let outcome = WorkflowInvocationOutcome {
+                    ok: false,
+                    status,
+                    summary: summary.to_owned(),
+                    details: serde_json::json!({"not_started": true}),
+                    actual_usage: None,
+                    child_refs: Vec::new(),
+                    interruption: None,
+                };
+                let agent_id = active_plans
+                    .iter()
+                    .position(|candidate| candidate.item_id == plan.item_id)
+                    .and_then(|index| children.get(index))
+                    .map(|child| child.agent.id.as_str().to_owned());
+                self.append_child_event(
+                    run_id,
+                    JournalPayload::ChildFinished {
+                        child_key: WorkflowChildKey::SwarmItem {
+                            swarm_id: swarm_id.clone(),
+                            item_id: plan.item_id.clone(),
+                        },
+                        agent_id,
+                        status,
+                        summary: summary.to_owned(),
+                        actual_usage: None,
+                        error: Some(summary.to_owned()),
+                    },
+                )
+                .await?;
+                item_outcomes.push((plan.item_id.clone(), outcome));
             }
         }
 
@@ -2224,6 +2065,11 @@ impl WorkflowRuntime {
             .as_ref()
             .is_some_and(|s| s.children.iter().all(|c| c.agent.state.is_terminal()));
         let any_failed = item_outcomes.iter().any(|(_, o)| !o.ok);
+        let actual_usage = item_outcomes.iter().fold(None, |total, (_, outcome)| {
+            outcome
+                .actual_usage
+                .map_or(total, |usage| Some(add_usage(total, usage)))
+        });
         Ok(WorkflowInvocationOutcome {
             ok: all_terminal && !any_failed,
             status: if all_terminal && !any_failed {
@@ -2245,7 +2091,7 @@ impl WorkflowRuntime {
                 "items": ordered,
                 "swarm": final_snapshot,
             }),
-            actual_usage: None,
+            actual_usage,
             child_refs: Vec::new(),
             interruption: None,
         })
@@ -2318,7 +2164,7 @@ impl WorkflowRuntime {
         Ok(outcome)
     }
 
-    async fn append_swarm_item(
+    async fn append_child_event(
         &self,
         run_id: &WorkflowId,
         payload: JournalPayload,
@@ -2349,6 +2195,45 @@ impl WorkflowRuntime {
         Ok(())
     }
 
+    /// Durably bind a workflow-hosted direct delegate to its real agent id.
+    pub async fn bind_direct_delegate_agent(
+        &self,
+        origin: &WorkflowExecutionOrigin,
+        agent_id: &crate::multi_agent::AgentId,
+    ) -> Result<(), WorkflowError> {
+        let invocation_id = origin.invocation_id.as_deref().ok_or_else(|| {
+            WorkflowError::InvalidInput(
+                "direct delegate binding requires a workflow invocation id".to_owned(),
+            )
+        })?;
+        if origin.swarm_item_id.is_some() {
+            return Err(WorkflowError::InvalidInput(
+                "direct delegate binding cannot target a swarm item".to_owned(),
+            ));
+        }
+        let state = self.run_state(&origin.run_id).await?;
+        {
+            let guard = state.lock().await;
+            if guard.current_invocation.as_deref() != Some(invocation_id)
+                || guard.current_invocation_kind != Some(WorkflowInvocationKind::Delegate)
+            {
+                return Err(WorkflowError::InvalidInput(
+                    "direct delegate binding does not match the active invocation".to_owned(),
+                ));
+            }
+        }
+        self.append_child_event(
+            &origin.run_id,
+            JournalPayload::ChildStarted {
+                child_key: WorkflowChildKey::DirectDelegate {
+                    invocation_id: invocation_id.to_owned(),
+                },
+                agent_id: Some(agent_id.as_str().to_owned()),
+            },
+        )
+        .await
+    }
+
     async fn finished_swarm_item_ids(
         &self,
         run_id: &WorkflowId,
@@ -2364,10 +2249,10 @@ impl WorkflowRuntime {
         let writer = journal
             .lock()
             .map_err(|_| WorkflowError::Host("workflow journal lock poisoned".to_owned()))?;
-        let prefix = format!("{swarm_id}:");
+        let prefix = format!("swarm:{swarm_id}:");
         Ok(writer
             .index()
-            .finished_swarm_items
+            .finished_children
             .iter()
             .filter_map(|key| key.strip_prefix(&prefix).map(str::to_owned))
             .collect())
@@ -2379,6 +2264,11 @@ impl WorkflowRuntime {
         };
         let guard = state.lock().await;
         guard.control.pause_requested.load(Ordering::Acquire)
+    }
+
+    async fn current_phase(&self, run_id: &WorkflowId) -> Result<Option<String>, WorkflowError> {
+        let state = self.run_state(run_id).await?;
+        Ok(state.lock().await.current_phase.clone())
     }
 
     async fn is_stop_requested(&self, run_id: &WorkflowId) -> bool {
@@ -2541,7 +2431,12 @@ impl WorkflowRuntime {
         let path = guard.journal_path();
         let run = guard.metadata.run_id.clone();
         drop(guard);
-        let envelopes = journal::collect_journal(&path, Some(&run))?;
+        let envelopes = journal::collect_journal(
+            &path,
+            Some(&run),
+            self.limits.journal_record_bytes,
+            self.limits.journal_total_bytes,
+        )?;
         Ok(envelopes.iter().any(|env| {
             matches!(
                 &env.payload,
@@ -2696,49 +2591,22 @@ impl WorkflowRuntime {
                 return Ok(());
             }
         };
-        // V1 durable artifacts rehydrate as inspectable read-only projections.
-        if metadata.journal_format_version < journal::JOURNAL_FORMAT_V2 {
-            self.rehydrate_v1_readonly(run_dir, metadata, handles)
-                .await?;
-            return Ok(());
-        }
-
         let journal_path = run_dir.join("journal.jsonl");
-        let recovery =
-            match crate::workflow::recovery::recover_journal(&journal_path, Some(&metadata.run_id))
-            {
-                Ok(report) => report,
+        let mut writer =
+            match JournalWriter::open(&journal_path, metadata.run_id.clone(), &self.limits) {
+                Ok(writer) => writer,
                 Err(error) => {
                     handles.push(
                         self.insert_failed_run(
                             run_dir,
                             metadata,
-                            format!("journal recovery failed: {error}"),
+                            format!("journal open failed: {error}"),
                         )
                         .await,
                     );
                     return Ok(());
                 }
             };
-
-        let mut writer = match JournalWriter::open_recovered(
-            &journal_path,
-            metadata.run_id.clone(),
-            &recovery,
-        ) {
-            Ok(writer) => writer,
-            Err(error) => {
-                handles.push(
-                    self.insert_failed_run(
-                        run_dir,
-                        metadata,
-                        format!("journal open failed: {error}"),
-                    )
-                    .await,
-                );
-                return Ok(());
-            }
-        };
 
         // Reconcile durable starts without finishes via the production
         // (or test-injected) read-only resolver. Never relaunches effects.
@@ -2772,43 +2640,27 @@ impl WorkflowRuntime {
         // Crash after FinalResultRecorded / before Completed: append only the
         // missing terminal state. Never re-execute Lua or rewrite the result.
         if writer.index().final_result_seq.is_some() && writer.index().terminal_state.is_none() {
-            let envelopes = match journal::collect_journal(&journal_path, Some(&metadata.run_id)) {
-                Ok(envelopes) => envelopes,
-                Err(error) => {
-                    handles.push(
-                        self.insert_failed_run(
-                            run_dir,
-                            metadata,
-                            format!("corrupt journal: {error}"),
-                        )
-                        .await,
-                    );
-                    return Ok(());
-                }
-            };
-            let (previous, _) = support::last_state(&envelopes);
-            let previous = if previous.is_terminal() {
-                WorkflowState::Running
-            } else {
-                previous
-            };
-            // Completed is only legal from Running; if durable state drifted,
-            // still close only when a final result is present and nonterminal.
-            let target_previous = if previous.can_transition_to(WorkflowState::Completed) {
-                previous
-            } else {
-                WorkflowState::Running
-            };
             let timestamp_ms = current_timestamp_ms();
-            match effect::prepare_transition(
-                &writer,
-                metadata.run_id.clone(),
-                target_previous,
-                WorkflowState::Completed,
-                "recover_final_result",
-                WorkflowActor::Runtime,
-                timestamp_ms,
-            ) {
+            let prepared = writer
+                .index()
+                .current_state
+                .ok_or_else(|| {
+                    WorkflowError::Journal(
+                        "final-result recovery requires a durable current state".to_owned(),
+                    )
+                })
+                .and_then(|previous| {
+                    effect::prepare_transition(
+                        &writer,
+                        metadata.run_id.clone(),
+                        previous,
+                        WorkflowState::Completed,
+                        "recover_final_result",
+                        WorkflowActor::Runtime,
+                        timestamp_ms,
+                    )
+                });
+            match prepared {
                 Ok(prepared) => {
                     if let Err(error) =
                         effect::commit_transition(&mut writer, &prepared, &self.limits)
@@ -2853,7 +2705,12 @@ impl WorkflowRuntime {
             return Ok(());
         }
 
-        let mut envelopes = match journal::collect_journal(&journal_path, Some(&metadata.run_id)) {
+        let mut envelopes = match journal::collect_journal(
+            &journal_path,
+            Some(&metadata.run_id),
+            self.limits.journal_record_bytes,
+            self.limits.journal_total_bytes,
+        ) {
             Ok(records) if !records.is_empty() => records,
             Ok(_) => {
                 handles.push(
@@ -2903,32 +2760,36 @@ impl WorkflowRuntime {
                         );
                         return Ok(());
                     }
-                    envelopes =
-                        match journal::collect_journal(&journal_path, Some(&metadata.run_id)) {
-                            Ok(records) if !records.is_empty() => records,
-                            Ok(_) => {
-                                handles.push(
-                                    self.insert_failed_run(
-                                        run_dir,
-                                        metadata,
-                                        "host_exit recovery cleared journal".to_owned(),
-                                    )
-                                    .await,
-                                );
-                                return Ok(());
-                            }
-                            Err(error) => {
-                                handles.push(
-                                    self.insert_failed_run(
-                                        run_dir,
-                                        metadata,
-                                        format!("host_exit recovery reread failed: {error}"),
-                                    )
-                                    .await,
-                                );
-                                return Ok(());
-                            }
-                        };
+                    envelopes = match journal::collect_journal(
+                        &journal_path,
+                        Some(&metadata.run_id),
+                        self.limits.journal_record_bytes,
+                        self.limits.journal_total_bytes,
+                    ) {
+                        Ok(records) if !records.is_empty() => records,
+                        Ok(_) => {
+                            handles.push(
+                                self.insert_failed_run(
+                                    run_dir,
+                                    metadata,
+                                    "host_exit recovery cleared journal".to_owned(),
+                                )
+                                .await,
+                            );
+                            return Ok(());
+                        }
+                        Err(error) => {
+                            handles.push(
+                                self.insert_failed_run(
+                                    run_dir,
+                                    metadata,
+                                    format!("host_exit recovery reread failed: {error}"),
+                                )
+                                .await,
+                            );
+                            return Ok(());
+                        }
+                    };
                 }
                 Err(error) => {
                     handles.push(
@@ -2954,57 +2815,6 @@ impl WorkflowRuntime {
                 Some(Arc::new(StdMutex::new(writer))),
             )
             .await,
-        );
-        Ok(())
-    }
-
-    /// Rehydrate a V1 run as a read-only projection (no journal mutation).
-    async fn rehydrate_v1_readonly(
-        &self,
-        run_dir: PathBuf,
-        metadata: WorkflowRunMetadata,
-        handles: &mut Vec<WorkflowHandle>,
-    ) -> Result<(), WorkflowError> {
-        let journal_path = run_dir.join("journal.jsonl");
-        let records = match journal::read_journal(&journal_path) {
-            Ok(records) if !records.is_empty() => records,
-            Ok(_) => {
-                handles.push(
-                    self.insert_failed_run(
-                        run_dir,
-                        metadata,
-                        "corrupt journal: missing initial state".to_owned(),
-                    )
-                    .await,
-                );
-                return Ok(());
-            }
-            Err(error) => {
-                handles.push(
-                    self.insert_failed_run(run_dir, metadata, format!("corrupt journal: {error}"))
-                        .await,
-                );
-                return Ok(());
-            }
-        };
-
-        let (last_state, last_reason) = last_record_state(&records);
-        let final_state = if last_state.rehydrates_as_paused_host_exit() {
-            WorkflowState::Paused
-        } else {
-            last_state
-        };
-        let terminal_reason = if last_state.rehydrates_as_paused_host_exit() {
-            Some("host_exit".to_owned())
-        } else if final_state == WorkflowState::Paused || final_state.is_terminal() {
-            last_reason
-        } else {
-            None
-        };
-
-        handles.push(
-            self.insert_rehydrated_v1(run_dir, metadata, records, final_state, terminal_reason)
-                .await,
         );
         Ok(())
     }
@@ -3086,7 +2896,6 @@ impl WorkflowRuntime {
                 ));
             }
             if !guard.replay_live {
-                let within_seed = guard.replay_cursor < guard.seed_entry_count;
                 if let Some(entry) = guard.replay_entries.get(guard.replay_cursor) {
                     if entry.call_index == call_index
                         && entry.kind == kind
@@ -3096,24 +2905,6 @@ impl WorkflowRuntime {
                         guard.replay_cursor += 1;
                         return Ok(outcome);
                     }
-                    // Seed prefix must match exactly before any new external effect.
-                    if within_seed {
-                        return Err(WorkflowError::coded(
-                            super::error::WorkflowErrorCode::LineageMismatch,
-                            format!(
-                                "lineage seed mismatch at call_index {call_index}: expected hash {}, got {input_hash}",
-                                entry.canonical_input_hash
-                            ),
-                        ));
-                    }
-                } else if within_seed {
-                    return Err(WorkflowError::coded(
-                        super::error::WorkflowErrorCode::LineageMismatch,
-                        format!(
-                            "lineage seed exhausted early at call_index {call_index} (seed_entry_count={})",
-                            guard.seed_entry_count
-                        ),
-                    ));
                 }
                 guard.replay_live = true;
             }
@@ -3123,6 +2914,7 @@ impl WorkflowRuntime {
             })?;
             let run_id_owned = guard.metadata.run_id.clone();
             let control = Arc::clone(&guard.control);
+            let phase_id = guard.current_phase.clone();
             let invocation_id = format!("inv_{}", uuid::Uuid::new_v4().as_simple());
             let timestamp_ms = current_timestamp_ms();
             // Build envelope under journal std lock (no async lock held after this block ends).
@@ -3145,13 +2937,43 @@ impl WorkflowRuntime {
                 journal,
                 prepared_start,
                 control,
+                phase_id,
                 timestamp_ms,
             }
         };
 
         // --- reserve + durable InvocationStarted (no async run lock) ---
         let start_result = self.journal_io(&prepared.journal, |writer| {
-            effect::commit_invocation_start(writer, &prepared.prepared_start, &self.limits)
+            let mut sequence =
+                effect::commit_invocation_start(writer, &prepared.prepared_start, &self.limits)?;
+            if prepared.prepared_start.kind == WorkflowInvocationKind::Delegate {
+                let input = match &prepared.prepared_start.envelope.payload {
+                    JournalPayload::InvocationStarted {
+                        canonical_input: Some(input),
+                        ..
+                    } => input,
+                    _ => unreachable!("prepared delegate start must carry canonical input"),
+                };
+                let (title, role) = child_spec(input);
+                let child_key = WorkflowChildKey::DirectDelegate {
+                    invocation_id: prepared.prepared_start.invocation_id.clone(),
+                };
+                let queued = JournalEnvelope::new(
+                    writer.next_seq(),
+                    prepared.timestamp_ms,
+                    prepared.prepared_start.envelope.run_id.clone(),
+                    JournalPayload::ChildQueued {
+                        child_key: child_key.clone(),
+                        child_kind: WorkflowChildKind::Delegate,
+                        invocation_id: prepared.prepared_start.invocation_id.clone(),
+                        phase_id: prepared.phase_id.clone(),
+                        title,
+                        role,
+                    },
+                );
+                sequence = writer.append(&queued, &self.limits)?;
+            }
+            Ok(sequence)
         });
         let sequence = match start_result {
             Ok(sequence) => sequence,
@@ -3183,6 +3005,7 @@ impl WorkflowRuntime {
             let mut guard = state.lock().await;
             guard.invocation_count = guard.invocation_count.saturating_add(1);
             guard.current_invocation = Some(prepared.prepared_start.invocation_id.clone());
+            guard.current_invocation_kind = Some(kind);
             guard.projection_sequence = Some(sequence);
             guard.updated_at_ms = Some(prepared.timestamp_ms);
             self.emit_projection(&guard, WorkflowProjectionStage::Updated);
@@ -3219,6 +3042,19 @@ impl WorkflowRuntime {
         };
         let timestamp_ms = current_timestamp_ms();
 
+        if kind == WorkflowInvocationKind::Delegate {
+            self.journal_io(&journal, |writer| {
+                append_child_finished(
+                    writer,
+                    &invocation_id,
+                    &outcome,
+                    None,
+                    timestamp_ms,
+                    &self.limits,
+                )
+            })?;
+        }
+
         let prepared_finish = {
             let writer = journal
                 .lock()
@@ -3243,7 +3079,7 @@ impl WorkflowRuntime {
             }
             Err(WorkflowError::JournalRecordLimitExceeded { .. }) => {
                 let reason = "workflow invocation result exceeds journal record limit".to_owned();
-                let compact = compact_resource_limited_outcome(&reason, &outcome);
+                let bounded = bounded_resource_limited_outcome(&reason, &outcome);
                 let prepared = {
                     let writer = journal.lock().map_err(|_| {
                         WorkflowError::Host("workflow journal lock poisoned".to_owned())
@@ -3252,18 +3088,18 @@ impl WorkflowRuntime {
                         &writer,
                         run_id.clone(),
                         invocation_id.clone(),
-                        compact.clone(),
+                        bounded.clone(),
                         timestamp_ms,
                     )
                 };
                 let sequence = self.journal_io(&journal, |writer| {
                     effect::commit_invocation_finish(writer, &prepared, &self.limits)
                 })?;
-                (sequence, compact, Some(reason))
+                (sequence, bounded, Some(reason))
             }
             Err(WorkflowError::JournalTotalLimitExceeded) => {
                 let reason = "workflow journal total limit reached".to_owned();
-                let compact = compact_resource_limited_outcome(&reason, &outcome);
+                let bounded = bounded_resource_limited_outcome(&reason, &outcome);
                 let prepared = {
                     let writer = journal.lock().map_err(|_| {
                         WorkflowError::Host("workflow journal lock poisoned".to_owned())
@@ -3272,14 +3108,14 @@ impl WorkflowRuntime {
                         &writer,
                         run_id.clone(),
                         invocation_id.clone(),
-                        compact.clone(),
+                        bounded.clone(),
                         timestamp_ms,
                     )
                 };
                 let sequence = self.journal_io(&journal, |writer| {
                     effect::commit_invocation_finish(writer, &prepared, &self.limits)
                 })?;
-                (sequence, compact, Some(reason))
+                (sequence, bounded, Some(reason))
             }
             Err(error) => {
                 let mut guard = state.lock().await;
@@ -3294,6 +3130,7 @@ impl WorkflowRuntime {
         {
             let mut guard = state.lock().await;
             guard.current_invocation = None;
+            guard.current_invocation_kind = None;
             observe_outcome(&mut guard, kind, &outcome);
             guard.projection_sequence = Some(sequence);
             guard.updated_at_ms = Some(timestamp_ms);
@@ -3361,6 +3198,7 @@ impl WorkflowRuntime {
             guard.worker_active = false;
             guard.worker_join = None;
             guard.current_invocation = None;
+            guard.current_invocation_kind = None;
             self.release_worker_admission_locked(&mut guard);
             if guard.state.is_terminal()
                 || guard.state == WorkflowState::Paused
@@ -3492,15 +3330,19 @@ impl WorkflowRuntime {
             self.release_worker_admission_locked(&mut guard);
             if guard.state.is_terminal() || guard.state == WorkflowState::Paused {
                 guard.current_invocation = None;
+                guard.current_invocation_kind = None;
                 return Ok(());
             }
         }
 
         let current = {
             let guard = state.lock().await;
-            guard.current_invocation.clone()
+            guard
+                .current_invocation
+                .clone()
+                .map(|invocation_id| (invocation_id, guard.current_invocation_kind))
         };
-        if let Some(invocation_id) = current {
+        if let Some((invocation_id, invocation_kind)) = current {
             let journal = {
                 let guard = state.lock().await;
                 guard.journal.clone()
@@ -3521,9 +3363,27 @@ impl WorkflowRuntime {
                 };
                 let timestamp_ms = current_timestamp_ms();
                 let prepared = {
-                    let writer = journal.lock().map_err(|_| {
+                    let mut writer = journal.lock().map_err(|_| {
                         WorkflowError::Host("workflow journal lock poisoned".to_owned())
                     })?;
+                    if invocation_kind == Some(WorkflowInvocationKind::Delegate) {
+                        let child_key = WorkflowChildKey::DirectDelegate {
+                            invocation_id: invocation_id.clone(),
+                        };
+                        let agent_id = writer
+                            .index()
+                            .child_agent_ids
+                            .get(&child_key.display_key())
+                            .and_then(Clone::clone);
+                        append_child_finished(
+                            &mut writer,
+                            &invocation_id,
+                            &outcome,
+                            agent_id.as_deref(),
+                            timestamp_ms,
+                            &self.limits,
+                        )?;
+                    }
                     effect::prepare_invocation_finish(
                         &writer,
                         run_id_owned,
@@ -3538,6 +3398,7 @@ impl WorkflowRuntime {
                     Ok(sequence) => {
                         let mut guard = state.lock().await;
                         guard.current_invocation = None;
+                        guard.current_invocation_kind = None;
                         guard.failure_count = guard.failure_count.saturating_add(1);
                         guard.projection_sequence = Some(sequence);
                         guard.updated_at_ms = Some(timestamp_ms);
@@ -3591,6 +3452,7 @@ impl WorkflowRuntime {
         state.worker_active = false;
         state.worker_join = None;
         state.current_invocation = None;
+        state.current_invocation_kind = None;
         // Unsequenced recovery-failure projection must not leak occupancy.
         self.release_worker_admission_locked(state);
         state.state = WorkflowState::Failed;
@@ -3770,10 +3632,40 @@ impl WorkflowRuntime {
         metadata: &WorkflowRunMetadata,
         journal_path: &Path,
     ) -> Result<(), WorkflowError> {
-        let envelopes = journal::collect_journal(journal_path, Some(&metadata.run_id))?;
+        let envelopes = journal::collect_journal(
+            journal_path,
+            Some(&metadata.run_id),
+            self.limits.journal_record_bytes,
+            self.limits.journal_total_bytes,
+        )?;
         let incomplete = find_incomplete_invocations(&envelopes);
         if incomplete.is_empty() {
             return Ok(());
+        }
+
+        let mut open_children = HashMap::<WorkflowChildKey, (String, Option<String>)>::new();
+        for envelope in &envelopes {
+            match &envelope.payload {
+                JournalPayload::ChildQueued {
+                    child_key,
+                    invocation_id,
+                    ..
+                } => {
+                    open_children.insert(child_key.clone(), (invocation_id.clone(), None));
+                }
+                JournalPayload::ChildStarted {
+                    child_key,
+                    agent_id,
+                } => {
+                    if let Some((_, bound_agent_id)) = open_children.get_mut(child_key) {
+                        bound_agent_id.clone_from(agent_id);
+                    }
+                }
+                JournalPayload::ChildFinished { child_key, .. } => {
+                    open_children.remove(child_key);
+                }
+                _ => {}
+            }
         }
 
         let resolver = self.bound_recovery_resolver()?;
@@ -3788,6 +3680,54 @@ impl WorkflowRuntime {
             };
 
             let timestamp_ms = current_timestamp_ms();
+            if invocation.kind == WorkflowInvocationKind::Delegate {
+                let child_key = WorkflowChildKey::DirectDelegate {
+                    invocation_id: invocation.invocation_id.clone(),
+                };
+                let agent_id = open_children
+                    .get(&child_key)
+                    .and_then(|(_, agent_id)| agent_id.as_deref());
+                if writer
+                    .index()
+                    .queued_children
+                    .contains(&child_key.display_key())
+                {
+                    append_child_finished(
+                        writer,
+                        &invocation.invocation_id,
+                        &outcome,
+                        agent_id,
+                        timestamp_ms,
+                        &self.limits,
+                    )?;
+                    open_children.remove(&child_key);
+                }
+            }
+            let interrupted_children = open_children
+                .iter()
+                .filter(|(_, (parent_invocation_id, _))| {
+                    parent_invocation_id == &invocation.invocation_id
+                })
+                .map(|(child_key, (_, agent_id))| (child_key.clone(), agent_id.clone()))
+                .collect::<Vec<_>>();
+            for (child_key, agent_id) in interrupted_children {
+                let summary = "interrupted(host_exit); child effect was not repeated".to_owned();
+                let envelope = JournalEnvelope::new(
+                    writer.next_seq(),
+                    timestamp_ms,
+                    metadata.run_id.clone(),
+                    JournalPayload::ChildFinished {
+                        child_key: child_key.clone(),
+                        agent_id,
+                        status: WorkflowOutcomeStatus::Interrupted,
+                        summary: summary.clone(),
+                        actual_usage: None,
+                        error: Some(summary),
+                    },
+                );
+                writer.append(&envelope, &self.limits)?;
+                open_children.remove(&child_key);
+            }
             let prepared = effect::prepare_invocation_finish(
                 writer,
                 metadata.run_id.clone(),
@@ -3854,77 +3794,6 @@ impl WorkflowRuntime {
         emitter(session_dir, projection_stage, state.snapshot());
     }
 
-    async fn insert_rehydrated_v1(
-        &self,
-        run_dir: PathBuf,
-        metadata: WorkflowRunMetadata,
-        records: Vec<JournalRecord>,
-        state: WorkflowState,
-        terminal_reason: Option<String>,
-    ) -> WorkflowHandle {
-        let replay_entries = replay_record_entries(&records);
-        let projection_sequence = records.last().map(JournalRecord::seq);
-        let (started_at_ms, updated_at_ms) = record_projection_timestamps(&records);
-        let control = Arc::new(RunControl::new());
-        let run_id = metadata.run_id.clone();
-        let artifacts = ArtifactStore::empty(run_id.clone(), &run_dir);
-        let run_state = RunState {
-            current_phase: recovered_record_phase(&records),
-            invocation_count: records
-                .iter()
-                .filter(|record| matches!(record, JournalRecord::InvocationStarted { .. }))
-                .count()
-                .try_into()
-                .unwrap_or(u64::MAX),
-            failure_count: records
-                .iter()
-                .filter(|record| {
-                    matches!(
-                        record,
-                        JournalRecord::InvocationFinished { outcome, .. } if !outcome.ok
-                    )
-                })
-                .count()
-                .try_into()
-                .unwrap_or(u64::MAX),
-            actual_usage: aggregate_record_usage(&records),
-            inherited_usage: None,
-            seed_entry_count: 0,
-            projection_sequence,
-            started_at_ms,
-            updated_at_ms,
-            latest_log_summary: latest_log_summary(&replay_entries),
-            latest_report_summary: latest_record_report_summary(&records),
-            reports: recovered_record_reports(&records),
-            metadata,
-            state,
-            terminal_reason,
-            run_dir,
-            control: Arc::clone(&control),
-            worker_active: false,
-            worker_join: None,
-            worker_permit: None,
-            current_invocation: None,
-            replay_entries,
-            replay_cursor: 0,
-            replay_live: false,
-            journal: None,
-            final_result: None,
-            pending_user_input: None,
-            artifacts,
-            v1_read_only: true,
-        };
-        self.runs
-            .lock()
-            .await
-            .insert(run_id.0.clone(), Arc::new(Mutex::new(run_state)));
-        WorkflowHandle {
-            run_id,
-            control,
-            runtime: self.clone(),
-        }
-    }
-
     async fn insert_rehydrated(
         &self,
         run_dir: PathBuf,
@@ -3950,23 +3819,7 @@ impl WorkflowRuntime {
             current_phase: recovered_phase(&envelopes),
             invocation_count: invocation_count(&envelopes),
             failure_count: failure_count(&envelopes),
-            actual_usage: {
-                let seed_ids = lineage::seed_invocation_ids_from_journal(&envelopes);
-                if seed_ids.is_empty() {
-                    aggregate_usage(&envelopes)
-                } else {
-                    lineage::split_usage_for_seed(&envelopes, &seed_ids).1
-                }
-            },
-            inherited_usage: {
-                let seed_ids = lineage::seed_invocation_ids_from_journal(&envelopes);
-                if seed_ids.is_empty() {
-                    None
-                } else {
-                    lineage::split_usage_for_seed(&envelopes, &seed_ids).0
-                }
-            },
-            seed_entry_count: lineage::seed_pair_count_from_journal(&envelopes),
+            actual_usage: aggregate_usage(&envelopes),
             projection_sequence,
             started_at_ms,
             updated_at_ms,
@@ -3982,6 +3835,7 @@ impl WorkflowRuntime {
             worker_join: None,
             worker_permit: None,
             current_invocation: None,
+            current_invocation_kind: None,
             replay_entries,
             replay_cursor: 0,
             replay_live: false,
@@ -3989,7 +3843,6 @@ impl WorkflowRuntime {
             final_result,
             pending_user_input,
             artifacts,
-            v1_read_only: false,
         };
         self.runs
             .lock()
@@ -4010,7 +3863,6 @@ impl WorkflowRuntime {
     ) -> WorkflowHandle {
         let metadata = WorkflowRunMetadata {
             run_id,
-            parent_run_id: None,
             name: "corrupt workflow".to_owned(),
             description: String::new(),
             phases: Vec::new(),
@@ -4018,7 +3870,6 @@ impl WorkflowRuntime {
             script_sha256: String::new(),
             args: serde_json::json!({}),
             launch_source: "rehydrate".to_owned(),
-            journal_format_version: journal::JOURNAL_FORMAT_V1,
             output_schema: None,
             display_name: None,
             input_schema: None,
@@ -4045,8 +3896,6 @@ impl WorkflowRuntime {
             invocation_count: 0,
             failure_count: 1,
             actual_usage: None,
-            inherited_usage: None,
-            seed_entry_count: 0,
             projection_sequence: None,
             started_at_ms: None,
             updated_at_ms: None,
@@ -4060,6 +3909,7 @@ impl WorkflowRuntime {
             worker_join: None,
             worker_permit: None,
             current_invocation: None,
+            current_invocation_kind: None,
             replay_entries: Vec::new(),
             replay_cursor: 0,
             replay_live: false,
@@ -4067,7 +3917,6 @@ impl WorkflowRuntime {
             final_result: None,
             pending_user_input: None,
             artifacts,
-            v1_read_only: false,
         };
         self.runs
             .lock()
@@ -4085,6 +3934,7 @@ struct PreparedInvoke {
     journal: SharedJournal,
     prepared_start: effect::PreparedInvocationStart,
     control: Arc<RunControl>,
+    phase_id: Option<String>,
     timestamp_ms: u64,
 }
 
@@ -4245,6 +4095,22 @@ impl WorkflowHandle {
         self.runtime.pending_user_input(&self.run_id).await
     }
 
+    pub async fn operator_snapshot(
+        &self,
+        task_id: &str,
+    ) -> Result<super::WorkflowOperatorSnapshot, WorkflowError> {
+        self.runtime.operator_snapshot(&self.run_id, task_id).await
+    }
+
+    pub async fn operator_child_page(
+        &self,
+        request: &super::WorkflowOperatorRequest,
+    ) -> Result<super::WorkflowChildPage, WorkflowError> {
+        self.runtime
+            .operator_child_page(&self.run_id, request)
+            .await
+    }
+
     pub async fn accept_child_structured_output_with_repair(
         &self,
         multi_agent: &MultiAgentRuntime,
@@ -4331,6 +4197,17 @@ impl WorkflowHandle {
             .await
     }
 
+    pub async fn child_projection(&self) -> Result<super::ChildProjection, WorkflowError> {
+        let state = self.runtime.run_state(&self.run_id).await?;
+        let journal_path = state.lock().await.journal_path();
+        super::project_children(
+            &journal_path,
+            Some(&self.run_id),
+            self.runtime.limits.journal_record_bytes,
+            self.runtime.limits.journal_total_bytes,
+        )
+    }
+
     #[must_use]
     pub fn is_pause_requested(&self) -> bool {
         self.control.pause_requested.load(Ordering::Acquire)
@@ -4348,7 +4225,9 @@ impl WorkflowHandle {
 }
 
 fn child_run_to_outcome(output: &ChildRunOutput) -> WorkflowInvocationOutcome {
-    child_agent_to_outcome(&output.snapshot)
+    let mut outcome = child_agent_to_outcome(&output.snapshot);
+    outcome.actual_usage = accumulate_child_usage(None, &output.events);
+    outcome
 }
 
 fn child_agent_to_outcome(agent: &crate::multi_agent::AgentSnapshot) -> WorkflowInvocationOutcome {
@@ -4379,6 +4258,69 @@ fn child_agent_to_outcome(agent: &crate::multi_agent::AgentSnapshot) -> Workflow
         child_refs: Vec::new(),
         interruption: None,
     }
+}
+
+fn append_child_finished(
+    writer: &mut JournalWriter,
+    invocation_id: &str,
+    outcome: &WorkflowInvocationOutcome,
+    agent_id_hint: Option<&str>,
+    timestamp_ms: u64,
+    limits: &WorkflowLimits,
+) -> Result<u64, WorkflowError> {
+    let child_key = WorkflowChildKey::DirectDelegate {
+        invocation_id: invocation_id.to_owned(),
+    };
+    if writer
+        .index()
+        .finished_children
+        .contains(&child_key.display_key())
+    {
+        return Ok(writer.next_seq().saturating_sub(1));
+    }
+    let agent_id = outcome
+        .details
+        .get("agent_id")
+        .and_then(serde_json::Value::as_str)
+        .map(str::to_owned)
+        .or_else(|| {
+            outcome
+                .child_refs
+                .iter()
+                .find(|reference| reference.kind == "delegate")
+                .map(|reference| reference.id.clone())
+        })
+        .or_else(|| agent_id_hint.map(str::to_owned));
+    let summary = bounded_summary(&outcome.summary);
+    let envelope = JournalEnvelope::new(
+        writer.next_seq(),
+        timestamp_ms,
+        writer.run_id().clone(),
+        JournalPayload::ChildFinished {
+            child_key,
+            agent_id,
+            status: outcome.status,
+            summary: summary.clone(),
+            actual_usage: outcome.actual_usage,
+            error: (!outcome.ok).then_some(summary),
+        },
+    );
+    writer.append(&envelope, limits)
+}
+
+fn child_spec(input: &serde_json::Value) -> (Option<String>, Option<String>) {
+    let title = input
+        .get("title")
+        .or_else(|| input.get("task"))
+        .and_then(serde_json::Value::as_str)
+        .filter(|value| !value.trim().is_empty())
+        .map(str::to_owned);
+    let role = input
+        .get("role")
+        .and_then(serde_json::Value::as_str)
+        .filter(|value| !value.trim().is_empty())
+        .map(str::to_owned);
+    (title, role)
 }
 
 fn accumulate_child_usage(
@@ -4429,71 +4371,6 @@ fn observe_outcome(
     }
 }
 
-fn encode_user_input_prompt(
-    prepared: &super::user_input::PreparedUserInputRequest,
-) -> serde_json::Value {
-    let mut obj = serde_json::Map::new();
-    obj.insert(
-        "prompt".to_owned(),
-        serde_json::Value::String(prepared.prompt.clone()),
-    );
-    obj.insert("answer_schema".to_owned(), prepared.answer_schema.clone());
-    if let Some(default) = &prepared.default {
-        obj.insert("default".to_owned(), default.clone());
-    }
-    if let Some(title) = &prepared.title {
-        obj.insert("title".to_owned(), serde_json::Value::String(title.clone()));
-    }
-    obj.insert(
-        "answer_policy".to_owned(),
-        serde_json::Value::String(prepared.answer_policy.as_str().to_owned()),
-    );
-    serde_json::Value::Object(obj)
-}
-
-fn decode_user_input_prompt(
-    request_id: &str,
-    prompt: Option<&serde_json::Value>,
-) -> PendingUserInput {
-    match prompt {
-        Some(serde_json::Value::Object(map)) => {
-            let text = map
-                .get("prompt")
-                .and_then(|v| v.as_str())
-                .map_or_else(|| prompt_to_string(prompt), str::to_owned);
-            let answer_schema = map
-                .get("answer_schema")
-                .cloned()
-                .unwrap_or(serde_json::Value::Bool(true));
-            let default = map.get("default").cloned();
-            let title = map.get("title").and_then(|v| v.as_str()).map(str::to_owned);
-            let answer_policy = map
-                .get("answer_policy")
-                .and_then(|v| v.as_str())
-                .and_then(|s| super::user_input::UserAnswerPolicy::parse(s).ok())
-                .unwrap_or_default();
-            PendingUserInput {
-                request_id: request_id.to_owned(),
-                prompt: text,
-                answer_schema,
-                default,
-                title,
-                answer_policy,
-                answer: None,
-            }
-        }
-        other => PendingUserInput {
-            request_id: request_id.to_owned(),
-            prompt: prompt_to_string(other),
-            answer_schema: serde_json::json!(true),
-            default: None,
-            title: None,
-            answer_policy: super::user_input::UserAnswerPolicy::default(),
-            answer: None,
-        },
-    }
-}
-
 fn user_input_from_envelopes(
     envelopes: &[JournalEnvelope],
     request_id: &str,
@@ -4504,8 +4381,20 @@ fn user_input_from_envelopes(
             JournalPayload::UserInputRequested {
                 request_id: rid,
                 prompt,
+                answer_schema,
+                default,
+                title,
+                answer_policy,
             } if rid == request_id => {
-                pending = Some(decode_user_input_prompt(rid, prompt.as_ref()));
+                pending = Some(PendingUserInput {
+                    request_id: rid.clone(),
+                    prompt: prompt.clone(),
+                    answer_schema: answer_schema.clone(),
+                    default: default.clone(),
+                    title: title.clone(),
+                    answer_policy: *answer_policy,
+                    answer: None,
+                });
             }
             JournalPayload::UserInputAnswered {
                 request_id: rid,
@@ -4527,8 +4416,23 @@ fn latest_open_user_input(envelopes: &[JournalEnvelope]) -> Option<PendingUserIn
     let mut answered = std::collections::HashSet::new();
     for envelope in envelopes {
         match &envelope.payload {
-            JournalPayload::UserInputRequested { request_id, prompt } => {
-                open = Some(decode_user_input_prompt(request_id, prompt.as_ref()));
+            JournalPayload::UserInputRequested {
+                request_id,
+                prompt,
+                answer_schema,
+                default,
+                title,
+                answer_policy,
+            } => {
+                open = Some(PendingUserInput {
+                    request_id: request_id.clone(),
+                    prompt: prompt.clone(),
+                    answer_schema: answer_schema.clone(),
+                    default: default.clone(),
+                    title: title.clone(),
+                    answer_policy: *answer_policy,
+                    answer: None,
+                });
             }
             JournalPayload::UserInputAnswered { request_id, .. } => {
                 answered.insert(request_id.clone());
@@ -4550,12 +4454,4 @@ fn latest_user_input(envelopes: &[JournalEnvelope]) -> Option<PendingUserInput> 
         }
     }
     last_id.and_then(|id| user_input_from_envelopes(envelopes, &id))
-}
-
-fn prompt_to_string(prompt: Option<&serde_json::Value>) -> String {
-    match prompt {
-        Some(serde_json::Value::String(s)) => s.clone(),
-        Some(other) => other.to_string(),
-        None => String::new(),
-    }
 }

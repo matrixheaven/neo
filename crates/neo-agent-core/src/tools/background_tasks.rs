@@ -105,16 +105,18 @@ impl ManagedBackgroundCommand {
 ///
 /// Projection only — never a second durable owner. Values come from
 /// `WorkflowRuntime` snapshots / TaskOutput materials.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct WorkflowTaskProjection {
     pub run_id: String,
     pub human_handle: Option<String>,
+    pub display_name: String,
+    pub purpose: String,
+    pub elapsed_ms: u64,
     pub definition_name: String,
     pub definition_revision: Option<String>,
     /// Launch origin / source scope label (builtin|user|project|dynamic|launch_source).
     pub source_scope: Option<String>,
     pub current_phase: Option<String>,
-    pub parent_run_id: Option<String>,
     pub admission_wait_reason: Option<String>,
     pub started_child_count: u64,
     pub queued_child_count: u64,
@@ -122,12 +124,16 @@ pub struct WorkflowTaskProjection {
     pub actual_usage_total: Option<u64>,
     pub has_final_result: bool,
     pub artifact_count: usize,
-    pub pending_request_id: Option<String>,
     pub started_at_ms: Option<u64>,
     pub updated_at_ms: Option<u64>,
     pub terminal_reason: Option<String>,
     pub latest_log_summary: Option<String>,
     pub latest_report_summary: Option<String>,
+    pub current_step_key: Option<crate::workflow::WorkflowStepKey>,
+    pub steps: Vec<crate::workflow::WorkflowStepRow>,
+    pub child_page: Option<crate::workflow::WorkflowChildPage>,
+    pub pending_user: Option<crate::workflow::PendingUserRequest>,
+    pub inline_unsaved: bool,
 }
 
 #[derive(Clone)]
@@ -162,8 +168,6 @@ pub struct BackgroundTaskListQuery {
     pub state: Option<BackgroundTaskStatus>,
     /// When Some(true), only AwaitingUser workflows; Some(false) excludes them.
     pub awaiting_user: Option<bool>,
-    /// Parent run id lineage filter (workflows).
-    pub lineage_parent: Option<String>,
     /// Page size (clamped 1..=500). Defaults to 50 when zero.
     pub limit: usize,
     /// Opaque query-bound cursor from a previous page.
@@ -380,10 +384,13 @@ impl BackgroundTaskManager {
 
     /// Register a delegate agent as a background task. Returns the task ID
     /// (the agent ID).
-    pub async fn start_delegate(&self, snapshot: crate::multi_agent::AgentSnapshot) -> String {
+    pub async fn start_delegate(&self, mut snapshot: crate::multi_agent::AgentSnapshot) -> String {
         let task_id = snapshot.id.as_str().to_owned();
         let description = snapshot.task.clone();
         let terminal = snapshot.state.is_terminal();
+        if terminal {
+            freeze_delegate_timestamp(&mut snapshot);
+        }
         let state = if terminal {
             let status = match snapshot.state {
                 crate::multi_agent::AgentLifecycleState::Completed => {
@@ -418,12 +425,13 @@ impl BackgroundTaskManager {
     pub async fn complete_delegate(
         &self,
         task_id: &str,
-        snapshot: crate::multi_agent::AgentSnapshot,
+        mut snapshot: crate::multi_agent::AgentSnapshot,
     ) {
         let mut tasks = self.inner.lock().await;
         if let Some(record) = tasks.get_mut(task_id)
             && matches!(record.state, BackgroundTaskState::DelegateRunning { .. })
         {
+            freeze_delegate_timestamp(&mut snapshot);
             record.state = BackgroundTaskState::DelegateFinished {
                 status: BackgroundTaskStatus::Completed,
                 snapshot,
@@ -436,12 +444,15 @@ impl BackgroundTaskManager {
     pub async fn cancel_delegate(
         &self,
         task_id: &str,
-        snapshot: crate::multi_agent::AgentSnapshot,
+        mut snapshot: crate::multi_agent::AgentSnapshot,
     ) {
         let mut tasks = self.inner.lock().await;
         if let Some(record) = tasks.get_mut(task_id)
             && matches!(record.state, BackgroundTaskState::DelegateRunning { .. })
         {
+            let now = current_epoch_ms();
+            snapshot.terminal_at_ms.get_or_insert(now);
+            snapshot.updated_at_ms = snapshot.updated_at_ms.max(now);
             record.state = BackgroundTaskState::DelegateFinished {
                 status: BackgroundTaskStatus::Cancelled,
                 snapshot,
@@ -454,16 +465,34 @@ impl BackgroundTaskManager {
     /// (the swarm ID).
     pub async fn start_delegate_swarm(
         &self,
-        snapshot: crate::multi_agent::SwarmSnapshot,
+        mut snapshot: crate::multi_agent::SwarmSnapshot,
     ) -> String {
         let task_id = snapshot.swarm_id.clone();
+        let terminal = snapshot.state.is_terminal();
+        if terminal {
+            freeze_swarm_timestamps(&mut snapshot);
+        }
+        let state = if terminal {
+            BackgroundTaskState::DelegateSwarmFinished {
+                status: status_from_agent_state(snapshot.state),
+                snapshot,
+            }
+        } else {
+            BackgroundTaskState::DelegateSwarmRunning { snapshot }
+        };
         self.inner.lock().await.insert(
             task_id.clone(),
             BackgroundTaskRecord {
-                description: snapshot.description.clone(),
+                description: match &state {
+                    BackgroundTaskState::DelegateSwarmRunning { snapshot }
+                    | BackgroundTaskState::DelegateSwarmFinished { snapshot, .. } => {
+                        snapshot.description.clone()
+                    }
+                    _ => unreachable!(),
+                },
                 started_at: Instant::now(),
-                finished_at: None,
-                state: BackgroundTaskState::DelegateSwarmRunning { snapshot },
+                finished_at: terminal.then(Instant::now),
+                state,
                 detached: true,
                 human_handle: None,
             },
@@ -513,7 +542,7 @@ impl BackgroundTaskManager {
     pub async fn complete_delegate_swarm(
         &self,
         task_id: &str,
-        snapshot: crate::multi_agent::SwarmSnapshot,
+        mut snapshot: crate::multi_agent::SwarmSnapshot,
     ) {
         let mut tasks = self.inner.lock().await;
         if let Some(record) = tasks.get_mut(task_id)
@@ -522,6 +551,7 @@ impl BackgroundTaskManager {
                 BackgroundTaskState::DelegateSwarmRunning { .. }
             )
         {
+            freeze_swarm_timestamps(&mut snapshot);
             record.state = BackgroundTaskState::DelegateSwarmFinished {
                 status: BackgroundTaskStatus::Completed,
                 snapshot,
@@ -534,7 +564,7 @@ impl BackgroundTaskManager {
     pub async fn cancel_delegate_swarm(
         &self,
         task_id: &str,
-        snapshot: crate::multi_agent::SwarmSnapshot,
+        mut snapshot: crate::multi_agent::SwarmSnapshot,
     ) {
         let mut tasks = self.inner.lock().await;
         if let Some(record) = tasks.get_mut(task_id)
@@ -543,6 +573,7 @@ impl BackgroundTaskManager {
                 BackgroundTaskState::DelegateSwarmRunning { .. }
             )
         {
+            freeze_swarm_timestamps(&mut snapshot);
             record.state = BackgroundTaskState::DelegateSwarmFinished {
                 status: BackgroundTaskStatus::Cancelled,
                 snapshot,
@@ -558,9 +589,10 @@ impl BackgroundTaskManager {
     pub async fn finish_delegate(
         &self,
         task_id: &str,
-        snapshot: crate::multi_agent::AgentSnapshot,
+        mut snapshot: crate::multi_agent::AgentSnapshot,
     ) {
         let status = status_from_agent_state(snapshot.state);
+        freeze_delegate_timestamp(&mut snapshot);
         let mut tasks = self.inner.lock().await;
         if let Some(record) = tasks.get_mut(task_id)
             && matches!(record.state, BackgroundTaskState::DelegateRunning { .. })
@@ -575,9 +607,10 @@ impl BackgroundTaskManager {
     pub async fn finish_delegate_swarm(
         &self,
         task_id: &str,
-        snapshot: crate::multi_agent::SwarmSnapshot,
+        mut snapshot: crate::multi_agent::SwarmSnapshot,
     ) {
         let status = status_from_agent_state(snapshot.state);
+        freeze_swarm_timestamps(&mut snapshot);
         let mut tasks = self.inner.lock().await;
         if let Some(record) = tasks.get_mut(task_id)
             && matches!(
@@ -672,6 +705,65 @@ impl BackgroundTaskManager {
         }
     }
 
+    pub async fn workflow_operator_snapshot(
+        &self,
+        task_id: &str,
+    ) -> Result<crate::workflow::WorkflowOperatorSnapshot, ToolError> {
+        let Some(handle) = self.workflow_handle(task_id).await else {
+            return Err(ToolError::InvalidInput {
+                tool: "WorkflowOperator".to_owned(),
+                message: format!("unknown workflow task `{task_id}`"),
+            });
+        };
+        handle
+            .operator_snapshot(task_id)
+            .await
+            .map_err(|error| ToolError::InvalidInput {
+                tool: "WorkflowOperator".to_owned(),
+                message: error.to_string(),
+            })
+    }
+
+    pub async fn workflow_operator_child_page(
+        &self,
+        task_id: &str,
+        request: &crate::workflow::WorkflowOperatorRequest,
+        multi_agent: &crate::multi_agent::MultiAgentRuntime,
+    ) -> Result<crate::workflow::WorkflowChildPage, ToolError> {
+        let Some(handle) = self.workflow_handle(task_id).await else {
+            return Err(ToolError::InvalidInput {
+                tool: "WorkflowOperator".to_owned(),
+                message: format!("unknown workflow task `{task_id}`"),
+            });
+        };
+        let mut page =
+            handle
+                .operator_child_page(request)
+                .await
+                .map_err(|error| ToolError::InvalidInput {
+                    tool: "WorkflowOperator".to_owned(),
+                    message: error.to_string(),
+                })?;
+        for child in &mut page.items {
+            if child.state.is_terminal()
+                || child.state == crate::workflow::WorkflowChildState::Queued
+            {
+                continue;
+            }
+            let Some(agent_id) = child.agent_id.as_deref() else {
+                continue;
+            };
+            let Some(live) = multi_agent
+                .agent_snapshot(agent_id)
+                .map(|agent| agent.progress_snapshot())
+            else {
+                continue;
+            };
+            merge_live_workflow_child(child, &live);
+        }
+        Ok(page)
+    }
+
     pub async fn pause_workflow(
         &self,
         task_id: &str,
@@ -756,178 +848,6 @@ impl BackgroundTaskManager {
             "status": "queued",
             "request_id": request_id,
             "action": "TaskAnswer",
-        })))
-    }
-
-    /// Linked-run fork via the sole runtime owner (design §34 / §38.2).
-    ///
-    /// Registers the child as a background workflow task. Does not mutate the parent.
-    pub async fn fork_workflow(
-        &self,
-        task_id: &str,
-        session_dir: &Path,
-        runtime: &crate::workflow::WorkflowRuntime,
-        checkpoint_seq: Option<u64>,
-        actor: crate::workflow::WorkflowActor,
-    ) -> Result<ToolResult, ToolError> {
-        let _ = actor;
-        let parent = match self.workflow_control_handle("TaskFork", task_id).await {
-            Ok(handle) => handle,
-            Err(result) => return Ok(result),
-        };
-        let parent_output = parent
-            .output()
-            .await
-            .map_err(|error| ToolError::InvalidInput {
-                tool: "TaskFork".to_owned(),
-                message: format!("read parent workflow failed: {error}"),
-            })?;
-        if !parent_output.state.is_terminal()
-            && parent_output.state != crate::workflow::WorkflowState::Paused
-            && parent_output.state != crate::workflow::WorkflowState::AwaitingUser
-        {
-            // Allow fork from terminal, paused, or awaiting; running-only is fail-closed.
-            if matches!(
-                parent_output.state,
-                crate::workflow::WorkflowState::Running | crate::workflow::WorkflowState::Queued
-            ) {
-                return Ok(ToolResult::error(
-                    "fork requires a stable checkpoint (paused, awaiting user, or terminal)",
-                )
-                .with_details(json!({
-                    "task_id": task_id,
-                    "kind": "workflow",
-                    "action": "TaskFork",
-                    "outcome": "unstable_state",
-                    "state": parent_output.state.as_str(),
-                })));
-            }
-        }
-
-        let checkpoint = if let Some(seq) = checkpoint_seq {
-            let materials = runtime
-                .task_output_materials(&parent.run_id)
-                .await
-                .map_err(|error| ToolError::InvalidInput {
-                    tool: "TaskFork".to_owned(),
-                    message: format!("materials for checkpoint failed: {error}"),
-                })?;
-            let envelopes = crate::workflow::journal::collect_journal(
-                &materials.journal_path,
-                Some(&parent.run_id),
-            )
-            .map_err(|error| ToolError::InvalidInput {
-                tool: "TaskFork".to_owned(),
-                message: format!("journal read for checkpoint failed: {error}"),
-            })?;
-            let digest = crate::workflow::runtime::compute_prefix_digest(&envelopes, seq).map_err(
-                |error| ToolError::InvalidInput {
-                    tool: "TaskFork".to_owned(),
-                    message: format!("checkpoint digest failed: {error}"),
-                },
-            )?;
-            Some(
-                crate::workflow::WorkflowCheckpoint::new(parent.run_id.clone(), seq, digest)
-                    .map_err(|error| ToolError::InvalidInput {
-                        tool: "TaskFork".to_owned(),
-                        message: format!("invalid checkpoint: {error}"),
-                    })?,
-            )
-        } else {
-            None
-        };
-
-        let launch = crate::workflow::WorkflowLaunchRequest {
-            name: parent_output.metadata.name.clone(),
-            description: parent_output.metadata.description.clone(),
-            phases: parent_output.metadata.phases.clone(),
-            script: parent_output.metadata.script.clone(),
-            args: parent_output.metadata.args.clone(),
-            launch_source: format!("tasks:fork ({})", parent.run_id.as_str()),
-            parent_run_id: Some(parent.run_id.clone()),
-            output_schema: None,
-            display_name: parent_output.metadata.display_name.clone(),
-            input_schema: parent_output.metadata.input_schema.clone(),
-            definition_origin: parent_output.metadata.definition_origin,
-            inline_unsaved: false,
-        };
-        let child = runtime
-            .create_linked_run(
-                session_dir,
-                crate::workflow::runtime::LinkedRunRequest {
-                    parent_run_id: parent.run_id.clone(),
-                    checkpoint,
-                    link_reason: "tasks_fork".to_owned(),
-                    launch,
-                },
-            )
-            .await
-            .map_err(|error| ToolError::InvalidInput {
-                tool: "TaskFork".to_owned(),
-                message: format!("fork failed: {error}"),
-            })?;
-        let child_task_id = child.run_id.0.clone();
-        self.start_workflow(
-            child_task_id.clone(),
-            parent_output.metadata.description.clone(),
-            child,
-        )
-        .await?;
-        Ok(ToolResult::ok(format!(
-            "workflow {} forked to {child_task_id}",
-            parent.run_id.0
-        ))
-        .with_details(json!({
-            "task_id": task_id,
-            "kind": "workflow",
-            "action": "TaskFork",
-            "parent_run_id": parent.run_id.0,
-            "run_id": child_task_id,
-            "status": "forked",
-        })))
-    }
-
-    /// Prune-safe removal of a terminal workflow task registration.
-    ///
-    /// Only removes the background-task projection for terminal runs. Durable
-    /// journal/storage deletion is handled by automatic retention;
-    /// this method never deletes run directories.
-    pub async fn prune_workflow_if_safe(
-        &self,
-        task_id: &str,
-        actor: crate::workflow::WorkflowActor,
-    ) -> Result<ToolResult, ToolError> {
-        let _ = actor;
-        let handle = match self.workflow_control_handle("TaskPrune", task_id).await {
-            Ok(handle) => handle,
-            Err(result) => return Ok(result),
-        };
-        let snapshot = handle.snapshot().await;
-        if !snapshot.state.is_terminal() {
-            return Ok(ToolResult::error(format!(
-                "prune-safe only applies to terminal workflows; `{}` is {}",
-                task_id,
-                snapshot.state.as_str()
-            ))
-            .with_details(json!({
-                "task_id": task_id,
-                "kind": "workflow",
-                "action": "TaskPrune",
-                "outcome": "not_terminal",
-                "state": snapshot.state.as_str(),
-            })));
-        }
-        let removed = self.remove_workflow(task_id).await;
-        Ok(ToolResult::ok(format!(
-            "workflow {} prune-safe registration removed (durable run retained)",
-            handle.run_id.0
-        ))
-        .with_details(json!({
-            "task_id": task_id,
-            "kind": "workflow",
-            "action": "TaskPrune",
-            "status": if removed { "removed" } else { "missing" },
-            "durable_deleted": false,
         })))
     }
 
@@ -1117,6 +1037,16 @@ impl BackgroundTaskManager {
         })
     }
 
+    /// Build the `/tasks` page. Child activity belongs to the selected child page.
+    pub async fn list_page_with_live_agents(
+        &self,
+        query: BackgroundTaskListQuery,
+        multi_agent: &crate::multi_agent::MultiAgentRuntime,
+    ) -> Result<BackgroundTaskListPage, ToolError> {
+        let _ = multi_agent;
+        self.list_page(query).await
+    }
+
     /// Metadata-only enumeration for discovery (`TaskList`).
     ///
     /// Returns only [`BackgroundTaskKind::Bash`], [`BackgroundTaskKind::Question`],
@@ -1231,8 +1161,7 @@ impl BackgroundTaskManager {
         let final_path = root.join(format!("{task_id}.status.json"));
         let running_path = root.join(format!("{task_id}.running.json"));
         Ok(
-            match Self::inspect_persisted_task_metadata(task_id, &final_path, &running_path).await?
-            {
+            match Self::read_persisted_task_metadata(task_id, &final_path, &running_path).await? {
                 PersistedTaskFiles::Final(snapshot) => Some(*snapshot),
                 PersistedTaskFiles::Missing => None,
                 PersistedTaskFiles::Running => Some(BackgroundTaskSnapshot {
@@ -1251,7 +1180,7 @@ impl BackgroundTaskManager {
         )
     }
 
-    async fn inspect_persisted_task_metadata(
+    async fn read_persisted_task_metadata(
         task_id: &str,
         final_path: &Path,
         running_path: &Path,
@@ -1470,6 +1399,9 @@ impl BackgroundTaskManager {
                         _ => unreachable!(),
                     };
                     snapshot.state = crate::multi_agent::AgentLifecycleState::Cancelled;
+                    let now = current_epoch_ms();
+                    snapshot.terminal_at_ms.get_or_insert(now);
+                    snapshot.updated_at_ms = snapshot.updated_at_ms.max(now);
                     record.state = BackgroundTaskState::DelegateFinished {
                         status: BackgroundTaskStatus::Cancelled,
                         snapshot: snapshot.clone(),
@@ -1491,10 +1423,18 @@ impl BackgroundTaskManager {
                 }
                 BackgroundTaskState::DelegateSwarmRunning { snapshot: _ } => {
                     let record = tasks.get_mut(task_id).expect("record still exists");
-                    let snapshot = match &record.state {
+                    let mut snapshot = match &record.state {
                         BackgroundTaskState::DelegateSwarmRunning { snapshot } => snapshot.clone(),
                         _ => unreachable!(),
                     };
+                    let now = current_epoch_ms();
+                    for child in &mut snapshot.children {
+                        if !child.agent.state.is_terminal() {
+                            child.agent.state = crate::multi_agent::AgentLifecycleState::Cancelled;
+                            child.agent.terminal_at_ms.get_or_insert(now);
+                            child.agent.updated_at_ms = child.agent.updated_at_ms.max(now);
+                        }
+                    }
                     record.state = BackgroundTaskState::DelegateSwarmFinished {
                         status: BackgroundTaskStatus::Cancelled,
                         snapshot: snapshot.clone(),
@@ -1667,7 +1607,7 @@ impl BackgroundTaskManager {
             return Self::settled_persisted_snapshot(root, task_id, &final_path, &running_path)
                 .await;
         }
-        match Self::inspect_persisted_task(root, task_id, &final_path, &running_path).await? {
+        match Self::read_persisted_task(root, task_id, &final_path, &running_path).await? {
             PersistedTaskFiles::Final(snapshot) => return Ok(Some(*snapshot)),
             PersistedTaskFiles::Missing => return Ok(None),
             PersistedTaskFiles::Running => {}
@@ -1692,7 +1632,7 @@ impl BackgroundTaskManager {
         running_path: &Path,
     ) -> Result<Option<BackgroundTaskSnapshot>, ToolError> {
         Ok(
-            match Self::inspect_persisted_task(root, task_id, final_path, running_path).await? {
+            match Self::read_persisted_task(root, task_id, final_path, running_path).await? {
                 PersistedTaskFiles::Final(snapshot) => Some(*snapshot),
                 PersistedTaskFiles::Missing => None,
                 PersistedTaskFiles::Running => Some(BackgroundTaskSnapshot {
@@ -1711,7 +1651,7 @@ impl BackgroundTaskManager {
         )
     }
 
-    async fn inspect_persisted_task(
+    async fn read_persisted_task(
         root: &Path,
         task_id: &str,
         final_path: &Path,
@@ -1721,10 +1661,10 @@ impl BackgroundTaskManager {
             return Ok(PersistedTaskFiles::Final(Box::new(snapshot)));
         }
         let running = Self::read_persisted_running(task_id, running_path).await?;
-        Self::inspect_after_first_running(root, task_id, final_path, running_path, running).await
+        Self::read_after_first_running(root, task_id, final_path, running_path, running).await
     }
 
-    async fn inspect_after_first_running(
+    async fn read_after_first_running(
         root: &Path,
         task_id: &str,
         final_path: &Path,
@@ -1812,7 +1752,7 @@ impl BackgroundTaskManager {
             .is_some_and(|record| record.detached)
     }
 
-    /// Read-only inspection of a task's kind that does NOT poll the
+    /// Read-only lookup of a task's kind that does NOT poll the
     /// underlying process (unlike [`Self::snapshot`], which calls
     /// `try_wait` on running bash commands and can transition them to a
     /// terminal state as a side effect).
@@ -1950,7 +1890,7 @@ impl BackgroundTaskManager {
                 kind: BackgroundTaskKind::Delegate,
                 status: BackgroundTaskStatus::Running,
                 description,
-                elapsed,
+                elapsed: delegate_elapsed(snapshot),
                 output: None,
                 answers: None,
                 delegate: Some(snapshot.clone()),
@@ -1962,7 +1902,7 @@ impl BackgroundTaskManager {
                 kind: BackgroundTaskKind::Delegate,
                 status: *status,
                 description,
-                elapsed,
+                elapsed: delegate_elapsed(snapshot),
                 output: None,
                 answers: None,
                 delegate: Some(snapshot.clone()),
@@ -1974,7 +1914,7 @@ impl BackgroundTaskManager {
                 kind: BackgroundTaskKind::DelegateSwarm,
                 status: BackgroundTaskStatus::Running,
                 description,
-                elapsed,
+                elapsed: swarm_elapsed(snapshot),
                 output: None,
                 answers: None,
                 delegate: None,
@@ -1987,7 +1927,7 @@ impl BackgroundTaskManager {
                     kind: BackgroundTaskKind::DelegateSwarm,
                     status: *status,
                     description,
-                    elapsed,
+                    elapsed: swarm_elapsed(snapshot),
                     output: None,
                     answers: None,
                     delegate: None,
@@ -2030,8 +1970,14 @@ impl BackgroundTaskManager {
             .await
             .ok()
             .and_then(|page| page.summary);
-        let projection =
-            project_workflow(&snapshot, output.as_ref(), summary.as_ref(), human_handle);
+        let operator = handle.operator_snapshot(task_id).await.ok();
+        let projection = project_workflow(
+            &snapshot,
+            output.as_ref(),
+            summary.as_ref(),
+            human_handle,
+            operator.as_ref(),
+        );
         BackgroundTaskSnapshot {
             task_id: task_id.to_owned(),
             kind: BackgroundTaskKind::Workflow,
@@ -2079,6 +2025,7 @@ fn project_workflow(
     output: Option<&crate::workflow::WorkflowOutput>,
     summary: Option<&crate::workflow::WorkflowOutputSummary>,
     human_handle: Option<String>,
+    operator: Option<&crate::workflow::WorkflowOperatorSnapshot>,
 ) -> WorkflowTaskProjection {
     let definition_name = output
         .map(|o| o.metadata.name.clone())
@@ -2090,17 +2037,6 @@ fn project_workflow(
     let source_scope = output
         .map(|o| o.metadata.launch_source.clone())
         .or_else(|| summary.map(|s| s.origin.clone()));
-    let parent_run_id = output
-        .and_then(|o| o.metadata.parent_run_id.as_ref().map(|id| id.0.clone()))
-        .or_else(|| {
-            summary.and_then(|s| {
-                s.lineage
-                    .as_ref()
-                    .and_then(|v| v.get("parent_run_id"))
-                    .and_then(|v| v.as_str())
-                    .map(str::to_owned)
-            })
-        });
     let actual_usage_total = snapshot
         .actual_usage
         .as_ref()
@@ -2120,35 +2056,97 @@ fn project_workflow(
                 None
             }
         });
+    let child_counts = operator.map_or_else(crate::workflow::ChildCounts::default, |value| {
+        value.child_counts.clone()
+    });
     WorkflowTaskProjection {
         run_id: snapshot.id.0.clone(),
         human_handle: human_handle.or_else(|| summary.and_then(|s| s.human_handle.clone())),
+        display_name: operator
+            .map(|value| value.display_name.clone())
+            .or_else(|| output.and_then(|value| value.metadata.display_name.clone()))
+            .unwrap_or_else(|| definition_name.clone()),
+        purpose: operator
+            .map(|value| value.purpose.clone())
+            .or_else(|| output.map(|value| value.metadata.description.clone()))
+            .unwrap_or_else(|| snapshot.title.clone()),
+        elapsed_ms: operator.map_or_else(
+            || {
+                workflow_elapsed(snapshot)
+                    .as_millis()
+                    .try_into()
+                    .unwrap_or(u64::MAX)
+            },
+            |value| value.elapsed_ms,
+        ),
         definition_name,
         definition_revision,
         source_scope,
-        current_phase: snapshot
-            .current_phase
-            .clone()
+        current_phase: operator
+            .and_then(|value| {
+                value
+                    .current_step_key
+                    .as_ref()
+                    .and_then(|key| key.phase_id.clone())
+            })
+            .or_else(|| snapshot.current_phase.clone())
             .or_else(|| summary.and_then(|s| s.current_phase.clone())),
-        parent_run_id,
         admission_wait_reason,
-        started_child_count: summary.map_or(0, |s| s.started_child_count),
-        queued_child_count: summary.map_or(0, |s| s.queued_child_count),
-        terminal_child_count: summary.map_or(0, |s| s.terminal_child_count),
+        started_child_count: child_counts
+            .done
+            .saturating_add(child_counts.working)
+            .saturating_add(child_counts.failed),
+        queued_child_count: child_counts.queued,
+        terminal_child_count: child_counts.done.saturating_add(child_counts.failed),
         actual_usage_total,
         has_final_result: summary.is_some_and(|s| s.final_result.is_some()),
         artifact_count: summary.map_or(0, |s| s.artifact_metadata.len()),
-        pending_request_id: summary
-            .and_then(|s| s.pending_user.as_ref().map(|p| p.request_id.clone())),
         started_at_ms: snapshot.started_at_ms,
-        updated_at_ms: snapshot.updated_at_ms,
+        updated_at_ms: operator
+            .map(|value| value.updated_at_ms)
+            .or(snapshot.updated_at_ms),
         terminal_reason: snapshot
             .terminal_reason
             .clone()
             .or_else(|| summary.and_then(|s| s.terminal_reason.clone())),
         latest_log_summary: snapshot.latest_log_summary.clone(),
         latest_report_summary: snapshot.latest_report_summary.clone(),
+        current_step_key: operator.and_then(|value| value.current_step_key.clone()),
+        steps: operator.map_or_else(Vec::new, |value| value.steps.clone()),
+        child_page: None,
+        pending_user: operator.and_then(|value| value.pending_user.clone()),
+        inline_unsaved: output.is_some_and(|value| {
+            value.metadata.inline_unsaved && value.metadata.output_schema.is_some()
+        }),
     }
+}
+
+fn merge_live_workflow_child(
+    child: &mut crate::workflow::WorkflowChildRow,
+    live: &crate::multi_agent::AgentProgressSnapshot,
+) {
+    if child.state.is_terminal()
+        || child.state == crate::workflow::WorkflowChildState::Queued
+        || live.state.is_terminal()
+    {
+        return;
+    }
+    let total = live
+        .token_count
+        .saturating_add(live.cache_read_token_count)
+        .saturating_add(live.cache_write_token_count);
+    child.actual_usage = Some(serde_json::json!({
+        "total_tokens": u64::try_from(total).unwrap_or(u64::MAX),
+    }));
+    child.latest_activity = live.last_tool.as_ref().map_or_else(
+        || live.latest_text.clone(),
+        |tool| {
+            Some(tool.summary.as_deref().map_or_else(
+                || tool.name.clone(),
+                |summary| format!("{}: {summary}", tool.name),
+            ))
+        },
+    );
 }
 
 const LIST_CURSOR_VERSION: u32 = 1;
@@ -2189,10 +2187,6 @@ fn list_query_hash(query: &BackgroundTaskListQuery) -> String {
         Some(true) => hasher.update(b"1"),
         Some(false) => hasher.update(b"0"),
         None => hasher.update(b"-"),
-    }
-    hasher.update(b"|lineage=");
-    if let Some(parent) = &query.lineage_parent {
-        hasher.update(parent.as_bytes());
     }
     // limit is part of page size, not filter identity for cursor binding
     format!("{:x}", hasher.finalize())
@@ -2268,16 +2262,6 @@ fn matches_list_query(snapshot: &BackgroundTaskSnapshot, query: &BackgroundTaskL
             return false;
         }
     }
-    if let Some(parent) = &query.lineage_parent {
-        let matched = snapshot
-            .workflow
-            .as_ref()
-            .and_then(|w| w.parent_run_id.as_deref())
-            == Some(parent.as_str());
-        if !matched {
-            return false;
-        }
-    }
     true
 }
 
@@ -2345,8 +2329,8 @@ struct TaskListInput {
 #[derive(Debug, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 struct TaskOutputInput {
-    /// The background task ID to inspect.
-    #[schemars(description = "The background task ID to inspect.")]
+    /// The background task ID to read.
+    #[schemars(description = "The background task ID to read.")]
     task_id: String,
     /// Whether to wait for the task to finish before returning.
     #[schemars(
@@ -2405,7 +2389,7 @@ impl Tool for TaskListTool {
 
     fn description(&self) -> &'static str {
         "List background tasks and their current status.\n\n\
-         Use this tool to discover which background tasks exist and where each one stands. It is the entry point for inspecting background work: it returns a task ID, status, kind, description, and elapsed time for every task it reports.\n\n\
+         Use this tool to discover which background tasks exist and where each one stands. It returns a task ID, status, kind, description, and elapsed time for every task it reports.\n\n\
          Guidelines:\n\
          - After a context compaction, or whenever you are unsure which background tasks are running or what their task IDs are, call this tool to re-enumerate them instead of guessing a task ID.\n\
          - Prefer the default `active_only=true`, which lists only non-terminal tasks. Pass `active_only=false` only when you specifically need to see tasks that have already finished.\n\
@@ -2448,13 +2432,13 @@ impl Tool for TaskOutputTool {
 
     fn description(&self) -> &'static str {
         "Retrieve output from a running or completed background task.\n\n\
-         Use this after `Bash` with background mode or `AskUserQuestion` with `background=true` when you need to inspect progress or explicitly wait for completion.\n\n\
+         Use this after `Bash` with background mode or `AskUserQuestion` with `background=true` when you need to read progress or explicitly wait for completion.\n\n\
          Guidelines:\n\
          - Prefer relying on automatic completion notifications. Use this tool only when you need task output before the automatic notification arrives.\n\
          - By default this tool is non-blocking and returns a current status/output snapshot.\n\
          - Use `block=true` only when you intentionally want to wait for completion or timeout.\n\
          - This tool returns structured task metadata and an output preview.\n\
-         - A workflow waiting for input exposes request_id, prompt, answer_schema, optional default, answer_policy, and next_action in every view. Call TaskAnswer with those exact IDs only when next_action is TaskAnswer; never guess a request_id or inspect the journal just to answer.\n\
+         - A workflow waiting for input exposes request_id, prompt, answer_schema, optional default, answer_policy, and next_action in every view. Call TaskAnswer with those exact IDs only when next_action is TaskAnswer; never guess a request_id or read the journal just to answer.\n\
          - For delegate agent IDs and swarm IDs, this tool returns the canonical multi-agent result shape used by Delegate, DelegateSwarm, and WaitDelegate.\n\
          - For a terminal task, check `status` and `exit_code` to understand why it ended.\n\
          - This tool works with the generic background task system and should remain the primary read path for future task types.\n\n\
@@ -2574,7 +2558,7 @@ impl Tool for TaskStopTool {
 
     fn description(&self) -> &'static str {
         "Stop a running background task.\n\n\
-         Only use this when a task must genuinely be cancelled — for a task that is finishing normally, wait for its completion notification or inspect it with `TaskOutput` instead of stopping it.\n\n\
+         Only use this when a task must genuinely be cancelled — for a task that is finishing normally, wait for its completion notification or read it with `TaskOutput` instead of stopping it.\n\n\
          Guidelines:\n\
          - This is a general-purpose stop capability for any background task. It is not a bash-specific kill.\n\
          - Stopping a task is destructive: it may leave partial side effects behind. Use it with care.\n\
@@ -2636,7 +2620,7 @@ impl Tool for TaskStopTool {
             if !input.task_id.starts_with("swarm_") {
                 // Check whether this is a delegate background task before
                 // attempting runtime cancellation. Use the read-only
-                // `task_kind` inspector rather than `snapshot`, which would
+                // `task_kind` lookup rather than `snapshot`, which would
                 // poll `try_wait` on a running bash task and could finalize
                 // it before `stop()` runs.
                 let is_delegate = ctx
@@ -2933,6 +2917,54 @@ fn workflow_elapsed(snapshot: &crate::workflow::WorkflowSnapshot) -> Duration {
     elapsed_from_epoch_ms(started_at_ms, ended_at_ms)
 }
 
+fn delegate_elapsed(snapshot: &crate::multi_agent::AgentSnapshot) -> Duration {
+    let Some(started_at_ms) = snapshot.started_at_ms else {
+        return Duration::ZERO;
+    };
+    let ended_at_ms = if snapshot.state.is_terminal() {
+        snapshot.terminal_at_ms.unwrap_or(snapshot.updated_at_ms)
+    } else {
+        current_epoch_ms()
+    };
+    elapsed_from_epoch_ms(started_at_ms, ended_at_ms)
+}
+
+fn freeze_delegate_timestamp(snapshot: &mut crate::multi_agent::AgentSnapshot) {
+    let now = current_epoch_ms();
+    snapshot.terminal_at_ms.get_or_insert(now);
+    snapshot.updated_at_ms = snapshot.updated_at_ms.max(now);
+}
+
+fn swarm_elapsed(snapshot: &crate::multi_agent::SwarmSnapshot) -> Duration {
+    let Some(started_at_ms) = snapshot
+        .children
+        .iter()
+        .filter_map(|child| child.agent.started_at_ms)
+        .min()
+    else {
+        return Duration::ZERO;
+    };
+    let ended_at_ms = if snapshot.state.is_terminal() {
+        snapshot
+            .children
+            .iter()
+            .filter_map(|child| child.agent.terminal_at_ms)
+            .max()
+            .unwrap_or(started_at_ms)
+    } else {
+        current_epoch_ms()
+    };
+    elapsed_from_epoch_ms(started_at_ms, ended_at_ms)
+}
+
+fn freeze_swarm_timestamps(snapshot: &mut crate::multi_agent::SwarmSnapshot) {
+    for child in &mut snapshot.children {
+        if child.agent.state.is_terminal() {
+            freeze_delegate_timestamp(&mut child.agent);
+        }
+    }
+}
+
 fn elapsed_from_epoch_ms(started_at_ms: u64, ended_at_ms: u64) -> Duration {
     Duration::from_millis(ended_at_ms.saturating_sub(started_at_ms))
 }
@@ -3098,10 +3130,186 @@ mod tests {
     use super::*;
     use crate::workflow::journal::{JournalPayload, collect_journal};
     use crate::workflow::{
-        WorkflowActor, WorkflowId, WorkflowLaunchRequest, WorkflowLimits, WorkflowPhase,
-        WorkflowRuntime, WorkflowSnapshot, WorkflowState,
+        WorkflowActor, WorkflowChildKey, WorkflowChildKind, WorkflowChildRow, WorkflowChildState,
+        WorkflowId, WorkflowLaunchRequest, WorkflowLimits, WorkflowPhase, WorkflowRuntime,
+        WorkflowSnapshot, WorkflowState,
     };
     use crate::{ShellLimits, ShellRuntime, ToolAccess};
+
+    fn workflow_child_for_test(
+        key: WorkflowChildKey,
+        child_kind: WorkflowChildKind,
+        agent_id: Option<String>,
+        state: WorkflowChildState,
+    ) -> WorkflowChildRow {
+        WorkflowChildRow {
+            key,
+            child_kind,
+            phase_id: None,
+            agent_id,
+            state,
+            title: Some("Review".to_owned()),
+            role: None,
+            queued_at_ms: Some(1_000),
+            started_at_ms: Some(2_000),
+            updated_at_ms: 3_000,
+            terminal_at_ms: None,
+            terminal_summary: None,
+            error_summary: None,
+            actual_usage: None,
+            latest_activity: None,
+            generated_files: Vec::new(),
+        }
+    }
+
+    fn live_workflow_agent_for_test(
+        state: crate::multi_agent::AgentLifecycleState,
+    ) -> crate::multi_agent::AgentProgressSnapshot {
+        use crate::multi_agent::{
+            AgentId, AgentRunMode, AgentToolActivityPhase, DelegateToolProgress,
+        };
+
+        crate::multi_agent::AgentProgressSnapshot {
+            agent_id: AgentId::from_suffix_for_test("workflow-live"),
+            state,
+            mode: AgentRunMode::Foreground,
+            detached_from_foreground: false,
+            started_at_ms: Some(1_500),
+            updated_at_ms: 2_500,
+            terminal_at_ms: None,
+            terminal_reason: None,
+            run_count: 1,
+            live_messages_received: 1,
+            tool_count: 1,
+            token_count: 10,
+            cache_read_token_count: 2,
+            cache_write_token_count: 3,
+            elapsed_ms: 1_000,
+            latest_text: Some("fallback text".to_owned()),
+            last_tool: Some(DelegateToolProgress {
+                id: "tool-1".to_owned(),
+                name: "Read".to_owned(),
+                summary: Some("src/lib.rs".to_owned()),
+                phase: AgentToolActivityPhase::Ongoing,
+                output: None,
+                files: Vec::new(),
+            }),
+            outcome: None,
+        }
+    }
+
+    #[test]
+    fn workflow_live_child_merge_uses_real_activity_usage_and_preserves_durable_facts() {
+        use crate::multi_agent::AgentLifecycleState;
+
+        let mut live = live_workflow_agent_for_test(AgentLifecycleState::Running);
+        let mut child = workflow_child_for_test(
+            WorkflowChildKey::DirectDelegate {
+                invocation_id: "inv-1".to_owned(),
+            },
+            WorkflowChildKind::Delegate,
+            Some(live.agent_id.as_str().to_owned()),
+            WorkflowChildState::Recovering,
+        );
+
+        merge_live_workflow_child(&mut child, &live);
+        assert_eq!(child.state, WorkflowChildState::Recovering);
+        assert_eq!(child.actual_usage.as_ref().unwrap()["total_tokens"], 15);
+        assert_eq!(child.latest_activity.as_deref(), Some("Read: src/lib.rs"));
+
+        child.state = WorkflowChildState::Completed;
+        child.terminal_summary = Some("durable result".to_owned());
+        child.actual_usage = Some(serde_json::json!({"input_tokens": 7}));
+        live.token_count = 99;
+        merge_live_workflow_child(&mut child, &live);
+        assert_eq!(child.state, WorkflowChildState::Completed);
+        assert_eq!(child.actual_usage.as_ref().unwrap()["input_tokens"], 7);
+        assert_eq!(child.terminal_summary.as_deref(), Some("durable result"));
+
+        child.state = WorkflowChildState::Queued;
+        merge_live_workflow_child(&mut child, &live);
+        assert_eq!(child.state, WorkflowChildState::Queued);
+
+        child.state = WorkflowChildState::Recovering;
+        live.state = AgentLifecycleState::Completed;
+        merge_live_workflow_child(&mut child, &live);
+        assert_eq!(child.state, WorkflowChildState::Recovering);
+    }
+
+    #[tokio::test]
+    async fn delegate_and_swarm_elapsed_use_frozen_persisted_timestamps_after_reregistration() {
+        use crate::multi_agent::{
+            AgentPathKind, AgentRole, AgentRunMode, DelegateContext, MultiAgentRuntime,
+            SwarmAggregate, SwarmChildSnapshot, SwarmSnapshot,
+        };
+
+        let runtime = MultiAgentRuntime::new();
+        let mut agent = runtime.start_delegate(
+            "review",
+            None,
+            AgentRole::Reviewer,
+            AgentRunMode::Background,
+            DelegateContext::None,
+            AgentPathKind::Root,
+        );
+        agent.state = crate::multi_agent::AgentLifecycleState::Completed;
+        agent.started_at_ms = Some(100);
+        agent.terminal_at_ms = Some(650);
+        agent.updated_at_ms = 650;
+
+        let manager = BackgroundTaskManager::new();
+        let task_id = manager.start_delegate(agent.clone()).await;
+        assert_eq!(
+            manager
+                .snapshot(&task_id)
+                .await
+                .expect("delegate snapshot")
+                .elapsed,
+            Duration::from_millis(550)
+        );
+        manager.start_delegate(agent.clone()).await;
+        assert_eq!(
+            manager
+                .snapshot(&task_id)
+                .await
+                .expect("delegate reload")
+                .elapsed,
+            Duration::from_millis(550)
+        );
+
+        let swarm = SwarmSnapshot {
+            swarm_id: "swarm-elapsed".to_owned(),
+            description: "review swarm".to_owned(),
+            role: AgentRole::Reviewer,
+            mode: AgentRunMode::Background,
+            state: crate::multi_agent::AgentLifecycleState::Completed,
+            max_concurrency: 1,
+            aggregate: SwarmAggregate::from_states([agent.state]),
+            children: vec![SwarmChildSnapshot {
+                item_index: 0,
+                item: "review".to_owned(),
+                agent,
+            }],
+        };
+        let swarm_id = manager.start_delegate_swarm(swarm.clone()).await;
+        assert_eq!(
+            manager
+                .snapshot(&swarm_id)
+                .await
+                .expect("swarm snapshot")
+                .elapsed,
+            Duration::from_millis(550)
+        );
+        manager.start_delegate_swarm(swarm).await;
+        assert_eq!(
+            manager
+                .snapshot(&swarm_id)
+                .await
+                .expect("swarm reload")
+                .elapsed,
+            Duration::from_millis(550)
+        );
+    }
 
     #[tokio::test]
     async fn manager_lists_active_and_completed_questions() {
@@ -3169,7 +3377,6 @@ mod tests {
                     script: "neo.phase('work')".to_owned(),
                     args: json!({}),
                     launch_source: "test".to_owned(),
-                    parent_run_id: None,
                     output_schema: None,
                     display_name: None,
                     input_schema: None,
@@ -3236,6 +3443,8 @@ mod tests {
         let records = collect_journal(
             &crate::workflow::journal_path(session.path(), &crate::workflow::WorkflowId(task_id)),
             None,
+            crate::workflow::WorkflowLimits::default().journal_record_bytes,
+            crate::workflow::WorkflowLimits::default().journal_total_bytes,
         )
         .expect("journal");
         assert!(records.iter().any(|record| matches!(
@@ -3290,7 +3499,6 @@ mod tests {
                     script: "neo.phase('work')".to_owned(),
                     args: json!({}),
                     launch_source: "test".to_owned(),
-                    parent_run_id: None,
                     output_schema: None,
                     display_name: None,
                     input_schema: None,
@@ -3437,7 +3645,6 @@ mod tests {
             latest_log_summary: None,
             latest_report_summary: None,
             terminal_reason: None,
-            steps: Vec::new(),
             display_name: "workflow elapsed".to_owned(),
             purpose: "test".to_owned(),
         };
@@ -3925,7 +4132,7 @@ mod tests {
         tokio::fs::remove_file(&running_path)
             .await
             .expect("remove running marker between reads");
-        let state = BackgroundTaskManager::inspect_after_first_running(
+        let state = BackgroundTaskManager::read_after_first_running(
             tasks.path(),
             task_id,
             &tasks.path().join(format!("{task_id}.status.json")),
@@ -3933,7 +4140,7 @@ mod tests {
             true,
         )
         .await
-        .expect("second persisted inspection");
+        .expect("second persisted lookup");
         assert!(matches!(state, PersistedTaskFiles::Missing));
     }
 

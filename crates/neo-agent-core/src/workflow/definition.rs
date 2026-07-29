@@ -20,11 +20,8 @@ use super::state::{
     WorkflowName, WorkflowPhase, WorkflowRevision, WorkflowSourceOrigin, validate_portable_name,
 };
 
-/// Definition format version for V2 manifests and resolved definitions.
-pub const DEFINITION_FORMAT_VERSION: u32 = 2;
-
 /// ASCII framing magic including the trailing NUL byte.
-pub const DEFINITION_REVISION_PREFIX: &[u8] = b"neo-workflow-definition-v2\0";
+pub const DEFINITION_REVISION_PREFIX: &[u8] = b"neo-workflow-definition\0";
 
 /// Fully typed manifest fields that participate in the content revision.
 ///
@@ -34,7 +31,6 @@ pub const DEFINITION_REVISION_PREFIX: &[u8] = b"neo-workflow-definition-v2\0";
 /// lookup key and lives on [`ResolvedWorkflowDefinition`] only.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct CanonicalWorkflowManifest {
-    pub definition_format_version: u32,
     pub display_name: String,
     pub description: String,
     pub phases: Vec<WorkflowPhase>,
@@ -65,8 +61,7 @@ pub struct ResolvedWorkflowDefinition {
     /// Display-only locator; never a trust or hash input.
     pub source_locator: Option<String>,
     pub revision: WorkflowRevision,
-    pub definition_format_version: u32,
-    /// Compact canonical manifest JSON bytes used for the revision frame.
+    /// Whitespace-free canonical manifest JSON bytes used for the revision frame.
     pub canonical_manifest_json: Vec<u8>,
 }
 
@@ -83,7 +78,6 @@ impl std::fmt::Debug for ResolvedWorkflowDefinition {
             .field("source_origin", &self.source_origin)
             .field("source_locator", &self.source_locator)
             .field("revision", &self.revision)
-            .field("definition_format_version", &self.definition_format_version)
             .field(
                 "canonical_manifest_json_len",
                 &self.canonical_manifest_json.len(),
@@ -117,7 +111,6 @@ pub struct DynamicWorkflowDefinitionInput {
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct FileWorkflowToml {
-    definition_format_version: u32,
     /// Optional; when present must match the filename stem exactly.
     #[serde(default)]
     name: Option<String>,
@@ -133,7 +126,7 @@ struct FileWorkflowToml {
 /// Compute the exact definition content revision.
 ///
 /// Framing:
-/// `ASCII "neo-workflow-definition-v2\0" || u64be(manifest_len) || manifest ||
+/// `ASCII "neo-workflow-definition\0" || u64be(manifest_len) || manifest ||
 ///  u64be(source_len) || source`.
 #[must_use]
 pub fn compute_definition_revision(
@@ -168,7 +161,7 @@ pub fn build_definition_revision_frame(
     frame
 }
 
-/// Serialize a typed manifest to compact UTF-8-byte-sorted canonical JSON.
+/// Serialize a typed manifest to whitespace-free UTF-8-byte-sorted canonical JSON.
 pub fn serialize_canonical_manifest(
     manifest: &CanonicalWorkflowManifest,
 ) -> Result<Vec<u8>, WorkflowError> {
@@ -236,7 +229,6 @@ pub fn resolve_dynamic_definition(
 
     let source_sha256 = source_sha256_hex(source_bytes);
     let typed = CanonicalWorkflowManifest {
-        definition_format_version: DEFINITION_FORMAT_VERSION,
         display_name,
         description,
         phases,
@@ -301,7 +293,6 @@ pub fn resolve_paired_definition(
         .to_owned();
 
     let typed = CanonicalWorkflowManifest {
-        definition_format_version: DEFINITION_FORMAT_VERSION,
         display_name,
         description,
         phases,
@@ -333,15 +324,6 @@ fn decode_file_manifest(manifest_bytes: &[u8]) -> Result<FileWorkflowToml, Workf
             format!("manifest TOML decode failed: {err}"),
         )
     })?;
-    if raw.definition_format_version != DEFINITION_FORMAT_VERSION {
-        return Err(WorkflowError::coded(
-            WorkflowErrorCode::InvalidManifest,
-            format!(
-                "unsupported definition_format_version {}; expected {DEFINITION_FORMAT_VERSION}",
-                raw.definition_format_version
-            ),
-        ));
-    }
     Ok(raw)
 }
 
@@ -459,7 +441,6 @@ fn finish_resolved(
         source_origin,
         source_locator,
         revision,
-        definition_format_version: DEFINITION_FORMAT_VERSION,
         canonical_manifest_json,
     })
 }
@@ -622,7 +603,6 @@ mod tests {
     #[test]
     fn key_reorder_preserves_canonical_manifest_bytes() {
         let m1 = CanonicalWorkflowManifest {
-            definition_format_version: 2,
             display_name: "Demo".into(),
             description: "d".into(),
             phases: vec![WorkflowPhase {

@@ -1,4 +1,4 @@
-//! V2 workflow identity, state, and transactional lifecycle tests (Tasks 1 + 4).
+//! Canonical workflow identity, state, and transactional lifecycle tests.
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
@@ -8,7 +8,7 @@ use neo_agent_core::workflow::journal::{
     JournalEnvelope, JournalPayload, JournalWriter, collect_journal, read_run_metadata, run_dir,
 };
 use neo_agent_core::workflow::{
-    WORKFLOW_NAME_MAX_LEN, WorkflowActor, WorkflowArtifactId, WorkflowCheckpoint, WorkflowError,
+    UserAnswerPolicy, WORKFLOW_NAME_MAX_LEN, WorkflowActor, WorkflowArtifactId, WorkflowError,
     WorkflowErrorCode, WorkflowFinalResultMetadata, WorkflowHumanHandle, WorkflowInvocationId,
     WorkflowInvocationKind, WorkflowInvocationOutcome, WorkflowLaunchRequest, WorkflowLimits,
     WorkflowName, WorkflowOutcomeStatus, WorkflowPhase, WorkflowRequestId, WorkflowRevision,
@@ -16,7 +16,7 @@ use neo_agent_core::workflow::{
 };
 
 #[test]
-fn workflow_v2_identity_rejects_invalid_names() {
+fn workflow_identity_rejects_invalid_names() {
     // Valid portable names.
     let max_valid = "a".repeat(WORKFLOW_NAME_MAX_LEN);
     for name in ["a", "review", "review-2", "phase_1", max_valid.as_str()] {
@@ -51,19 +51,19 @@ fn workflow_v2_identity_rejects_invalid_names() {
         );
     }
 
-    // Run ID: UUID machine key for V2; opaque V1 strings stay readable via from_existing.
+    // Run ID: canonical UUID machine key plus internal construction for stored IDs.
     let generated = WorkflowRunId::generate();
     assert!(
         generated.as_str().starts_with("wf_"),
         "generated id should use wf_ prefix"
     );
-    WorkflowRunId::parse_v2(generated.as_str()).expect("generated id parses");
-    WorkflowRunId::parse_v2("00000000-0000-4000-8000-000000000001").expect("hyphen UUID");
-    WorkflowRunId::parse_v2("00000000000040008000000000000001").expect("simple hex");
-    let bad = WorkflowRunId::parse_v2("not-a-uuid").expect_err("reject garbage");
+    WorkflowRunId::parse(generated.as_str()).expect("generated id parses");
+    WorkflowRunId::parse("00000000-0000-4000-8000-000000000001").expect("hyphen UUID");
+    WorkflowRunId::parse("00000000000040008000000000000001").expect("simple hex");
+    let bad = WorkflowRunId::parse("not-a-uuid").expect_err("reject garbage");
     assert_eq!(bad.code(), WorkflowErrorCode::InvalidInput);
-    let v1 = WorkflowRunId::from_existing("run_legacy_opaque");
-    assert_eq!(v1.as_str(), "run_legacy_opaque");
+    let stored = WorkflowRunId::from_existing("wf_stored_internal_key");
+    assert_eq!(stored.as_str(), "wf_stored_internal_key");
 
     // Revision must be lowercase sha-256 hex.
     let rev = WorkflowRevision::from_bytes(b"neo-workflow");
@@ -81,10 +81,8 @@ fn workflow_v2_identity_rejects_invalid_names() {
     assert!(req.as_str().starts_with("req_"));
     let art = WorkflowArtifactId::new(generated.clone(), rev.as_str()).unwrap();
     assert_eq!(art.as_content_sha256(), rev.as_str());
-    let ckpt = WorkflowCheckpoint::new(generated, 3, rev.as_str()).unwrap();
-    assert_eq!(ckpt.sequence, 3);
 
-    // V2 states and transitions.
+    // canonical states and transitions.
     assert!(!WorkflowState::Queued.is_terminal());
     assert!(!WorkflowState::AwaitingUser.is_terminal());
     assert!(WorkflowState::Completed.is_terminal());
@@ -103,12 +101,6 @@ fn workflow_v2_identity_rejects_invalid_names() {
     assert_eq!(WorkflowState::Queued.as_str(), "queued");
 
     // Stable error codes are not message-parsed.
-    let coded = WorkflowError::coded(WorkflowErrorCode::LineageMismatch, "prefix diverged");
-    assert_eq!(coded.code(), WorkflowErrorCode::LineageMismatch);
-    assert_eq!(
-        WorkflowErrorCode::LineageMismatch.as_str(),
-        "lineage_mismatch"
-    );
     assert_eq!(
         WorkflowError::InvalidInput("x".into()).code(),
         WorkflowErrorCode::InvalidInput
@@ -130,7 +122,6 @@ fn launch_request() -> WorkflowLaunchRequest {
         script: "return { ok = true }".to_owned(),
         args: serde_json::json!({}),
         launch_source: "/workflow review".to_owned(),
-        parent_run_id: None,
         output_schema: None,
         display_name: None,
         input_schema: None,
@@ -152,7 +143,7 @@ fn completed(summary: &str) -> WorkflowInvocationOutcome {
 }
 
 #[tokio::test]
-async fn v2_create_is_durable_and_queued_before_registration() {
+async fn create_is_durable_and_queued_before_registration() {
     let dir = tempfile::tempdir().unwrap();
     let runtime = WorkflowRuntime::default();
 
@@ -167,14 +158,16 @@ async fn v2_create_is_durable_and_queued_before_registration() {
 
     let meta = read_run_metadata(&run_dir(dir.path(), &handle.run_id)).unwrap();
     assert_eq!(meta.run_id, handle.run_id);
-    assert_eq!(
-        meta.journal_format_version, 3,
-        "new runs use V3 journal format"
-    );
     assert_eq!(meta.name, "review");
 
     let journal_path = run_dir(dir.path(), &handle.run_id).join("journal.jsonl");
-    let envelopes = collect_journal(&journal_path, Some(&handle.run_id)).unwrap();
+    let envelopes = collect_journal(
+        &journal_path,
+        Some(&handle.run_id),
+        WorkflowLimits::default().journal_record_bytes,
+        WorkflowLimits::default().journal_total_bytes,
+    )
+    .unwrap();
     assert_eq!(envelopes.len(), 1);
     assert!(matches!(
         envelopes[0].payload,
@@ -214,7 +207,7 @@ async fn v2_create_is_durable_and_queued_before_registration() {
 }
 
 #[test]
-fn workflow_v2_rejects_all_illegal_and_terminal_transitions() {
+fn workflow_rejects_all_illegal_and_terminal_transitions() {
     let allowed: std::collections::HashSet<_> = WorkflowState::allowed_transitions()
         .iter()
         .copied()
@@ -328,7 +321,13 @@ async fn external_effect_is_never_executed_before_durable_start() {
     );
 
     let journal_path = run_dir(dir.path(), &handle.run_id).join("journal.jsonl");
-    let envelopes = collect_journal(&journal_path, Some(&handle.run_id)).unwrap();
+    let envelopes = collect_journal(
+        &journal_path,
+        Some(&handle.run_id),
+        WorkflowLimits::default().journal_record_bytes,
+        WorkflowLimits::default().journal_total_bytes,
+    )
+    .unwrap();
     let started = envelopes
         .iter()
         .any(|e| matches!(e.payload, JournalPayload::InvocationStarted { .. }));
@@ -349,7 +348,6 @@ async fn crash_after_final_result_appends_only_completed_state() {
     // Synthesize a durable prefix that crashed after FinalResultRecorded.
     let meta = neo_agent_core::workflow::WorkflowRunMetadata {
         run_id: run_id.clone(),
-        parent_run_id: None,
         name: "review".to_owned(),
         description: "crash recovery".to_owned(),
         phases: Vec::new(),
@@ -359,19 +357,17 @@ async fn crash_after_final_result_appends_only_completed_state() {
             .to_owned(),
         args: serde_json::json!({}),
         launch_source: "/workflow".to_owned(),
-        journal_format_version: 2,
         output_schema: None,
         display_name: None,
         input_schema: None,
         definition_origin: None,
         inline_unsaved: false,
     };
-    neo_agent_core::workflow::write_run_metadata(&run_path, &meta, &WorkflowLimits::default())
-        .unwrap();
+    let limits = WorkflowLimits::default();
+    neo_agent_core::workflow::write_run_metadata(&run_path, &meta, &limits).unwrap();
 
     let journal_path = run_path.join("journal.jsonl");
-    let mut writer = JournalWriter::open(&journal_path, run_id.clone()).unwrap();
-    let limits = WorkflowLimits::default();
+    let mut writer = JournalWriter::open(&journal_path, run_id.clone(), &limits).unwrap();
     let mut seq = 0u64;
     let mut append = |payload: JournalPayload| {
         let env = JournalEnvelope::new(seq, 1_000 + seq, run_id.clone(), payload);
@@ -398,7 +394,13 @@ async fn crash_after_final_result_appends_only_completed_state() {
     });
     drop(writer);
 
-    let before = collect_journal(&journal_path, Some(&run_id)).unwrap();
+    let before = collect_journal(
+        &journal_path,
+        Some(&run_id),
+        WorkflowLimits::default().journal_record_bytes,
+        WorkflowLimits::default().journal_total_bytes,
+    )
+    .unwrap();
     assert_eq!(before.len(), 3);
     assert!(before.iter().all(|e| {
         !matches!(
@@ -417,7 +419,13 @@ async fn crash_after_final_result_appends_only_completed_state() {
     assert_eq!(recovered.run_id, run_id);
     assert_eq!(recovered.snapshot().await.state, WorkflowState::Completed);
 
-    let after = collect_journal(&journal_path, Some(&run_id)).unwrap();
+    let after = collect_journal(
+        &journal_path,
+        Some(&run_id),
+        WorkflowLimits::default().journal_record_bytes,
+        WorkflowLimits::default().journal_total_bytes,
+    )
+    .unwrap();
     assert_eq!(
         after.len(),
         4,
@@ -446,7 +454,13 @@ async fn crash_after_final_result_appends_only_completed_state() {
     let runtime2 = WorkflowRuntime::default();
     let handles2 = runtime2.rehydrate(session).await.unwrap();
     assert_eq!(handles2[0].snapshot().await.state, WorkflowState::Completed);
-    let after2 = collect_journal(&journal_path, Some(&run_id)).unwrap();
+    let after2 = collect_journal(
+        &journal_path,
+        Some(&run_id),
+        WorkflowLimits::default().journal_record_bytes,
+        WorkflowLimits::default().journal_total_bytes,
+    )
+    .unwrap();
     assert_eq!(after2.len(), 4);
 }
 
@@ -461,7 +475,6 @@ async fn ordinary_resume_cannot_bypass_awaiting_user() {
     std::fs::create_dir_all(&run_path).unwrap();
     let meta = neo_agent_core::workflow::WorkflowRunMetadata {
         run_id: run_id.clone(),
-        parent_run_id: None,
         name: "await".to_owned(),
         description: String::new(),
         phases: Vec::new(),
@@ -471,18 +484,16 @@ async fn ordinary_resume_cannot_bypass_awaiting_user() {
             .to_owned(),
         args: serde_json::json!({}),
         launch_source: "/workflow".to_owned(),
-        journal_format_version: 2,
         output_schema: None,
         display_name: None,
         input_schema: None,
         definition_origin: None,
         inline_unsaved: false,
     };
-    neo_agent_core::workflow::write_run_metadata(&run_path, &meta, &WorkflowLimits::default())
-        .unwrap();
-    let journal_path = run_path.join("journal.jsonl");
-    let mut writer = JournalWriter::open(&journal_path, run_id.clone()).unwrap();
     let limits = WorkflowLimits::default();
+    neo_agent_core::workflow::write_run_metadata(&run_path, &meta, &limits).unwrap();
+    let journal_path = run_path.join("journal.jsonl");
+    let mut writer = JournalWriter::open(&journal_path, run_id.clone(), &limits).unwrap();
     for (seq, payload) in [
         JournalPayload::RunCreated {
             name: "await".to_owned(),
@@ -497,7 +508,11 @@ async fn ordinary_resume_cannot_bypass_awaiting_user() {
         },
         JournalPayload::UserInputRequested {
             request_id: "req_1".to_owned(),
-            prompt: Some(serde_json::json!({"q": "continue?"})),
+            prompt: "continue?".to_owned(),
+            answer_schema: serde_json::json!({"type": "boolean"}),
+            default: Some(serde_json::json!(true)),
+            title: Some("Confirm".to_owned()),
+            answer_policy: UserAnswerPolicy::Human,
         },
         JournalPayload::StateChanged {
             previous: WorkflowState::Running,
@@ -599,7 +614,13 @@ async fn worker_panic_clears_active_state_and_releases_resources() {
 
     // Journal must finish the open invocation before Failed.
     let journal_path = run_dir(dir.path(), &handle.run_id).join("journal.jsonl");
-    let envelopes = collect_journal(&journal_path, Some(&handle.run_id)).unwrap();
+    let envelopes = collect_journal(
+        &journal_path,
+        Some(&handle.run_id),
+        WorkflowLimits::default().journal_record_bytes,
+        WorkflowLimits::default().journal_total_bytes,
+    )
+    .unwrap();
     let finished = envelopes.iter().any(|env| {
         matches!(
             &env.payload,
@@ -623,7 +644,6 @@ async fn rehydrate_starts_no_worker_and_preserves_awaiting_user() {
     std::fs::create_dir_all(&run_path).unwrap();
     let meta = neo_agent_core::workflow::WorkflowRunMetadata {
         run_id: run_id.clone(),
-        parent_run_id: None,
         name: "await".to_owned(),
         description: String::new(),
         phases: Vec::new(),
@@ -633,18 +653,16 @@ async fn rehydrate_starts_no_worker_and_preserves_awaiting_user() {
             .to_owned(),
         args: serde_json::json!({}),
         launch_source: "/workflow".to_owned(),
-        journal_format_version: 2,
         output_schema: None,
         display_name: None,
         input_schema: None,
         definition_origin: None,
         inline_unsaved: false,
     };
-    neo_agent_core::workflow::write_run_metadata(&run_path, &meta, &WorkflowLimits::default())
-        .unwrap();
-    let journal_path = run_path.join("journal.jsonl");
-    let mut writer = JournalWriter::open(&journal_path, run_id.clone()).unwrap();
     let limits = WorkflowLimits::default();
+    neo_agent_core::workflow::write_run_metadata(&run_path, &meta, &limits).unwrap();
+    let journal_path = run_path.join("journal.jsonl");
+    let mut writer = JournalWriter::open(&journal_path, run_id.clone(), &limits).unwrap();
     for (seq, payload) in [
         JournalPayload::RunCreated {
             name: "await".to_owned(),
@@ -659,7 +677,11 @@ async fn rehydrate_starts_no_worker_and_preserves_awaiting_user() {
         },
         JournalPayload::UserInputRequested {
             request_id: "req_await".to_owned(),
-            prompt: Some(serde_json::json!({"q": "continue?"})),
+            prompt: "continue?".to_owned(),
+            answer_schema: serde_json::json!({"type": "boolean"}),
+            default: Some(serde_json::json!(true)),
+            title: Some("Confirm".to_owned()),
+            answer_policy: UserAnswerPolicy::Human,
         },
         JournalPayload::StateChanged {
             previous: WorkflowState::Running,

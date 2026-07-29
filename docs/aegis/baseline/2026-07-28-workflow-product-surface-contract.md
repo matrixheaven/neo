@@ -18,16 +18,15 @@ by focused test evidence at commit `b52c172a`.
 - No prompt-keyword route gate, mandatory action ordering, or CLI/slash/Cargo
   prerequisite.
 - `create-workflow` skill teaches authoring without being a launch grant.
-- Journal format V3 for new runs; V1/V2 readable without migration.
-- Generic ChildQueued/ChildStarted/ChildFinished V3 lifecycle events.
-- V2 SwarmItem* events remain readable (projected to generic rows).
+- One journal format for all runs. Old journal formats are unsupported.
+- Generic ChildQueued/ChildStarted/ChildFinished lifecycle events.
 - Operator projection: WorkflowOperatorSnapshot, stable cursor paging.
 - Automatic retention at 90% watermark, 80% target, 30-day minimum age.
 - `/tasks` Workflow Operator view with Step/Agent/Details layouts.
 
 ## Architecture / Runtime Boundary Baseline
 
-- WorkflowRuntime: sole durable lifecycle owner. Journal V3 writes.
+- WorkflowRuntime: sole durable lifecycle owner and journal writer.
 - WorkflowLaunchCoordinator: stateless launch preflight.
 - WorkflowDefinitionRegistry: sole trusted definition owner.
 - BackgroundTaskManager: task lookup, control forwarding, durable/live join.
@@ -37,11 +36,9 @@ by focused test evidence at commit `b52c172a`.
 ## Verification
 
 All focused test evidence recorded at `docs/aegis/work/2026-07-28-workflow-product-surface-redesign/90-evidence.md`.
-Key results: 657+ package tests pass, 5 operator tests, 5 V3 journal tests,
-30 dispatch tests, 7 retention tests. TUI regressions (95 tests) unchanged.
+Key results cover journal recovery and retention, child lifecycle projection,
+dispatch, and the Workflow view in `/tasks`.
 
 ## Residual Risk
 
-- Three CLI integration tests require API credentials for `workflow run`.
-- Native Windows/Linux/macOS terminal evidence is pending (Task 10).
-- Unofficial docs (docs/en, docs/zh) reference retired CLI commands.
+- Real `workflow run` verification requires a configured provider credential.

@@ -14,9 +14,7 @@ use super::journal::canonical_input_hash;
 use super::runtime::{WorkflowHandle, WorkflowLaunchRequest, WorkflowRuntime};
 use super::schema::CompiledSchema;
 use super::source_sha256_hex;
-use super::state::{
-    WorkflowActor, WorkflowId, WorkflowLineageMetadata, WorkflowPhase, WorkflowRevision,
-};
+use super::state::{WorkflowActor, WorkflowPhase, WorkflowRevision};
 use crate::PermissionMode;
 use crate::tools::BackgroundTaskManager;
 
@@ -36,12 +34,10 @@ pub struct WorkflowLaunchIntent {
     pub schema_sha256: String,
     pub actor: WorkflowActor,
     pub permission_mode: PermissionMode,
-    pub parent_lineage: Option<WorkflowLineageMetadata>,
     pub name: String,
     pub description: String,
     pub phases: Vec<WorkflowPhase>,
     pub script: String,
-    pub parent_run_id: Option<WorkflowId>,
     /// Optional precompiled input schema for argument validation.
     pub compiled_input_schema: Option<CompiledSchema>,
     /// Final output schema JSON pinned onto the run for production validation.
@@ -63,7 +59,6 @@ pub struct WorkflowLaunchBinding {
     pub workspace_identity: String,
     pub actor: WorkflowActor,
     pub permission_mode: PermissionMode,
-    pub parent_lineage: Option<WorkflowLineageMetadata>,
     pub compiled_input_schema: Option<CompiledSchema>,
     /// SHA-256 of canonical schema material (empty when no schema binding).
     pub schema_sha256: String,
@@ -87,12 +82,10 @@ impl WorkflowLaunchIntent {
             schema_sha256: binding.schema_sha256,
             actor: binding.actor,
             permission_mode: binding.permission_mode,
-            parent_lineage: binding.parent_lineage,
             name: request.name,
             description: request.description,
             phases: request.phases,
             script: request.script,
-            parent_run_id: request.parent_run_id,
             compiled_input_schema: binding.compiled_input_schema,
             output_schema: request.output_schema,
             display_name: request.display_name.clone(),
@@ -112,7 +105,6 @@ impl WorkflowLaunchIntent {
             script: self.script.clone(),
             args: self.args.clone(),
             launch_source: self.launch_source.clone(),
-            parent_run_id: self.parent_run_id.clone(),
             output_schema: self.output_schema.clone(),
             display_name: self.display_name.clone(),
             input_schema: self.input_schema.clone(),
@@ -324,7 +316,6 @@ mod tests {
             script: "neo.phase('work')".to_owned(),
             args: json!({"target": "core"}),
             launch_source: "test".to_owned(),
-            parent_run_id: None,
             output_schema: None,
             display_name: None,
             input_schema: None,
@@ -339,7 +330,6 @@ mod tests {
             workspace_identity: "workspace-a".to_owned(),
             actor: WorkflowActor::Model,
             permission_mode: PermissionMode::Auto,
-            parent_lineage: None,
             compiled_input_schema: None,
             schema_sha256: String::new(),
         }

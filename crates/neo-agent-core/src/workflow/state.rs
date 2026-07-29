@@ -4,39 +4,35 @@ use uuid::Uuid;
 
 use super::error::{WorkflowError, WorkflowErrorCode};
 use crate::AgentTokenUsage;
-use crate::multi_agent::{AgentSnapshot, SwarmSnapshot};
 
 /// Portable workflow/registry name grammar: `[a-z0-9][a-z0-9_-]{0,63}`.
 pub const WORKFLOW_NAME_MAX_LEN: usize = 64;
 
 /// Durable machine identity for one workflow run.
 ///
-/// V2 creation uses a UUID-derived key (`wf_<uuid-simple>`). V1 artifacts may
-/// carry opaque strings and remain readable as-is.
-///
 /// Canonical name is [`WorkflowRunId`]; `WorkflowId` is the durable newtype
 /// storage type (same struct) kept for existing call sites.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize, JsonSchema)]
 pub struct WorkflowId(pub String);
 
-/// Canonical V2 name for [`WorkflowId`] (same type).
+/// Canonical public name for [`WorkflowId`] (same type).
 pub type WorkflowRunId = WorkflowId;
 
 impl WorkflowId {
-    /// Generate a new V2 machine identity (`wf_` + UUID simple hex).
+    /// Generate a machine identity (`wf_` + UUID simple hex).
     #[must_use]
     pub fn generate() -> Self {
         Self(format!("wf_{}", Uuid::new_v4().as_simple()))
     }
 
-    /// Wrap an existing stored identity without validation (V1 read path).
+    /// Wrap an already validated stored identity without reparsing it.
     #[must_use]
     pub fn from_existing(id: impl Into<String>) -> Self {
         Self(id.into())
     }
 
-    /// Parse a V2 machine identity: raw UUID or `wf_<32-lowercase-hex>`.
-    pub fn parse_v2(raw: &str) -> Result<Self, WorkflowError> {
+    /// Parse a machine identity: raw UUID or `wf_<32-lowercase-hex>`.
+    pub fn parse(raw: &str) -> Result<Self, WorkflowError> {
         if let Some(simple) = raw.strip_prefix("wf_") {
             if is_uuid_simple(simple) {
                 return Ok(Self(raw.to_owned()));
@@ -248,30 +244,6 @@ impl WorkflowArtifactId {
     }
 }
 
-/// Durable checkpoint: source run + journal sequence boundary + prefix digest.
-#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize, JsonSchema)]
-pub struct WorkflowCheckpoint {
-    pub run_id: WorkflowRunId,
-    pub sequence: u64,
-    /// Lowercase SHA-256 over the verified journal prefix through `sequence`.
-    pub prefix_digest: String,
-}
-
-impl WorkflowCheckpoint {
-    pub fn new(
-        run_id: WorkflowRunId,
-        sequence: u64,
-        prefix_digest: impl Into<String>,
-    ) -> Result<Self, WorkflowError> {
-        let prefix_digest = WorkflowRevision::parse(&prefix_digest.into())?.0;
-        Ok(Self {
-            run_id,
-            sequence,
-            prefix_digest,
-        })
-    }
-}
-
 /// Validate the portable name grammar used for workflow names and handles.
 ///
 /// Grammar: `[a-z0-9][a-z0-9_-]{0,63}` — case-sensitive, no Unicode.
@@ -310,7 +282,7 @@ pub fn validate_portable_name(raw: &str, kind: &str) -> Result<(), WorkflowError
     Ok(())
 }
 
-/// Canonical V2 lifecycle states (plus V1-compatible terminal set).
+/// Canonical workflow lifecycle states.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum WorkflowState {
@@ -367,7 +339,7 @@ impl WorkflowState {
         }
     }
 
-    /// Whether `from -> to` is an allowed V2 transition.
+    /// Whether `from -> to` is an allowed transition.
     #[must_use]
     pub fn can_transition_to(self, to: Self) -> bool {
         use WorkflowState::{
@@ -422,7 +394,7 @@ impl WorkflowState {
         Ok(())
     }
 
-    /// Explicit V2 transition table entries as `(from, to)` pairs.
+    /// Explicit transition table entries as `(from, to)` pairs.
     #[must_use]
     pub fn allowed_transitions() -> &'static [(Self, Self)] {
         use WorkflowState::{
@@ -506,21 +478,10 @@ pub struct WorkflowPinnedSource {
     /// Display-only locator; never a trust or hash input.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub source_locator: Option<String>,
-    /// Exact Lua source bytes as UTF-8 text for V2 runs.
+    /// Exact Lua source bytes as UTF-8 text.
     pub lua_source: String,
     /// Verified lowercase SHA-256 of `lua_source` bytes.
     pub source_sha256: String,
-}
-
-/// Lineage link to a parent run / checkpoint.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
-pub struct WorkflowLineageMetadata {
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub parent_run_id: Option<WorkflowRunId>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub parent_checkpoint: Option<WorkflowCheckpoint>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub link_reason: Option<String>,
 }
 
 /// Final-result ownership metadata (top-level Lua return).
@@ -603,15 +564,10 @@ pub struct WorkflowPhase {
     pub description: String,
 }
 
-/// V1 run metadata shape — retained for read-only decode of existing artifacts.
-///
-/// V2 adds richer pinned/lineage fields via dedicated types; V1 `run.json` files
-/// continue to deserialize into this struct without a V1 writer path.
+/// Durable metadata for a workflow run.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct WorkflowRunMetadata {
     pub run_id: WorkflowRunId,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub parent_run_id: Option<WorkflowRunId>,
     pub name: String,
     pub description: String,
     pub phases: Vec<WorkflowPhase>,
@@ -620,8 +576,7 @@ pub struct WorkflowRunMetadata {
     #[serde(default = "default_args")]
     pub args: serde_json::Value,
     pub launch_source: String,
-    pub journal_format_version: u32,
-    /// Pinned final result schema for the production runner (absent on legacy V1).
+    /// Pinned final result schema for the production runner.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub output_schema: Option<serde_json::Value>,
     /// Optional user-facing display name pinned at creation.
@@ -667,24 +622,6 @@ fn default_details() -> serde_json::Value {
     serde_json::Value::Object(serde_json::Map::new())
 }
 
-// --- Legacy types retained for historical session read-only compatibility ---
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
-pub struct WorkflowStepRecord {
-    pub index: usize,
-    pub name: String,
-    pub state: WorkflowState,
-    pub summary: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub details: Option<serde_json::Value>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub agent: Option<AgentSnapshot>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub swarm: Option<SwarmSnapshot>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub has_failures: Option<bool>,
-}
-
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct WorkflowSnapshot {
     pub id: WorkflowRunId,
@@ -712,8 +649,6 @@ pub struct WorkflowSnapshot {
     pub latest_report_summary: Option<String>,
     #[serde(default)]
     pub terminal_reason: Option<String>,
-    #[serde(default)]
-    pub steps: Vec<WorkflowStepRecord>,
     /// Pinned display name for notifications and the Operator.
     #[serde(default)]
     pub display_name: String,

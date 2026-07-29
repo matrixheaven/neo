@@ -24,7 +24,6 @@ fn launch_request(name: &str) -> WorkflowLaunchRequest {
         script: "return { ok = true }".to_owned(),
         args: json!({}),
         launch_source: "/workflow".to_owned(),
-        parent_run_id: None,
         output_schema: None,
         display_name: None,
         input_schema: None,
@@ -43,7 +42,7 @@ async fn wait_running(handle: &neo_agent_core::workflow::WorkflowHandle) {
     panic!("run did not become Running");
 }
 
-/// Append many large state-change records after the durable head so total
+/// Append many large recovery records after the durable head so total
 /// journal size is multi-megabyte / multi-gigabyte-logical without loading it
 /// all into a TaskOutput page.
 fn append_logical_multi_gigabyte_journal(
@@ -52,25 +51,31 @@ fn append_logical_multi_gigabyte_journal(
     record_count: u64,
     payload_chars: usize,
 ) {
-    let existing = collect_journal(path, Some(run_id)).expect("collect head");
+    let existing = collect_journal(
+        path,
+        Some(run_id),
+        WorkflowLimits::default().journal_record_bytes,
+        WorkflowLimits::default().journal_total_bytes,
+    )
+    .expect("collect head");
     let next_seq = existing.last().map_or(0, |e| e.seq + 1);
-    let mut writer = JournalWriter::open(path, run_id.clone()).expect("open writer");
     let limits = WorkflowLimits {
         journal_record_bytes: 32 * 1024 * 1024,
         journal_total_bytes: 8 * 1024 * 1024 * 1024,
         ..WorkflowLimits::default()
     };
+    let mut writer = JournalWriter::open(path, run_id.clone(), &limits).expect("open writer");
     let filler = "x".repeat(payload_chars);
     for i in 0..record_count {
         let envelope = JournalEnvelope::new(
             next_seq + i,
             1_000 + i,
             run_id.clone(),
-            JournalPayload::StateChanged {
-                previous: WorkflowState::Running,
-                new: WorkflowState::Running,
-                reason: format!("heartbeat-{i}-{filler}"),
-                actor: WorkflowActor::Runtime,
+            JournalPayload::RecoveryActionApplied {
+                action: format!("page-fixture-{i}"),
+                detail: Some(json!({ "filler": &filler })),
+                quarantine_sha256: None,
+                removed_bytes: None,
             },
         );
         writer.append(&envelope, &limits).expect("append record");

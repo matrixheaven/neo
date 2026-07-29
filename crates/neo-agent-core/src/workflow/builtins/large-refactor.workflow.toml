@@ -1,8 +1,7 @@
-definition_format_version = 2
 name = "large-refactor"
 display_name = "Large Refactor"
 description = "Partition approved refactor work into isolated-worktree slices, preserve verification artifacts, and await explicit human merge/retirement decisions. Never auto-merges or deletes worktrees."
-source_sha256 = "44b723d9de477510654df45d3c1e687f69b7bb6d63ba7353755033b39d31d80d"
+source_sha256 = "a5d7ccfc64d28b64f63a6fec92ecd1f70dae07f235c39670133761a707801f3f"
 
 [[phases]]
 id = "intake"

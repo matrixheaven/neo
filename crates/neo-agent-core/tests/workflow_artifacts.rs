@@ -26,7 +26,6 @@ fn launch_request(name: &str) -> WorkflowLaunchRequest {
         script: "return { ok = true }".to_owned(),
         args: serde_json::json!({}),
         launch_source: "/workflow".to_owned(),
-        parent_run_id: None,
         output_schema: None,
         display_name: None,
         input_schema: None,
@@ -144,7 +143,13 @@ async fn artifact_is_visible_only_after_durable_commit() {
 
     // Journal ends with ArtifactCommitted after file write.
     let journal_path = run_dir.join("journal.jsonl");
-    let envelopes = collect_journal(&journal_path, Some(&handle.run_id)).expect("journal");
+    let envelopes = collect_journal(
+        &journal_path,
+        Some(&handle.run_id),
+        WorkflowLimits::default().journal_record_bytes,
+        WorkflowLimits::default().journal_total_bytes,
+    )
+    .expect("journal");
     assert!(
         envelopes.iter().any(|e| matches!(
             &e.payload,
@@ -287,8 +292,13 @@ async fn oversized_final_result_uses_artifact_without_losing_usage() {
 
     // ArtifactCommitted precedes FinalResultRecorded in the journal.
     let run_dir = neo_agent_core::workflow::run_dir(dir.path(), &handle.run_id);
-    let envelopes =
-        collect_journal(&run_dir.join("journal.jsonl"), Some(&handle.run_id)).expect("journal");
+    let envelopes = collect_journal(
+        &run_dir.join("journal.jsonl"),
+        Some(&handle.run_id),
+        WorkflowLimits::default().journal_record_bytes,
+        WorkflowLimits::default().journal_total_bytes,
+    )
+    .expect("journal");
     let art_seq = envelopes.iter().find_map(|e| match &e.payload {
         JournalPayload::ArtifactCommitted {
             logical_name: Some(name),
@@ -369,8 +379,13 @@ async fn corrupt_or_missing_artifact_is_typed_error() {
     // Direct store read_range also typed.
     let store = ArtifactStore::open(&run_dir, handle.run_id.clone()).expect("open");
     // Rehydrate membership from journal without trusting FS.
-    let envelopes =
-        collect_journal(&run_dir.join("journal.jsonl"), Some(&handle.run_id)).expect("scan");
+    let envelopes = collect_journal(
+        &run_dir.join("journal.jsonl"),
+        Some(&handle.run_id),
+        WorkflowLimits::default().journal_record_bytes,
+        WorkflowLimits::default().journal_total_bytes,
+    )
+    .expect("scan");
     let mut store = store;
     store
         .rehydrate_from_envelopes(&envelopes)
@@ -446,7 +461,8 @@ async fn staged_orphan_is_not_listed() {
 
     // Journal commit is what makes it visible.
     let journal_path = run_dir.join("journal.jsonl");
-    let mut writer = JournalWriter::open(&journal_path, run_id.clone()).unwrap();
+    let mut writer =
+        JournalWriter::open(&journal_path, run_id.clone(), &WorkflowLimits::default()).unwrap();
     let env = JournalEnvelope::new(
         0,
         1,
@@ -464,7 +480,13 @@ async fn staged_orphan_is_not_listed() {
         .expect("append");
     drop(writer);
 
-    let envelopes = collect_journal(&journal_path, Some(&run_id)).unwrap();
+    let envelopes = collect_journal(
+        &journal_path,
+        Some(&run_id),
+        WorkflowLimits::default().journal_record_bytes,
+        WorkflowLimits::default().journal_total_bytes,
+    )
+    .unwrap();
     store.rehydrate_from_envelopes(&envelopes).unwrap();
     assert_eq!(store.list_metadata().len(), 1);
     let content = store.get(&staged.artifact_id).unwrap();
@@ -490,7 +512,7 @@ fn artifact_replace_and_integrity_are_platform_safe() {
     assert_eq!(art_dir, PathBuf::from(&run_dir).join("artifacts"));
     assert!(art_dir.is_dir());
 
-    let payload = b"platform-artifact-body-v1";
+    let payload = b"platform-artifact-body";
     let staged = store
         .stage(
             &WorkflowLimits::default(),
@@ -519,7 +541,8 @@ fn artifact_replace_and_integrity_are_platform_safe() {
 
     // Journal membership then integrity-validated read.
     let journal_path = run_dir.join("journal.jsonl");
-    let mut writer = JournalWriter::open(&journal_path, run_id.clone()).unwrap();
+    let mut writer =
+        JournalWriter::open(&journal_path, run_id.clone(), &WorkflowLimits::default()).unwrap();
     let env = JournalEnvelope::new(
         0,
         1,
@@ -537,7 +560,13 @@ fn artifact_replace_and_integrity_are_platform_safe() {
         .expect("append ArtifactCommitted");
     drop(writer);
 
-    let envelopes = collect_journal(&journal_path, Some(&run_id)).unwrap();
+    let envelopes = collect_journal(
+        &journal_path,
+        Some(&run_id),
+        WorkflowLimits::default().journal_record_bytes,
+        WorkflowLimits::default().journal_total_bytes,
+    )
+    .unwrap();
     let mut store = store;
     store.rehydrate_from_envelopes(&envelopes).unwrap();
     let content = store.get(&staged.artifact_id).expect("validated get");

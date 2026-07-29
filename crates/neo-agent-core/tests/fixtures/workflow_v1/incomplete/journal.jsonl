@@ -1,2 +1,0 @@
-{"type":"state_changed","seq":0,"timestamp_ms":1000,"previous":"running","new":"running","reason":"launch","actor":"runtime"}
-{"type":"invocation_started","seq":1,"timestamp_ms":1001,"invocation_id":"inv_open","call_index":0,"kind":"delegate","canonical_input":{"task":"test"},"canonical_input_hash":"6f61ec065cc48110dfadf4cfb0e17f5d010e2a374a5d65923cf265d2c6815662"}

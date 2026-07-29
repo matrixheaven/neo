@@ -33,7 +33,6 @@ fn launch_request() -> WorkflowLaunchRequest {
         script: "return true".to_owned(),
         args: serde_json::json!({}),
         launch_source: "test".to_owned(),
-        parent_run_id: None,
         output_schema: None,
         display_name: None,
         input_schema: None,
@@ -150,7 +149,7 @@ async fn terminal_workflow_notification_waits_for_natural_turn() {
     assert_eq!(notifications.len(), 1);
     let notification = &notifications[0];
     let notification_id = notification.id.clone();
-    // Empty Ok runner has no final_result → V2 terminalizes Failed, not Completed.
+    // An empty successful runner has no final_result, so it finishes Failed.
     assert_eq!(notification.state, WorkflowState::Failed);
     assert_eq!(notification.run_id, handle.run_id);
     assert_eq!(

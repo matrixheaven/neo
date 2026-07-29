@@ -2,7 +2,7 @@
 //!
 //! Recovery mutates the journal only for a proven final EOF suffix:
 //! - valid unterminated JSON → append newline and sync
-//! - invalid non-newline suffix → hash-addressed quarantine, then truncate
+//! - invalid non-newline suffix → hash-addressed quarantine, then atomic replacement
 //!
 //! Newline-terminated invalid records, interior malformation, sequence gaps,
 //! run-ID mismatch, and canonical hash mismatch fail closed without mutation.
@@ -12,15 +12,15 @@
 //! resolver may only adopt a proven terminal result, interrupt with host_exit,
 //! or record a typed conflict.
 
-use std::io::Write;
+use std::io::{self, Read, Write};
 use std::path::{Path, PathBuf};
 
 use sha2::{Digest, Sha256};
 
-use super::error::{WorkflowError, WorkflowErrorCode};
+use super::error::WorkflowError;
 use super::journal::{
-    JournalEnvelope, JournalPayload, JournalScanIndex, JournalWriter, scan_journal,
-    validate_envelope,
+    JournalEnvelope, JournalPayload, JournalScanIndex,
+    journal_scan::{JournalRecoveryPrefix, scan_recovery_prefix},
 };
 use super::state::{WorkflowId, WorkflowInvocationOutcome};
 use crate::session::atomic_file;
@@ -62,7 +62,7 @@ pub enum EffectReconciliation {
     AdoptProven { outcome: WorkflowInvocationOutcome },
     /// No terminal result — durable interrupted(host_exit); do not relaunch.
     InterruptHostExit,
-    /// Conflicting or unverifiable result — keep inspectable; do not choose heuristically.
+    /// Conflicting or unverifiable result — preserve for diagnosis; do not choose heuristically.
     Conflict { detail: String },
 }
 
@@ -100,7 +100,7 @@ pub fn quarantine_tail_path(run_dir: &Path, sha256_hex: &str) -> PathBuf {
     recovery_quarantine_dir(run_dir).join(format!("{sha256_hex}.tail"))
 }
 
-/// Recover a V2 journal's final EOF suffix, then return a validated scan index.
+/// Recover a journal's final EOF suffix, then return a validated scan index.
 ///
 /// Scans only the final non-newline EOF suffix for normalize/quarantine. All
 /// complete newline-terminated lines must already be valid; any interior or
@@ -108,37 +108,17 @@ pub fn quarantine_tail_path(run_dir: &Path, sha256_hex: &str) -> PathBuf {
 pub fn recover_journal(
     path: &Path,
     expected_run_id: Option<&WorkflowId>,
+    max_record_bytes: u64,
+    max_total_bytes: u64,
 ) -> Result<JournalRecoveryReport, WorkflowError> {
-    let bytes = match std::fs::read(path) {
-        Ok(bytes) => bytes,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-            return Ok(JournalRecoveryReport {
-                action: JournalRecoveryAction::None,
-                index: JournalScanIndex::default(),
-                recovery_record_appended: false,
-            });
-        }
-        Err(error) => return Err(WorkflowError::Journal(error.to_string())),
-    };
-
-    if bytes.is_empty() {
-        let mut index = JournalScanIndex::default();
-        if let Some(run_id) = expected_run_id {
-            index.run_id = Some(run_id.clone());
-        }
-        return Ok(JournalRecoveryReport {
-            action: JournalRecoveryAction::None,
-            index,
-            recovery_record_appended: false,
-        });
-    }
-
-    let prefix = analyze_prefix(&bytes, expected_run_id)?;
-    let suffix = &bytes[prefix.last_validated_offset as usize..];
+    let JournalRecoveryPrefix {
+        index,
+        last_validated_offset,
+        suffix,
+        valid_suffix_seq,
+    } = scan_recovery_prefix(path, expected_run_id, max_record_bytes, max_total_bytes)?;
 
     if suffix.is_empty() {
-        // Clean newline-terminated journal (or empty after validated lines).
-        let index = scan_journal(path, expected_run_id)?;
         return Ok(JournalRecoveryReport {
             action: JournalRecoveryAction::None,
             index,
@@ -147,169 +127,28 @@ pub fn recover_journal(
     }
 
     // Final EOF suffix without a terminating newline.
-    match try_parse_valid_suffix(suffix, &prefix, expected_run_id) {
-        Ok(envelope) => {
-            normalize_unterminated_newline(path)?;
-            let index = scan_journal(path, expected_run_id)?;
-            Ok(JournalRecoveryReport {
-                action: JournalRecoveryAction::NormalizedUnterminated { seq: envelope.seq },
-                index,
-                recovery_record_appended: false,
-            })
-        }
-        Err(SuffixParseFailure::NotValidRecord) => {
-            let report = quarantine_and_truncate(
-                path,
-                expected_run_id,
-                prefix.last_validated_offset,
-                suffix,
-            )?;
-            Ok(report)
-        }
-        Err(SuffixParseFailure::Corrupt(error)) => Err(error),
+    if let Some(seq) = valid_suffix_seq {
+        normalize_unterminated_newline(path)?;
+        return Ok(JournalRecoveryReport {
+            action: JournalRecoveryAction::NormalizedUnterminated { seq },
+            index,
+            recovery_record_appended: false,
+        });
     }
-}
 
-/// Open the canonical journal after applying torn-tail recovery for `run_id`.
-pub fn open_recovered_journal(
-    path: &Path,
-    run_id: WorkflowId,
-) -> Result<(JournalWriter, JournalRecoveryReport), WorkflowError> {
-    let report = recover_journal(path, Some(&run_id))?;
-    let writer = JournalWriter::open_recovered(path, run_id, &report)?;
-    Ok((writer, report))
+    quarantine_and_replace(
+        path,
+        expected_run_id,
+        index,
+        last_validated_offset,
+        &suffix,
+        max_record_bytes,
+        max_total_bytes,
+    )
 }
 
 // ---------------------------------------------------------------------------
-// Prefix analysis (complete newline-terminated lines only)
-// ---------------------------------------------------------------------------
-
-struct PrefixAnalysis {
-    last_validated_offset: u64,
-    next_seq: u64,
-    run_id: Option<WorkflowId>,
-}
-
-fn analyze_prefix(
-    bytes: &[u8],
-    expected_run_id: Option<&WorkflowId>,
-) -> Result<PrefixAnalysis, WorkflowError> {
-    let mut offset = 0usize;
-    let mut expected_seq = 0u64;
-    let mut run_id: Option<WorkflowId> = expected_run_id.cloned();
-
-    while offset < bytes.len() {
-        let rest = &bytes[offset..];
-        let Some(rel_nl) = rest.iter().position(|&b| b == b'\n') else {
-            // Remainder is the non-newline EOF suffix — stop; caller handles it.
-            break;
-        };
-        let line = &rest[..rel_nl];
-        let line_end = offset + rel_nl + 1;
-
-        if line.is_empty() {
-            return Err(journal_corrupt("malformed record: empty journal line"));
-        }
-
-        let envelope = parse_envelope_line(line).map_err(|e| {
-            // Newline-terminated invalid JSON / unknown kind → fail closed.
-            journal_corrupt(format!("malformed or unknown journal record: {e}"))
-        })?;
-        validate_envelope_in_sequence(&envelope, expected_seq, &mut run_id, expected_run_id)?;
-
-        expected_seq = expected_seq
-            .checked_add(1)
-            .ok_or_else(|| journal_corrupt("journal sequence overflow"))?;
-        offset = line_end;
-    }
-
-    Ok(PrefixAnalysis {
-        last_validated_offset: u64::try_from(offset)
-            .map_err(|_| journal_corrupt("journal offset overflow"))?,
-        next_seq: expected_seq,
-        run_id,
-    })
-}
-
-enum SuffixParseFailure {
-    /// Partial / non-JSON / wrong shape at EOF — eligible for quarantine.
-    NotValidRecord,
-    /// Parsed enough to know this is durable corruption (seq/run/hash/version).
-    Corrupt(WorkflowError),
-}
-
-fn try_parse_valid_suffix(
-    suffix: &[u8],
-    prefix: &PrefixAnalysis,
-    expected_run_id: Option<&WorkflowId>,
-) -> Result<JournalEnvelope, SuffixParseFailure> {
-    if suffix.is_empty() {
-        return Err(SuffixParseFailure::NotValidRecord);
-    }
-    // Empty-looking whitespace-only tails are still invalid partials.
-    if suffix.iter().all(u8::is_ascii_whitespace) {
-        return Err(SuffixParseFailure::NotValidRecord);
-    }
-
-    let envelope = match parse_envelope_line(suffix) {
-        Ok(envelope) => envelope,
-        Err(_) => return Err(SuffixParseFailure::NotValidRecord),
-    };
-
-    let mut run_id = prefix.run_id.clone();
-    match validate_envelope_in_sequence(&envelope, prefix.next_seq, &mut run_id, expected_run_id) {
-        Ok(()) => Ok(envelope),
-        // Sequence / run / hash / version mismatch on a complete-looking JSON
-        // object at EOF without newline is still corruption (not a torn partial).
-        Err(error) if error.code() == WorkflowErrorCode::JournalCorrupt => {
-            Err(SuffixParseFailure::Corrupt(error))
-        }
-        Err(error) => Err(SuffixParseFailure::Corrupt(error)),
-    }
-}
-
-fn parse_envelope_line(line: &[u8]) -> Result<JournalEnvelope, String> {
-    serde_json::from_slice(line).map_err(|e| e.to_string())
-}
-
-fn validate_envelope_in_sequence(
-    envelope: &JournalEnvelope,
-    expected_seq: u64,
-    run_id: &mut Option<WorkflowId>,
-    expected_run_id: Option<&WorkflowId>,
-) -> Result<(), WorkflowError> {
-    if envelope.seq != expected_seq {
-        return Err(journal_corrupt(format!(
-            "sequence gap: expected {expected_seq}, got {}",
-            envelope.seq
-        )));
-    }
-    match run_id {
-        None => *run_id = Some(envelope.run_id.clone()),
-        Some(expected) if expected != &envelope.run_id => {
-            return Err(journal_corrupt(format!(
-                "run id mismatch: expected {}, got {}",
-                expected.as_str(),
-                envelope.run_id.as_str()
-            )));
-        }
-        Some(_) => {}
-    }
-    if let Some(expected) = expected_run_id
-        && expected != &envelope.run_id
-    {
-        return Err(journal_corrupt(format!(
-            "run id mismatch: expected {}, got {}",
-            expected.as_str(),
-            envelope.run_id.as_str()
-        )));
-    }
-    validate_envelope(envelope)?;
-    Ok(())
-}
-
-// ---------------------------------------------------------------------------
-// Mutations: normalize newline / quarantine + truncate
+// Mutations: normalize newline / quarantine + atomic replacement
 // ---------------------------------------------------------------------------
 
 fn normalize_unterminated_newline(path: &Path) -> Result<(), WorkflowError> {
@@ -326,11 +165,14 @@ fn normalize_unterminated_newline(path: &Path) -> Result<(), WorkflowError> {
     Ok(())
 }
 
-fn quarantine_and_truncate(
+fn quarantine_and_replace(
     path: &Path,
     expected_run_id: Option<&WorkflowId>,
+    prefix_index: JournalScanIndex,
     last_validated_offset: u64,
     suffix: &[u8],
+    max_record_bytes: u64,
+    max_total_bytes: u64,
 ) -> Result<JournalRecoveryReport, WorkflowError> {
     let run_dir = path.parent().ok_or_else(|| {
         WorkflowError::Journal("journal path has no parent run directory".to_owned())
@@ -344,40 +186,47 @@ fn quarantine_and_truncate(
     // Persist quarantine first. Any failure here leaves the journal untouched.
     write_quarantine_file(&quarantine_path, suffix)?;
 
-    // Truncate only after durable quarantine.
-    truncate_journal(path, last_validated_offset)?;
+    let recovery_line = expected_run_id
+        .filter(|_| prefix_index.run_created)
+        .map(|run_id| {
+            torn_tail_recovery_record_line(
+                run_id,
+                &sha,
+                removed_bytes,
+                last_validated_offset,
+                prefix_index.next_seq,
+                max_record_bytes,
+            )
+        })
+        .transpose()?;
+    let recovery_record_appended = recovery_line.is_some();
 
-    // Append a recovery record when a valid run identity is known and a prefix exists
-    // or the journal is empty-but-bound. Empty journals after total-suffix quarantine
-    // still get a seq-0 recovery record when run_id is known.
-    let mut recovery_record_appended = false;
-    let index = if let Some(run_id) = expected_run_id {
-        match append_torn_tail_recovery_record(
-            path,
-            run_id,
-            &sha,
-            removed_bytes,
-            last_validated_offset,
-        ) {
-            Ok(()) => {
-                recovery_record_appended = true;
-                scan_journal(path, Some(run_id))?
-            }
-            Err(error) => {
-                // Quarantine + truncate already committed; surface scan/append issues.
-                // Prefer returning the post-truncate index when scan works.
-                match scan_journal(path, Some(run_id)) {
-                    Ok(index) => {
-                        let _ = error;
-                        index
-                    }
-                    Err(_) => return Err(error),
-                }
-            }
+    let replacement = atomic_file::replace_existing_file_atomic_with_status(path, |temp| {
+        let source = std::fs::File::open(path)?;
+        let copied = io::copy(&mut source.take(last_validated_offset), temp)?;
+        if copied != last_validated_offset {
+            return Err(io::Error::new(
+                io::ErrorKind::UnexpectedEof,
+                format!(
+                    "journal ended at {copied} bytes while copying validated prefix of {last_validated_offset} bytes"
+                ),
+            ));
         }
-    } else {
-        scan_journal(path, None)?
+        if let Some(line) = &recovery_line {
+            temp.write_all(line)?;
+            temp.write_all(b"\n")?;
+        }
+        Ok(())
+    })
+    .map_err(|error| WorkflowError::Journal(error.to_string()))?;
+    if let atomic_file::AtomicWriteStatus::CommittedUnsynced(error) = replacement {
+        return Err(WorkflowError::Journal(format!(
+            "journal recovery committed but parent directory sync failed: {error}"
+        )));
     };
+
+    let index =
+        scan_recovery_prefix(path, expected_run_id, max_record_bytes, max_total_bytes)?.index;
 
     Ok(JournalRecoveryReport {
         action: JournalRecoveryAction::TornTailQuarantined {
@@ -436,40 +285,16 @@ fn write_quarantine_file(path: &Path, suffix: &[u8]) -> Result<(), WorkflowError
     Ok(())
 }
 
-fn truncate_journal(path: &Path, last_validated_offset: u64) -> Result<(), WorkflowError> {
-    let file = std::fs::OpenOptions::new()
-        .write(true)
-        .open(path)
-        .map_err(|e| WorkflowError::Journal(e.to_string()))?;
-    file.set_len(last_validated_offset)
-        .and_then(|()| file.sync_all())
-        .map_err(|e| WorkflowError::Journal(e.to_string()))?;
-    if let Some(parent) = path.parent() {
-        let _ = atomic_file::sync_directory(parent);
-    }
-    Ok(())
-}
-
-fn append_torn_tail_recovery_record(
-    path: &Path,
+fn torn_tail_recovery_record_line(
     run_id: &WorkflowId,
     quarantine_sha256: &str,
     removed_bytes: u64,
     last_validated_offset: u64,
-) -> Result<(), WorkflowError> {
-    // Determine next seq from the truncated prefix without going through open()
-    // recovery recursion: scan the (now clean) file.
-    let index = if last_validated_offset == 0 {
-        JournalScanIndex {
-            run_id: Some(run_id.clone()),
-            ..Default::default()
-        }
-    } else {
-        scan_journal(path, Some(run_id))?
-    };
-
+    next_seq: u64,
+    max_record_bytes: u64,
+) -> Result<Vec<u8>, WorkflowError> {
     let envelope = JournalEnvelope::new(
-        index.next_seq,
+        next_seq,
         // Wall-clock is fine for recovery bookkeeping; sequence is the commit order.
         current_timestamp_ms(),
         run_id.clone(),
@@ -483,22 +308,19 @@ fn append_torn_tail_recovery_record(
         },
     );
 
-    // Append without re-entering recover_journal.
-    let mut file = std::fs::OpenOptions::new()
-        .append(true)
-        .open(path)
-        .map_err(|e| WorkflowError::Journal(e.to_string()))?;
     let line =
         serde_json::to_string(&envelope).map_err(|e| WorkflowError::Journal(e.to_string()))?;
-    file.write_all(line.as_bytes())
-        .and_then(|()| file.write_all(b"\n"))
-        .and_then(|()| file.sync_all())
-        .map_err(|e| WorkflowError::Journal(e.to_string()))?;
-    let _ = file;
-    if let Some(parent) = path.parent() {
-        let _ = atomic_file::sync_directory(parent);
+    let line_bytes = u64::try_from(line.len())
+        .ok()
+        .and_then(|bytes| bytes.checked_add(1))
+        .ok_or_else(|| WorkflowError::Journal("recovery record size overflow".to_owned()))?;
+    if line_bytes > max_record_bytes {
+        return Err(WorkflowError::JournalRecordLimitExceeded {
+            observed: line_bytes,
+            limit: max_record_bytes,
+        });
     }
-    Ok(())
+    Ok(line.into_bytes())
 }
 
 fn current_timestamp_ms() -> u64 {
@@ -506,8 +328,4 @@ fn current_timestamp_ms() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map_or(0, |d| d.as_millis() as u64)
-}
-
-fn journal_corrupt(message: impl Into<String>) -> WorkflowError {
-    WorkflowError::coded(WorkflowErrorCode::JournalCorrupt, message)
 }

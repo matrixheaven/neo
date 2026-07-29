@@ -1057,13 +1057,11 @@ child lifecycle owners.
 
 ## 19. Durable Child Lifecycle
 
-### 19.1 New journal version
+### 19.1 Canonical child records
 
-Adding generic child events changes a durable, fail-closed format. New runs
-SHALL therefore write Workflow journal format V3 rather than silently extending
-V2 under the same version.
-
-V3 adds:
+Every Workflow run uses the same journal envelope, scanner, recovery path, and
+typed child records. There is no format generation switch or compatibility
+reader. The child lifecycle is:
 
 ```text
 ChildQueued
@@ -1105,17 +1103,15 @@ retain its aggregate return value.
 - Invocation events remain effect/replay owners. Child events own lineage and
   roster lifecycle only; they do not create a second serialized effect result.
 
-### 19.3 Read compatibility
+### 19.3 Single-path rule
 
-- New Neo reads V2 and V3.
-- V2 runs are never migrated or rewritten.
-- V2 `SwarmItemQueued/Started/Finished` events project to the generic child row.
-- A V2 direct delegate that only has a terminal `child_ref` appears after
-  terminal reconstruction; Neo does not invent a missing live history.
-- New runs write only the V3 generic child lifecycle, not both generic and old
-  swarm events.
-
-This is a one-way writer retirement, not two durable owners.
+- New runs, resume, output paging, retention, the harness, and child projection
+  use the same scanner and recovery path.
+- `SwarmItemQueued/Started/Finished`, version dispatch, compatibility readers,
+  migration logic, and old fixtures are deleted.
+- A direct delegate and a swarm item project through the same generic child
+  lifecycle.
+- Unknown or torn records fail closed through the canonical recovery rules.
 
 ### 19.4 Recovery
 
@@ -1133,7 +1129,7 @@ After restart:
 `BackgroundTaskManager` SHALL produce the Operator projection by joining:
 
 ```text
-WorkflowRuntime snapshot + V2/V3 journal child projection
+WorkflowRuntime snapshot + journal child projection
                      |
                      +-- agent_id --> MultiAgentRuntime live snapshot
 ```
@@ -1269,9 +1265,8 @@ Implementation planning SHALL classify each edit:
 - move-out/extract-first;
 - new responsibility.
 
-New Workflow Operator rendering/state belongs in a bounded workflow-specific
-module under the existing Task Browser ownership, not as another large branch
-inside a generic renderer. Journal V3 projection belongs beside workflow
+New Workflow Operator rendering/state belongs under the existing Task Browser
+ownership, not as another dashboard. Journal projection belongs beside workflow
 journal/state projection, not in TUI or `BackgroundTaskManager` parsing code.
 
 This governance is about clear ownership, not maximizing file count.
@@ -1318,10 +1313,10 @@ This governance is about clear ownership, not maximizing file count.
 
 ### 28.4 Durability and scale
 
-1. V3 direct and swarm child lifecycles replay after restart.
-2. V2 terminal runs remain readable without migration.
+1. Direct and swarm child lifecycles replay after restart through one journal.
+2. No compatibility reader, writer branch, migration, or old fixture remains.
 3. Started-without-terminal children display Recovering.
-4. Unknown or torn journal data retains existing fail-closed/recovery rules.
+4. Unknown or torn journal data retains fail-closed recovery rules.
 5. A 1,000-child and 10,000-child fixture can be paged with stable selection.
 6. No test or production constant imposes a total workflow child ceiling.
 
@@ -1334,7 +1329,7 @@ Windows, Linux, and macOS evidence is required for:
 - non-TTY exit behavior;
 - Operator key/mouse input;
 - narrow/wide terminal rendering;
-- journal V3 create/replay and path safety.
+- journal create/replay and path safety.
 
 Local proof must not be reported as remote CI or native proof for another OS.
 
@@ -1399,7 +1394,7 @@ This design does not:
 - add a total child cap;
 - add hosted services or a web dashboard;
 - add jump-to-transcript indexing in the first version;
-- migrate or rewrite old session/workflow journals;
+- migrate old session/workflow journals;
 - preserve removed CLI commands as hidden aliases.
 
 ## 31. Baseline and ADR Sync
@@ -1407,11 +1402,12 @@ This design does not:
 After implementation and verification:
 
 1. Create a new ADR covering the human CLI, assistant action semantics,
-   workflow journal V3 child lifecycle, completion delivery, and Operator.
+   canonical workflow journal child lifecycle, completion delivery, and Operator.
 2. Create a new landed baseline snapshot.
 3. Supersede only the affected portions of ADR-0007 and current workflow
    baselines.
-4. Keep historical specs, plans, ADRs, and V2 evidence unchanged.
+4. Remove obsolete format-generation guidance from active Workflow design,
+   planning, tests, and evidence.
 5. Update English/Chinese guides, tool references, slash references, CLI help,
    and the `create-workflow` skill from the new landed baseline.
 

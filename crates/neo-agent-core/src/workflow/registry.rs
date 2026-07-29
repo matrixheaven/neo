@@ -16,7 +16,7 @@ use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::SystemTime;
 
 use super::ResolvedWorkflowDefinition;
-use super::definition::{DEFINITION_FORMAT_VERSION, resolve_paired_definition, source_sha256_hex};
+use super::definition::{resolve_paired_definition, source_sha256_hex};
 use super::error::{WorkflowError, WorkflowErrorCode};
 use super::limits::WorkflowLimits;
 use super::state::{
@@ -114,7 +114,7 @@ pub struct RegistryDefinitionSummary {
     pub schema: RegistryDefinitionSchemaSummary,
 }
 
-/// Compact schema metadata for list results; never clones the full schema.
+/// Bounded schema metadata for list results; never clones the full schema.
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct RegistryDefinitionSchemaSummary {
     pub input: Option<RegistrySchemaSummary>,
@@ -1418,10 +1418,6 @@ fn serialize_file_manifest_toml(
     }
 
     let mut table = toml::map::Map::new();
-    table.insert(
-        "definition_format_version".to_owned(),
-        toml::Value::Integer(i64::from(DEFINITION_FORMAT_VERSION)),
-    );
     table.insert(
         "name".to_owned(),
         toml::Value::String(name.as_str().to_owned()),

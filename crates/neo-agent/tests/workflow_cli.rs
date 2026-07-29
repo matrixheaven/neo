@@ -50,7 +50,6 @@ fn write_user_workflow(name: &str, script: &str) {
     let source_sha = source_sha256_hex(script.as_bytes());
     let toml = format!(
         r#"
-definition_format_version = 2
 display_name = "Test Workflow"
 description = "CLI acceptance test"
 source_sha256 = "{source_sha}"
@@ -79,7 +78,6 @@ fn write_user_workflow_named(name: &str, display: &str, description: &str, scrip
     let source_sha = source_sha256_hex(script.as_bytes());
     let toml = format!(
         r#"
-definition_format_version = 2
 display_name = "{display}"
 description = "{description}"
 source_sha256 = "{source_sha}"
@@ -190,7 +188,6 @@ fn workflow_check_and_test_are_deterministic_side_effect_free_and_actionable() {
     let bad_sha = source_sha256_hex(bad_script.as_bytes());
     let bad_toml = format!(
         r#"
-definition_format_version = 2
 display_name = "Bad"
 description = "bad"
 source_sha256 = "{bad_sha}"

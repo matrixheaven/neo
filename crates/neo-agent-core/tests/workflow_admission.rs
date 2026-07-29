@@ -23,7 +23,6 @@ fn launch_request(name: &str) -> WorkflowLaunchRequest {
         script: "neo.phase('work')".to_owned(),
         args: serde_json::json!({}),
         launch_source: "/workflow".to_owned(),
-        parent_run_id: None,
         output_schema: None,
         display_name: None,
         input_schema: None,
@@ -466,47 +465,28 @@ async fn workflow_storage_reservations_are_race_safe() {
 }
 
 #[test]
-fn retention_preview_excludes_live_referenced_pinned_nonterminal() {
+fn retention_preview_excludes_nonterminal_runs() {
     let subjects = vec![
         RetentionSubject {
             run_id: WorkflowId::from_existing("running"),
-            state: WorkflowState::Running,
+            state: Some(WorkflowState::Running),
             bytes: 10,
+            terminal_timestamp_ms: None,
             age_ms: 99_999,
-            referenced: false,
-            pinned: false,
         },
         RetentionSubject {
             run_id: WorkflowId::from_existing("queued"),
-            state: WorkflowState::Queued,
+            state: Some(WorkflowState::Queued),
             bytes: 10,
+            terminal_timestamp_ms: None,
             age_ms: 99_999,
-            referenced: false,
-            pinned: false,
-        },
-        RetentionSubject {
-            run_id: WorkflowId::from_existing("ref"),
-            state: WorkflowState::Completed,
-            bytes: 10,
-            age_ms: 99_999,
-            referenced: true,
-            pinned: false,
-        },
-        RetentionSubject {
-            run_id: WorkflowId::from_existing("pin"),
-            state: WorkflowState::Failed,
-            bytes: 10,
-            age_ms: 99_999,
-            referenced: false,
-            pinned: true,
         },
         RetentionSubject {
             run_id: WorkflowId::from_existing("old"),
-            state: WorkflowState::Completed,
+            state: Some(WorkflowState::Completed),
             bytes: 50,
+            terminal_timestamp_ms: Some(0),
             age_ms: 99_999,
-            referenced: false,
-            pinned: false,
         },
     ];
     let preview = preview_mark_sweep(
@@ -522,8 +502,6 @@ fn retention_preview_excludes_live_referenced_pinned_nonterminal() {
     let exclusions: Vec<_> = preview.excluded.iter().map(|(_, reason)| *reason).collect();
     assert!(exclusions.contains(&RetentionExclusion::Live));
     assert!(exclusions.contains(&RetentionExclusion::Queued));
-    assert!(exclusions.contains(&RetentionExclusion::Referenced));
-    assert!(exclusions.contains(&RetentionExclusion::Pinned));
 }
 
 #[test]
@@ -564,7 +542,7 @@ fn try_admit_reports_capacity_reason_without_rejecting_by_child_count() {
 }
 
 #[test]
-fn automatic_retention_reclaims_only_old_terminal_unreferenced_runs_to_low_watermark() {
+fn automatic_retention_reclaims_only_old_terminal_runs_to_low_watermark() {
     use neo_agent_core::workflow::{
         WorkflowAdmission, WorkflowLimits, WorkflowRunMetadata, WorkflowState, perform_retention,
     };
@@ -577,7 +555,6 @@ fn automatic_retention_reclaims_only_old_terminal_unreferenced_runs_to_low_water
         session_id: &str,
         run_id: &str,
         state: WorkflowState,
-        parent_run_id: Option<&str>,
         extra_bytes: usize,
     ) {
         let run_dir = sessions_root
@@ -589,8 +566,6 @@ fn automatic_retention_reclaims_only_old_terminal_unreferenced_runs_to_low_water
 
         let metadata = WorkflowRunMetadata {
             run_id: neo_agent_core::workflow::WorkflowRunId::from_existing(run_id),
-            parent_run_id: parent_run_id
-                .map(|id| neo_agent_core::workflow::WorkflowRunId::from_existing(id)),
             name: "test".to_owned(),
             description: String::new(),
             phases: vec![],
@@ -598,7 +573,6 @@ fn automatic_retention_reclaims_only_old_terminal_unreferenced_runs_to_low_water
             script_sha256: "abc".to_owned(),
             args: serde_json::json!({}),
             launch_source: "test".to_owned(),
-            journal_format_version: 2,
             output_schema: None,
             display_name: None,
             input_schema: None,
@@ -612,37 +586,7 @@ fn automatic_retention_reclaims_only_old_terminal_unreferenced_runs_to_low_water
         )
         .expect("write metadata");
 
-        // For non-terminal states, write a journal with the state.
-        // Terminal runs don't need a journal (infer_run_state defaults to Completed).
-        if !state.is_terminal() {
-            use neo_agent_core::workflow::WorkflowId;
-            use neo_agent_core::workflow::journal::{
-                JOURNAL_FORMAT_V2, JournalEnvelope, JournalPayload, JournalWriter,
-            };
-            let wid = WorkflowId::from_existing(run_id);
-            let limits_journal = WorkflowLimits::default();
-            let mut writer = JournalWriter::open(&run_dir.join("journal.jsonl"), wid.clone())
-                .expect("open journal");
-            writer
-                .append(
-                    &JournalEnvelope {
-                        version: JOURNAL_FORMAT_V2,
-                        seq: 0,
-                        timestamp_ms: 1_000_000,
-                        run_id: wid,
-                        payload: JournalPayload::StateChanged {
-                            previous: WorkflowState::Queued,
-                            new: state,
-                            reason: "test".to_owned(),
-                            actor: neo_agent_core::workflow::WorkflowActor::Runtime,
-                        },
-                        canonical_input_hash: None,
-                        payload_refs: vec![],
-                    },
-                    &limits_journal,
-                )
-                .expect("append state");
-        }
+        write_state_journal(&run_dir, run_id, state, 1_000_000);
 
         if extra_bytes > 0 {
             let dummy = run_dir.join("dummy.bin");
@@ -661,7 +605,7 @@ fn automatic_retention_reclaims_only_old_terminal_unreferenced_runs_to_low_water
     let session = "session-1";
     let bucket = "wd_test_00110011aaaa";
 
-    // Terminal runs — candidates for reclamation (they are current-time, so under 30 days).
+    // Terminal runs carry durable timestamps older than 30 days.
     // With a 20 KiB limit, even small runs will trigger retention.
     make_run(
         root,
@@ -669,7 +613,6 @@ fn automatic_retention_reclaims_only_old_terminal_unreferenced_runs_to_low_water
         session,
         "terminal-1",
         WorkflowState::Completed,
-        None,
         4096,
     );
     make_run(
@@ -678,7 +621,6 @@ fn automatic_retention_reclaims_only_old_terminal_unreferenced_runs_to_low_water
         session,
         "terminal-2",
         WorkflowState::Failed,
-        None,
         4096,
     );
     make_run(
@@ -687,7 +629,6 @@ fn automatic_retention_reclaims_only_old_terminal_unreferenced_runs_to_low_water
         session,
         "terminal-3",
         WorkflowState::Cancelled,
-        None,
         4096,
     );
     // Non-terminal runs — should be preserved.
@@ -697,66 +638,25 @@ fn automatic_retention_reclaims_only_old_terminal_unreferenced_runs_to_low_water
         session,
         "running",
         WorkflowState::Running,
-        None,
         2048,
     );
-    make_run(
-        root,
-        bucket,
-        session,
-        "queued",
-        WorkflowState::Queued,
-        None,
-        2048,
-    );
-    make_run(
-        root,
-        bucket,
-        session,
-        "paused",
-        WorkflowState::Paused,
-        None,
-        2048,
-    );
+    make_run(root, bucket, session, "queued", WorkflowState::Queued, 2048);
+    make_run(root, bucket, session, "paused", WorkflowState::Paused, 2048);
     make_run(
         root,
         bucket,
         session,
         "awaiting",
         WorkflowState::AwaitingUser,
-        None,
         2048,
     );
-    // Referenced run — has a child run pointing to it.
-    make_run(
-        root,
-        bucket,
-        session,
-        "referenced-parent",
-        WorkflowState::Completed,
-        None,
-        2048,
-    );
-    make_run(
-        root,
-        bucket,
-        session,
-        "child-of-parent",
-        WorkflowState::Completed,
-        Some("referenced-parent"),
-        1024,
-    );
-
     // With small runs and a 20 KiB limit, the watermarks trigger at ~18 KiB.
-    // Total bytes: 4096*3 + 2048*4 + 2048 + 1024 = 12288 + 8192 + 2048 + 1024 = 23552 > 18K.
-    // But all runs are < 30 days old (just created), so none should be reclaimed.
+    // Total payload bytes: 4096*3 + 2048*4 = 20480 > 18 KiB.
     let outcome = perform_retention(root, Some(&admission), &limits);
 
-    // All runs should be preserved since none are 30+ days old.
-    // The function returns storage_full if eligible candidates exist but none qualify by age.
-    assert_eq!(
-        outcome.reclaimed_count, 0,
-        "no runs should be reclaimed (under 30 days)"
+    assert!(
+        outcome.reclaimed_count > 0,
+        "old terminal runs must be reclaimed"
     );
 
     // Verify all non-terminal runs are preserved.
@@ -764,19 +664,12 @@ fn automatic_retention_reclaims_only_old_terminal_unreferenced_runs_to_low_water
     assert!(run_dir_path(root, bucket, session, "queued").exists());
     assert!(run_dir_path(root, bucket, session, "paused").exists());
     assert!(run_dir_path(root, bucket, session, "awaiting").exists());
-    // Terminal runs are also preserved (too young).
-    assert!(run_dir_path(root, bucket, session, "terminal-1").exists());
-    assert!(run_dir_path(root, bucket, session, "terminal-2").exists());
-    assert!(run_dir_path(root, bucket, session, "terminal-3").exists());
-    // Referenced run is also preserved.
-    assert!(run_dir_path(root, bucket, session, "referenced-parent").exists());
-    assert!(run_dir_path(root, bucket, session, "child-of-parent").exists());
-
-    // storage_full should be true because data exceeds limit but nothing is eligible.
-    assert!(
-        outcome.storage_full,
-        "should report storage_full when protected data alone exceeds limit"
-    );
+    let terminal_runs_remaining = ["terminal-1", "terminal-2", "terminal-3"]
+        .into_iter()
+        .filter(|run_id| run_dir_path(root, bucket, session, run_id).exists())
+        .count();
+    assert_eq!(3 - terminal_runs_remaining, outcome.reclaimed_count);
+    assert!(!outcome.storage_full);
 }
 
 fn run_dir_path(sessions_root: &Path, bucket: &str, session_id: &str, run_id: &str) -> PathBuf {
@@ -787,138 +680,359 @@ fn run_dir_path(sessions_root: &Path, bucket: &str, session_id: &str, run_id: &s
         .join(run_id)
 }
 
-#[test]
-fn automatic_retention_preserves_protected_runs_and_fails_closed_on_path_escape() {
-    use neo_agent_core::workflow::{
-        WorkflowAdmission, WorkflowLimits, WorkflowRunMetadata, WorkflowState, perform_retention,
-    };
+fn write_state_journal(
+    run_dir: &Path,
+    run_id: &str,
+    state: WorkflowState,
+    first_timestamp_ms: u64,
+) {
+    use neo_agent_core::workflow::journal::{JournalEnvelope, JournalPayload, JournalWriter};
+    use neo_agent_core::workflow::{WorkflowFinalResultMetadata, WorkflowId};
 
-    let sessions_root = tempfile::tempdir().expect("tempdir");
-    let root = sessions_root.path();
+    let run_id = WorkflowId::from_existing(run_id);
+    let limits = WorkflowLimits::default();
+    let mut writer = JournalWriter::open(&run_dir.join("journal.jsonl"), run_id.clone(), &limits)
+        .expect("open journal");
+    let mut payloads = vec![JournalPayload::RunCreated {
+        name: "admission-test".to_owned(),
+        description: None,
+        launch_source: None,
+    }];
 
-    // Create a sentinel file OUTSIDE the candidate run directories.
-    let sentinel = root.join("do-not-delete.txt");
-    fs::write(&sentinel, b"sentinel").expect("write sentinel");
-
-    // Create another directory outside runs that could be targeted.
-    let outside_dir = root.join("not-a-run");
-    fs::create_dir(&outside_dir).expect("create outside dir");
-    fs::write(outside_dir.join("data.txt"), b"outside").expect("write outside");
-
-    let limits = WorkflowLimits {
-        // Very tight limit to force retention attempt.
-        global_storage_bytes: 4 * 1024, // 4 KiB
-        ..WorkflowLimits::default()
-    };
-    let admission = WorkflowAdmission::new(limits.clone());
-
-    let bucket = "wd_test_00220011bbbb";
-    let session = "session-1";
-
-    fn create_run(
-        root: &Path,
-        bucket: &str,
-        session: &str,
-        run_id: &str,
-        state: WorkflowState,
-        extra_bytes: usize,
-    ) {
-        let run_dir = run_dir_path(root, bucket, session, run_id);
-        fs::create_dir_all(&run_dir).expect("create run dir");
-        let metadata = WorkflowRunMetadata {
-            run_id: neo_agent_core::workflow::WorkflowRunId::from_existing(run_id),
-            parent_run_id: None,
-            name: "test".to_owned(),
-            description: String::new(),
-            phases: vec![],
-            script: "neo.phase('work')".to_owned(),
-            script_sha256: "abc".to_owned(),
-            args: serde_json::json!({}),
-            launch_source: "test".to_owned(),
-            journal_format_version: 2,
-            output_schema: None,
-            display_name: None,
-            input_schema: None,
-            definition_origin: None,
-            inline_unsaved: false,
-        };
-        neo_agent_core::workflow::journal::write_run_metadata(
-            &run_dir,
-            &metadata,
-            &WorkflowLimits::default(),
-        )
-        .expect("write metadata");
-
-        // Only write journal for non-terminal states to pass validation.
-        if !state.is_terminal() {
-            use neo_agent_core::workflow::WorkflowId;
-            use neo_agent_core::workflow::journal::{
-                JOURNAL_FORMAT_V2, JournalEnvelope, JournalPayload, JournalWriter,
-            };
-            let wid = WorkflowId::from_existing(run_id);
-            let limits_journal = WorkflowLimits::default();
-            let mut writer = JournalWriter::open(&run_dir.join("journal.jsonl"), wid.clone())
-                .expect("open journal");
-            writer
-                .append(
-                    &JournalEnvelope {
-                        version: JOURNAL_FORMAT_V2,
-                        seq: 0,
-                        timestamp_ms: 1_000_000,
-                        run_id: wid,
-                        payload: JournalPayload::StateChanged {
-                            previous: WorkflowState::Queued,
-                            new: state,
-                            reason: "test".to_owned(),
-                            actor: neo_agent_core::workflow::WorkflowActor::Runtime,
-                        },
-                        canonical_input_hash: None,
-                        payload_refs: vec![],
+    match state {
+        WorkflowState::Queued => {}
+        WorkflowState::AwaitingUser | WorkflowState::Pausing | WorkflowState::Completed => {
+            payloads.push(JournalPayload::StateChanged {
+                previous: WorkflowState::Queued,
+                new: WorkflowState::Running,
+                reason: "test".to_owned(),
+                actor: WorkflowActor::Runtime,
+            });
+            if state == WorkflowState::Completed {
+                payloads.push(JournalPayload::FinalResultRecorded {
+                    metadata: WorkflowFinalResultMetadata {
+                        value: Some(serde_json::json!({"ok": true})),
+                        artifact_id: None,
+                        schema_revision: None,
                     },
-                    &limits_journal,
-                )
-                .expect("append state");
+                });
+            }
+            payloads.push(JournalPayload::StateChanged {
+                previous: WorkflowState::Running,
+                new: state,
+                reason: "test".to_owned(),
+                actor: WorkflowActor::Runtime,
+            });
         }
-
-        if extra_bytes > 0 {
-            fs::write(&run_dir.join("dummy.bin"), vec![0u8; extra_bytes]).expect("write dummy");
+        WorkflowState::Running
+        | WorkflowState::Paused
+        | WorkflowState::Failed
+        | WorkflowState::Cancelled
+        | WorkflowState::ResourceLimited => {
+            payloads.push(JournalPayload::StateChanged {
+                previous: WorkflowState::Queued,
+                new: state,
+                reason: "test".to_owned(),
+                actor: WorkflowActor::Runtime,
+            });
         }
     }
 
-    // Only terminal runs (but under 30 days, so not eligible).
-    create_run(
-        root,
-        bucket,
-        session,
-        "terminal-x",
-        WorkflowState::Completed,
-        2048,
+    for (seq, payload) in payloads.into_iter().enumerate() {
+        writer
+            .append(
+                &JournalEnvelope::new(
+                    u64::try_from(seq).expect("journal sequence"),
+                    first_timestamp_ms + u64::try_from(seq).expect("journal timestamp"),
+                    run_id.clone(),
+                    payload,
+                ),
+                &limits,
+            )
+            .expect("append journal record");
+    }
+}
+
+#[tokio::test]
+async fn retention_excludes_missing_and_corrupt_journals_without_terminal_proof() {
+    use neo_agent_core::workflow::{WorkflowLimits, WorkflowRuntime, perform_retention};
+
+    let sessions_root = tempfile::tempdir().expect("sessions root");
+    let session_dir = sessions_root
+        .path()
+        .join("wd_test_fail_closed")
+        .join("session-1");
+    let runtime = WorkflowRuntime::default();
+    let missing = runtime
+        .create_run(&session_dir, launch_request("missing-journal"))
+        .await
+        .expect("create missing-journal run");
+    let corrupt = runtime
+        .create_run(&session_dir, launch_request("corrupt-journal"))
+        .await
+        .expect("create corrupt-journal run");
+    let missing_dir = session_dir.join("workflows").join(missing.run_id.as_str());
+    let corrupt_dir = session_dir.join("workflows").join(corrupt.run_id.as_str());
+    fs::remove_file(missing_dir.join("journal.jsonl")).expect("remove journal");
+    fs::write(corrupt_dir.join("journal.jsonl"), b"not-json\n").expect("corrupt journal");
+    fs::write(missing_dir.join("payload.bin"), vec![0; 8 * 1024]).expect("missing payload");
+    fs::write(corrupt_dir.join("payload.bin"), vec![0; 8 * 1024]).expect("corrupt payload");
+
+    let limits = WorkflowLimits {
+        global_storage_bytes: 4 * 1024,
+        ..WorkflowLimits::default()
+    };
+    let outcome = perform_retention(sessions_root.path(), None, &limits);
+    assert_eq!(outcome.reclaimed_count, 0);
+    assert!(outcome.storage_full);
+    assert!(missing_dir.exists());
+    assert!(corrupt_dir.exists());
+}
+
+fn write_run_fixture(
+    run_dir: &Path,
+    run_id: &str,
+    state: WorkflowState,
+    first_timestamp_ms: u64,
+    extra_bytes: usize,
+) {
+    use neo_agent_core::workflow::WorkflowRunMetadata;
+
+    fs::create_dir_all(run_dir).expect("create run dir");
+    let metadata = WorkflowRunMetadata {
+        run_id: neo_agent_core::workflow::WorkflowRunId::from_existing(run_id),
+        name: "test".to_owned(),
+        description: String::new(),
+        phases: vec![],
+        script: "neo.phase('work')".to_owned(),
+        script_sha256: "abc".to_owned(),
+        args: serde_json::json!({}),
+        launch_source: "test".to_owned(),
+        output_schema: None,
+        display_name: None,
+        input_schema: None,
+        definition_origin: None,
+        inline_unsaved: false,
+    };
+    neo_agent_core::workflow::journal::write_run_metadata(
+        run_dir,
+        &metadata,
+        &WorkflowLimits::default(),
+    )
+    .expect("write metadata");
+    write_state_journal(run_dir, run_id, state, first_timestamp_ms);
+    fs::write(run_dir.join("dummy.bin"), vec![0u8; extra_bytes]).expect("write dummy");
+}
+
+fn set_directory_modified(path: &Path, modified: std::time::SystemTime) -> std::io::Result<()> {
+    #[cfg(windows)]
+    let directory = {
+        use std::os::windows::fs::OpenOptionsExt;
+        const FILE_FLAG_BACKUP_SEMANTICS: u32 = 0x0200_0000;
+        fs::OpenOptions::new()
+            .read(true)
+            .custom_flags(FILE_FLAG_BACKUP_SEMANTICS)
+            .open(path)?
+    };
+    #[cfg(not(windows))]
+    let directory = fs::File::open(path)?;
+
+    directory.set_times(fs::FileTimes::new().set_modified(modified))
+}
+
+#[test]
+fn automatic_retention_uses_terminal_timestamp_not_directory_mtime() {
+    use neo_agent_core::workflow::{WorkflowLimits, current_unix_ms, perform_retention};
+
+    let sessions_root = tempfile::tempdir().expect("sessions root");
+    let run_dir = run_dir_path(
+        sessions_root.path(),
+        "wd_test_terminal_age",
+        "session-1",
+        "fresh-terminal",
     );
-    // A running run.
-    create_run(
-        root,
-        bucket,
-        session,
-        "running-x",
-        WorkflowState::Running,
-        1024,
+    write_run_fixture(
+        &run_dir,
+        "fresh-terminal",
+        WorkflowState::Cancelled,
+        current_unix_ms(),
+        8 * 1024,
+    );
+    let old_directory_time = std::time::SystemTime::now()
+        .checked_sub(Duration::from_millis(
+            neo_agent_core::workflow::retention::MIN_RUN_AGE_MS + 1_000,
+        ))
+        .expect("old directory time");
+    set_directory_modified(&run_dir, old_directory_time).expect("age run directory");
+
+    let limits = WorkflowLimits {
+        global_storage_bytes: 4 * 1024,
+        ..WorkflowLimits::default()
+    };
+    let outcome = perform_retention(sessions_root.path(), None, &limits);
+    assert_eq!(outcome.reclaimed_count, 0);
+    assert!(run_dir.exists());
+}
+
+#[cfg(unix)]
+fn create_directory_link(target: &Path, link: &Path) -> std::io::Result<()> {
+    std::os::unix::fs::symlink(target, link)
+}
+
+#[cfg(windows)]
+fn create_directory_link(target: &Path, link: &Path) -> std::io::Result<()> {
+    std::os::windows::fs::symlink_dir(target, link)
+}
+
+#[test]
+fn automatic_retention_rejects_linked_workflows_directory_escape() {
+    use neo_agent_core::workflow::{WorkflowLimits, perform_retention};
+
+    let sandbox = tempfile::tempdir().expect("sandbox");
+    let sessions_root = sandbox.path().join("sessions");
+    let session_dir = sessions_root.join("wd_test_escape").join("session-1");
+    fs::create_dir_all(&session_dir).expect("create session");
+    let outside_workflows = sandbox.path().join("outside-workflows");
+    let outside_run = outside_workflows.join("escaped-run");
+    write_run_fixture(
+        &outside_run,
+        "escaped-run",
+        WorkflowState::Cancelled,
+        1_000_000,
+        8 * 1024,
     );
 
-    let outcome = perform_retention(root, Some(&admission), &limits);
+    let link_result = create_directory_link(&outside_workflows, &session_dir.join("workflows"));
+    #[cfg(windows)]
+    if link_result.is_err() {
+        return;
+    }
+    #[cfg(not(windows))]
+    link_result.expect("create workflows link");
 
-    // The sentinel file outside candidate directories must be preserved.
-    assert!(sentinel.exists(), "sentinel file must never be deleted");
-    assert!(
-        outside_dir.exists(),
-        "outside directory must never be deleted"
+    let limits = WorkflowLimits {
+        global_storage_bytes: 4 * 1024,
+        ..WorkflowLimits::default()
+    };
+    let outcome = perform_retention(&sessions_root, None, &limits);
+    assert_eq!(outcome.reclaimed_count, 0);
+    assert!(outside_run.exists());
+    assert!(outside_run.join("dummy.bin").exists());
+}
+
+#[test]
+fn retention_counts_invalid_runs_and_quarantine_bytes() {
+    use neo_agent_core::workflow::{WorkflowLimits, perform_retention};
+
+    let sessions_root = tempfile::tempdir().expect("sessions root");
+    let workflows = sessions_root
+        .path()
+        .join("wd_test_unreadable")
+        .join("session-1")
+        .join("workflows");
+    let unreadable = workflows.join("missing-metadata");
+    fs::create_dir_all(&unreadable).expect("create unreadable run");
+    fs::write(unreadable.join("payload.bin"), vec![0; 8 * 1024]).expect("write payload");
+    let corrupt = workflows.join("corrupt-metadata");
+    fs::create_dir_all(&corrupt).expect("create corrupt run");
+    fs::write(corrupt.join("run.json"), b"not-json").expect("write corrupt metadata");
+    fs::write(corrupt.join("payload.bin"), vec![0; 8 * 1024]).expect("write corrupt payload");
+    let mismatch = workflows.join("mismatched-run-id");
+    write_run_fixture(
+        &mismatch,
+        "different-run-id",
+        WorkflowState::Cancelled,
+        1_000_000,
+        8 * 1024,
     );
 
-    // Non-terminal runs are preserved.
-    assert!(run_dir_path(root, bucket, session, "running-x").exists());
+    let limits = WorkflowLimits {
+        global_storage_bytes: 4 * 1024,
+        ..WorkflowLimits::default()
+    };
+    let outcome = perform_retention(sessions_root.path(), None, &limits);
+    assert_eq!(outcome.reclaimed_count, 0);
+    assert!(outcome.storage_full);
+    assert!(unreadable.exists());
+    assert!(corrupt.exists());
+    assert!(mismatch.exists());
 
-    // With young runs, nothing should be reclaimed.
-    assert_eq!(
-        outcome.reclaimed_count, 0,
-        "young runs should never be reclaimed"
+    fs::remove_dir_all(&workflows).expect("remove unreadable fixture");
+    let stranded = sessions_root
+        .path()
+        .join(".workflow-retention-trash")
+        .join("stranded");
+    fs::create_dir_all(&stranded).expect("create stranded directory");
+    fs::write(stranded.join("payload.bin"), vec![0; 8 * 1024]).expect("write stranded payload");
+
+    let outcome = perform_retention(sessions_root.path(), None, &limits);
+    assert_eq!(outcome.reclaimed_count, 1);
+    assert!(!outcome.storage_full);
+    assert!(!stranded.exists());
+}
+
+#[test]
+fn retention_journal_total_limit_fails_closed() {
+    use neo_agent_core::workflow::{WorkflowLimits, perform_retention};
+
+    let sessions_root = tempfile::tempdir().expect("sessions root");
+    let run_dir = run_dir_path(
+        sessions_root.path(),
+        "wd_test_journal_limit",
+        "session-1",
+        "large-journal",
     );
+    write_run_fixture(
+        &run_dir,
+        "large-journal",
+        WorkflowState::Cancelled,
+        1_000_000,
+        8 * 1024,
+    );
+    let limits = WorkflowLimits {
+        journal_total_bytes: 1,
+        global_storage_bytes: 4 * 1024,
+        ..WorkflowLimits::default()
+    };
+
+    let outcome = perform_retention(sessions_root.path(), None, &limits);
+    assert_eq!(outcome.reclaimed_count, 0);
+    assert!(outcome.storage_full);
+    assert!(run_dir.exists());
+}
+
+#[test]
+fn retention_storage_full_uses_global_limit_after_reclaim() {
+    use neo_agent_core::workflow::{WorkflowLimits, perform_retention};
+
+    let sessions_root = tempfile::tempdir().expect("sessions root");
+    let terminal = run_dir_path(
+        sessions_root.path(),
+        "wd_test_storage_full",
+        "session-1",
+        "terminal",
+    );
+    write_run_fixture(
+        &terminal,
+        "terminal",
+        WorkflowState::Cancelled,
+        1_000_000,
+        4 * 1024,
+    );
+    let protected = terminal
+        .parent()
+        .expect("workflows")
+        .join("missing-metadata");
+    fs::create_dir_all(&protected).expect("create protected run");
+    fs::write(protected.join("payload.bin"), vec![0; 13 * 1024]).expect("write protected data");
+    let limits = WorkflowLimits {
+        global_storage_bytes: 16 * 1024,
+        ..WorkflowLimits::default()
+    };
+
+    let outcome = perform_retention(sessions_root.path(), None, &limits);
+    assert_eq!(outcome.reclaimed_count, 1);
+    assert!(!outcome.storage_full);
+    assert!(!terminal.exists());
+    assert!(protected.exists());
 }

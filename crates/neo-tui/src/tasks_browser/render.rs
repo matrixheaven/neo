@@ -4,16 +4,9 @@ use crate::primitive::theme::TuiTheme;
 use crate::primitive::{Color, Style, paint, truncate_width, visible_width};
 
 use super::{
-    state::{TaskBrowserFilter, TaskBrowserState},
-    view::{TaskBrowserItem, TaskBrowserStatus},
+    state::{TaskBrowserFocus, TaskBrowserState},
+    view::TaskBrowserItem,
 };
-
-const MIN_WIDE_WIDTH: usize = 72;
-const WIDE_GAP: usize = 1;
-const FOOTER: &str = " ↑↓ select   Enter workflow/O output   S/X stop   P/U pause/resume   [/] page   R refresh   Tab filter   Q/Esc close";
-const COMPACT_FOOTER: &str = " Q/Esc close   Tab filter   S stop   [/] page   R refresh";
-const WORKFLOW_FOOTER: &str =
-    " O output   P/U pause/resume   S/X stop   A answer   Esc back   Q close";
 
 pub struct TaskBrowserRenderer<'a> {
     state: &'a TaskBrowserState,
@@ -31,247 +24,340 @@ impl<'a> TaskBrowserRenderer<'a> {
         if width == 0 || height == 0 {
             return Vec::new();
         }
-        if height < 6 {
-            return self.render_tiny(width, height);
-        }
         if self.state.workflow_item().is_some() {
-            return self.render_workflow(width, height);
-        }
-        if width >= MIN_WIDE_WIDTH {
-            self.render_wide(width, height)
+            self.render_workflow(width, height)
         } else {
-            self.render_narrow(width, height)
+            self.render_browser(width, height)
         }
     }
 
     fn render_workflow(&self, width: usize, height: usize) -> Vec<String> {
-        let item = self.state.workflow_item().expect("checked above");
-        let content_height = height.saturating_sub(2).max(3);
-        let detail_height = if self.state.workflow_output_open() {
-            content_height / 2
+        if height < 4 {
+            return pad_height(
+                vec![self.workflow_header(width), self.workflow_footer(width)],
+                height,
+            );
+        }
+        let content_height = height.saturating_sub(2);
+        let item = self
+            .state
+            .workflow_item()
+            .expect("workflow view requires item");
+        let mut lines = vec![self.workflow_header(width)];
+        if width >= 100 {
+            let top = content_height.saturating_sub(5).max(3);
+            let steps_width = (width / 3).clamp(24, 42);
+            let agents_width = width.saturating_sub(steps_width + 1);
+            lines.extend(join_columns(
+                &[
+                    self.steps_pane(steps_width, top),
+                    self.children_pane(agents_width, top),
+                ],
+                &[steps_width, agents_width],
+                top,
+            ));
+            lines.extend(self.details_pane(width, content_height.saturating_sub(top), item));
+        } else if width >= 70 {
+            let steps_height = (content_height / 3).max(3);
+            let agents_height = (content_height / 3).max(3);
+            lines.extend(self.steps_pane(width, steps_height));
+            lines.extend(self.children_pane(width, agents_height));
+            lines.extend(self.details_pane(
+                width,
+                content_height.saturating_sub(steps_height + agents_height),
+                item,
+            ));
         } else {
-            content_height
-        };
-        let mut lines = Vec::with_capacity(height);
-        lines.push(truncate_width(
-            &format!(
-                " WORKFLOW {}  {}  {}",
-                item.title,
-                item.status.label(),
-                item.elapsed
-            ),
-            width,
-            "...",
-            false,
-        ));
-        lines.extend(pane(
-            " Workflow ",
-            width,
-            detail_height,
-            &item.detail_lines,
-            self.theme.overlay_border,
-        ));
-        if self.state.workflow_output_open() {
-            let output_height = content_height.saturating_sub(detail_height);
-            let output = item
-                .preview_lines
-                .iter()
-                .skip(self.state.output_scroll())
-                .cloned()
-                .collect::<Vec<_>>();
-            lines.extend(pane(
-                " Workflow Output ",
+            let navigation_height = content_height.saturating_sub(4).max(2);
+            if self.state.focus() == TaskBrowserFocus::Steps {
+                lines.extend(self.steps_pane(width, navigation_height));
+            } else {
+                lines.extend(self.children_pane(width, navigation_height));
+            }
+            lines.extend(self.details_pane(
                 width,
-                output_height,
-                &output,
-                self.theme.overlay_border,
+                content_height.saturating_sub(navigation_height),
+                item,
             ));
         }
-        lines.push(truncate_width(WORKFLOW_FOOTER, width, "...", false));
+        lines.push(self.workflow_footer(width));
         pad_height(lines, height)
     }
 
-    fn render_wide(&self, width: usize, height: usize) -> Vec<String> {
-        let header_height = 2usize;
-        let footer_height = 1usize;
-        let content_height = height.saturating_sub(header_height + footer_height).max(3);
-        let left_width = (width / 3).clamp(30, 42);
-        let right_width = width.saturating_sub(left_width + WIDE_GAP);
-        let detail_height = (content_height / 2).max(4).min(content_height);
-        let preview_height = content_height.saturating_sub(detail_height).max(3);
-
-        let left = self.tasks_pane(left_width, content_height);
-        let mut right = self.detail_pane(right_width, detail_height);
-        right.extend(self.preview_pane(right_width, preview_height));
-        right.truncate(content_height);
-        while right.len() < content_height {
-            right.push(" ".repeat(right_width));
-        }
-
-        let mut lines = Vec::with_capacity(height);
-        lines.push(self.header(width));
-        lines.push(String::new());
-        for row in 0..content_height {
-            lines.push(fit_line(
-                &format!("{}{}{}", left[row], " ".repeat(WIDE_GAP), right[row]),
-                width,
-            ));
-        }
-        lines.push(self.footer(width));
-        pad_height(lines, height)
-    }
-
-    fn render_narrow(&self, width: usize, height: usize) -> Vec<String> {
-        let footer_height = 1usize;
-        let content_height = height.saturating_sub(2 + footer_height).max(3);
-        let list_height = (content_height / 2).max(4).min(content_height);
-        let detail_height = content_height.saturating_sub(list_height);
-
-        let mut lines = Vec::with_capacity(height);
-        lines.push(self.header(width));
-        lines.push(String::new());
-        lines.extend(self.tasks_pane(width, list_height));
-        if detail_height > 0 {
-            lines.extend(self.detail_pane(width, detail_height.max(3)));
-        }
-        lines.push(self.footer(width));
-        pad_height(lines, height)
-    }
-
-    fn render_tiny(&self, width: usize, height: usize) -> Vec<String> {
-        let mut lines = Vec::with_capacity(height);
-        lines.push(self.header(width));
-        if height > 2 {
-            lines.push(truncate_width(
-                "Tasks: use a taller terminal",
-                width,
-                "...",
-                false,
-            ));
-        }
-        if height > 1 {
-            lines.push(self.footer(width));
-        }
-        pad_height(lines, height)
-    }
-
-    fn header(&self, width: usize) -> String {
-        let visible = self.state.visible_items();
-        let running = visible
-            .iter()
-            .filter(|item| item.status == TaskBrowserStatus::Running)
-            .count();
-        let waiting = visible
-            .iter()
-            .filter(|item| item.status == TaskBrowserStatus::Waiting)
-            .count();
-        let completed = visible
-            .iter()
-            .filter(|item| item.status == TaskBrowserStatus::Completed)
-            .count();
-        let interrupted = visible
-            .iter()
-            .filter(|item| item.status.is_interrupted())
-            .count();
-        let mut header = format!(" TASK BROWSER  filter={}", self.state.filter().label());
-        if running > 0 {
-            let _ = write!(header, "  {running} running");
-        }
-        if waiting > 0 {
-            let _ = write!(header, "  {waiting} waiting");
-        }
-        if completed > 0 {
-            let _ = write!(header, "  {completed} completed");
-        }
-        if interrupted > 0 {
-            let _ = write!(header, "  {interrupted} interrupted");
-        }
-        if let Some(total) = self.state.snapshot().total_matched {
-            let _ = write!(header, "  {total} matched");
-        } else {
-            let _ = write!(header, "  {} total", visible.len());
-        }
-        if self.state.list_has_more() {
-            let _ = write!(header, "  more…");
+    fn workflow_header(&self, width: usize) -> String {
+        let item = self
+            .state
+            .workflow_item()
+            .expect("workflow view requires item");
+        let workflow = item.workflow.as_ref().expect("workflow item carries meta");
+        let mut header = format!(
+            " {}  {}  {}  {}",
+            workflow.display_name,
+            item.status.label(),
+            format_elapsed(workflow.elapsed_ms),
+            workflow.purpose
+        );
+        if workflow.pending_user.is_some() {
+            header.push_str("  Needs input");
         }
         truncate_width(&header, width, "...", false)
     }
 
-    fn footer(&self, width: usize) -> String {
+    fn workflow_footer(&self, width: usize) -> String {
         if let Some(task_id) = self.state.stop_confirmation_task_id() {
             return truncate_width(
-                &format!(" Stop {task_id}?  Enter confirm   Esc cancel"),
+                &format!(" Stop {task_id}?  Enter confirm  Esc back"),
                 width,
                 "...",
                 false,
             );
         }
-        if let Some(message) = self.state.footer_message() {
-            return truncate_width(&format!(" {message}"), width, "...", false);
+        if let Some(draft) = self.state.save_draft() {
+            return truncate_width(
+                if draft.replacement.is_some() {
+                    " Enter replace  Esc cancel"
+                } else {
+                    " Tab destination  Enter save  Esc back"
+                },
+                width,
+                "...",
+                false,
+            );
         }
-        let footer = if width < visible_width(FOOTER) {
-            COMPACT_FOOTER
+        if let Some(draft) = self.state.answer_draft() {
+            let help = if draft.form.structured_fallback {
+                " Enter submit  Esc not now"
+            } else if self.state.selected_answer_field().is_some_and(|field| {
+                matches!(field.control, super::WorkflowAnswerControl::ObjectArray)
+            }) {
+                " Delete remove row  + add row  Left/Right select row  Up/Down fields  Enter submit  Esc later"
+            } else {
+                " Up/Down fields  Left/Right choose  Space toggle  Enter submit  Esc later"
+            };
+            return truncate_width(help, width, "...", false);
+        }
+        let workflow = self
+            .state
+            .workflow_item()
+            .and_then(|item| item.workflow.as_ref());
+        let mut footer = " Tab switch  Enter details  P pause/resume  X stop  Esc back".to_owned();
+        if workflow.is_some_and(|value| value.inline_unsaved) {
+            footer.push_str("  S save");
+        }
+        truncate_width(&footer, width, "...", false)
+    }
+
+    fn steps_pane(&self, width: usize, height: usize) -> Vec<String> {
+        let selected = self.state.selected_workflow_step();
+        let body = self
+            .state
+            .workflow_item()
+            .and_then(|item| item.workflow.as_ref())
+            .map(|workflow| {
+                workflow
+                    .steps
+                    .iter()
+                    .map(|step| {
+                        let pointer = if selected == Some(step) { ">" } else { " " };
+                        format!(
+                            "{pointer} {} {}  {}/{}/{}",
+                            step.state.marker(),
+                            step.title,
+                            step.done_count,
+                            step.working_count,
+                            step.queued_count,
+                        )
+                    })
+                    .collect()
+            })
+            .unwrap_or_else(|| vec!["No steps yet.".to_owned()]);
+        pane(" Steps ", width, height, &body, self.theme.overlay_border)
+    }
+
+    fn children_pane(&self, width: usize, height: usize) -> Vec<String> {
+        let selected = self.state.selected_workflow_child();
+        let mut body = self
+            .state
+            .workflow_item()
+            .and_then(|item| item.workflow.as_ref())
+            .map(|workflow| {
+                workflow
+                    .child_page
+                    .items
+                    .iter()
+                    .map(|child| {
+                        let pointer = if selected == Some(child) { ">" } else { " " };
+                        let role = child
+                            .role
+                            .as_deref()
+                            .map_or(String::new(), |role| format!(" [{role}]"));
+                        let activity = child
+                            .latest_activity
+                            .as_deref()
+                            .map_or(String::new(), |value| format!("  {value}"));
+                        format!(
+                            "{pointer} {} {}{}  {}{}",
+                            child.state.marker(),
+                            child.title,
+                            role,
+                            child.elapsed,
+                            activity
+                        )
+                    })
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default();
+        if body.is_empty() {
+            body.push("No agents in this step.".to_owned());
+        }
+        pane(" Agents ", width, height, &body, self.theme.overlay_border)
+    }
+
+    fn details_pane(&self, width: usize, height: usize, item: &TaskBrowserItem) -> Vec<String> {
+        if let Some(draft) = self.state.save_draft() {
+            if let Some(replacement) = &draft.replacement {
+                return pane(
+                    " Replace workflow? ",
+                    width,
+                    height,
+                    &[
+                        format!("Existing: {}", replacement.existing_display_name),
+                        format!("New: {}", replacement.new_display_name),
+                        format!("Location: {}", replacement.target_location),
+                    ],
+                    self.theme.overlay_border,
+                );
+            }
+            return pane(
+                " Save workflow ",
+                width,
+                height,
+                &[
+                    format!("Name: {}", draft.name),
+                    format!("Save to: {}", draft.destination.label()),
+                ],
+                self.theme.overlay_border,
+            );
+        }
+        if let Some(draft) = self.state.answer_draft() {
+            let body = if draft.form.structured_fallback {
+                let mut body = vec![draft.json_editor.clone()];
+                body.extend(draft.field_errors.iter().cloned());
+                body
+            } else {
+                draft.form.lines(
+                    &draft.value,
+                    &draft.field_errors,
+                    draft.selected_field,
+                    &draft.choice_indices,
+                    &draft.branch_indices,
+                )
+            };
+            return pane(" Answer ", width, height, &body, self.theme.overlay_border);
+        }
+        if self.state.child_details_open()
+            && let Some(child) = self.state.selected_workflow_child()
+        {
+            let mut body = vec![
+                format!("Agent: {}", child.title),
+                format!("State: {}", child.state.marker()),
+            ];
+            if let Some(usage) = &child.actual_usage {
+                body.push(format!("Usage: {usage}"));
+            }
+            body.push(format!("Elapsed: {}", child.elapsed));
+            if let Some(role) = &child.role {
+                body.push(format!("Role: {role}"));
+            }
+            if let Some(activity) = &child.latest_activity {
+                body.push(format!("Activity: {activity}"));
+            }
+            if let Some(summary) = &child.terminal_summary {
+                body.push(format!("Result: {summary}"));
+            }
+            return pane(" Details ", width, height, &body, self.theme.overlay_border);
+        }
+        pane(
+            " Details ",
+            width,
+            height,
+            &item.detail_lines,
+            self.theme.overlay_border,
+        )
+    }
+
+    fn render_browser(&self, width: usize, height: usize) -> Vec<String> {
+        let content_height = height.saturating_sub(2).max(1);
+        let mut lines = vec![self.browser_header(width)];
+        if self.state.task_details_open() && width >= 70 {
+            let tasks_width = (width / 3).clamp(24, 42);
+            let details_width = width.saturating_sub(tasks_width + 1);
+            let details_height = content_height / 2;
+            let mut details = self.task_details_pane(details_width, details_height);
+            details.extend(
+                self.task_output_pane(details_width, content_height.saturating_sub(details_height)),
+            );
+            lines.extend(join_columns(
+                &[self.tasks_pane(tasks_width, content_height), details],
+                &[tasks_width, details_width],
+                content_height,
+            ));
         } else {
-            FOOTER
+            lines.extend(self.tasks_pane(width, content_height));
+        }
+        let footer = if self.state.task_details_open() {
+            " O switch output  PgUp/PgDn scroll output  X stop  Esc back"
+        } else {
+            " Tab filter  Enter details  O output  X stop  Esc close"
         };
-        truncate_width(footer, width, "...", false)
+        lines.push(truncate_width(footer, width, "...", false));
+        pad_height(lines, height)
+    }
+
+    fn browser_header(&self, width: usize) -> String {
+        let mut header = format!(" TASK BROWSER  filter={}", self.state.filter().label());
+        let count = self.state.visible_items().len();
+        let _ = write!(header, "  {count} tasks");
+        truncate_width(&header, width, "...", false)
     }
 
     fn tasks_pane(&self, width: usize, height: usize) -> Vec<String> {
-        let title = format!(" Tasks [{}] ", self.state.filter().pane_label());
-        let visible = self.state.visible_items();
-        let mut body = Vec::new();
-        if visible.is_empty() {
-            let empty = match self.state.filter() {
-                TaskBrowserFilter::All => "No background tasks in this session.",
-                TaskBrowserFilter::Active => "No active tasks. Tab = show all / workflow.",
-                TaskBrowserFilter::Workflow => "No workflow tasks. Tab = show all.",
-            };
-            body.extend(wrap_words(empty, width.saturating_sub(4)));
+        let body = self
+            .state
+            .visible_items()
+            .into_iter()
+            .map(|item| self.task_row(item, width.saturating_sub(4)))
+            .collect::<Vec<_>>();
+        let body = if body.is_empty() {
+            vec!["No tasks.".to_owned()]
         } else {
-            let max_rows = height.saturating_sub(2);
-            let selected = visible
-                .iter()
-                .position(|item| self.state.selected_task_id() == Some(item.id.as_str()))
-                .unwrap_or(0);
-            let start = selected.saturating_sub(max_rows.saturating_sub(1));
-            for item in visible.into_iter().skip(start).take(max_rows) {
-                body.push(self.task_row(item, width.saturating_sub(4)));
-            }
-        }
-        pane(&title, width, height, &body, self.theme.overlay_border)
+            body
+        };
+        pane(" Tasks ", width, height, &body, self.theme.overlay_border)
     }
 
-    fn detail_pane(&self, width: usize, height: usize) -> Vec<String> {
-        let body = self.state.selected_item().map_or_else(
-            || vec!["Select a task from the list.".to_owned()],
-            |item| item.detail_lines.clone(),
-        );
-        pane(" Detail ", width, height, &body, self.theme.overlay_border)
+    fn task_details_pane(&self, width: usize, height: usize) -> Vec<String> {
+        let body = self
+            .state
+            .selected_item()
+            .map(|item| item.detail_lines.clone())
+            .unwrap_or_else(|| vec!["No task selected.".to_owned()]);
+        pane(" Details ", width, height, &body, self.theme.overlay_border)
     }
 
-    fn preview_pane(&self, width: usize, height: usize) -> Vec<String> {
-        let body = self.state.selected_item().map_or_else(
-            || vec!["No task selected.".to_owned()],
-            |item| {
-                if item.preview_lines.is_empty() {
-                    vec!["No output yet.".to_owned()]
-                } else {
-                    item.preview_lines
-                        .iter()
-                        .skip(self.state.output_scroll())
-                        .cloned()
-                        .collect()
-                }
-            },
-        );
-        pane(
-            " Preview Output ",
-            width,
-            height,
-            &body,
-            self.theme.overlay_border,
-        )
+    fn task_output_pane(&self, width: usize, height: usize) -> Vec<String> {
+        let body = self
+            .state
+            .selected_item()
+            .map(|item| {
+                item.preview_lines
+                    .iter()
+                    .skip(self.state.output_scroll())
+                    .cloned()
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default();
+        pane(" Output ", width, height, &body, self.theme.overlay_border)
     }
 
     fn task_row(&self, item: &TaskBrowserItem, width: usize) -> String {
@@ -280,113 +366,80 @@ impl<'a> TaskBrowserRenderer<'a> {
         } else {
             " "
         };
-        let id_label = item.human_handle.as_deref().unwrap_or(item.id.as_str());
-        let phase = item
-            .workflow
-            .as_ref()
-            .and_then(|w| w.current_phase.as_deref())
-            .unwrap_or("");
-        let raw = if phase.is_empty() {
-            format!(
-                "{pointer} {} {}  {:<9} {}",
+        let label = item.human_handle.as_deref().unwrap_or(item.id.as_str());
+        truncate_width(
+            &format!(
+                "{pointer} {} {}  {}",
                 item.status.marker(),
-                id_label,
-                item.status.label(),
+                label,
                 item.title
-            )
-        } else {
-            format!(
-                "{pointer} {} {}  {:<9} {} [{}]",
-                item.status.marker(),
-                id_label,
-                item.status.label(),
-                item.title,
-                phase
-            )
-        };
-        truncate_width(&raw, width, "...", false)
+            ),
+            width,
+            "...",
+            false,
+        )
     }
 }
 
+fn format_elapsed(ms: u64) -> String {
+    let seconds = ms / 1_000;
+    format!("{:02}:{:02}", seconds / 60, seconds % 60)
+}
+
 fn pane(title: &str, width: usize, height: usize, body: &[String], color: Color) -> Vec<String> {
-    if width < 2 || height == 0 {
+    if height == 0 {
         return Vec::new();
+    }
+    if width < 3 {
+        return vec![truncate_width(title, width, "", false); height];
     }
     if height == 1 {
         return vec![truncate_width(title.trim(), width, "...", false)];
     }
-
     let inner = width.saturating_sub(2);
-    let border_style = Style::default().fg(color);
-    let mut lines = Vec::with_capacity(height);
-    lines.push(paint(&titled_top(title, inner), border_style));
-
-    let content_rows = height.saturating_sub(2);
-    for row in 0..content_rows {
-        let raw = body.get(row).map_or("", String::as_str);
-        lines.push(side_line(raw, inner, border_style));
+    let style = Style::default().fg(color);
+    let mut lines = vec![paint(&titled_top(title, inner), style)];
+    for row in 0..height.saturating_sub(2) {
+        let text = body.get(row).map_or("", String::as_str);
+        let text = truncate_width(text, inner.saturating_sub(2), "...", false);
+        lines.push(format!(
+            "{} {}{} {}",
+            paint("│", style),
+            text,
+            " ".repeat(inner.saturating_sub(2).saturating_sub(visible_width(&text))),
+            paint("│", style)
+        ));
     }
-    lines.push(paint(&format!("└{}┘", "─".repeat(inner)), border_style));
+    lines.push(paint(&format!("└{}┘", "─".repeat(inner)), style));
     lines
 }
 
 fn titled_top(title: &str, inner: usize) -> String {
-    let title_width = visible_width(title);
-    if title_width >= inner {
-        return format!("┌{}┐", truncate_width(title, inner, "", false));
-    }
-    format!("┌{title}{}┐", "─".repeat(inner - title_width))
-}
-
-fn side_line(raw: &str, inner: usize, border_style: Style) -> String {
-    let content_width = inner.saturating_sub(2);
-    let text = truncate_width(raw, content_width, "...", false);
-    let padding = " ".repeat(content_width.saturating_sub(visible_width(&text)));
+    let title = truncate_width(title, inner, "", false);
     format!(
-        "{} {}{} {}",
-        paint("│", border_style),
-        text,
-        padding,
-        paint("│", border_style)
+        "┌{title}{}┐",
+        "─".repeat(inner.saturating_sub(visible_width(&title)))
     )
 }
 
-fn wrap_words(text: &str, width: usize) -> Vec<String> {
-    if width == 0 {
-        return vec![String::new()];
-    }
-
-    let mut lines = Vec::new();
-    let mut current = String::new();
-    for word in text.split_whitespace() {
-        let next_width = if current.is_empty() {
-            visible_width(word)
-        } else {
-            visible_width(&current) + 1 + visible_width(word)
-        };
-        if next_width > width && !current.is_empty() {
-            // Flush the in-progress line and start a new one with `word`,
-            // reusing the existing capacity to avoid an extra allocation.
-            lines.push(std::mem::take(&mut current));
-            word.clone_into(&mut current);
-        } else if current.is_empty() {
-            word.clone_into(&mut current);
-        } else {
-            current.push(' ');
-            current.push_str(word);
-        }
-    }
-    if !current.is_empty() {
-        lines.push(current);
-    }
-    if lines.is_empty() {
-        lines.push(String::new());
-    }
-    lines
-}
-
-fn fit_line(line: &str, width: usize) -> String {
-    truncate_width(line, width, "...", false)
+fn join_columns(columns: &[Vec<String>], widths: &[usize], height: usize) -> Vec<String> {
+    (0..height)
+        .map(|row| {
+            columns
+                .iter()
+                .zip(widths)
+                .map(|(column, width)| {
+                    truncate_width(
+                        column.get(row).map_or("", String::as_str),
+                        *width,
+                        "...",
+                        false,
+                    )
+                })
+                .collect::<Vec<_>>()
+                .join(" ")
+        })
+        .collect()
 }
 
 fn pad_height(mut lines: Vec<String>, height: usize) -> Vec<String> {

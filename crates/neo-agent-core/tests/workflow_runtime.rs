@@ -6,15 +6,28 @@ use std::time::Duration;
 use neo_agent_core::AgentTokenUsage;
 use neo_agent_core::runtime::WorkflowDispatchResolver;
 use neo_agent_core::workflow::journal::{
-    JournalEnvelope, JournalPayload, JournalWriter, collect_journal,
+    JournalEnvelope, JournalPayload, JournalWriter, collect_journal as collect_journal_with_limit,
 };
 use neo_agent_core::workflow::{
-    WorkflowActor, WorkflowChildRef, WorkflowHandle, WorkflowInterruptionReason,
+    WorkflowActor, WorkflowChildKey, WorkflowChildKind, WorkflowChildRef, WorkflowExecutionOrigin,
+    WorkflowFinalResultMetadata, WorkflowHandle, WorkflowInterruptionReason,
     WorkflowInvocationKind, WorkflowInvocationOutcome, WorkflowLaunchRequest, WorkflowLimits,
     WorkflowOutcomeStatus, WorkflowPhase, WorkflowRuntime, WorkflowState, canonical_input_hash,
     journal_path,
 };
 use tokio::sync::Notify;
+
+fn collect_journal(
+    path: &Path,
+    expected_run_id: Option<&neo_agent_core::workflow::WorkflowId>,
+) -> Result<Vec<JournalEnvelope>, neo_agent_core::workflow::WorkflowError> {
+    collect_journal_with_limit(
+        path,
+        expected_run_id,
+        WorkflowLimits::default().journal_record_bytes,
+        WorkflowLimits::default().journal_total_bytes,
+    )
+}
 
 fn launch_request() -> WorkflowLaunchRequest {
     WorkflowLaunchRequest {
@@ -27,7 +40,6 @@ fn launch_request() -> WorkflowLaunchRequest {
         script: "neo.phase('build')".to_owned(),
         args: serde_json::json!({}),
         launch_source: "/workflow".to_owned(),
-        parent_run_id: None,
         output_schema: None,
         display_name: None,
         input_schema: None,
@@ -149,7 +161,7 @@ async fn oversized_invocation_outcome_terminalizes_without_stranding_running_sta
         37
     );
     let records = collect_journal(&journal_path(dir.path(), &handle.run_id), None).unwrap();
-    let compact_outcome = records
+    let bounded_outcome = records
         .iter()
         .find_map(|record| match &record.payload {
             JournalPayload::InvocationFinished { outcome, .. }
@@ -159,16 +171,16 @@ async fn oversized_invocation_outcome_terminalizes_without_stranding_running_sta
             }
             _ => None,
         })
-        .expect("compact invocation outcome");
+        .expect("bounded invocation outcome");
     assert_eq!(
-        compact_outcome
+        bounded_outcome
             .actual_usage
             .expect("journal usage")
             .output_tokens,
         23
     );
     assert_eq!(
-        compact_outcome.child_refs,
+        bounded_outcome.child_refs,
         vec![
             WorkflowChildRef {
                 kind: "agent".to_owned(),
@@ -193,9 +205,6 @@ async fn oversized_invocation_outcome_terminalizes_without_stranding_running_sta
         output.actual_usage.expect("live output usage").input_tokens,
         37
     );
-    // WorkflowOutput no longer embeds full invocation history (use TaskOutput).
-    assert!(output.invocations.is_empty());
-
     let recovered_runtime = WorkflowRuntime::new(limits);
     let recovered = recovered_runtime.rehydrate(dir.path()).await.unwrap();
     assert_eq!(recovered.len(), 1);
@@ -207,8 +216,7 @@ async fn oversized_invocation_outcome_terminalizes_without_stranding_running_sta
             .output_tokens,
         23
     );
-    let recovered_output = recovered[0].output().await.unwrap();
-    assert!(recovered_output.invocations.is_empty());
+    let _recovered_output = recovered[0].output().await.unwrap();
     let recovered_records =
         collect_journal(&journal_path(dir.path(), &handle.run_id), None).unwrap();
     let recovered_outcome = recovered_records
@@ -222,11 +230,11 @@ async fn oversized_invocation_outcome_terminalizes_without_stranding_running_sta
             _ => None,
         })
         .expect("recovered journal invocation");
-    assert_eq!(recovered_outcome.child_refs, compact_outcome.child_refs);
+    assert_eq!(recovered_outcome.child_refs, bounded_outcome.child_refs);
 }
 
 #[tokio::test]
-async fn resume_without_session_dispatch_returns_to_inspectable_paused_state() {
+async fn resume_without_session_dispatch_returns_to_readable_paused_state() {
     let dir = tempfile::tempdir().unwrap();
     let runtime = WorkflowRuntime::new(WorkflowLimits::default());
     WorkflowDispatchResolver::default()
@@ -432,7 +440,8 @@ async fn invoke_persists_start_before_effect_and_finish_after_effect() {
     let runtime = WorkflowRuntime::new(WorkflowLimits::default());
     let handle = create_running_run(&runtime, dir.path()).await;
     let path = journal_path(dir.path(), &handle.run_id);
-    let observed_start = Arc::new(AtomicBool::new(false));
+    let observed_queued_projection = Arc::new(AtomicBool::new(false));
+    let effect_handle = handle.clone();
 
     let outcome = handle
         .invoke(
@@ -442,19 +451,21 @@ async fn invoke_persists_start_before_effect_and_finish_after_effect() {
             true,
             {
                 let path = path.clone();
-                let observed_start = Arc::clone(&observed_start);
+                let observed_queued_projection = Arc::clone(&observed_queued_projection);
                 move |invocation| async move {
-                    observed_start.store(
-                        collect_journal(&path, None)
-                            .unwrap()
-                            .last()
-                            .is_some_and(|env| {
-                                matches!(
-                                    &env.payload,
-                                    JournalPayload::InvocationStarted { invocation_id, .. }
-                                        if invocation_id == &invocation.invocation_id
-                                )
-                            }),
+                    let durable = collect_journal(&path, None).unwrap();
+                    let queued_sequence = durable.last().and_then(|envelope| {
+                        matches!(
+                            &envelope.payload,
+                            JournalPayload::ChildQueued {
+                                child_key: WorkflowChildKey::DirectDelegate { invocation_id },
+                                ..
+                            } if invocation_id == &invocation.invocation_id
+                        )
+                        .then_some(envelope.seq)
+                    });
+                    observed_queued_projection.store(
+                        effect_handle.snapshot().await.projection_sequence == queued_sequence,
                         Ordering::Release,
                     );
                     completed_with_usage(3, 2)
@@ -465,7 +476,7 @@ async fn invoke_persists_start_before_effect_and_finish_after_effect() {
         .unwrap();
 
     assert!(outcome.ok);
-    assert!(observed_start.load(Ordering::Acquire));
+    assert!(observed_queued_projection.load(Ordering::Acquire));
     let records = collect_journal(&path, None).unwrap();
     assert!(
         records
@@ -473,6 +484,21 @@ async fn invoke_persists_start_before_effect_and_finish_after_effect() {
             .any(|r| matches!(r.payload, JournalPayload::InvocationStarted { .. })),
         "missing InvocationStarted: {records:?}"
     );
+    assert!(
+        records
+            .iter()
+            .any(|r| matches!(r.payload, JournalPayload::ChildQueued { .. })),
+        "missing ChildQueued: {records:?}"
+    );
+    let child_finished = records
+        .iter()
+        .position(|r| matches!(r.payload, JournalPayload::ChildFinished { .. }))
+        .expect("missing ChildFinished");
+    let invocation_finished = records
+        .iter()
+        .position(|r| matches!(r.payload, JournalPayload::InvocationFinished { .. }))
+        .expect("missing InvocationFinished");
+    assert!(child_finished < invocation_finished);
     assert!(
         records
             .iter()
@@ -647,7 +673,7 @@ async fn replay_uses_matching_prefix_without_repeating_effect_then_starts_live()
         .unwrap();
     let recovered_handle = recovered.rehydrate(dir.path()).await.unwrap().remove(0);
     recovered_handle.resume(WorkflowActor::Human).await.unwrap();
-    // Runner exits without final_result → Failed under V2 completion rules.
+    // Runner exits without final_result → Failed under canonical completion rules.
     wait_for_state(&recovered_handle, WorkflowState::Failed).await;
     assert_eq!(effects.load(Ordering::Acquire), 2);
 }
@@ -697,7 +723,7 @@ async fn replay_mismatch_starts_live_effect() {
         .unwrap();
     let recovered_handle = recovered.rehydrate(dir.path()).await.unwrap().remove(0);
     recovered_handle.resume(WorkflowActor::Human).await.unwrap();
-    // Runner exits without final_result → Failed under V2 completion rules.
+    // Runner exits without final_result → Failed under canonical completion rules.
     wait_for_state(&recovered_handle, WorkflowState::Failed).await;
     assert_eq!(effects.load(Ordering::Acquire), 1);
 }
@@ -714,20 +740,44 @@ async fn incomplete_invocation_is_interrupted_and_never_reexecuted() {
     let run_id = existing
         .first()
         .map_or_else(|| handle.run_id.clone(), |e| e.run_id.clone());
-    let mut writer = JournalWriter::open(&path, run_id.clone()).unwrap();
+    let mut writer =
+        JournalWriter::open(&path, run_id.clone(), &WorkflowLimits::default()).unwrap();
     let started = JournalEnvelope::new(
         next_seq,
         2,
-        run_id,
+        run_id.clone(),
         JournalPayload::InvocationStarted {
             invocation_id: "inv_incomplete".to_owned(),
             call_index: 0,
-            kind: WorkflowInvocationKind::Delegate,
+            kind: WorkflowInvocationKind::Swarm,
             canonical_input: Some(input.clone()),
         },
     )
     .with_canonical_input_hash(canonical_input_hash(&input));
     writer.append(&started, &WorkflowLimits::default()).unwrap();
+    let child_key = WorkflowChildKey::SwarmItem {
+        swarm_id: "swarm_crash".to_owned(),
+        item_id: "item_1".to_owned(),
+    };
+    for payload in [
+        JournalPayload::ChildQueued {
+            child_key: child_key.clone(),
+            child_kind: WorkflowChildKind::SwarmItem,
+            invocation_id: "inv_incomplete".to_owned(),
+            phase_id: Some("build".to_owned()),
+            title: Some("crash recovery".to_owned()),
+            role: Some("reviewer".to_owned()),
+        },
+        JournalPayload::ChildStarted {
+            child_key: child_key.clone(),
+            agent_id: Some("agent_crash".to_owned()),
+        },
+    ] {
+        let envelope = JournalEnvelope::new(writer.next_seq(), 3, run_id.clone(), payload);
+        writer
+            .append(&envelope, &WorkflowLimits::default())
+            .unwrap();
+    }
     drop(handle);
     drop(runtime);
 
@@ -742,7 +792,7 @@ async fn incomplete_invocation_is_interrupted_and_never_reexecuted() {
                     let outcome = handle
                         .invoke(
                             0,
-                            WorkflowInvocationKind::Delegate,
+                            WorkflowInvocationKind::Swarm,
                             serde_json::json!({"task": "audit"}),
                             true,
                             move |_| async move {
@@ -759,9 +809,35 @@ async fn incomplete_invocation_is_interrupted_and_never_reexecuted() {
         .unwrap();
     let recovered_handle = recovered.rehydrate(dir.path()).await.unwrap().remove(0);
     recovered_handle.resume(WorkflowActor::Human).await.unwrap();
-    // Runner exits without final_result → Failed under V2 completion rules.
+    // Runner exits without final_result → Failed under canonical completion rules.
     wait_for_state(&recovered_handle, WorkflowState::Failed).await;
     assert_eq!(effects.load(Ordering::Acquire), 0);
+    let recovered_records = collect_journal(&path, Some(&run_id)).unwrap();
+    let child_finished = recovered_records
+        .iter()
+        .position(|record| {
+            matches!(
+                &record.payload,
+                JournalPayload::ChildFinished {
+                    child_key: finished_key,
+                    agent_id: Some(agent_id),
+                    status: WorkflowOutcomeStatus::Interrupted,
+                    ..
+                } if finished_key == &child_key && agent_id == "agent_crash"
+            )
+        })
+        .expect("open swarm child must be durably interrupted");
+    let invocation_finished = recovered_records
+        .iter()
+        .position(|record| {
+            matches!(
+                &record.payload,
+                JournalPayload::InvocationFinished { invocation_id, .. }
+                    if invocation_id == "inv_incomplete"
+            )
+        })
+        .expect("incomplete invocation must be durably interrupted");
+    assert!(child_finished < invocation_finished);
 }
 
 #[tokio::test]
@@ -776,11 +852,12 @@ async fn recovery_resolver_adopts_known_terminal_child_result() {
     let run_id = existing
         .first()
         .map_or_else(|| handle.run_id.clone(), |e| e.run_id.clone());
-    let mut writer = JournalWriter::open(&path, run_id.clone()).unwrap();
+    let mut writer =
+        JournalWriter::open(&path, run_id.clone(), &WorkflowLimits::default()).unwrap();
     let started = JournalEnvelope::new(
         next_seq,
         2,
-        run_id,
+        run_id.clone(),
         JournalPayload::InvocationStarted {
             invocation_id: "child_7".to_owned(),
             call_index: 0,
@@ -790,6 +867,28 @@ async fn recovery_resolver_adopts_known_terminal_child_result() {
     )
     .with_canonical_input_hash(canonical_input_hash(&input));
     writer.append(&started, &WorkflowLimits::default()).unwrap();
+    let child_key = WorkflowChildKey::DirectDelegate {
+        invocation_id: "child_7".to_owned(),
+    };
+    for payload in [
+        JournalPayload::ChildQueued {
+            child_key: child_key.clone(),
+            child_kind: WorkflowChildKind::Delegate,
+            invocation_id: "child_7".to_owned(),
+            phase_id: None,
+            title: Some("audit".to_owned()),
+            role: None,
+        },
+        JournalPayload::ChildStarted {
+            child_key: child_key.clone(),
+            agent_id: Some("agent_7".to_owned()),
+        },
+    ] {
+        let envelope = JournalEnvelope::new(writer.next_seq(), 3, run_id.clone(), payload);
+        writer
+            .append(&envelope, &WorkflowLimits::default())
+            .unwrap();
+    }
     drop(handle);
     drop(runtime);
 
@@ -801,10 +900,58 @@ async fn recovery_resolver_adopts_known_terminal_child_result() {
         })
         .unwrap();
     recovered.rehydrate(dir.path()).await.unwrap();
-    assert!(collect_journal(&path, None).unwrap().iter().any(|record| {
+    let recovered_records = collect_journal(&path, None).unwrap();
+    assert!(recovered_records.iter().any(|record| {
         matches!(&record.payload, JournalPayload::InvocationFinished { invocation_id, outcome, .. }
             if invocation_id == "child_7" && outcome.summary == "adopted child")
     }));
+    assert!(recovered_records.iter().any(|record| {
+        matches!(
+            &record.payload,
+            JournalPayload::ChildFinished {
+                child_key: finished_key,
+                agent_id: Some(agent_id),
+                status: WorkflowOutcomeStatus::Completed,
+                ..
+            } if finished_key == &child_key && agent_id == "agent_7"
+        )
+    }));
+}
+
+#[tokio::test]
+async fn final_result_recovery_rejects_non_running_durable_state() {
+    let dir = tempfile::tempdir().unwrap();
+    let runtime = WorkflowRuntime::new(WorkflowLimits::default());
+    let handle = create_running_run(&runtime, dir.path()).await;
+    handle
+        .record_final_result(WorkflowFinalResultMetadata {
+            value: Some(serde_json::json!({"ok": true})),
+            artifact_id: None,
+            schema_revision: None,
+        })
+        .await
+        .unwrap();
+    handle.pause(WorkflowActor::Human).await.unwrap();
+    let path = journal_path(dir.path(), &handle.run_id);
+    let before = collect_journal(&path, Some(&handle.run_id)).unwrap();
+    drop(handle);
+    drop(runtime);
+
+    let recovered = WorkflowRuntime::new(WorkflowLimits::default());
+    let recovered_handle = recovered.rehydrate(dir.path()).await.unwrap().remove(0);
+    let snapshot = recovered_handle.snapshot().await;
+    assert_eq!(snapshot.state, WorkflowState::Failed);
+    assert!(
+        snapshot.terminal_reason.as_deref().is_some_and(
+            |reason| reason.contains("illegal workflow transition paused -> completed")
+        ),
+        "unexpected recovery failure: {:?}",
+        snapshot.terminal_reason
+    );
+    assert_eq!(
+        collect_journal(&path, Some(&recovered_handle.run_id)).unwrap(),
+        before
+    );
 }
 
 #[tokio::test]
@@ -869,7 +1016,7 @@ async fn pause_reaches_effect_boundary_and_resume_restarts_same_run() {
     );
     let run_id = handle.run_id.clone();
     handle.resume(WorkflowActor::Human).await.unwrap();
-    // V2 requires a durable final_result for Completed; this runner only
+    // canonical requires a durable final_result for Completed; this runner only
     // exercises pause/resume occupancy, so the worker exits Failed.
     wait_for_state(&handle, WorkflowState::Failed).await;
     assert_eq!(handle.run_id, run_id);
@@ -960,7 +1107,7 @@ async fn stop_cancels_active_effect_and_terminalizes_after_finish_record() {
 }
 
 #[tokio::test]
-async fn corrupt_run_is_rehydrated_as_inspectable_failed_handle() {
+async fn corrupt_run_is_rehydrated_as_readable_failed_handle() {
     let dir = tempfile::tempdir().unwrap();
     let run_dir = dir.path().join("workflows").join("wf_corrupt");
     std::fs::create_dir_all(&run_dir).unwrap();
@@ -998,7 +1145,8 @@ async fn rehydrate_isolates_recovery_append_failure() {
     let run_id = existing
         .first()
         .map_or_else(|| bad_id.clone(), |e| e.run_id.clone());
-    let mut writer = JournalWriter::open(&bad_path, run_id.clone()).unwrap();
+    let mut writer =
+        JournalWriter::open(&bad_path, run_id.clone(), &WorkflowLimits::default()).unwrap();
     let started = JournalEnvelope::new(
         next_seq,
         2,
@@ -1022,13 +1170,14 @@ async fn rehydrate_isolates_recovery_append_failure() {
     let run_id = existing
         .first()
         .map_or_else(|| good_id.clone(), |e| e.run_id.clone());
-    let mut good_writer = JournalWriter::open(&good_path, run_id.clone()).unwrap();
+    let mut good_writer =
+        JournalWriter::open(&good_path, run_id.clone(), &WorkflowLimits::default()).unwrap();
     let changed = JournalEnvelope::new(
         next_seq,
         2,
         run_id,
         JournalPayload::StateChanged {
-            previous: WorkflowState::Running,
+            previous: WorkflowState::Queued,
             // Cancelled is terminal without requiring final_result_recorded.
             new: WorkflowState::Cancelled,
             reason: "done".to_owned(),
@@ -1096,22 +1245,45 @@ async fn rehydrate_isolates_recovery_append_failure() {
 async fn workflow_worker_panic_finishes_invocation_before_failed_state() {
     let dir = tempfile::tempdir().unwrap();
     let runtime = WorkflowRuntime::new(WorkflowLimits::default());
+    let binding_runtime = runtime.clone();
     let in_effect = Arc::new(Notify::new());
     runtime
         .bind_runner({
             let in_effect = Arc::clone(&in_effect);
+            let binding_runtime = binding_runtime.clone();
             move |handle, _metadata, _session_dir| {
                 let in_effect = Arc::clone(&in_effect);
+                let binding_runtime = binding_runtime.clone();
                 async move {
+                    let run_id = handle.run_id.clone();
                     handle
                         .invoke(
                             0,
                             WorkflowInvocationKind::Delegate,
                             serde_json::json!({"task": "boom"}),
                             true,
-                            move |_| {
+                            move |context| {
                                 let in_effect = Arc::clone(&in_effect);
+                                let binding_runtime = binding_runtime.clone();
+                                let origin = WorkflowExecutionOrigin {
+                                    run_id,
+                                    human_handle: None,
+                                    definition_name: "test-run".to_owned(),
+                                    definition_revision: None,
+                                    phase_id: None,
+                                    invocation_id: Some(context.invocation_id),
+                                    swarm_item_id: None,
+                                };
                                 async move {
+                                    binding_runtime
+                                        .bind_direct_delegate_agent(
+                                            &origin,
+                                            &neo_agent_core::multi_agent::AgentId::from_existing(
+                                                "agent_worker_panic",
+                                            ),
+                                        )
+                                        .await
+                                        .expect("bind direct agent");
                                     in_effect.notify_waiters();
                                     panic!("workflow worker test panic");
                                 }
@@ -1180,6 +1352,14 @@ async fn workflow_worker_panic_finishes_invocation_before_failed_state() {
         }
         other => panic!("expected InvocationFinished, got {other:?}"),
     }
+    assert!(records.iter().any(|record| matches!(
+        &record.payload,
+        JournalPayload::ChildFinished {
+            agent_id: Some(agent_id),
+            status: WorkflowOutcomeStatus::Interrupted,
+            ..
+        } if agent_id == "agent_worker_panic"
+    )));
 
     // No open invocation remains after panic supervision.
     assert!(!records.iter().any(|record| matches!(&record.payload, JournalPayload::InvocationStarted { invocation_id, .. }

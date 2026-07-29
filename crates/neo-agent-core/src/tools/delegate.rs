@@ -16,10 +16,10 @@ use super::{
 };
 use crate::AgentEvent;
 use crate::multi_agent::{
-    AgentLifecycleState, AgentProfile, AgentRunMode, ChildPlan, ChildRuntimeDeps, DelegateContext,
-    DelegateRequest, DelegateSwarmRequest, SwarmAggregate, SwarmChildProgress, SwarmChildSnapshot,
-    SwarmResourceLimits, SwarmSnapshot, apply_agent_progress, child_plans_from_delegate_swarm,
-    child_plans_serialized_bytes,
+    AgentLifecycleState, AgentProfile, AgentRunMode, AgentTerminalReason, ChildPlan,
+    ChildRuntimeDeps, DelegateContext, DelegateRequest, DelegateSwarmRequest, SwarmAggregate,
+    SwarmChildProgress, SwarmChildSnapshot, SwarmResourceLimits, SwarmSnapshot,
+    apply_agent_progress, child_plans_from_delegate_swarm, child_plans_serialized_bytes,
 };
 use crate::workflow::{CompiledSchema, StructuredOutputSource, accept_structured_output};
 
@@ -146,6 +146,37 @@ async fn execute_delegate(
             crate::multi_agent::AgentPathKind::Root,
         )
     };
+
+    if let Some(origin) = deps.config.workflow_execution_origin.as_ref()
+        && origin.invocation_id.is_some()
+        && origin.swarm_item_id.is_none()
+        && let Err(error) = ctx
+            .workflow_runtime
+            .bind_direct_delegate_agent(origin, &snapshot.id)
+            .await
+    {
+        let message = error.to_string();
+        let terminal = ctx
+            .multi_agent
+            .mark_background_terminal_reason(
+                &snapshot.id,
+                AgentLifecycleState::Failed,
+                AgentTerminalReason::Error,
+                Some(message.clone()),
+            )
+            .unwrap_or_else(|| snapshot.clone());
+        let mut details = agent_details(
+            "delegate",
+            &terminal,
+            Some(request.context),
+            SummaryScope::CurrentRun,
+            true,
+            true,
+            false,
+        );
+        details["binding_error"] = json!(message.clone());
+        return Ok(ToolResult::error(message).with_details(details));
+    }
 
     // Background mode: register the agent in the background task manager
     // and return immediately.

@@ -11475,7 +11475,6 @@ async fn spawn_workflow_approval_invocation(
                 script: "neo.phase('verify')".to_owned(),
                 args: serde_json::json!({}),
                 launch_source: "test".to_owned(),
-                parent_run_id: None,
                 output_schema: None,
                 display_name: None,
                 input_schema: None,
@@ -11531,8 +11530,13 @@ async fn spawn_workflow_approval_invocation(
 }
 
 fn assert_cancelled_workflow_invocation_journal(journal_path: &Path) {
-    let envelopes =
-        neo_agent_core::workflow::collect_journal(journal_path, None).expect("read journal");
+    let envelopes = neo_agent_core::workflow::collect_journal(
+        journal_path,
+        None,
+        neo_agent_core::workflow::WorkflowLimits::default().journal_record_bytes,
+        neo_agent_core::workflow::WorkflowLimits::default().journal_total_bytes,
+    )
+    .expect("read journal");
     assert!(envelopes.iter().any(|envelope| {
         matches!(
             &envelope.payload,
@@ -12086,7 +12090,6 @@ fn demo_named_workflow_config(temp: &tempfile::TempDir, mode: PermissionMode) ->
     let source_sha = source_sha256_hex(script.as_bytes());
     let manifest = format!(
         r#"
-definition_format_version = 2
 name = "demo"
 display_name = "Demo"
 description = "named slash fixture"
@@ -16543,7 +16546,7 @@ async fn task_browser_stop_confirmation_stops_selected_task() {
         .expect("show tasks");
 
     controller
-        .handle_input_event(InputEvent::Insert('s'))
+        .handle_input_event(InputEvent::Insert('x'))
         .await
         .expect("request stop");
     assert_eq!(
@@ -16609,7 +16612,6 @@ async fn task_browser_workflow_controls_use_human_handle() {
                 script: "neo.phase('work')".to_owned(),
                 args: serde_json::json!({}),
                 launch_source: "test".to_owned(),
-                parent_run_id: None,
                 output_schema: None,
                 display_name: None,
                 input_schema: None,
@@ -16620,6 +16622,10 @@ async fn task_browser_workflow_controls_use_human_handle() {
         .await
         .expect("create workflow");
     let run_id = handle.run_id.clone();
+    handle
+        .enter_running_for_direct_execution()
+        .await
+        .expect("enter running");
     config
         .background_tasks
         .start_workflow(
@@ -16636,10 +16642,6 @@ async fn task_browser_workflow_controls_use_human_handle() {
         .await
         .expect("show tasks");
 
-    controller
-        .handle_input_event(InputEvent::Submit)
-        .await
-        .expect("open workflow");
     assert_eq!(
         controller
             .chrome()
@@ -16649,37 +16651,9 @@ async fn task_browser_workflow_controls_use_human_handle() {
         Some(run_id.0.as_str())
     );
     controller
-        .handle_input_event(InputEvent::Insert('O'))
-        .await
-        .expect("toggle workflow output");
-    assert!(
-        controller
-            .chrome()
-            .task_browser_state()
-            .expect("browser open")
-            .workflow_output_open()
-    );
-    controller
-        .handle_input_event(InputEvent::Cancel)
-        .await
-        .expect("return to task browser");
-
-    controller
         .handle_input_event(InputEvent::Insert('p'))
         .await
-        .expect("request pause");
-    assert_eq!(
-        controller
-            .chrome()
-            .task_browser_state()
-            .expect("browser open")
-            .pause_confirmation_task_id(),
-        Some(run_id.0.as_str())
-    );
-    controller
-        .handle_input_event(InputEvent::Submit)
-        .await
-        .expect("confirm pause");
+        .expect("pause workflow");
     assert!(handle.is_pause_requested());
     assert_eq!(
         handle.snapshot().await.state,
@@ -16693,20 +16667,16 @@ async fn task_browser_workflow_controls_use_human_handle() {
         .expect("bind test runner");
     controller.refresh_task_browser().await;
     controller
-        .handle_input_event(InputEvent::Insert('u'))
+        .handle_input_event(InputEvent::Insert('p'))
         .await
-        .expect("request resume");
-    controller
-        .handle_input_event(InputEvent::Submit)
-        .await
-        .expect("confirm resume");
+        .expect("resume workflow");
     assert_eq!(
         handle.snapshot().await.state,
         neo_agent_core::workflow::WorkflowState::Running
     );
 
     controller
-        .handle_input_event(InputEvent::Insert('s'))
+        .handle_input_event(InputEvent::Insert('x'))
         .await
         .expect("request stop");
     controller
@@ -16727,7 +16697,310 @@ async fn task_browser_workflow_controls_use_human_handle() {
 }
 
 #[tokio::test]
-async fn task_browser_enter_toggles_output_focus_without_stop_confirmation() {
+async fn workflow_operator_answers_controls_and_saves_through_canonical_owners() {
+    use neo_agent_core::workflow::{
+        AwaitUserInput, UserAnswerPolicy, WorkflowDefinitionRegistry,
+        WorkflowDefinitionRegistryConfig, WorkflowLimits,
+    };
+
+    let temp = tempfile::tempdir().expect("tempdir");
+    let sessions_dir = temp.path().join("sessions");
+    let project_dir = temp.path().join("workspace");
+    let neo_home = temp.path().join("neo-home");
+    std::fs::create_dir_all(&project_dir).expect("project dir");
+    std::fs::create_dir_all(&neo_home).expect("neo home");
+
+    let mut controller = InteractiveController::new_for_test(
+        "neo",
+        "test-session",
+        "openai/gpt-4.1",
+        project_dir.clone(),
+        |_request| async move { Ok(Vec::<AgentEvent>::new()) },
+    );
+    let mut config = test_config(&project_dir, sessions_dir.clone());
+    config.workflow_definitions =
+        WorkflowDefinitionRegistry::new(WorkflowDefinitionRegistryConfig {
+            neo_home,
+            workspace: project_dir.clone(),
+            project_trusted: true,
+            limits: WorkflowLimits::default(),
+            builtins: Vec::new(),
+        });
+    let runtime = neo_agent_core::workflow::WorkflowRuntime::new(WorkflowLimits::default());
+    let handle = runtime
+        .create_run(
+            &sessions_dir,
+            neo_agent_core::workflow::WorkflowLaunchRequest {
+                name: "browser-inline".to_owned(),
+                description: "answer and save from tasks".to_owned(),
+                phases: vec![neo_agent_core::workflow::WorkflowPhase {
+                    id: "work".to_owned(),
+                    description: "work".to_owned(),
+                }],
+                script: "return { ok = true }".to_owned(),
+                args: serde_json::json!({}),
+                launch_source: "test".to_owned(),
+                output_schema: Some(serde_json::json!({
+                    "type": "object",
+                    "properties": { "ok": { "type": "boolean" } },
+                    "required": ["ok"],
+                    "additionalProperties": false
+                })),
+                display_name: Some("Browser inline".to_owned()),
+                input_schema: None,
+                definition_origin: None,
+                inline_unsaved: true,
+            },
+        )
+        .await
+        .expect("create workflow");
+    handle
+        .enter_running_for_direct_execution()
+        .await
+        .expect("enter running");
+    let awaiting = handle
+        .await_user(
+            0,
+            AwaitUserInput {
+                prompt: "Continue?".to_owned(),
+                answer_schema: serde_json::json!({
+                    "oneOf": [
+                        { "title": "Continue", "type": "boolean" },
+                        { "title": "Explain", "type": "string" }
+                    ]
+                }),
+                default: Some(serde_json::json!(true)),
+                title: Some("Continue".to_owned()),
+                answer_policy: Some(UserAnswerPolicy::Human),
+            },
+        )
+        .await;
+    assert!(awaiting.is_err(), "await_user must suspend the workflow");
+    let task_id = handle.run_id.0.clone();
+    config
+        .background_tasks
+        .start_workflow(task_id.clone(), "browser inline".to_owned(), handle.clone())
+        .await
+        .expect("register workflow");
+    for index in 0..55 {
+        config
+            .background_tasks
+            .start_question(format!("question-{index}"), format!("Question {index}"))
+            .await;
+    }
+    config
+        .workflow_definitions
+        .save(
+            neo_agent_core::workflow::WorkflowSaveScope::Project,
+            &neo_agent_core::workflow::WorkflowSaveRequest {
+                name: "browser-saved".to_owned(),
+                display_name: "Existing browser workflow".to_owned(),
+                description: "existing definition".to_owned(),
+                phases: vec![neo_agent_core::workflow::WorkflowPhase {
+                    id: "work".to_owned(),
+                    description: "work".to_owned(),
+                }],
+                lua_source: "return { ok = false }".to_owned(),
+                input_schema: None,
+                output_schema: serde_json::json!({
+                    "type": "object",
+                    "properties": { "ok": { "type": "boolean" } },
+                    "required": ["ok"],
+                    "additionalProperties": false
+                }),
+            },
+            false,
+        )
+        .expect("seed conflicting workflow");
+    controller.local_config = Some(config);
+
+    controller.type_text("/tasks");
+    controller
+        .handle_input_event(InputEvent::Submit)
+        .await
+        .expect("show workflow");
+    assert_eq!(
+        controller
+            .chrome()
+            .task_browser_state()
+            .and_then(neo_tui::tasks_browser::TaskBrowserState::workflow_item)
+            .map(|item| item.id.as_str()),
+        Some(task_id.as_str())
+    );
+    assert!(
+        controller
+            .chrome()
+            .task_browser_state()
+            .and_then(neo_tui::tasks_browser::TaskBrowserState::answer_draft)
+            .is_some()
+    );
+    controller
+        .handle_input_event(InputEvent::Cancel)
+        .await
+        .expect("dismiss answer");
+    assert!(
+        controller
+            .chrome()
+            .task_browser_state()
+            .and_then(neo_tui::tasks_browser::TaskBrowserState::answer_draft)
+            .is_none()
+    );
+    controller
+        .handle_input_event(InputEvent::Submit)
+        .await
+        .expect("reopen answer");
+    assert!(
+        controller
+            .chrome()
+            .task_browser_state()
+            .and_then(neo_tui::tasks_browser::TaskBrowserState::answer_draft)
+            .is_some()
+    );
+
+    controller
+        .handle_input_event(InputEvent::MoveRight)
+        .await
+        .expect("choose text branch");
+    controller
+        .handle_input_event(InputEvent::Insert('x'))
+        .await
+        .expect("edit text branch");
+    assert_eq!(
+        controller
+            .chrome()
+            .task_browser_state()
+            .and_then(|state| state.answer_draft())
+            .map(|draft| &draft.value),
+        Some(&serde_json::json!("x"))
+    );
+    controller
+        .handle_input_event(InputEvent::MoveLeft)
+        .await
+        .expect("restore boolean branch");
+    controller
+        .handle_input_event(InputEvent::Insert(' '))
+        .await
+        .expect("toggle boolean branch");
+    controller
+        .handle_input_event(InputEvent::MoveRight)
+        .await
+        .expect("restore text branch");
+    assert_eq!(
+        controller
+            .chrome()
+            .task_browser_state()
+            .and_then(|state| state.answer_draft())
+            .map(|draft| &draft.value),
+        Some(&serde_json::json!("x"))
+    );
+    controller
+        .handle_input_event(InputEvent::MoveLeft)
+        .await
+        .expect("restore edited boolean branch");
+    controller
+        .handle_input_event(InputEvent::Submit)
+        .await
+        .expect("submit answer");
+    assert_eq!(
+        handle
+            .pending_user_input()
+            .await
+            .expect("pending input")
+            .expect("input record")
+            .answer,
+        Some(serde_json::json!(false))
+    );
+
+    controller
+        .handle_input_event(InputEvent::Insert('s'))
+        .await
+        .expect("open save dialog");
+    assert_eq!(
+        controller
+            .chrome()
+            .task_browser_state()
+            .and_then(neo_tui::tasks_browser::TaskBrowserState::save_draft)
+            .map(|draft| draft.name.as_str()),
+        Some("browser-inline")
+    );
+    controller
+        .handle_input_event(InputEvent::Paste("browser-saved".to_owned()))
+        .await
+        .expect("set save name");
+    controller
+        .handle_input_event(InputEvent::Submit)
+        .await
+        .expect("request replacement");
+    let replacement = controller
+        .chrome()
+        .task_browser_state()
+        .and_then(neo_tui::tasks_browser::TaskBrowserState::save_draft)
+        .and_then(|draft| draft.replacement.as_ref())
+        .expect("replacement details");
+    assert_eq!(
+        replacement.existing_display_name,
+        "Existing browser workflow"
+    );
+    assert_eq!(replacement.new_display_name, "Browser inline");
+    assert_eq!(
+        replacement.target_location,
+        project_dir.join(".neo/workflows").to_string_lossy()
+    );
+    controller
+        .handle_input_event(InputEvent::Submit)
+        .await
+        .expect("replace workflow");
+    assert!(
+        project_dir
+            .join(".neo/workflows/browser-saved.lua")
+            .is_file()
+    );
+    assert_eq!(
+        std::fs::read_to_string(project_dir.join(".neo/workflows/browser-saved.lua"))
+            .expect("read replaced workflow"),
+        "return { ok = true }"
+    );
+    assert!(
+        handle
+            .output()
+            .await
+            .expect("output")
+            .metadata
+            .inline_unsaved
+    );
+    assert!(
+        !controller
+            .chrome()
+            .task_browser_state()
+            .and_then(neo_tui::tasks_browser::TaskBrowserState::workflow_item)
+            .and_then(|item| item.workflow.as_ref())
+            .is_some_and(|workflow| workflow.inline_unsaved)
+    );
+
+    controller
+        .handle_input_event(InputEvent::Insert('x'))
+        .await
+        .expect("request stop");
+    assert_eq!(
+        controller
+            .chrome()
+            .task_browser_state()
+            .expect("browser open")
+            .stop_confirmation_task_id(),
+        Some(task_id.as_str())
+    );
+    controller
+        .handle_input_event(InputEvent::Submit)
+        .await
+        .expect("confirm stop");
+    assert_eq!(
+        handle.snapshot().await.state,
+        neo_agent_core::workflow::WorkflowState::Cancelled
+    );
+}
+
+#[tokio::test]
+async fn task_browser_plain_task_controls_remain_available() {
     let temp = tempfile::tempdir().expect("tempdir");
     let sessions_dir = temp.path().join(".neo/sessions");
     let mut controller = InteractiveController::new_for_test(
@@ -16752,8 +17025,27 @@ async fn task_browser_enter_toggles_output_focus_without_stop_confirmation() {
     controller
         .handle_input_event(InputEvent::Submit)
         .await
-        .expect("toggle output focus");
+        .expect("handle enter");
 
+    assert!(
+        controller
+            .chrome()
+            .task_browser_state()
+            .expect("browser open")
+            .stop_confirmation_task_id()
+            .is_none()
+    );
+    assert!(
+        controller
+            .chrome()
+            .task_browser_state()
+            .expect("browser open")
+            .task_details_open()
+    );
+    controller
+        .handle_input_event(InputEvent::Insert('o'))
+        .await
+        .expect("open task output");
     assert_eq!(
         controller
             .chrome()
@@ -16761,6 +17053,27 @@ async fn task_browser_enter_toggles_output_focus_without_stop_confirmation() {
             .expect("browser open")
             .focus(),
         neo_tui::tasks_browser::TaskBrowserFocus::Output
+    );
+    controller
+        .local_config
+        .as_ref()
+        .expect("config")
+        .background_tasks
+        .start_question("question-2".to_owned(), "Pick another".to_owned())
+        .await;
+    controller
+        .handle_input_event(InputEvent::Insert('r'))
+        .await
+        .expect("refresh task list");
+    assert_eq!(
+        controller
+            .chrome()
+            .task_browser_state()
+            .expect("browser open")
+            .snapshot()
+            .items()
+            .len(),
+        2
     );
 }
 

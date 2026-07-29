@@ -281,7 +281,6 @@ impl InteractiveController {
             script: prepared.definition.lua_source.clone(),
             args: prepared.args.clone(),
             launch_source: format!("named:{}", prepared.definition.name.as_str()),
-            parent_run_id: None,
             output_schema: Some(prepared.definition.output_schema.clone()),
             display_name: Some(prepared.definition.display_name.clone()),
             input_schema: prepared.definition.input_schema.clone(),
@@ -296,7 +295,6 @@ impl InteractiveController {
                 workspace_identity: prepared.workspace.display().to_string(),
                 actor: neo_agent_core::workflow::WorkflowActor::Human,
                 permission_mode: prepared.permission_mode,
-                parent_lineage: None,
                 compiled_input_schema: prepared.definition.compiled_input_schema.clone(),
                 schema_sha256,
             },
@@ -349,28 +347,83 @@ impl InteractiveController {
             .cloned()
             .unwrap_or_default();
         let intent = state.list_intent();
+        let page_limit = if intent.limit == 0 { 50 } else { intent.limit };
         let query = neo_agent_core::tools::BackgroundTaskListQuery {
             active_only: intent.active_only,
             kind: intent
                 .workflow_only
                 .then_some(neo_agent_core::tools::BackgroundTaskKind::Workflow),
-            limit: if intent.limit == 0 { 50 } else { intent.limit },
+            limit: page_limit,
             cursor: intent.cursor,
             ..neo_agent_core::tools::BackgroundTaskListQuery::default()
         };
-        match config.background_tasks.list_page(query).await {
-            Ok(page) => {
-                let snapshot = task_browser::list_page_to_browser_snapshot(&page);
-                if let Err(message) = state.apply_snapshot_checked(&snapshot) {
-                    state.set_footer_message(message);
+        let preferred_workflow = {
+            let awaiting_query = neo_agent_core::tools::BackgroundTaskListQuery {
+                kind: Some(neo_agent_core::tools::BackgroundTaskKind::Workflow),
+                awaiting_user: Some(true),
+                limit: 1,
+                ..neo_agent_core::tools::BackgroundTaskListQuery::default()
+            };
+            let awaiting = config
+                .background_tasks
+                .list_page(awaiting_query)
+                .await
+                .ok()
+                .and_then(|page| page.items.into_iter().next());
+            if awaiting.is_some() {
+                awaiting
+            } else {
+                config
+                    .background_tasks
+                    .list_page(neo_agent_core::tools::BackgroundTaskListQuery {
+                        active_only: true,
+                        kind: Some(neo_agent_core::tools::BackgroundTaskKind::Workflow),
+                        limit: 1,
+                        ..neo_agent_core::tools::BackgroundTaskListQuery::default()
+                    })
+                    .await
+                    .ok()
+                    .and_then(|page| page.items.into_iter().next())
+            }
+        };
+        let preferred_task_id = match config
+            .background_tasks
+            .list_page_with_live_agents(query, &config.multi_agent)
+            .await
+        {
+            Ok(mut page) => {
+                if let Some(preferred) = preferred_workflow
+                    && !page
+                        .items
+                        .iter()
+                        .any(|item| item.task_id == preferred.task_id)
+                {
+                    page.items.insert(0, preferred);
                 }
+                task_browser::update_workflow_save_availability(
+                    &mut page,
+                    &config.background_tasks,
+                    &config.workflow_definitions,
+                )
+                .await;
+                let preferred_task_id = task_browser::preferred_workflow_task_id(&page);
+                let snapshot = task_browser::list_page_to_browser_snapshot(&page);
+                state.apply_snapshot(&snapshot);
+                if let Some(task_id) = preferred_task_id.as_deref() {
+                    let _ = state.open_workflow_for_task(task_id);
+                }
+                preferred_task_id
             }
             Err(error) => {
                 state.set_footer_message(error.to_string());
+                None
             }
-        }
+        };
         self.last_task_browser_refresh = Some(Instant::now());
         self.tui.chrome_mut().push_task_browser_overlay(state);
+        if preferred_task_id.is_some() {
+            self.refresh_task_browser().await;
+        }
     }
 
     pub(super) fn start_init_workflow(

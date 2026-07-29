@@ -1,4 +1,3 @@
-definition_format_version = 2
 name = "code-review"
 display_name = "Code Review"
 description = "Read-only multi-domain code review with structured findings-first output. Never modifies code."

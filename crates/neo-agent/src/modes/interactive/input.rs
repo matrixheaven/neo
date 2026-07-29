@@ -302,6 +302,225 @@ impl InteractiveController {
         if self.tui.chrome().task_browser_state().is_none() {
             return Ok(false);
         }
+        if matches!(event, InputEvent::Insert('r' | 'R'))
+            && self
+                .tui
+                .chrome()
+                .task_browser_state()
+                .is_some_and(|state| state.workflow_item().is_none())
+        {
+            self.refresh_task_browser().await;
+            return Ok(true);
+        }
+        if self
+            .tui
+            .chrome()
+            .task_browser_state()
+            .is_some_and(|state| state.answer_draft().is_some())
+        {
+            let structured_fallback = self
+                .tui
+                .chrome()
+                .task_browser_state()
+                .and_then(|state| state.answer_draft())
+                .is_some_and(|draft| draft.form.structured_fallback);
+            if !structured_fallback {
+                let action = match event {
+                    InputEvent::Action(KeybindingAction::SelectConfirm) | InputEvent::Submit => {
+                        Some(TaskBrowserAction::SubmitAnswer)
+                    }
+                    InputEvent::Action(KeybindingAction::SelectCancel) | InputEvent::Cancel => {
+                        Some(TaskBrowserAction::DismissAnswer)
+                    }
+                    InputEvent::Action(KeybindingAction::SelectUp) | InputEvent::ScrollUp(_) => {
+                        Some(TaskBrowserAction::SelectPreviousAnswerField)
+                    }
+                    InputEvent::Action(KeybindingAction::SelectDown)
+                    | InputEvent::ScrollDown(_)
+                    | InputEvent::Action(KeybindingAction::InputTab)
+                    | InputEvent::Insert('\t') => Some(TaskBrowserAction::SelectNextAnswerField),
+                    InputEvent::MoveLeft => {
+                        if let Some(state) = self.tui.chrome_mut().task_browser_state_mut() {
+                            state.cycle_selected_answer_value(-1);
+                        }
+                        return Ok(true);
+                    }
+                    InputEvent::MoveRight => {
+                        if let Some(state) = self.tui.chrome_mut().task_browser_state_mut() {
+                            state.cycle_selected_answer_value(1);
+                        }
+                        return Ok(true);
+                    }
+                    InputEvent::Insert(' ') => {
+                        if let Some(state) = self.tui.chrome_mut().task_browser_state_mut()
+                            && !state.toggle_selected_answer_value()
+                        {
+                            state.append_selected_answer_char(' ');
+                        }
+                        return Ok(true);
+                    }
+                    InputEvent::Insert('+') => {
+                        if let Some(state) = self.tui.chrome_mut().task_browser_state_mut()
+                            && !state.append_selected_answer_object_row()
+                        {
+                            state.append_selected_answer_char('+');
+                        }
+                        return Ok(true);
+                    }
+                    InputEvent::Insert(ch) => {
+                        if let Some(state) = self.tui.chrome_mut().task_browser_state_mut() {
+                            state.append_selected_answer_char(ch);
+                        }
+                        return Ok(true);
+                    }
+                    InputEvent::Paste(raw) => {
+                        if let Some(state) = self.tui.chrome_mut().task_browser_state_mut() {
+                            state.paste_selected_answer_value(&raw);
+                        }
+                        return Ok(true);
+                    }
+                    InputEvent::Backspace => {
+                        if let Some(state) = self.tui.chrome_mut().task_browser_state_mut() {
+                            state.delete_selected_answer_char();
+                        }
+                        return Ok(true);
+                    }
+                    InputEvent::Delete => {
+                        if let Some(state) = self.tui.chrome_mut().task_browser_state_mut()
+                            && !state.remove_selected_answer_object_row()
+                        {
+                            state.delete_selected_answer_char();
+                        }
+                        return Ok(true);
+                    }
+                    InputEvent::NewLine => {
+                        if let Some(state) = self.tui.chrome_mut().task_browser_state_mut() {
+                            state.append_selected_answer_char('\n');
+                        }
+                        return Ok(true);
+                    }
+                    _ => return Ok(true),
+                };
+                if let Some(action) = action {
+                    self.apply_task_browser_action(action).await?;
+                }
+                return Ok(true);
+            }
+            let action = match event {
+                InputEvent::Action(KeybindingAction::SelectConfirm) | InputEvent::Submit => {
+                    Some(TaskBrowserAction::SubmitAnswer)
+                }
+                InputEvent::Action(KeybindingAction::SelectCancel) | InputEvent::Cancel => {
+                    Some(TaskBrowserAction::DismissAnswer)
+                }
+                InputEvent::Insert(ch) => {
+                    if let Some(state) = self.tui.chrome_mut().task_browser_state_mut()
+                        && let Some(draft) = state.answer_draft()
+                    {
+                        let initial = serde_json::to_string_pretty(&draft.value)
+                            .unwrap_or_else(|_| "null".to_owned());
+                        let mut raw = if draft.json_editor == initial {
+                            String::new()
+                        } else {
+                            draft.json_editor.clone()
+                        };
+                        raw.push(ch);
+                        state.set_answer_json(raw);
+                    }
+                    return Ok(true);
+                }
+                InputEvent::Paste(raw) => {
+                    if let Some(state) = self.tui.chrome_mut().task_browser_state_mut() {
+                        state.set_answer_json(raw);
+                    }
+                    return Ok(true);
+                }
+                InputEvent::Backspace | InputEvent::Delete => {
+                    if let Some(state) = self.tui.chrome_mut().task_browser_state_mut()
+                        && let Some(draft) = state.answer_draft()
+                    {
+                        let mut raw = draft.json_editor.clone();
+                        raw.pop();
+                        state.set_answer_json(raw);
+                    }
+                    return Ok(true);
+                }
+                InputEvent::NewLine => {
+                    if let Some(state) = self.tui.chrome_mut().task_browser_state_mut()
+                        && let Some(draft) = state.answer_draft()
+                    {
+                        let mut raw = draft.json_editor.clone();
+                        raw.push('\n');
+                        state.set_answer_json(raw);
+                    }
+                    return Ok(true);
+                }
+                _ => return Ok(true),
+            };
+            if let Some(action) = action {
+                self.apply_task_browser_action(action).await?;
+            }
+            return Ok(true);
+        }
+        if self
+            .tui
+            .chrome()
+            .task_browser_state()
+            .is_some_and(|state| state.save_draft().is_some())
+        {
+            let replace_confirmation = self
+                .tui
+                .chrome()
+                .task_browser_state()
+                .and_then(|state| state.save_draft())
+                .is_some_and(|draft| draft.replacement.is_some());
+            let action = match event {
+                InputEvent::Action(KeybindingAction::SelectConfirm) | InputEvent::Submit => {
+                    Some(TaskBrowserAction::SubmitSave)
+                }
+                InputEvent::Action(KeybindingAction::SelectCancel) | InputEvent::Cancel => {
+                    Some(TaskBrowserAction::Cancel)
+                }
+                _ if replace_confirmation => return Ok(true),
+                InputEvent::Action(KeybindingAction::InputTab)
+                | InputEvent::Insert('\t')
+                | InputEvent::Action(KeybindingAction::SelectUp)
+                | InputEvent::Action(KeybindingAction::SelectDown) => {
+                    Some(TaskBrowserAction::ToggleSaveDestination)
+                }
+                InputEvent::Insert(ch) => {
+                    if let Some(state) = self.tui.chrome_mut().task_browser_state_mut()
+                        && let Some(draft) = state.save_draft()
+                    {
+                        let mut name = draft.name.clone();
+                        name.push(ch);
+                        state.set_save_name(name);
+                    }
+                    return Ok(true);
+                }
+                InputEvent::Paste(name) => {
+                    if let Some(state) = self.tui.chrome_mut().task_browser_state_mut() {
+                        state.set_save_name(name);
+                    }
+                    return Ok(true);
+                }
+                InputEvent::Backspace | InputEvent::Delete => {
+                    if let Some(state) = self.tui.chrome_mut().task_browser_state_mut()
+                        && let Some(draft) = state.save_draft()
+                    {
+                        let mut name = draft.name.clone();
+                        name.pop();
+                        state.set_save_name(name);
+                    }
+                    return Ok(true);
+                }
+                _ => return Ok(true),
+            };
+            if let Some(action) = action {
+                self.apply_task_browser_action(action).await?;
+            }
+            return Ok(true);
+        }
         let Some(action) = self.task_browser_action_for_event(event) else {
             return Ok(true);
         };
@@ -328,51 +547,82 @@ impl InteractiveController {
                 .tui
                 .chrome()
                 .task_browser_state()
-                .map_or(Some(TaskBrowserAction::ToggleOutputFocus), |state| {
+                .map_or(None, |state| {
                     if state.stop_confirmation_task_id().is_some() {
                         Some(TaskBrowserAction::ConfirmStop)
-                    } else if state.pause_confirmation_task_id().is_some() {
-                        Some(TaskBrowserAction::ConfirmPause)
-                    } else if state.resume_confirmation_task_id().is_some() {
-                        Some(TaskBrowserAction::ConfirmResume)
-                    } else if state.answer_confirmation_task_id().is_some() {
-                        Some(TaskBrowserAction::ConfirmAnswer)
+                    } else if state
+                        .workflow_item()
+                        .and_then(|item| item.workflow.as_ref())
+                        .is_some_and(|workflow| workflow.pending_user.is_some())
+                    {
+                        Some(TaskBrowserAction::OpenAnswer)
                     } else if state.workflow_item().is_some() {
-                        Some(TaskBrowserAction::ToggleWorkflowOutput)
+                        Some(match state.focus() {
+                            neo_tui::tasks_browser::TaskBrowserFocus::Agents => {
+                                TaskBrowserAction::OpenWorkflowChildDetails
+                            }
+                            _ => TaskBrowserAction::ToggleWorkflowFocus,
+                        })
                     } else if state.selected_item().is_some_and(|item| {
                         item.kind == neo_tui::tasks_browser::TaskBrowserKind::Workflow
                     }) {
                         Some(TaskBrowserAction::OpenWorkflow)
                     } else {
-                        Some(TaskBrowserAction::ToggleOutputFocus)
+                        Some(TaskBrowserAction::OpenTaskDetails)
                     }
                 }),
             InputEvent::Action(KeybindingAction::SelectCancel) | InputEvent::Cancel => {
                 Some(TaskBrowserAction::Cancel)
             }
-            InputEvent::Action(KeybindingAction::InputTab) | InputEvent::Insert('\t') => {
-                Some(TaskBrowserAction::ToggleFilter)
-            }
+            InputEvent::Action(KeybindingAction::InputTab) | InputEvent::Insert('\t') => self
+                .tui
+                .chrome()
+                .task_browser_state()
+                .map_or(Some(TaskBrowserAction::ToggleFilter), |state| {
+                    if state.workflow_item().is_some() {
+                        Some(TaskBrowserAction::ToggleWorkflowFocus)
+                    } else {
+                        Some(TaskBrowserAction::ToggleFilter)
+                    }
+                }),
             InputEvent::MoveHome => Some(TaskBrowserAction::SelectFirst),
             InputEvent::MoveEnd => Some(TaskBrowserAction::SelectLast),
             InputEvent::Insert('q' | 'Q') => Some(TaskBrowserAction::Close),
-            InputEvent::Insert('r' | 'R') => Some(TaskBrowserAction::Refresh),
-            InputEvent::Insert('p' | 'P') => Some(TaskBrowserAction::RequestPause),
-            InputEvent::Insert('u' | 'U') => Some(TaskBrowserAction::RequestResume),
-            InputEvent::Insert('s' | 'S' | 'x' | 'X') => Some(TaskBrowserAction::RequestStop),
-            InputEvent::Insert('a' | 'A') => Some(TaskBrowserAction::RequestAnswer),
-            InputEvent::Insert(']') => Some(TaskBrowserAction::RequestNextPage),
-            InputEvent::Insert('[') => Some(TaskBrowserAction::RequestPrevPage),
-            InputEvent::Insert('o' | 'O') => self.tui.chrome().task_browser_state().map_or(
-                Some(TaskBrowserAction::ToggleOutputFocus),
-                |state| {
-                    if state.workflow_item().is_some() {
-                        Some(TaskBrowserAction::ToggleWorkflowOutput)
-                    } else {
-                        Some(TaskBrowserAction::ToggleOutputFocus)
-                    }
-                },
-            ),
+            InputEvent::Insert('p' | 'P') => {
+                self.tui.chrome().task_browser_state().and_then(|state| {
+                    state
+                        .workflow_item()
+                        .map(|_| TaskBrowserAction::TogglePauseResume)
+                })
+            }
+            InputEvent::Insert('x' | 'X') => Some(TaskBrowserAction::RequestStop),
+            InputEvent::Insert('s' | 'S') => {
+                self.tui.chrome().task_browser_state().and_then(|state| {
+                    state
+                        .workflow_item()
+                        .and_then(|item| item.workflow.as_ref())
+                        .filter(|workflow| workflow.inline_unsaved)
+                        .map(|_| TaskBrowserAction::RequestSave)
+                })
+            }
+            InputEvent::Insert('o' | 'O') => {
+                self.tui.chrome().task_browser_state().and_then(|state| {
+                    state
+                        .workflow_item()
+                        .is_none()
+                        .then_some(TaskBrowserAction::ToggleOutputFocus)
+                })
+            }
+            InputEvent::Insert(']') => self.tui.chrome().task_browser_state().and_then(|state| {
+                state
+                    .workflow_item()
+                    .map(|_| TaskBrowserAction::RequestNextChildPage)
+            }),
+            InputEvent::Insert('[') => self.tui.chrome().task_browser_state().and_then(|state| {
+                state
+                    .workflow_item()
+                    .map(|_| TaskBrowserAction::RequestPrevChildPage)
+            }),
             InputEvent::Key(key) => {
                 let actions = self.keybindings.matching_actions(&key);
                 OVERLAY_ACTION_PRIORITY
@@ -393,9 +643,6 @@ impl InteractiveController {
         action: TaskBrowserAction,
     ) -> Result<()> {
         match action {
-            TaskBrowserAction::Refresh => {
-                self.refresh_task_browser().await;
-            }
             TaskBrowserAction::Close => {
                 self.tui.chrome_mut().close_focused_overlay();
             }
@@ -409,44 +656,77 @@ impl InteractiveController {
                     self.stop_task_from_browser(task_id).await;
                 }
             }
-            TaskBrowserAction::ConfirmPause => {
-                let task_id = self
+            TaskBrowserAction::TogglePauseResume => {
+                let intent = self
                     .tui
                     .chrome_mut()
                     .task_browser_state_mut()
-                    .and_then(|state| state.handle_action(TaskBrowserAction::ConfirmPause));
-                if let Some(task_id) = task_id {
-                    self.control_workflow_from_browser(task_id, false).await;
+                    .and_then(|state| {
+                        let resume = state.workflow_item().is_some_and(|item| {
+                            item.status == neo_tui::tasks_browser::TaskBrowserStatus::Paused
+                        });
+                        state
+                            .handle_action(TaskBrowserAction::TogglePauseResume)
+                            .map(|task_id| (task_id, resume))
+                    });
+                if let Some((task_id, resume)) = intent {
+                    self.control_workflow_from_browser(task_id, resume).await;
                 }
             }
-            TaskBrowserAction::ConfirmResume => {
-                let task_id = self
+            TaskBrowserAction::SubmitAnswer => {
+                let submission = self
                     .tui
                     .chrome_mut()
                     .task_browser_state_mut()
-                    .and_then(|state| state.handle_action(TaskBrowserAction::ConfirmResume));
-                if let Some(task_id) = task_id {
-                    self.control_workflow_from_browser(task_id, true).await;
+                    .and_then(|state| {
+                        let _ = state.handle_action(TaskBrowserAction::SubmitAnswer);
+                        state.take_answer_submission()
+                    });
+                if let Some(submission) = submission {
+                    self.answer_workflow_from_browser(submission).await;
                 }
             }
-            TaskBrowserAction::ConfirmAnswer => {
+            TaskBrowserAction::SubmitSave => {
+                let submission = self
+                    .tui
+                    .chrome_mut()
+                    .task_browser_state_mut()
+                    .and_then(|state| {
+                        let _ = state.handle_action(TaskBrowserAction::SubmitSave);
+                        state.take_save_submission()
+                    });
+                if let Some(submission) = submission {
+                    self.save_workflow_from_browser(submission).await;
+                }
+            }
+            TaskBrowserAction::RequestSave => {
                 let task_id = self
                     .tui
                     .chrome_mut()
                     .task_browser_state_mut()
-                    .and_then(|state| state.handle_action(TaskBrowserAction::ConfirmAnswer));
+                    .and_then(|state| {
+                        let task_id = state.workflow_item().map(|item| item.id.clone());
+                        let _ = state.handle_action(TaskBrowserAction::RequestSave);
+                        state.save_draft().is_some().then_some(task_id).flatten()
+                    });
                 if let Some(task_id) = task_id {
-                    self.answer_workflow_from_browser(task_id).await;
+                    self.set_workflow_save_name_from_runtime(&task_id).await;
                 }
             }
             TaskBrowserAction::Cancel => {
-                let result = self
+                let (result, left_workflow) = self
                     .tui
                     .chrome_mut()
                     .task_browser_state_mut()
-                    .and_then(|state| state.handle_action(TaskBrowserAction::Cancel));
+                    .map_or((None, false), |state| {
+                        let was_workflow = state.workflow_item().is_some();
+                        let result = state.handle_action(TaskBrowserAction::Cancel);
+                        (result, was_workflow && state.workflow_item().is_none())
+                    });
                 if result.as_deref() == Some("__close__") {
                     self.tui.chrome_mut().close_focused_overlay();
+                } else if left_workflow {
+                    self.refresh_task_browser().await;
                 }
             }
             other => {
@@ -456,7 +736,7 @@ impl InteractiveController {
                         .task_browser_state_mut()
                         .is_some_and(|state| {
                             let _ = state.handle_action(other);
-                            state.list_refresh_requested()
+                            state.list_refresh_requested() || state.take_child_refresh_request()
                         });
                 if needs_refresh {
                     self.refresh_task_browser().await;
@@ -493,7 +773,11 @@ impl InteractiveController {
             cursor: intent.cursor,
             ..neo_agent_core::tools::BackgroundTaskListQuery::default()
         };
-        let page = match config.background_tasks.list_page(query).await {
+        let mut page = match config
+            .background_tasks
+            .list_page_with_live_agents(query, &config.multi_agent)
+            .await
+        {
             Ok(page) => page,
             Err(error) => {
                 return self
@@ -507,6 +791,50 @@ impl InteractiveController {
                     });
             }
         };
+        let child_intent = self
+            .tui
+            .chrome()
+            .task_browser_state()
+            .and_then(neo_tui::tasks_browser::TaskBrowserState::workflow_child_page_intent);
+        if let Some(intent) = child_intent.as_ref()
+            && !page.items.iter().any(|item| item.task_id == intent.task_id)
+            && let Ok(snapshot) = config.background_tasks.snapshot(&intent.task_id).await
+        {
+            page.items.insert(0, snapshot);
+        }
+        let child_error = if let Some(intent) = child_intent {
+            let request = neo_agent_core::workflow::WorkflowOperatorRequest {
+                step: intent.step,
+                cursor: intent.cursor,
+                limit: intent.limit,
+            };
+            match config
+                .background_tasks
+                .workflow_operator_child_page(&intent.task_id, &request, &config.multi_agent)
+                .await
+            {
+                Ok(child_page) => {
+                    if let Some(workflow) = page
+                        .items
+                        .iter_mut()
+                        .find(|item| item.task_id == intent.task_id)
+                        .and_then(|item| item.workflow.as_mut())
+                    {
+                        workflow.child_page = Some(child_page);
+                    }
+                    None
+                }
+                Err(error) => Some(error.to_string()),
+            }
+        } else {
+            None
+        };
+        task_browser::update_workflow_save_availability(
+            &mut page,
+            &config.background_tasks,
+            &config.workflow_definitions,
+        )
+        .await;
         let snapshot = task_browser::list_page_to_browser_snapshot(&page);
         let changed = self
             .tui
@@ -514,7 +842,8 @@ impl InteractiveController {
             .task_browser_state_mut()
             .is_some_and(|state| {
                 let before = state.clone();
-                if let Err(message) = state.apply_snapshot_checked(&snapshot) {
+                state.apply_snapshot(&snapshot);
+                if let Some(message) = child_error {
                     state.set_footer_message(message);
                 } else {
                     state.clear_footer_message();
@@ -609,37 +938,22 @@ impl InteractiveController {
         }
     }
 
-    async fn answer_workflow_from_browser(&mut self, task_id: String) {
+    async fn answer_workflow_from_browser(
+        &mut self,
+        submission: neo_tui::tasks_browser::WorkflowAnswerSubmission,
+    ) {
         let Some(config) = self.local_config.as_ref() else {
             if let Some(state) = self.tui.chrome_mut().task_browser_state_mut() {
                 state.set_footer_message("No config available");
             }
             return;
         };
-        let request_id = self.tui.chrome().task_browser_state().and_then(|state| {
-            state
-                .snapshot()
-                .items()
-                .iter()
-                .find(|item| item.id == task_id)
-                .and_then(|item| {
-                    item.workflow
-                        .as_ref()
-                        .and_then(|meta| meta.pending_request_id.clone())
-                })
-        });
-        let Some(request_id) = request_id else {
-            if let Some(state) = self.tui.chrome_mut().task_browser_state_mut() {
-                state.set_footer_message("No pending request id for answer");
-            }
-            return;
-        };
         let result = config
             .background_tasks
             .answer_workflow(
-                &task_id,
-                &request_id,
-                serde_json::json!({}),
+                &submission.task_id,
+                &submission.request_id,
+                submission.value,
                 neo_agent_core::workflow::WorkflowActor::Human,
             )
             .await;
@@ -651,6 +965,172 @@ impl InteractiveController {
             }
             Ok(_) => {
                 self.refresh_task_browser().await;
+            }
+            Err(error) => {
+                if let Some(state) = self.tui.chrome_mut().task_browser_state_mut() {
+                    state.set_footer_message(error.to_string());
+                }
+            }
+        }
+    }
+
+    async fn save_workflow_from_browser(
+        &mut self,
+        submission: neo_tui::tasks_browser::WorkflowSaveSubmission,
+    ) {
+        let Some(config) = self.local_config.as_ref() else {
+            if let Some(state) = self.tui.chrome_mut().task_browser_state_mut() {
+                state.set_footer_message("No config available");
+            }
+            return;
+        };
+        let Some(handle) = config
+            .background_tasks
+            .workflow_handle(&submission.task_id)
+            .await
+        else {
+            if let Some(state) = self.tui.chrome_mut().task_browser_state_mut() {
+                state.set_footer_message("Workflow is no longer available");
+            }
+            return;
+        };
+        let output = match handle.output().await {
+            Ok(output) => output,
+            Err(error) => {
+                if let Some(state) = self.tui.chrome_mut().task_browser_state_mut() {
+                    state.set_footer_message(error.to_string());
+                }
+                return;
+            }
+        };
+        if !output.metadata.inline_unsaved {
+            if let Some(state) = self.tui.chrome_mut().task_browser_state_mut() {
+                state.set_footer_message("This workflow is already saved.");
+            }
+            return;
+        }
+        let Some(output_schema) = output.metadata.output_schema.clone() else {
+            if let Some(state) = self.tui.chrome_mut().task_browser_state_mut() {
+                state.set_footer_message(
+                    "This workflow does not contain enough information to save.",
+                );
+            }
+            return;
+        };
+        let scope = match submission.destination {
+            neo_tui::tasks_browser::WorkflowSaveDestination::Project => {
+                neo_agent_core::workflow::WorkflowSaveScope::Project
+            }
+            neo_tui::tasks_browser::WorkflowSaveDestination::AllProjects => {
+                neo_agent_core::workflow::WorkflowSaveScope::User
+            }
+        };
+        let request = neo_agent_core::workflow::WorkflowSaveRequest {
+            name: submission.name.clone(),
+            display_name: output
+                .metadata
+                .display_name
+                .clone()
+                .unwrap_or_else(|| output.metadata.name.clone()),
+            description: output.metadata.description.clone(),
+            phases: output.metadata.phases.clone(),
+            lua_source: output.metadata.script.clone(),
+            input_schema: output.metadata.input_schema.clone(),
+            output_schema,
+        };
+        match config
+            .workflow_definitions
+            .save(scope, &request, submission.replace)
+        {
+            Ok(_) => {
+                self.refresh_task_browser().await;
+                if let Some(state) = self.tui.chrome_mut().task_browser_state_mut() {
+                    state.set_footer_message(format!("Saved workflow `{}`.", request.name));
+                }
+            }
+            Err(error) => {
+                let replacement = if error.code()
+                    == neo_agent_core::workflow::WorkflowErrorCode::DefinitionConflict
+                    && !submission.replace
+                {
+                    let list_scope = match scope {
+                        neo_agent_core::workflow::WorkflowSaveScope::Project => {
+                            neo_agent_core::workflow::WorkflowListScope::Project
+                        }
+                        neo_agent_core::workflow::WorkflowSaveScope::User => {
+                            neo_agent_core::workflow::WorkflowListScope::User
+                        }
+                    };
+                    let existing_display_name = config
+                        .workflow_definitions
+                        .list(list_scope)
+                        .ok()
+                        .and_then(|definitions| {
+                            definitions
+                                .into_iter()
+                                .find(|definition| definition.name.as_str() == request.name)
+                        })
+                        .map_or_else(
+                            || format!("Saved workflow `{}`", request.name),
+                            |definition| definition.display_name,
+                        );
+                    config
+                        .workflow_definitions
+                        .save_target(scope, &request.name)
+                        .ok()
+                        .map(|target| {
+                            let location = target
+                                .manifest_path
+                                .parent()
+                                .unwrap_or(target.manifest_path.as_path())
+                                .to_string_lossy()
+                                .into_owned();
+                            (
+                                existing_display_name,
+                                request.display_name.clone(),
+                                location,
+                            )
+                        })
+                } else {
+                    None
+                };
+                if let Some(state) = self.tui.chrome_mut().task_browser_state_mut() {
+                    if let Some((existing_display_name, new_display_name, target_location)) =
+                        replacement
+                    {
+                        state.request_save_replace(
+                            request.name,
+                            submission.destination,
+                            existing_display_name,
+                            new_display_name,
+                            target_location,
+                        );
+                    } else {
+                        state.set_footer_message(error.to_string());
+                    }
+                }
+            }
+        }
+    }
+
+    async fn set_workflow_save_name_from_runtime(&mut self, task_id: &str) {
+        let Some(config) = self.local_config.as_ref() else {
+            return;
+        };
+        let result = match config.background_tasks.workflow_handle(task_id).await {
+            Some(handle) => handle.output().await.map(|output| output.metadata.name),
+            None => {
+                if let Some(state) = self.tui.chrome_mut().task_browser_state_mut() {
+                    state.set_footer_message("Workflow is no longer available");
+                }
+                return;
+            }
+        };
+        match result {
+            Ok(name) => {
+                if let Some(state) = self.tui.chrome_mut().task_browser_state_mut() {
+                    state.set_save_name(name);
+                }
             }
             Err(error) => {
                 if let Some(state) = self.tui.chrome_mut().task_browser_state_mut() {

@@ -335,11 +335,6 @@ async fn workflow_projection_emits_started_updated_and_finished_after_durable_tr
         finished.latest_report_summary.as_deref(),
         Some("scoped checks passed")
     );
-    assert!(
-        projections
-            .iter()
-            .all(|(_, workflow)| workflow.steps.is_empty())
-    );
 }
 
 #[tokio::test]
@@ -564,7 +559,6 @@ fn base_launch_request(
         script: "neo.phase('work')".to_owned(),
         args: json!({"target": name}),
         launch_source: launch_source.to_owned(),
-        parent_run_id: None,
         output_schema: None,
         display_name: None,
         input_schema: None,
@@ -587,7 +581,6 @@ fn intent_for(
             workspace_identity: workspace.display().to_string(),
             actor,
             permission_mode: mode,
-            parent_lineage: None,
             compiled_input_schema: None,
             schema_sha256: String::new(),
         },
@@ -816,7 +809,6 @@ async fn compile_schema_and_storage_failures_create_no_run() {
                 workspace_identity: workspace.path().display().to_string(),
                 actor: WorkflowActor::Model,
                 permission_mode: PermissionMode::Auto,
-                parent_lineage: None,
                 compiled_input_schema: Some(schema),
                 schema_sha256: "schema-binding".to_owned(),
             },

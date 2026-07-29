@@ -40,7 +40,7 @@ pub enum FixtureExecutionMode {
 }
 
 impl FixtureExecutionMode {
-    /// Live provider/tool execution is outside the V2 fixture harness.
+    /// Live provider/tool execution is outside the fixture harness.
     #[must_use]
     pub const fn supports_live(self) -> bool {
         false
@@ -347,7 +347,6 @@ pub async fn run_fixture_retained(
                 script: definition.lua_source.clone(),
                 args: definition_args,
                 launch_source: "workflow-fixture".to_owned(),
-                parent_run_id: None,
                 output_schema: Some(definition.output_schema.clone()),
                 display_name: Some(definition.display_name.clone()),
                 input_schema: definition.input_schema.clone(),
@@ -412,7 +411,12 @@ pub async fn run_fixture_retained(
     let output = handle.output().await?;
     let run_directory = run_dir(&session_dir, &handle.run_id);
     let journal_path = run_directory.join("journal.jsonl");
-    let envelopes = collect_journal(&journal_path, Some(&handle.run_id))?;
+    let envelopes = collect_journal(
+        &journal_path,
+        Some(&handle.run_id),
+        limits.journal_record_bytes,
+        limits.journal_total_bytes,
+    )?;
 
     let invocation_kinds: Vec<String> = envelopes
         .iter()

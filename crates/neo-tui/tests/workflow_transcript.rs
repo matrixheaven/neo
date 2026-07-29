@@ -1,5 +1,4 @@
-use neo_agent_core::AgentEvent;
-use neo_agent_core::workflow::{WorkflowId, WorkflowSnapshot, WorkflowState, WorkflowStepRecord};
+use neo_agent_core::workflow::{WorkflowId, WorkflowSnapshot, WorkflowState};
 use neo_tui::primitive::{Component, Finalization, Line, strip_ansi};
 use neo_tui::transcript::WorkflowCardComponent;
 
@@ -26,7 +25,6 @@ fn snapshot(state: WorkflowState) -> WorkflowSnapshot {
         terminal_reason: state
             .is_terminal()
             .then(|| "workflow reached its durable boundary".to_owned()),
-        steps: Vec::new(),
         display_name: "Runtime audit and fix".to_owned(),
         purpose: "Verify runtime correctness".to_owned(),
     }
@@ -41,20 +39,8 @@ fn text(lines: &[Line]) -> String {
 }
 
 #[test]
-fn workflow_card_projects_orchestration_without_child_duplication() {
-    let mut workflow = snapshot(WorkflowState::Running);
-    workflow.steps.push(WorkflowStepRecord {
-        index: 0,
-        name: "delegate child secret".to_owned(),
-        state: WorkflowState::Completed,
-        summary: Some("child result secret".to_owned()),
-        details: Some(serde_json::json!({"command": "full shell command secret"})),
-        agent: None,
-        swarm: None,
-        has_failures: None,
-    });
-
-    let rendered = text(&WorkflowCardComponent::new(workflow).render(120));
+fn workflow_card_projects_runtime_summary() {
+    let rendered = text(&WorkflowCardComponent::new(snapshot(WorkflowState::Running)).render(120));
 
     assert!(rendered.contains("Runtime audit and fix"), "{rendered}");
     assert!(rendered.contains("phase verify"), "{rendered}");
@@ -65,48 +51,6 @@ fn workflow_card_projects_orchestration_without_child_duplication() {
         "{rendered}"
     );
     assert!(rendered.contains("TaskPause · TaskStop"), "{rendered}");
-    assert!(!rendered.contains("delegate child secret"), "{rendered}");
-    assert!(!rendered.contains("child result secret"), "{rendered}");
-    assert!(
-        !rendered.contains("full shell command secret"),
-        "{rendered}"
-    );
-}
-
-#[test]
-fn historical_workflow_events_remain_read_only() {
-    for variant in ["WorkflowStarted", "WorkflowUpdated", "WorkflowFinished"] {
-        let payload = serde_json::json!({
-            "turn": 4,
-            "workflow": {
-                "id": "wf-historical",
-                "title": "Historical workflow",
-                "state": "running",
-                "steps": [{
-                    "index": 0,
-                    "name": "legacy step",
-                    "state": "completed",
-                    "summary": "legacy summary"
-                }]
-            }
-        });
-        let event: AgentEvent = serde_json::from_value(serde_json::Value::Object(
-            [(variant.to_owned(), payload)].into_iter().collect(),
-        ))
-        .expect("old workflow event remains readable");
-
-        let workflow = match event {
-            AgentEvent::WorkflowStarted { workflow, .. }
-            | AgentEvent::WorkflowUpdated { workflow, .. }
-            | AgentEvent::WorkflowFinished { workflow, .. } => workflow,
-            _ => panic!("historical workflow event"),
-        };
-        assert_eq!(workflow.projection_sequence, None);
-        assert!(!workflow.recovery_failure);
-        assert_eq!(workflow.started_at_ms, None);
-        assert_eq!(workflow.updated_at_ms, None);
-        assert_eq!(workflow.steps.len(), 1);
-    }
 }
 
 #[test]

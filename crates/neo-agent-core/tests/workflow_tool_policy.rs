@@ -214,7 +214,6 @@ fn workflow_tool_is_root_only_and_description_has_no_choreography() {
     assert!(
         !description.contains("MUST call Workflow(validate_inline), then Workflow(run_inline)")
     );
-    assert!(!description.contains("do not inspect Neo source"));
     assert!(!description.contains("REQUIRED FIRST ACTION"));
 
     let schema = neo_agent_core::tools::WorkflowTool.input_schema();

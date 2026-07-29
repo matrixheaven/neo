@@ -33,7 +33,6 @@ A file-backed definition is two same-stem regular files:
 ### Manifest fields
 
 ```toml
-definition_format_version = 2
 name = "my-workflow"          # must match the filename stem
 display_name = "My Workflow"
 description = "What this run orchestrates"
@@ -101,7 +100,7 @@ saved workflow may be discovered or run directly with
 A one-off evaluation can launch directly through `Workflow(run_inline)` after
 the definition is authored. If the user asks for a check-only result, use
 `Workflow(validate_inline)` first; this is optional and creates no task. No
-source inspection, shell/CLI, Cargo, TodoList, or saved-workflow discovery is
+source analysis, shell/CLI, Cargo, TodoList, or saved-workflow discovery is
 needed for the normal product path:
 
 ```text
@@ -257,7 +256,7 @@ prompt (required), answer_schema (required), default?, title?,
 answer_policy?  # human | human_or_model; default human
 ```
 
-**Do not request credentials, API keys, or other secrets.** Answers are persisted in the local journal and are inspectable after restart. The run enters durable `awaiting_user`, releases active VM/worker admission, and remains visible in `/tasks` and CLI. The assistant calls `TaskAnswer` only for `human_or_model`; human-only requests are answered by the user in the TUI or through the human CLI.
+**Do not request credentials, API keys, or other secrets.** Answers are persisted in the local journal and remain readable after restart. The run enters durable `awaiting_user`, releases active VM/worker admission, and remains visible in `/tasks` and CLI. The assistant calls `TaskAnswer` only for `human_or_model`; human-only requests are answered by the user in `/tasks`.
 
 `TaskResume` without an answer **cannot** clear `awaiting_user`.
 
@@ -271,7 +270,7 @@ Limits cover source/manifest bytes, Lua VM memory and instruction hooks, journal
 
 ## Artifacts and storage layout
 
-Each V2 run directory:
+Each run directory:
 
 ```text
 <session_dir>/workflows/<run_id>/
@@ -281,15 +280,11 @@ Each V2 run directory:
   recovery-quarantine/     # torn-tail quarantine only
 ```
 
-Large final results, reports, and raw schema-attempt output may be stored as artifact references. Reads revalidate size/digest. Default retention is non-destructive: terminal runs remain until explicit prune.
+Large final results, reports, and raw schema-attempt output may be stored as artifact references. Reads revalidate size/digest. When workflow storage reaches its configured high watermark, automatic retention reclaims terminal runs older than the configured minimum age until the low watermark is restored.
 
-## Linked runs and fork
+## Run immutability
 
-Terminal runs are immutable. Retry, definition change, argument change, raised machine limits, or an earlier checkpoint requires a **new linked run**:
-
-The child imports a verified completed-invocation prefix as lineage seed. Replay must match the seed before any new external effect; mismatch fails closed as `lineage_mismatch`. Inherited usage is display-only and is not charged to the new run's actual usage.
-
-V1 runs without durable V2 files remain readable as historical projections and cannot be resumed as live workflows.
+Terminal runs are immutable. Running the workflow again creates an independent run with its own arguments, result, usage, and journal. Only canonical run directories are readable and resumable; retired journal layouts are not migrated or projected.
 
 ## TaskOutput cursors
 
@@ -307,7 +302,7 @@ Each non-summary view accepts a stable **cursor** bound to run, view, and query 
 
 ## `/tasks` dashboard
 
-`/tasks` is extended for workflows: filterable list, phase/progress, queue/admission reason, awaiting-input state, actual usage, and detail actions when valid (pause, resume, answer, stop, fork). It remains a projection over background tasks and workflow snapshots — not a second state owner. Delegate / Bash / Terminal card layouts are unchanged.
+`/tasks` is extended for workflows: filterable list, phase/progress, queue/admission reason, awaiting-input state, actual usage, details/output, and valid controls (pause, resume, answer, stop). It remains a projection over background tasks and workflow snapshots — not a second state owner. Delegate / Bash / Terminal card layouts are unchanged.
 
 ## Built-in workflows
 

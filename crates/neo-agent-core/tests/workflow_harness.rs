@@ -4,9 +4,8 @@ use std::path::PathBuf;
 
 use neo_agent_core::workflow::journal::{JournalPayload, collect_journal};
 use neo_agent_core::workflow::{
-    DEFINITION_FORMAT_VERSION, FixtureExecutionMode, WorkflowLimits, WorkflowSourceOrigin,
-    WorkflowState, load_fixture, parse_fixture, resolve_paired_definition, run_fixture,
-    run_fixture_retained, source_sha256_hex,
+    FixtureExecutionMode, WorkflowLimits, WorkflowSourceOrigin, WorkflowState, load_fixture,
+    parse_fixture, resolve_paired_definition, run_fixture, run_fixture_retained, source_sha256_hex,
 };
 use serde_json::json;
 
@@ -23,7 +22,6 @@ fn resolve_script(
     let source_sha = source_sha256_hex(script.as_bytes());
     let toml = format!(
         r#"
-definition_format_version = {DEFINITION_FORMAT_VERSION}
 display_name = "{display}"
 description = "{description}"
 source_sha256 = "{source_sha}"
@@ -62,7 +60,6 @@ fn resolve_script_with_schema(
     let source_sha = source_sha256_hex(script.as_bytes());
     let toml = format!(
         r#"
-definition_format_version = {DEFINITION_FORMAT_VERSION}
 display_name = "{display}"
 description = "{description}"
 source_sha256 = "{source_sha}"
@@ -182,8 +179,13 @@ return { ok = true }
         report.invocation_kinds
     );
 
-    let envelopes =
-        collect_journal(&report.journal_path, None).expect("journal readable after run");
+    let envelopes = collect_journal(
+        &report.journal_path,
+        None,
+        WorkflowLimits::default().journal_record_bytes,
+        WorkflowLimits::default().journal_total_bytes,
+    )
+    .expect("journal readable after run");
     let repair_starts = envelopes
         .iter()
         .filter(|e| matches!(e.payload, JournalPayload::SchemaRepairStarted { .. }))
@@ -234,7 +236,13 @@ return { ok = true }
     assert_eq!(report.final_result, Some(json!({"ok": true})));
     assert_eq!(report.state, WorkflowState::Completed.as_str());
 
-    let envelopes = collect_journal(&report.journal_path, None).expect("journal");
+    let envelopes = collect_journal(
+        &report.journal_path,
+        None,
+        WorkflowLimits::default().journal_record_bytes,
+        WorkflowLimits::default().journal_total_bytes,
+    )
+    .expect("journal");
     assert!(
         envelopes
             .iter()

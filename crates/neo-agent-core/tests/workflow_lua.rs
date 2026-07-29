@@ -67,7 +67,6 @@ async fn make_runner_with_config(
                 script: String::new(),
                 args: serde_json::json!({}),
                 launch_source: "test".to_owned(),
-                parent_run_id: None,
                 output_schema: None,
                 display_name: None,
                 input_schema: None,
@@ -93,9 +92,14 @@ fn journal_path(fixture: &RunnerFixture) -> std::path::PathBuf {
     run_dir(fixture.session_dir.path(), &fixture.handle.run_id).join("journal.jsonl")
 }
 
-fn v2_started_kinds(fixture: &RunnerFixture) -> Vec<WorkflowInvocationKind> {
-    let envelopes = collect_journal(&journal_path(fixture), Some(&fixture.handle.run_id))
-        .expect("collect v2 journal");
+fn started_kinds(fixture: &RunnerFixture) -> Vec<WorkflowInvocationKind> {
+    let envelopes = collect_journal(
+        &journal_path(fixture),
+        Some(&fixture.handle.run_id),
+        WorkflowLimits::default().journal_record_bytes,
+        WorkflowLimits::default().journal_total_bytes,
+    )
+    .expect("collect journal");
     envelopes
         .into_iter()
         .filter_map(|envelope| match envelope.payload {
@@ -105,9 +109,14 @@ fn v2_started_kinds(fixture: &RunnerFixture) -> Vec<WorkflowInvocationKind> {
         .collect()
 }
 
-fn v2_started_inputs(fixture: &RunnerFixture) -> Vec<serde_json::Value> {
-    let envelopes = collect_journal(&journal_path(fixture), Some(&fixture.handle.run_id))
-        .expect("collect v2 journal");
+fn started_inputs(fixture: &RunnerFixture) -> Vec<serde_json::Value> {
+    let envelopes = collect_journal(
+        &journal_path(fixture),
+        Some(&fixture.handle.run_id),
+        WorkflowLimits::default().journal_record_bytes,
+        WorkflowLimits::default().journal_total_bytes,
+    )
+    .expect("collect journal");
     envelopes
         .into_iter()
         .filter_map(|envelope| match envelope.payload {
@@ -120,9 +129,14 @@ fn v2_started_inputs(fixture: &RunnerFixture) -> Vec<serde_json::Value> {
         .collect()
 }
 
-fn v2_finished_summaries(fixture: &RunnerFixture) -> Vec<String> {
-    let envelopes = collect_journal(&journal_path(fixture), Some(&fixture.handle.run_id))
-        .expect("collect v2 journal");
+fn finished_summaries(fixture: &RunnerFixture) -> Vec<String> {
+    let envelopes = collect_journal(
+        &journal_path(fixture),
+        Some(&fixture.handle.run_id),
+        WorkflowLimits::default().journal_record_bytes,
+        WorkflowLimits::default().journal_total_bytes,
+    )
+    .expect("collect journal");
     envelopes
         .into_iter()
         .filter_map(|envelope| match envelope.payload {
@@ -135,6 +149,7 @@ fn v2_finished_summaries(fixture: &RunnerFixture) -> Vec<String> {
 struct RecordingTool {
     name: &'static str,
     observed: Arc<Mutex<Option<serde_json::Value>>>,
+    observed_origin: Option<Arc<Mutex<Option<neo_agent_core::workflow::WorkflowExecutionOrigin>>>>,
     result: ToolResult,
 }
 
@@ -151,8 +166,14 @@ impl Tool for RecordingTool {
         serde_json::json!({"type": "object"})
     }
 
-    fn execute<'a>(&'a self, _ctx: &'a ToolContext, input: serde_json::Value) -> ToolFuture<'a> {
+    fn execute<'a>(&'a self, ctx: &'a ToolContext, input: serde_json::Value) -> ToolFuture<'a> {
         *self.observed.lock().expect("recording lock") = Some(input);
+        if let Some(observed_origin) = &self.observed_origin {
+            *observed_origin.lock().expect("origin recording lock") = ctx
+                .child_config
+                .as_ref()
+                .and_then(|config| config.workflow_execution_origin.clone());
+        }
         let result = self.result.clone();
         Box::pin(async move { Ok(result) })
     }
@@ -195,7 +216,7 @@ async fn semantic_validation_precedes_durable_invocation() {
         );
     }
     assert!(
-        v2_started_kinds(&fixture).is_empty(),
+        started_kinds(&fixture).is_empty(),
         "semantic failure must not journal InvocationStarted"
     );
 }
@@ -320,7 +341,7 @@ async fn disabled_apis_are_unavailable_but_pcall_remains() {
             serde_json::json!({}),
         )
         .await
-        .expect("sandbox inspection");
+        .expect("sandbox contract");
 
     assert!(
         result
@@ -350,7 +371,7 @@ async fn neo_fail_is_terminal_even_when_pcall_catches_it() {
         matches!(error, neo_agent_core::workflow::WorkflowError::Failed(ref reason) if reason == "deliberate"),
         "{error}"
     );
-    let kinds = v2_started_kinds(&fixture);
+    let kinds = started_kinds(&fixture);
     assert!(
         kinds.contains(&WorkflowInvocationKind::Fail),
         "expected Fail invocation, got {kinds:?}"
@@ -466,7 +487,7 @@ async fn local_host_operations_are_durable() {
     assert_eq!(output.current_phase.as_deref(), Some("build"));
     assert_eq!(output.reports, vec![serde_json::json!({"result": "ok"})]);
     assert_eq!(
-        v2_started_kinds(&fixture),
+        started_kinds(&fixture),
         [
             WorkflowInvocationKind::Phase,
             WorkflowInvocationKind::Log,
@@ -478,10 +499,12 @@ async fn local_host_operations_are_durable() {
 #[tokio::test]
 async fn child_failure_outcome_returns_normally() {
     let observed = Arc::new(Mutex::new(None));
+    let observed_origin = Arc::new(Mutex::new(None));
     let mut registry = ToolRegistry::new();
     registry.register(RecordingTool {
         name: "Delegate",
         observed: Arc::clone(&observed),
+        observed_origin: Some(Arc::clone(&observed_origin)),
         result: ToolResult::error("child failed").with_details(serde_json::json!({
             "kind": "delegate",
             "agent_id": "agent_test",
@@ -522,6 +545,13 @@ async fn child_failure_outcome_returns_normally() {
     assert_eq!(result["agent_id"], "agent_test");
     assert_eq!(result["input_tokens"], 11);
     assert_eq!(result["immutable"], true);
+    let origin = observed_origin
+        .lock()
+        .expect("origin recording lock")
+        .clone()
+        .expect("typed workflow origin");
+    assert_eq!(origin.run_id, fixture.handle.run_id);
+    assert!(origin.invocation_id.is_some());
 }
 
 #[tokio::test]
@@ -578,7 +608,7 @@ async fn verify_command_failure_message_is_durable_and_script_visible() {
     assert_eq!(result["caught"], true, "{result}");
     assert_eq!(result["outcome_type"], "table", "{result}");
     assert_eq!(result["summary"], "custom failure", "{result}");
-    let summaries = v2_finished_summaries(&fixture);
+    let summaries = finished_summaries(&fixture);
     assert!(
         summaries.iter().any(|s| s == "custom failure"),
         "expected custom failure summary, got {summaries:?}"
@@ -592,6 +622,7 @@ async fn swarm_concurrency_is_runtime_owned() {
     registry.register(RecordingTool {
         name: "DelegateSwarm",
         observed: Arc::clone(&observed),
+        observed_origin: None,
         result: ToolResult::error("recorded"),
     });
     let fixture = make_runner_with_registry(WorkflowLimits::default(), Vec::new(), registry).await;
@@ -607,7 +638,7 @@ async fn swarm_concurrency_is_runtime_owned() {
         observed.lock().expect("recording lock").as_ref().unwrap()["max_concurrency"],
         4
     );
-    let inputs = v2_started_inputs(&fixture);
+    let inputs = started_inputs(&fixture);
     assert!(
         inputs
             .iter()
@@ -792,6 +823,7 @@ async fn workflow_host_denies_model_supplied_limits() {
     registry.register(RecordingTool {
         name: "DelegateSwarm",
         observed: std::sync::Arc::clone(&observed),
+        observed_origin: None,
         result: ToolResult::error("recorded"),
     });
     let fixture = make_runner_with_registry(WorkflowLimits::default(), Vec::new(), registry).await;

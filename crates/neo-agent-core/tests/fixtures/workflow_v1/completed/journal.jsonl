@@ -1,4 +1,0 @@
-{"type":"state_changed","seq":0,"timestamp_ms":1000,"previous":"running","new":"running","reason":"launch","actor":"runtime"}
-{"type":"invocation_started","seq":1,"timestamp_ms":1001,"invocation_id":"inv_1","call_index":0,"kind":"delegate","canonical_input":{"task":"test"},"canonical_input_hash":"6f61ec065cc48110dfadf4cfb0e17f5d010e2a374a5d65923cf265d2c6815662"}
-{"type":"invocation_finished","seq":2,"timestamp_ms":1002,"invocation_id":"inv_1","outcome":{"ok":true,"status":"completed","summary":"done","details":{}}}
-{"type":"state_changed","seq":3,"timestamp_ms":1003,"previous":"running","new":"completed","reason":"finished","actor":"runtime"}

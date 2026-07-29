@@ -8,8 +8,8 @@ Date: `2026-07-28`
 ADR-0007 established the assistant-native `Workflow` tool and deleted the
 capability/nonce authorization system. Implementation of the Workflow product
 surface redesign expanded the assistant contract with self-contained mutation
-actions, V3 journal child lifecycle, Operator projection, automatic retention,
-and a narrowed four-command CLI.
+actions, canonical child lifecycle records, Operator projection, automatic
+retention, and a narrowed four-command CLI.
 
 ## Decision
 
@@ -31,10 +31,22 @@ The `Workflow` tool has seven actions: `list`, `show`, `validate_inline`,
 `validate_saved`, `save`, `run_inline`, `run_saved`. Each mutation action
 performs complete preflight internally. No mandatory validation ordering.
 
-### Journal V3
+### Definition And Runtime Ownership
 
-New runs write `JOURNAL_FORMAT_V3` with generic `ChildQueued`/`ChildStarted`/
-`ChildFinished` lifecycle events. V1/V2 remain readable without migration.
+`WorkflowDefinitionRegistry` is the sole owner of stored workflow definitions
+and their resolution. `WorkflowRuntime` is the sole durable owner of run
+lifecycle, state, journal, replay, recovery, lineage, artifact references, and
+aggregate results. Launch coordination, background tasks, session events, and
+the TUI are adapters or projections; none writes workflow truth.
+
+### Canonical Journal
+
+Every run uses one `JournalEnvelope` and typed `JournalPayload` stream. New
+runs, resume, output paging, retention, the harness, and child projection all
+read the same journal through the canonical scanner and recovery path. Direct
+delegates and swarm items share the generic `ChildQueued`/`ChildStarted`/
+`ChildFinished` lifecycle. Live activity enriches non-terminal projections but
+does not create another durable record stream.
 
 ### Operator Projection
 
@@ -44,25 +56,30 @@ for paging. Live activity from `MultiAgentRuntime` enriches non-terminal rows.
 ### Automatic Retention
 
 Trigger at 90% global storage, reclaim to 80%. Minimum eligible age: 30 days.
-Only terminal, unreferenced, unpinned runs are eligible.
+Only terminal runs older than the configured minimum age are eligible.
 
 ## Alternatives Considered
 
 - Keep broad nine-command CLI family. Rejected: exposes backend mechanics.
 - Keep mandatory validate-before-run. Rejected: runtime owns safety, not prompt
   choreography.
-- Keep V2 journal format. Rejected: unable to support generic child lifecycle
-  without SwarmItem* backward-compatibility constraints.
+- Keep swarm-specific child records. Rejected: direct delegates and swarm items
+  need one lifecycle contract and one projection path.
+- Keep multiple journal readers or writers. Rejected: duplicate contracts make
+  durable ownership and recovery ambiguous.
 
 ## Consequences
 
 - CLI scripts using removed commands (`show`, `save`, `answer`, `fork`, `prune`)
   must update.
-- Saved workflow runs use V3 journal, readable across versions.
+- Saved workflow runs, resume, output paging, retention, the harness, and child
+  projection use the same journal contract.
 - Automatic retention prevents unbounded storage growth without user-facing CLI.
 
 ## Supersedes
 
-Supersedes the human CLI, model action semantics, and operator-surface portions
-of ADR-0007. ADR-0006/0007 remain historical for runtime, registry, journal,
-and platform durable boundaries.
+Supersedes the human CLI, model action semantics, journal event model, and
+operator-surface portions of ADR-0007. ADR-0006/0007 remain historical context
+for the runtime, registry, and platform durability decisions recorded there;
+this ADR is authoritative for the current Workflow product surface and journal
+contract.

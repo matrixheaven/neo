@@ -90,6 +90,17 @@ pub(crate) fn replace_existing_file_atomic_status(
     path: &Path,
     content: &[u8],
 ) -> io::Result<AtomicWriteStatus> {
+    replace_existing_file_atomic_with_status(path, |file| file.write_all(content))
+}
+
+/// Atomically replace an existing regular file with caller-streamed content.
+///
+/// The callback writes only to a same-directory temporary file. The target is
+/// replaced after the callback succeeds and the temporary file is synced.
+pub(crate) fn replace_existing_file_atomic_with_status(
+    path: &Path,
+    write: impl FnOnce(&mut fs::File) -> io::Result<()>,
+) -> io::Result<AtomicWriteStatus> {
     let parent = path.parent().ok_or_else(|| {
         io::Error::new(
             io::ErrorKind::InvalidInput,
@@ -107,7 +118,7 @@ pub(crate) fn replace_existing_file_atomic_status(
 
     let file_name = path.file_name().and_then(OsStr::to_str).unwrap_or("edit");
     let temp_path = parent.join(format!(".{file_name}.{}.tmp", Uuid::new_v4()));
-    if let Err(error) = write_temp_file(&temp_path, content)
+    if let Err(error) = write_temp_file_with(&temp_path, write)
         .and_then(|()| preserve_replaced_file_permissions(&temp_path, &metadata))
     {
         let _ = fs::remove_file(&temp_path);
@@ -307,11 +318,18 @@ pub(crate) fn reject_reparse_or_symlink_if_present(path: &Path) -> io::Result<()
 }
 
 fn write_temp_file(path: &Path, content: &[u8]) -> io::Result<()> {
+    write_temp_file_with(path, |file| file.write_all(content))
+}
+
+fn write_temp_file_with(
+    path: &Path,
+    write: impl FnOnce(&mut fs::File) -> io::Result<()>,
+) -> io::Result<()> {
     let mut file = fs::OpenOptions::new()
         .write(true)
         .create_new(true)
         .open(path)?;
-    file.write_all(content)?;
+    write(&mut file)?;
     file.sync_all()
 }
 

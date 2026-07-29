@@ -7,13 +7,13 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use neo_agent_core::workflow::{
-    BuiltinWorkflowDefinition, CanonicalWorkflowManifest, DEFINITION_FORMAT_VERSION,
-    DEFINITION_REVISION_PREFIX, DynamicWorkflowDefinitionInput, MANIFEST_SUFFIX, SOURCE_SUFFIX,
-    WorkflowDefinitionRegistry, WorkflowDefinitionRegistryConfig, WorkflowErrorCode,
-    WorkflowLimits, WorkflowListScope, WorkflowPhase, WorkflowSaveRequest, WorkflowSaveScope,
-    WorkflowSourceOrigin, build_definition_revision_frame, compute_definition_revision,
-    pin_resolved_source, resolve_dynamic_definition, resolve_paired_definition,
-    serialize_canonical_manifest, source_sha256_hex,
+    BuiltinWorkflowDefinition, CanonicalWorkflowManifest, DEFINITION_REVISION_PREFIX,
+    DynamicWorkflowDefinitionInput, MANIFEST_SUFFIX, SOURCE_SUFFIX, WorkflowDefinitionRegistry,
+    WorkflowDefinitionRegistryConfig, WorkflowErrorCode, WorkflowLimits, WorkflowListScope,
+    WorkflowPhase, WorkflowSaveRequest, WorkflowSaveScope, WorkflowSourceOrigin,
+    build_definition_revision_frame, compute_definition_revision, pin_resolved_source,
+    resolve_dynamic_definition, resolve_paired_definition, serialize_canonical_manifest,
+    source_sha256_hex,
 };
 use serde_json::{Map, Value, json};
 
@@ -34,7 +34,6 @@ fn sample_script() -> &'static str {
 
 fn golden_manifest(source_sha256: &str) -> CanonicalWorkflowManifest {
     CanonicalWorkflowManifest {
-        definition_format_version: DEFINITION_FORMAT_VERSION,
         display_name: "Golden Demo".to_owned(),
         description: "stable revision fixture".to_owned(),
         phases: vec![WorkflowPhase {
@@ -60,7 +59,7 @@ fn definition_revision_golden_vectors_are_stable() {
         !canonical_text.contains('\n'),
         "canonical JSON must be single-line: {canonical_text}"
     );
-    // serde_json::to_vec is compact: no space after ':' or ',' outside strings.
+    // serde_json::to_vec adds no space after ':' or ',' outside strings.
     assert!(
         !canonical_text.contains(": ") && !canonical_text.contains(", "),
         "canonical JSON must omit insignificant whitespace: {canonical_text}"
@@ -97,7 +96,6 @@ fn definition_revision_golden_vectors_are_stable() {
     )
     .expect("dynamic resolve");
     assert_eq!(dynamic.revision.as_str(), revision.as_str());
-    assert_eq!(dynamic.definition_format_version, DEFINITION_FORMAT_VERSION);
     assert_eq!(dynamic.source_origin, WorkflowSourceOrigin::Dynamic);
     assert_eq!(dynamic.source_sha256, source_sha);
     assert_eq!(dynamic.canonical_manifest_json, canonical);
@@ -105,7 +103,6 @@ fn definition_revision_golden_vectors_are_stable() {
 
     let toml = format!(
         r#"
-definition_format_version = 2
 display_name = "Golden Demo"
 description = "stable revision fixture"
 source_sha256 = "{source_sha}"
@@ -156,9 +153,9 @@ type = "boolean"
 // Pinned after fixture resolve. Update only when the golden fixture changes.
 const GOLDEN_SOURCE_SHA256: &str =
     "0467d5837e47b9b59fa85b2914df8bc62206b88545943869b0a659a9b617b821";
-const GOLDEN_CANONICAL_MANIFEST_JSON: &str = r#"{"definition_format_version":2,"description":"stable revision fixture","display_name":"Golden Demo","output_schema":{"additionalProperties":false,"properties":{"ok":{"type":"boolean"}},"required":["ok"],"type":"object"},"phases":[{"description":"execute","id":"run"}],"source_sha256":"0467d5837e47b9b59fa85b2914df8bc62206b88545943869b0a659a9b617b821"}"#;
+const GOLDEN_CANONICAL_MANIFEST_JSON: &str = r#"{"description":"stable revision fixture","display_name":"Golden Demo","output_schema":{"additionalProperties":false,"properties":{"ok":{"type":"boolean"}},"required":["ok"],"type":"object"},"phases":[{"description":"execute","id":"run"}],"source_sha256":"0467d5837e47b9b59fa85b2914df8bc62206b88545943869b0a659a9b617b821"}"#;
 const GOLDEN_DEFINITION_REVISION: &str =
-    "beacc7b5e8ec830a15ead60a8451f8ebf79ee8f8944c4dd36798955df7e95520";
+    "da83c9b4499969f02f09296c9549dc1613db42ab9ec04cd2b0577b787365ffd0";
 
 /// Object-key reorder preserves revision; length-prefix framing prevents
 /// field-boundary collisions from producing the same digest.
@@ -366,7 +363,6 @@ fn write_pair(dir: &Path, name: &str, display: &str, description: &str, script: 
     let source_sha = source_sha256_hex(script.as_bytes());
     let toml = format!(
         r#"
-definition_format_version = 2
 name = "{name}"
 display_name = "{display}"
 description = "{description}"
@@ -398,7 +394,6 @@ fn builtin_pair(
     let source_sha = source_sha256_hex(script.as_bytes());
     let toml = format!(
         r#"
-definition_format_version = 2
 name = "{name}"
 display_name = "{display}"
 description = "{description}"
@@ -524,7 +519,6 @@ fn registry_precedence_conflict_and_no_fallback() {
     // Corrupt the project pair for `shared` by mismatching source_sha256.
     let bad_toml = format!(
         r#"
-definition_format_version = 2
 name = "shared"
 display_name = "Broken Project"
 description = "invalid higher scope"
@@ -677,7 +671,6 @@ fn registry_rejects_symlink_reparse_and_path_escape() {
         let good_toml_sha = source_sha256_hex(b"return { ok = true }\n");
         let toml = format!(
             r#"
-definition_format_version = 2
 name = "linked"
 display_name = "Linked"
 description = "symlinked source"
@@ -845,7 +838,6 @@ fn save_is_no_clobber_and_pair_atomic() {
     // Lua present with wrong source_sha256 in toml is not launchable.
     let wrong_sha_toml = format!(
         r#"
-definition_format_version = 2
 name = "mismatched"
 display_name = "Mismatched"
 description = "hash mismatch"
@@ -950,7 +942,7 @@ fn registry_platform_path_and_link_semantics() {
     fs::write(user_dir.join("notes.txt"), b"not a workflow").expect("txt");
     fs::write(
         user_dir.join("almost.workflow.toml.bak"),
-        b"definition_format_version = 2\n",
+        b"not a workflow manifest\n",
     )
     .expect("bak");
     registry.invalidate();
@@ -1041,7 +1033,6 @@ fn registry_platform_path_and_link_semantics() {
         let good_sha = source_sha256_hex(b"return { ok = true }\n");
         let manifest = format!(
             r#"
-definition_format_version = 2
 name = "platform-link"
 display_name = "Platform Link"
 description = "symlink source"
@@ -1116,7 +1107,6 @@ type = "boolean"
         let good_sha = source_sha256_hex(b"return { ok = true }\n");
         let manifest = format!(
             r#"
-definition_format_version = 2
 name = "platform-link-win"
 display_name = "Platform Link Win"
 description = "symlink source"

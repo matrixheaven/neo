@@ -28,7 +28,6 @@ pub enum WorkflowErrorCode {
     AwaitingUser,
     InvalidUserAnswer,
     StaleUserRequest,
-    LineageMismatch,
     ArtifactMissing,
     ArtifactCorrupt,
     ResourceLimited,
@@ -72,7 +71,6 @@ impl WorkflowErrorCode {
             Self::AwaitingUser => "awaiting_user",
             Self::InvalidUserAnswer => "invalid_user_answer",
             Self::StaleUserRequest => "stale_user_request",
-            Self::LineageMismatch => "lineage_mismatch",
             Self::ArtifactMissing => "artifact_missing",
             Self::ArtifactCorrupt => "artifact_corrupt",
             Self::ResourceLimited => "resource_limited",
@@ -122,7 +120,7 @@ pub enum WorkflowError {
     Cancelled(String),
     #[error("run not found: {0}")]
     NotFound(String),
-    /// Typed stable-code error; preferred for new V2 control paths.
+    /// Typed stable-code error used by workflow control paths.
     #[error("{code}: {message}")]
     Coded {
         code: WorkflowErrorCode,

@@ -680,6 +680,8 @@ async fn instruction_replan_blocks_effect_without_model_turn() {
     let envelopes = collect_journal(
         &journal_path(temp.path(), &workflow.run_id),
         Some(&workflow.run_id),
+        WorkflowLimits::default().journal_record_bytes,
+        WorkflowLimits::default().journal_total_bytes,
     )
     .expect("journal");
     let invocation_id = envelopes
@@ -1113,7 +1115,6 @@ fn workflow_launch_request() -> WorkflowLaunchRequest {
         script: String::new(),
         args: json!({}),
         launch_source: "test".to_owned(),
-        parent_run_id: None,
         output_schema: None,
         display_name: None,
         input_schema: None,
@@ -1130,7 +1131,125 @@ async fn delegate_usage_and_child_ref_are_journaled_and_aggregated() {
         input_cache_read_tokens: 5,
         input_cache_write_tokens: 3,
     };
-    let harness = FakeHarness::from_turns([child_text_turn_with_usage("delegate done", usage)]);
+    let harness = FakeHarness::from_turns([child_text_turn_with_usage(
+        r#"{"result":"delegate done"}"#,
+        usage,
+    )]);
+    let runtime = WorkflowRuntime::new(WorkflowLimits::default());
+    let config = AgentConfig::for_model(harness.model())
+        .with_workspace_root(dir.path())
+        .expect("workspace root")
+        .with_permission_mode(PermissionMode::Yolo)
+        .with_workflow_runtime(runtime.clone());
+    let dispatch = handle(
+        config,
+        &harness,
+        Arc::new(ToolRegistry::with_builtin_tools()),
+        AgentContext::new(),
+    );
+    let workflow = runtime
+        .create_run(dir.path(), workflow_launch_request())
+        .await
+        .expect("workflow");
+    workflow
+        .enter_running_for_direct_execution()
+        .await
+        .expect("enter running");
+    let origin = workflow.execution_origin(None).await;
+    let output_schema = json!({
+        "type": "object",
+        "properties": {"result": {"type": "string"}},
+        "required": ["result"],
+        "additionalProperties": false,
+    });
+
+    let outcome = workflow
+        .invoke(
+            0,
+            WorkflowInvocationKind::Delegate,
+            json!({"task": "review usage", "output_schema": output_schema}),
+            true,
+            move |invocation| {
+                let dispatch = dispatch.clone();
+                async move {
+                    dispatch
+                        .run_one_with_origin(
+                            invocation,
+                            "Delegate",
+                            json!({
+                                "task": "review usage",
+                                "context": "none",
+                                "output_schema": {
+                                    "type": "object",
+                                    "properties": {"result": {"type": "string"}},
+                                    "required": ["result"],
+                                    "additionalProperties": false,
+                                }
+                            }),
+                            Some(origin),
+                        )
+                        .await
+                }
+            },
+        )
+        .await
+        .expect("invoke");
+
+    assert_eq!(outcome.actual_usage, Some(usage), "{outcome:?}");
+    let agent_id = outcome.details["agent_id"]
+        .as_str()
+        .expect("agent_id")
+        .to_owned();
+    assert_eq!(
+        outcome.child_refs,
+        [neo_agent_core::workflow::WorkflowChildRef {
+            kind: "delegate".to_owned(),
+            id: agent_id.clone(),
+        }]
+    );
+    let output = workflow.output().await.expect("output");
+    assert_eq!(output.actual_usage, Some(usage));
+    let envelopes = collect_journal(
+        &journal_path(dir.path(), &workflow.run_id),
+        Some(&workflow.run_id),
+        WorkflowLimits::default().journal_record_bytes,
+        WorkflowLimits::default().journal_total_bytes,
+    )
+    .expect("journal");
+    assert!(envelopes.iter().any(|record| matches!(
+        &record.payload,
+        JournalPayload::InvocationFinished {
+            outcome: journaled,
+            ..
+        } if journaled.actual_usage == Some(usage)
+            && journaled.child_refs == outcome.child_refs
+    )));
+    let queued_index = envelopes
+        .iter()
+        .position(|record| matches!(&record.payload, JournalPayload::ChildQueued { .. }))
+        .expect("queued child");
+    let started_index = envelopes
+        .iter()
+        .position(|record| matches!(&record.payload, JournalPayload::ChildStarted { .. }))
+        .expect("started child");
+    let finished_index = envelopes
+        .iter()
+        .position(|record| matches!(&record.payload, JournalPayload::ChildFinished { .. }))
+        .expect("finished child");
+    assert!(queued_index < started_index && started_index < finished_index);
+    assert!(matches!(
+        &envelopes[started_index].payload,
+        JournalPayload::ChildStarted {
+            agent_id: Some(journaled_agent_id),
+            ..
+        } if journaled_agent_id == &agent_id
+    ));
+}
+
+#[tokio::test]
+async fn invalid_delegate_finishes_without_started_child() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let harness = FakeHarness::from_turns([]);
     let config = AgentConfig::for_model(harness.model())
         .with_workspace_root(dir.path())
         .expect("workspace root")
@@ -1150,55 +1269,120 @@ async fn delegate_usage_and_child_ref_are_journaled_and_aggregated() {
         .enter_running_for_direct_execution()
         .await
         .expect("enter running");
+    let origin = workflow.execution_origin(None).await;
 
     let outcome = workflow
         .invoke(
             0,
             WorkflowInvocationKind::Delegate,
-            json!({"task": "inspect usage"}),
+            json!({"task": ""}),
             true,
-            move |invocation| {
-                let dispatch = dispatch.clone();
-                async move {
-                    dispatch
-                        .run_one(
-                            invocation,
-                            "Delegate",
-                            json!({"task": "inspect usage", "context": "none"}),
-                        )
-                        .await
-                }
+            move |invocation| async move {
+                dispatch
+                    .run_one_with_origin(invocation, "Delegate", json!({"task": ""}), Some(origin))
+                    .await
             },
         )
         .await
         .expect("invoke");
 
-    assert_eq!(outcome.actual_usage, Some(usage));
-    let agent_id = outcome.details["agent_id"]
-        .as_str()
-        .expect("agent_id")
-        .to_owned();
-    assert_eq!(
-        outcome.child_refs,
-        [neo_agent_core::workflow::WorkflowChildRef {
-            kind: "delegate".to_owned(),
-            id: agent_id,
-        }]
-    );
-    let output = workflow.output().await.expect("output");
-    assert_eq!(output.actual_usage, Some(usage));
+    assert!(!outcome.ok);
     let envelopes = collect_journal(
         &journal_path(dir.path(), &workflow.run_id),
         Some(&workflow.run_id),
+        WorkflowLimits::default().journal_record_bytes,
+        WorkflowLimits::default().journal_total_bytes,
     )
     .expect("journal");
+    assert!(
+        envelopes
+            .iter()
+            .any(|record| matches!(&record.payload, JournalPayload::ChildQueued { .. }))
+    );
+    assert!(
+        !envelopes
+            .iter()
+            .any(|record| matches!(&record.payload, JournalPayload::ChildStarted { .. }))
+    );
+    assert!(
+        envelopes
+            .iter()
+            .any(|record| matches!(&record.payload, JournalPayload::ChildFinished { .. }))
+    );
+}
+
+#[tokio::test]
+async fn failed_delegate_binding_terminalizes_child_before_model_start() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let harness = FakeHarness::from_turns([]);
+    let config = AgentConfig::for_model(harness.model())
+        .with_workspace_root(dir.path())
+        .expect("workspace root")
+        .with_permission_mode(PermissionMode::Yolo);
+    let dispatch = handle(
+        config,
+        &harness,
+        Arc::new(ToolRegistry::with_builtin_tools()),
+        AgentContext::new(),
+    );
+    let multi_agent = dispatch.config.multi_agent.clone();
+    let runtime = WorkflowRuntime::new(WorkflowLimits::default());
+    let workflow = runtime
+        .create_run(dir.path(), workflow_launch_request())
+        .await
+        .expect("workflow");
+    workflow
+        .enter_running_for_direct_execution()
+        .await
+        .expect("enter running");
+    let origin = workflow.execution_origin(None).await;
+
+    let outcome = workflow
+        .invoke(
+            0,
+            WorkflowInvocationKind::Delegate,
+            json!({"task": "must not start"}),
+            true,
+            move |invocation| async move {
+                dispatch
+                    .run_one_with_origin(
+                        invocation,
+                        "Delegate",
+                        json!({"task": "must not start"}),
+                        Some(origin),
+                    )
+                    .await
+            },
+        )
+        .await
+        .expect("invoke");
+
+    assert_eq!(outcome.status, WorkflowOutcomeStatus::Failed);
+    assert!(harness.requests().is_empty());
+    let agents = multi_agent.list_agents(true);
+    assert_eq!(agents.len(), 1);
+    assert_eq!(
+        agents[0].state,
+        neo_agent_core::multi_agent::AgentLifecycleState::Failed
+    );
+    let envelopes = collect_journal(
+        &journal_path(dir.path(), &workflow.run_id),
+        Some(&workflow.run_id),
+        WorkflowLimits::default().journal_record_bytes,
+        WorkflowLimits::default().journal_total_bytes,
+    )
+    .expect("journal");
+    assert!(
+        !envelopes
+            .iter()
+            .any(|record| matches!(&record.payload, JournalPayload::ChildStarted { .. }))
+    );
     assert!(envelopes.iter().any(|record| matches!(
         &record.payload,
-        JournalPayload::InvocationFinished {
-            outcome: journaled,
+        JournalPayload::ChildFinished {
+            agent_id: Some(agent_id),
             ..
-        } if journaled.actual_usage == Some(usage)
-            && journaled.child_refs == outcome.child_refs
+        } if agent_id == agents[0].id.as_str()
     )));
 }
 
@@ -1242,7 +1426,7 @@ async fn swarm_preserves_ids_terminal_children_and_aggregate_usage() {
                     {"title": "first", "value": "first"},
                     {"title": "second", "value": "second"},
                 ],
-                "prompt_template": "Inspect {{item}}",
+                "prompt_template": "Review {{item}}",
                 "max_concurrency": 1,
             }),
         )
@@ -1301,7 +1485,7 @@ async fn delegate_and_swarm_forward_canonical_lifecycle_events() {
         .run_one(
             invocation("inv_delegate"),
             "Delegate",
-            json!({"task": "inspect dispatch", "context": "none"}),
+            json!({"task": "review dispatch", "context": "none"}),
         )
         .await;
     assert!(delegate.ok, "{}", delegate.summary);
@@ -1310,9 +1494,9 @@ async fn delegate_and_swarm_forward_canonical_lifecycle_events() {
             invocation("inv_swarm"),
             "DelegateSwarm",
             json!({
-                "description": "inspect dispatch",
+                "description": "review dispatch",
                 "items": [{"title": "runtime", "value": "runtime"}],
-                "prompt_template": "Inspect {{item}}",
+                "prompt_template": "Review {{item}}",
             }),
         )
         .await;
@@ -1366,7 +1550,7 @@ async fn workflow_delegate_and_swarm_use_live_yolo_after_handle_creation() {
         .run_one(
             invocation("inv_live_delegate"),
             "Delegate",
-            json!({"task": "inspect dispatch", "context": "none"}),
+            json!({"task": "review dispatch", "context": "none"}),
         )
         .await;
     assert!(delegate.ok, "{}", delegate.summary);
@@ -1375,9 +1559,9 @@ async fn workflow_delegate_and_swarm_use_live_yolo_after_handle_creation() {
             invocation("inv_live_swarm"),
             "DelegateSwarm",
             json!({
-                "description": "inspect dispatch",
+                "description": "review dispatch",
                 "items": [{"title": "runtime", "value": "runtime"}],
-                "prompt_template": "Inspect {{item}}",
+                "prompt_template": "Review {{item}}",
             }),
         )
         .await;

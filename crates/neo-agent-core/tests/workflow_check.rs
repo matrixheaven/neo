@@ -4,10 +4,10 @@ use std::fs;
 use std::path::PathBuf;
 
 use neo_agent_core::workflow::{
-    BuiltinWorkflowDefinition, DEFINITION_FORMAT_VERSION, WorkflowDefinitionRegistry,
-    WorkflowDefinitionRegistryConfig, WorkflowLimits, WorkflowListScope, WorkflowSourceOrigin,
-    builtin_manifest_revision_vectors, check_definition, check_paired_bytes, check_registry_name,
-    compute_definition_revision, resolve_paired_definition, source_sha256_hex,
+    BuiltinWorkflowDefinition, WorkflowDefinitionRegistry, WorkflowDefinitionRegistryConfig,
+    WorkflowLimits, WorkflowListScope, WorkflowSourceOrigin, builtin_manifest_revision_vectors,
+    check_definition, check_paired_bytes, check_registry_name, compute_definition_revision,
+    resolve_paired_definition, source_sha256_hex,
 };
 
 fn fixture_root() -> PathBuf {
@@ -17,7 +17,6 @@ fn fixture_root() -> PathBuf {
 fn paired_toml(display: &str, description: &str, source_sha: &str, phases: &str) -> String {
     format!(
         r#"
-definition_format_version = {DEFINITION_FORMAT_VERSION}
 display_name = "{display}"
 description = "{description}"
 source_sha256 = "{source_sha}"

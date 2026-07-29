@@ -118,7 +118,7 @@ impl ArtifactStore {
         })
     }
 
-    /// Empty store without creating directories (V1 / failed rehydrate).
+    /// Empty store without creating directories (failed rehydrate).
     #[must_use]
     pub fn empty(run_id: WorkflowId, run_dir: &Path) -> Self {
         Self {

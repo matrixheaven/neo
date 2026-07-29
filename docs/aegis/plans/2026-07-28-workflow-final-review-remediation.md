@@ -30,7 +30,7 @@ Parent authority: `docs/aegis/work/2026-07-28-workflow-final-review/final-review
 
 Owner: `neo-agent-core/workflow`
 
-删除 V1/V2/V3 命名、旧 writer/scanner/recovery、版本分流和仅保护旧路径的 tests。保留一个 canonical envelope/writer/reader/recovery，并让新 run、resume、output、retention、harness、child projection 只走这一条。不得做迁移、双写或旧兼容。
+删除旧代际命名、旧 writer/scanner/recovery、版本分流和仅保护旧路径的 tests。保留一个 canonical envelope/writer/reader/recovery，并让新 run、resume、output、retention、harness、child projection 只走这一条。不得做迁移、双写或旧兼容。
 
 Verification: canonical source retirement scan；journal round-trip、recovery、child lifecycle、read/write/replay 精确测试。
 

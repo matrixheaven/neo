@@ -1755,7 +1755,6 @@ fn workflow_pair_bytes(
     let source_sha = format!("{:x}", Sha256::digest(script.as_bytes()));
     let toml = format!(
         r#"
-definition_format_version = 2
 name = "{name}"
 display_name = "{display}"
 description = "{description}"
@@ -2008,7 +2007,6 @@ async fn tasks_workflow_pagination_and_filters_are_stable() {
                     } else {
                         "user".to_owned()
                     },
-                    parent_run_id: None,
                     output_schema: None,
                     display_name: None,
                     input_schema: None,

@@ -5,10 +5,7 @@ use std::sync::atomic::AtomicBool;
 use tokio_util::sync::CancellationToken;
 
 use super::super::error::WorkflowError;
-use super::super::journal::{
-    self, IncompleteInvocation, JournalEnvelope, JournalPayload, JournalRecord,
-    canonical_input_hash,
-};
+use super::super::journal::{IncompleteInvocation, JournalEnvelope, JournalPayload};
 use super::super::state::{
     WorkflowActor, WorkflowFinalResultMetadata, WorkflowInvocationKind, WorkflowInvocationOutcome,
     WorkflowOutcomeStatus, WorkflowState,
@@ -85,110 +82,10 @@ impl RunControl {
 
 #[derive(Clone)]
 pub(super) struct ReplayEntry {
-    pub(super) invocation_id: String,
     pub(super) call_index: u64,
     pub(super) kind: WorkflowInvocationKind,
     pub(super) canonical_input_hash: String,
     pub(super) outcome: WorkflowInvocationOutcome,
-}
-
-pub struct ReplayPrefix {
-    pub matched_records: Vec<JournalRecord>,
-    pub first_live_call_index: u64,
-    pub incomplete: Vec<IncompleteInvocation>,
-}
-
-#[must_use]
-pub fn compute_replay_prefix(
-    records: &[JournalRecord],
-    new_calls: &[(u64, WorkflowInvocationKind, serde_json::Value)],
-) -> ReplayPrefix {
-    let entries = replay_record_entries(records);
-    let mut matched_records = Vec::new();
-    let mut first_live_call_index = 0;
-    for (entry, (call_index, kind, input)) in entries.iter().zip(new_calls) {
-        if entry.call_index != *call_index
-            || entry.kind != *kind
-            || entry.canonical_input_hash != canonical_input_hash(input)
-        {
-            break;
-        }
-        matched_records.extend(
-            records
-                .iter()
-                .filter(|record| match record {
-                    JournalRecord::InvocationStarted { invocation_id, .. }
-                    | JournalRecord::InvocationFinished { invocation_id, .. } => {
-                        invocation_id == &entry.invocation_id
-                    }
-                    JournalRecord::StateChanged { .. } => false,
-                })
-                .cloned(),
-        );
-        first_live_call_index = call_index.saturating_add(1);
-    }
-    ReplayPrefix {
-        matched_records,
-        first_live_call_index,
-        incomplete: journal::find_incomplete_record_invocations(records),
-    }
-}
-
-pub(super) fn replay_record_entries(records: &[JournalRecord]) -> Vec<ReplayEntry> {
-    let finished: HashMap<_, _> = records
-        .iter()
-        .filter_map(|record| match record {
-            JournalRecord::InvocationFinished {
-                invocation_id,
-                outcome,
-                ..
-            } => Some((invocation_id.as_str(), outcome)),
-            _ => None,
-        })
-        .collect();
-    let mut replay = Vec::new();
-    for entry in records.iter().filter_map(|record| match record {
-        JournalRecord::InvocationStarted {
-            invocation_id,
-            call_index,
-            kind,
-            canonical_input_hash,
-            ..
-        } => finished
-            .get(invocation_id.as_str())
-            .map(|outcome| ReplayEntry {
-                invocation_id: invocation_id.clone(),
-                call_index: *call_index,
-                kind: *kind,
-                canonical_input_hash: canonical_input_hash.clone(),
-                outcome: (*outcome).clone(),
-            }),
-        _ => None,
-    }) {
-        let Ok(index) = usize::try_from(entry.call_index) else {
-            continue;
-        };
-        if index > replay.len() {
-            continue;
-        }
-        replay.truncate(index);
-        replay.push(entry);
-    }
-    replay
-}
-
-pub(super) fn last_record_state(records: &[JournalRecord]) -> (WorkflowState, Option<String>) {
-    records
-        .iter()
-        .rev()
-        .find_map(|record| match record {
-            JournalRecord::StateChanged { new, reason, .. } => Some((*new, Some(reason.clone()))),
-            _ => None,
-        })
-        .unwrap_or((
-            WorkflowState::Failed,
-            Some("missing workflow state".to_owned()),
-        ))
 }
 
 pub(super) fn interrupted_outcome(invocation: &IncompleteInvocation) -> WorkflowInvocationOutcome {
@@ -208,7 +105,7 @@ pub(super) fn interrupted_outcome(invocation: &IncompleteInvocation) -> Workflow
     }
 }
 
-pub(super) fn compact_resource_limited_outcome(
+pub(super) fn bounded_resource_limited_outcome(
     reason: &str,
     original: &WorkflowInvocationOutcome,
 ) -> WorkflowInvocationOutcome {
@@ -223,20 +120,6 @@ pub(super) fn compact_resource_limited_outcome(
     }
 }
 
-pub(super) fn aggregate_record_usage(records: &[JournalRecord]) -> Option<AgentTokenUsage> {
-    records.iter().fold(None, |total, record| match record {
-        JournalRecord::InvocationFinished {
-            outcome:
-                WorkflowInvocationOutcome {
-                    actual_usage: Some(usage),
-                    ..
-                },
-            ..
-        } => Some(add_usage(total, *usage)),
-        _ => total,
-    })
-}
-
 pub(super) fn add_usage(total: Option<AgentTokenUsage>, usage: AgentTokenUsage) -> AgentTokenUsage {
     let total = total.unwrap_or(AgentTokenUsage {
         input_tokens: 0,
@@ -245,29 +128,6 @@ pub(super) fn add_usage(total: Option<AgentTokenUsage>, usage: AgentTokenUsage) 
         input_cache_write_tokens: 0,
     });
     total.saturating_add(usage)
-}
-
-pub(super) fn recovered_record_phase(records: &[JournalRecord]) -> Option<String> {
-    records.iter().rev().find_map(|record| match record {
-        JournalRecord::InvocationFinished { outcome, .. } if outcome.ok => outcome
-            .details
-            .get("phase")
-            .and_then(serde_json::Value::as_str)
-            .map(str::to_owned),
-        _ => None,
-    })
-}
-
-pub(super) fn recovered_record_reports(records: &[JournalRecord]) -> Vec<serde_json::Value> {
-    records
-        .iter()
-        .filter_map(|record| match record {
-            JournalRecord::InvocationFinished { outcome, .. } if outcome.ok => {
-                outcome.details.get("report").cloned()
-            }
-            _ => None,
-        })
-        .collect()
 }
 
 pub(super) fn latest_log_summary(entries: &[ReplayEntry]) -> Option<String> {
@@ -281,15 +141,6 @@ pub(super) fn latest_log_summary(entries: &[ReplayEntry]) -> Option<String> {
             .get("message")
             .and_then(serde_json::Value::as_str)
             .map(bounded_summary)
-    })
-}
-
-pub(super) fn latest_record_report_summary(records: &[JournalRecord]) -> Option<String> {
-    records.iter().rev().find_map(|record| match record {
-        JournalRecord::InvocationFinished { outcome, .. } if outcome.ok => {
-            outcome.details.get("report").and_then(report_summary)
-        }
-        _ => None,
     })
 }
 
@@ -316,20 +167,6 @@ pub(super) fn bounded_summary(value: &str) -> String {
         .collect::<String>()
         .trim()
         .to_owned()
-}
-
-pub(super) fn record_projection_timestamps(
-    records: &[JournalRecord],
-) -> (Option<u64>, Option<u64>) {
-    let timestamp = |record: &JournalRecord| match record {
-        JournalRecord::StateChanged { timestamp_ms, .. }
-        | JournalRecord::InvocationStarted { timestamp_ms, .. }
-        | JournalRecord::InvocationFinished { timestamp_ms, .. } => *timestamp_ms,
-    };
-    (
-        records.first().map(timestamp),
-        records.last().map(timestamp),
-    )
 }
 
 pub(super) fn current_timestamp_ms() -> u64 {
@@ -365,7 +202,6 @@ pub(super) fn replay_entries(envelopes: &[JournalEnvelope]) -> Vec<ReplayEntry> 
                 finished
                     .get(invocation_id.as_str())
                     .map(|outcome| ReplayEntry {
-                        invocation_id: invocation_id.clone(),
                         call_index: *call_index,
                         kind: *kind,
                         canonical_input_hash: hash,

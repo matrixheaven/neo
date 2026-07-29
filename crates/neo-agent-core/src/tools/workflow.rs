@@ -12,7 +12,7 @@ use crate::{WorkflowApprovalPresentation, WorkflowSaveApprovalPresentation};
 
 const DEFAULT_LIST_LIMIT: u32 = 20;
 const MAX_LIST_LIMIT: u32 = 100;
-const LIST_CURSOR_PREFIX: &str = "workflow-list-v1:";
+const LIST_CURSOR_PREFIX: &str = "workflow-list:";
 
 #[derive(
     Debug, Clone, Copy, PartialEq, Eq, serde::Deserialize, serde::Serialize, schemars::JsonSchema,
@@ -687,7 +687,6 @@ fn workflow_details(definition: &ResolvedWorkflowDefinition, include_source: boo
         "source_locator": definition.source_locator,
         "source_sha256": definition.source_sha256,
         "revision": definition.revision.as_str(),
-        "definition_format_version": definition.definition_format_version,
         "script": include_source.then_some(definition.lua_source.as_str()),
     })
 }
@@ -762,7 +761,6 @@ fn launch_intent_parts(
         script: definition.lua_source.clone(),
         args,
         launch_source: format!("model:Workflow({})", action.as_str()),
-        parent_run_id: None,
         output_schema: Some(definition.output_schema.clone()),
         display_name: Some(definition.display_name.clone()),
         input_schema: definition.input_schema.clone(),
@@ -776,7 +774,6 @@ fn launch_intent_parts(
             workspace_identity,
             actor: WorkflowActor::Model,
             permission_mode,
-            parent_lineage: None,
             compiled_input_schema: validate_args
                 .then(|| definition.compiled_input_schema.clone())
                 .flatten(),
@@ -1011,7 +1008,7 @@ async fn dispatch_prepared(
                         {
                             "tool": "Workflow",
                             "arguments": {"action": "show", "name": name},
-                            "reason": "Inspect this saved workflow."
+                            "reason": "Show this saved workflow."
                         },
                         {
                             "tool": "Workflow",
@@ -1123,7 +1120,7 @@ async fn dispatch_prepared(
                     {
                         "tool": "Workflow",
                         "arguments": {"action": "show", "name": definition.name.as_str()},
-                        "reason": "Inspect the saved definition."
+                        "reason": "Show the saved definition."
                     }
                 ]),
             )
@@ -1195,7 +1192,7 @@ async fn dispatch_prepared(
                     {
                         "tool": "Workflow",
                         "arguments": {"action": "show", "name": definition.name.as_str()},
-                        "reason": "Inspect the durable saved definition."
+                        "reason": "Show the durable saved definition."
                     }
                 ]),
             )

@@ -85,7 +85,6 @@ fn launch(script: String) -> WorkflowLaunchRequest {
         script,
         args: json!({}),
         launch_source: "/workflow".to_owned(),
-        parent_run_id: None,
         output_schema: None,
         display_name: None,
         input_schema: None,
@@ -202,14 +201,38 @@ async fn await_user_releases_permits_and_survives_restart() {
     assert_eq!(pending.request_id, request_id_for_call_index(0));
 
     let journal_path = run_dir(dir, &handle.run_id).join("journal.jsonl");
-    let envelopes = collect_journal(&journal_path, Some(&handle.run_id)).unwrap();
-    assert!(
-        envelopes.iter().any(|e| matches!(
-            &e.payload,
-            JournalPayload::UserInputRequested { request_id, .. }
-                if request_id == &pending.request_id
+    let envelopes = collect_journal(
+        &journal_path,
+        Some(&handle.run_id),
+        WorkflowLimits::default().journal_record_bytes,
+        WorkflowLimits::default().journal_total_bytes,
+    )
+    .unwrap();
+    let request = envelopes
+        .iter()
+        .find_map(|envelope| match &envelope.payload {
+            JournalPayload::UserInputRequested {
+                request_id,
+                prompt,
+                answer_schema,
+                default,
+                title,
+                answer_policy,
+            } if request_id == &pending.request_id => {
+                Some((prompt, answer_schema, default, title, answer_policy))
+            }
+            _ => None,
+        });
+    assert_eq!(
+        request,
+        Some((
+            &pending.prompt,
+            &pending.answer_schema,
+            &pending.default,
+            &pending.title,
+            &pending.answer_policy,
         )),
-        "UserInputRequested must be durable"
+        "UserInputRequested must durably preserve the canonical request"
     );
     assert!(
         envelopes.iter().any(|e| matches!(
@@ -264,7 +287,13 @@ async fn await_user_releases_permits_and_survives_restart() {
         .await
         .expect("stop while awaiting");
     assert_eq!(handles[0].snapshot().await.state, WorkflowState::Cancelled);
-    let after_stop = collect_journal(&journal_path, Some(&handle.run_id)).unwrap();
+    let after_stop = collect_journal(
+        &journal_path,
+        Some(&handle.run_id),
+        WorkflowLimits::default().journal_record_bytes,
+        WorkflowLimits::default().journal_total_bytes,
+    )
+    .unwrap();
     assert!(
         after_stop
             .iter()
@@ -345,7 +374,13 @@ async fn answer_validates_request_schema_before_queueing() {
     assert_eq!(final_value, json!({ "ok": true }));
 
     let journal_path = run_dir(fixture.dir.path(), &handle.run_id).join("journal.jsonl");
-    let envelopes = collect_journal(&journal_path, Some(&handle.run_id)).unwrap();
+    let envelopes = collect_journal(
+        &journal_path,
+        Some(&handle.run_id),
+        WorkflowLimits::default().journal_record_bytes,
+        WorkflowLimits::default().journal_total_bytes,
+    )
+    .unwrap();
     assert!(envelopes.iter().any(|e| matches!(
         &e.payload,
         JournalPayload::UserInputAnswered {

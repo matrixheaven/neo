@@ -43,10 +43,10 @@ pub use user_input::{
 };
 
 pub use definition::{
-    CanonicalWorkflowManifest, DEFINITION_FORMAT_VERSION, DEFINITION_REVISION_PREFIX,
-    DynamicWorkflowDefinitionInput, ResolvedWorkflowDefinition, build_definition_revision_frame,
-    compute_definition_revision, resolve_dynamic_definition, resolve_paired_definition,
-    serialize_canonical_manifest, source_sha256_hex,
+    CanonicalWorkflowManifest, DEFINITION_REVISION_PREFIX, DynamicWorkflowDefinitionInput,
+    ResolvedWorkflowDefinition, build_definition_revision_frame, compute_definition_revision,
+    resolve_dynamic_definition, resolve_paired_definition, serialize_canonical_manifest,
+    source_sha256_hex,
 };
 
 pub use registry::{
@@ -71,11 +71,9 @@ pub use child_projection::{
     ChildProjection, WorkflowChildRow, WorkflowChildState, project_children,
 };
 pub use journal::{
-    JOURNAL_FORMAT_V1, JOURNAL_FORMAT_V2, JOURNAL_FORMAT_V3, JournalEnvelope, JournalPayload,
-    JournalPayloadRef, JournalRecord, JournalRecordWriter, JournalWriter, WorkflowChildKey,
+    JournalEnvelope, JournalPayload, JournalPayloadRef, JournalWriter, WorkflowChildKey,
     WorkflowChildKind, canonical_input_hash, collect_journal, find_incomplete_invocations,
-    find_incomplete_record_invocations, journal_path, read_journal, read_run_metadata, run_dir,
-    validate_envelope, write_run_metadata,
+    journal_path, read_run_metadata, run_dir, validate_envelope, write_run_metadata,
 };
 pub use launch::{
     WorkflowLaunchBinding, WorkflowLaunchCoordinator, WorkflowLaunchHosts, WorkflowLaunchIntent,
@@ -98,24 +96,22 @@ pub use output::{
 };
 pub use retention::{
     RetentionExclusion, RetentionOutcome, RetentionPolicy, RetentionPreview, RetentionSubject,
-    classify_subject, collect_retention_subjects, current_unix_ms, dir_byte_size, file_age_ms,
-    infer_run_state, perform_retention, preview_mark_sweep,
+    classify_subject, current_unix_ms, dir_byte_size, perform_retention, preview_mark_sweep,
 };
 pub use runtime::{
     ChildIsolationRequest, ChildSchemaAcceptResult, ChildSchemaRepairRequest, ParentChildAuthority,
-    ReplayPrefix, ResolvedChildContext, ResolvedChildIsolation, ResolvedWorktreeBinding,
-    SwarmBatchRequest, WorkflowHandle, WorkflowInvocationContext, WorkflowLaunchRequest,
-    WorkflowOutput, WorkflowProjectionStage, WorkflowRuntime, child_isolation_provenance,
-    cleanup_isolated_worktree, compute_replay_prefix, host_bounded_context_summary,
-    permission_rank, resolve_child_context, resolve_child_isolation, resolve_child_model,
-    resolve_child_permission, resolve_child_tool_ceiling, resolve_child_worktree,
+    ResolvedChildContext, ResolvedChildIsolation, ResolvedWorktreeBinding, SwarmBatchRequest,
+    WorkflowHandle, WorkflowInvocationContext, WorkflowLaunchRequest, WorkflowOutput,
+    WorkflowProjectionStage, WorkflowRuntime, child_isolation_provenance,
+    cleanup_isolated_worktree, host_bounded_context_summary, permission_rank,
+    resolve_child_context, resolve_child_isolation, resolve_child_model, resolve_child_permission,
+    resolve_child_tool_ceiling, resolve_child_worktree,
 };
 pub use state::{
-    WORKFLOW_NAME_MAX_LEN, WorkflowActor, WorkflowArtifactId, WorkflowCheckpoint, WorkflowChildRef,
+    WORKFLOW_NAME_MAX_LEN, WorkflowActor, WorkflowArtifactId, WorkflowChildRef,
     WorkflowExecutionOrigin, WorkflowFinalResultMetadata, WorkflowHumanHandle, WorkflowId,
     WorkflowInterruptionReason, WorkflowInvocationId, WorkflowInvocationKind,
-    WorkflowInvocationOutcome, WorkflowLineageMetadata, WorkflowName, WorkflowOutcomeStatus,
-    WorkflowPhase, WorkflowPinnedSource, WorkflowRequestId, WorkflowRevision, WorkflowRunId,
-    WorkflowRunMetadata, WorkflowSnapshot, WorkflowSourceOrigin, WorkflowState, WorkflowStepRecord,
-    validate_portable_name,
+    WorkflowInvocationOutcome, WorkflowName, WorkflowOutcomeStatus, WorkflowPhase,
+    WorkflowPinnedSource, WorkflowRequestId, WorkflowRevision, WorkflowRunId, WorkflowRunMetadata,
+    WorkflowSnapshot, WorkflowSourceOrigin, WorkflowState, validate_portable_name,
 };

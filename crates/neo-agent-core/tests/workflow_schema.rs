@@ -162,7 +162,6 @@ async fn invalid_final_lua_result_fails_without_hidden_model_repair() {
                 script: String::new(),
                 args: json!({}),
                 launch_source: "test".to_owned(),
-                parent_run_id: None,
                 output_schema: None,
                 display_name: None,
                 input_schema: None,
@@ -276,7 +275,6 @@ async fn running_workflow_handle(
                 script: String::new(),
                 args: json!({}),
                 launch_source: "test".to_owned(),
-                parent_run_id: None,
                 output_schema: None,
                 display_name: None,
                 input_schema: None,
@@ -413,8 +411,13 @@ async fn child_schema_invalid_output_gets_exactly_one_tools_disabled_repair() {
     assert_eq!(usage.output_tokens, 27);
 
     let run_dir = neo_agent_core::workflow::run_dir(session_dir, &handle.run_id);
-    let envelopes =
-        collect_journal(&run_dir.join("journal.jsonl"), Some(&handle.run_id)).expect("journal");
+    let envelopes = collect_journal(
+        &run_dir.join("journal.jsonl"),
+        Some(&handle.run_id),
+        WorkflowLimits::default().journal_record_bytes,
+        WorkflowLimits::default().journal_total_bytes,
+    )
+    .expect("journal");
     let kinds: Vec<&str> = envelopes
         .iter()
         .map(|e| match &e.payload {
@@ -539,8 +542,13 @@ async fn schema_repair_tool_attempt_is_forbidden() {
     assert!(harness.requests()[1].tools.is_empty());
 
     let run_dir = neo_agent_core::workflow::run_dir(session_dir, &handle.run_id);
-    let envelopes =
-        collect_journal(&run_dir.join("journal.jsonl"), Some(&handle.run_id)).expect("journal");
+    let envelopes = collect_journal(
+        &run_dir.join("journal.jsonl"),
+        Some(&handle.run_id),
+        WorkflowLimits::default().journal_record_bytes,
+        WorkflowLimits::default().journal_total_bytes,
+    )
+    .expect("journal");
     let finished_err = envelopes.iter().any(|e| {
         matches!(
             &e.payload,

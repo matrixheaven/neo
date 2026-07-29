@@ -2232,6 +2232,7 @@ dependencies = [
  "reqwest 0.13.4",
  "rmcp",
  "rustix",
+ "same-file",
  "schemars",
  "serde",
  "serde_json",

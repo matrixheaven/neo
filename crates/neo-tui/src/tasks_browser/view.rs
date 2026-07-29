@@ -82,24 +82,94 @@ impl TaskBrowserStatus {
     }
 }
 
-/// Workflow projection fields for detail/list columns (TUI-only; never durable).
+/// Immutable Workflow Operator data supplied by the runtime projection.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct TaskBrowserWorkflowMeta {
     pub run_id: String,
-    pub human_handle: Option<String>,
-    pub definition_name: String,
-    pub definition_revision: Option<String>,
-    pub source_scope: Option<String>,
-    pub current_phase: Option<String>,
-    pub parent_run_id: Option<String>,
-    pub admission_wait_reason: Option<String>,
-    pub started_child_count: u64,
-    pub queued_child_count: u64,
-    pub terminal_child_count: u64,
-    pub actual_usage_total: Option<u64>,
-    pub has_final_result: bool,
-    pub artifact_count: usize,
-    pub pending_request_id: Option<String>,
+    pub display_name: String,
+    pub purpose: String,
+    pub elapsed_ms: u64,
+    pub current_step_key: Option<WorkflowStepKey>,
+    pub steps: Vec<TaskBrowserWorkflowStep>,
+    pub child_page: TaskBrowserWorkflowChildPage,
+    pub pending_user: Option<TaskBrowserPendingUserRequest>,
+    pub inline_unsaved: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TaskBrowserWorkflowRowState {
+    Pending,
+    Working,
+    Completed,
+    Failed,
+    Paused,
+    Recovering,
+}
+
+impl TaskBrowserWorkflowRowState {
+    #[must_use]
+    pub const fn marker(self) -> &'static str {
+        match self {
+            Self::Pending => "·",
+            Self::Working => "›",
+            Self::Completed => "✓",
+            Self::Failed => "✕",
+            Self::Paused => "Ⅱ",
+            Self::Recovering => "↻",
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TaskBrowserWorkflowStep {
+    pub key: WorkflowStepKey,
+    pub title: String,
+    pub state: TaskBrowserWorkflowRowState,
+    pub done_count: u64,
+    pub working_count: u64,
+    pub queued_count: u64,
+    pub failed_count: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TaskBrowserWorkflowChildPage {
+    pub items: Vec<TaskBrowserWorkflowChild>,
+    pub next_cursor: Option<String>,
+    pub has_more: bool,
+    pub query_hash: String,
+}
+
+impl Default for TaskBrowserWorkflowChildPage {
+    fn default() -> Self {
+        Self {
+            items: Vec::new(),
+            next_cursor: None,
+            has_more: false,
+            query_hash: String::new(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TaskBrowserWorkflowChild {
+    pub key: WorkflowChildKey,
+    pub title: String,
+    pub role: Option<String>,
+    pub state: TaskBrowserWorkflowRowState,
+    pub elapsed: String,
+    pub actual_usage: Option<serde_json::Value>,
+    pub latest_activity: Option<String>,
+    pub terminal_summary: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TaskBrowserPendingUserRequest {
+    pub request_id: String,
+    pub prompt: String,
+    pub answer_schema: serde_json::Value,
+    pub default: Option<serde_json::Value>,
+    pub title: Option<String>,
+    pub answer_policy: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -173,3 +243,4 @@ impl TaskBrowserSnapshot {
         })
     }
 }
+use neo_agent_core::workflow::{WorkflowChildKey, WorkflowStepKey};

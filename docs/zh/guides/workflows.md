@@ -33,7 +33,6 @@ Neo **不会**预测 token 成本、耗时、agent 数量或项目规模来暂�
 ### Manifest 字段
 
 ```toml
-definition_format_version = 2
 name = "my-workflow"          # 必须与文件名 stem 一致
 display_name = "My Workflow"
 description = "这次 run 编排什么"
@@ -250,7 +249,7 @@ prompt（必需）, answer_schema（必需）, default?, title?,
 answer_policy?  # human | human_or_model；默认 human
 ```
 
-**不要通过该接口索取密码、API key 或其他密钥。** 回答会写入本地 journal，重启后仍可检查。Run 进入持久化 `awaiting_user`，释放活动 VM/worker 准入，并继续在 `/tasks` 与 CLI 中可见。assistant 只对 `human_or_model` 使用 `TaskAnswer`；仅人类请求由用户通过 TUI 或人类 CLI 回答。
+**不要通过该接口索取密码、API key 或其他密钥。** 回答会写入本地 journal，重启后仍可读取。Run 进入持久化 `awaiting_user`，释放活动 VM/worker 准入，并继续在 `/tasks` 与 CLI 中可见。assistant 只对 `human_or_model` 使用 `TaskAnswer`；仅人类请求由用户通过 `/tasks` 回答。
 
 没有 answer 的 `TaskResume` **不能** 解除 `awaiting_user`。
 
@@ -264,7 +263,7 @@ answer_policy?  # human | human_or_model；默认 human
 
 ## Artifact 与存储布局
 
-每个 V2 run 目录：
+每个 run 目录：
 
 ```text
 <session_dir>/workflows/<run_id>/
@@ -274,15 +273,11 @@ answer_policy?  # human | human_or_model；默认 human
   recovery-quarantine/     # 仅用于 torn-tail 隔离
 ```
 
-过大的最终结果、报告与 schema 原始输出可能以 artifact 引用存储。读取会重新校验 size/digest。默认保留策略非破坏性：终态 run 会一直保留到显式 prune。
+过大的最终结果、报告与 schema 原始输出可能以 artifact 引用存储。读取会重新校验 size/digest。当 workflow 存储达到配置的高水位时，自动 retention 只会回收已超过最小保留时间的终态 run，直到恢复到低水位。
 
-## Linked run
+## Run 不可变性
 
-终态 run 不可变。重试、改定义、改参数、提高机器上限，都需要 **新的 linked run**。
-
-子 run 导入已验证的完成 invocation 前缀作为 lineage seed。回放必须在任何新外部 effect 之前匹配 seed；不匹配则以 `lineage_mismatch` 失败关闭。继承用量仅用于展示，不计入新 run 的 actual usage。
-
-没有持久化 V2 文件的 V1 run 仍可作为历史投影阅读，但不能作为 live workflow 恢复。
+终态 run 不可变。再次运行 workflow 会创建独立的新 run，拥有自己的参数、结果、用量和 journal。只有 canonical run 目录可读取和恢复；已废弃的 journal 布局不会迁移或投影。
 
 ## TaskOutput 游标
 
@@ -300,7 +295,7 @@ answer_policy?  # human | human_or_model；默认 human
 
 ## `/tasks` 面板
 
-`/tasks` 已扩展 workflow 支持：可过滤列表、phase/进度、排队/准入原因、等待输入状态、实际用量，以及合法时的详情动作（暂停、恢复、回答、停止、分叉）。它仍是 background task 与 workflow 快照的投影 — 不是第二状态所有者。Delegate / Bash / Terminal 卡片布局保持不变。
+`/tasks` 已扩展 workflow 支持：可过滤列表、phase/进度、排队/准入原因、等待输入状态、实际用量、详情/输出，以及合法控制（暂停、恢复、回答、停止）。它仍是 background task 与 workflow 快照的投影 — 不是第二状态所有者。Delegate / Bash / Terminal 卡片布局保持不变。
 
 ## 内置 workflow
 

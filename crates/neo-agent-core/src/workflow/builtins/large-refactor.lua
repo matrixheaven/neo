@@ -109,7 +109,7 @@ neo.verify(
 )
 
 if decision.retire_worktrees == true and decision.merge ~= true then
-  neo.log("retire requested without merge — worktrees left for manual inspection")
+  neo.log("retire requested without merge — worktrees left for manual review")
 end
 
 local unresolved = {}

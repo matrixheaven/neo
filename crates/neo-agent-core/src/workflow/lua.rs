@@ -653,13 +653,16 @@ impl LuaWorkflowRunner {
                         .map_err(|error| invalid_tool_input(&error))?;
                     let input = canonical_input.clone();
                     let index = call_index.fetch_add(1, Ordering::Relaxed);
+                    let origin = handle.execution_origin(None).await;
                     let outcome = Box::pin(handle.invoke(
                         index,
                         WorkflowInvocationKind::Delegate,
                         canonical_input,
                         true,
                         move |invocation| async move {
-                            dispatch.run_one(invocation, "Delegate", input).await
+                            dispatch
+                                .run_one_with_origin(invocation, "Delegate", input, Some(origin))
+                                .await
                         },
                     ))
                     .await

@@ -1,10 +1,12 @@
-use std::time::Duration;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use neo_agent_core::tools::{
     BackgroundTaskKind, BackgroundTaskSnapshot, BackgroundTaskStatus, CommandOutput,
 };
 use neo_tui::tasks_browser::{
-    TaskBrowserItem, TaskBrowserKind, TaskBrowserSnapshot, TaskBrowserStatus,
+    TaskBrowserItem, TaskBrowserKind, TaskBrowserPendingUserRequest, TaskBrowserSnapshot,
+    TaskBrowserStatus, TaskBrowserWorkflowChild, TaskBrowserWorkflowChildPage,
+    TaskBrowserWorkflowRowState, TaskBrowserWorkflowStep,
 };
 
 #[must_use]
@@ -27,25 +29,211 @@ pub fn list_page_to_browser_snapshot(
     }
 }
 
+#[must_use]
+pub fn preferred_workflow_task_id(
+    page: &neo_agent_core::tools::BackgroundTaskListPage,
+) -> Option<String> {
+    let latest = |requires_input: bool| {
+        page.items
+            .iter()
+            .filter(|item| item.kind == BackgroundTaskKind::Workflow)
+            .filter(|item| {
+                item.workflow.as_ref().is_some_and(|workflow| {
+                    if requires_input {
+                        workflow.pending_user.is_some()
+                    } else {
+                        item.status.is_active()
+                    }
+                })
+            })
+            .max_by_key(|item| {
+                item.workflow
+                    .as_ref()
+                    .and_then(|workflow| workflow.updated_at_ms)
+                    .unwrap_or_default()
+            })
+            .map(|item| item.task_id.clone())
+    };
+    latest(true).or_else(|| latest(false))
+}
+
+pub async fn update_workflow_save_availability(
+    page: &mut neo_agent_core::tools::BackgroundTaskListPage,
+    background_tasks: &neo_agent_core::tools::BackgroundTaskManager,
+    definitions: &neo_agent_core::workflow::WorkflowDefinitionRegistry,
+) {
+    let candidates = page
+        .items
+        .iter()
+        .filter_map(|item| {
+            item.workflow
+                .as_ref()
+                .filter(|workflow| workflow.inline_unsaved)
+                .map(|_| item.task_id.clone())
+        })
+        .collect::<Vec<_>>();
+    for task_id in candidates {
+        let Some(handle) = background_tasks.workflow_handle(&task_id).await else {
+            continue;
+        };
+        let Ok(output) = handle.output().await else {
+            continue;
+        };
+        if workflow_definition_is_saved(&output.metadata, definitions)
+            && let Some(workflow) = page
+                .items
+                .iter_mut()
+                .find(|item| item.task_id == task_id)
+                .and_then(|item| item.workflow.as_mut())
+        {
+            workflow.inline_unsaved = false;
+        }
+    }
+}
+
+fn workflow_definition_is_saved(
+    metadata: &neo_agent_core::workflow::WorkflowRunMetadata,
+    definitions: &neo_agent_core::workflow::WorkflowDefinitionRegistry,
+) -> bool {
+    let Some(output_schema) = metadata.output_schema.as_ref() else {
+        return false;
+    };
+    let display_name = metadata.display_name.as_deref().unwrap_or(&metadata.name);
+    definitions
+        .list(neo_agent_core::workflow::WorkflowListScope::Effective)
+        .unwrap_or_default()
+        .into_iter()
+        .filter_map(|summary| definitions.resolve(summary.name.as_str()).ok())
+        .any(|definition| {
+            definition.source_sha256 == metadata.script_sha256
+                && definition.display_name == display_name
+                && definition.description == metadata.description
+                && definition.phases == metadata.phases
+                && definition.input_schema == metadata.input_schema
+                && &definition.output_schema == output_schema
+        })
+}
+
 fn workflow_browser_meta(
     meta: &neo_agent_core::tools::WorkflowTaskProjection,
 ) -> neo_tui::tasks_browser::TaskBrowserWorkflowMeta {
     neo_tui::tasks_browser::TaskBrowserWorkflowMeta {
         run_id: meta.run_id.clone(),
-        human_handle: meta.human_handle.clone(),
-        definition_name: meta.definition_name.clone(),
-        definition_revision: meta.definition_revision.clone(),
-        source_scope: meta.source_scope.clone(),
-        current_phase: meta.current_phase.clone(),
-        parent_run_id: meta.parent_run_id.clone(),
-        admission_wait_reason: meta.admission_wait_reason.clone(),
-        started_child_count: meta.started_child_count,
-        queued_child_count: meta.queued_child_count,
-        terminal_child_count: meta.terminal_child_count,
-        actual_usage_total: meta.actual_usage_total,
-        has_final_result: meta.has_final_result,
-        artifact_count: meta.artifact_count,
-        pending_request_id: meta.pending_request_id.clone(),
+        display_name: meta.display_name.clone(),
+        purpose: meta.purpose.clone(),
+        elapsed_ms: meta.elapsed_ms,
+        current_step_key: meta.current_step_key.clone(),
+        steps: meta
+            .steps
+            .iter()
+            .map(|step| TaskBrowserWorkflowStep {
+                key: step.key.clone(),
+                title: step.title.clone(),
+                state: match step.state {
+                    neo_agent_core::workflow::StepRowState::Pending => {
+                        TaskBrowserWorkflowRowState::Pending
+                    }
+                    neo_agent_core::workflow::StepRowState::Active => {
+                        TaskBrowserWorkflowRowState::Working
+                    }
+                    neo_agent_core::workflow::StepRowState::Completed => {
+                        TaskBrowserWorkflowRowState::Completed
+                    }
+                    neo_agent_core::workflow::StepRowState::Failed => {
+                        TaskBrowserWorkflowRowState::Failed
+                    }
+                    neo_agent_core::workflow::StepRowState::Paused => {
+                        TaskBrowserWorkflowRowState::Paused
+                    }
+                },
+                done_count: step.done_count,
+                working_count: step.working_count,
+                queued_count: step.queued_count,
+                failed_count: step.failed_count,
+            })
+            .collect(),
+        child_page: meta
+            .child_page
+            .as_ref()
+            .map_or_else(TaskBrowserWorkflowChildPage::default, workflow_child_page),
+        pending_user: meta
+            .pending_user
+            .as_ref()
+            .map(|request| TaskBrowserPendingUserRequest {
+                request_id: request.request_id.clone(),
+                prompt: request.prompt.clone(),
+                answer_schema: request
+                    .answer_schema
+                    .clone()
+                    .unwrap_or_else(|| serde_json::json!({})),
+                default: request.default.clone(),
+                title: request.title.clone(),
+                answer_policy: request.answer_policy.clone(),
+            }),
+        inline_unsaved: meta.inline_unsaved,
+    }
+}
+
+fn workflow_child_page(
+    page: &neo_agent_core::workflow::WorkflowChildPage,
+) -> TaskBrowserWorkflowChildPage {
+    TaskBrowserWorkflowChildPage {
+        items: page.items.iter().map(workflow_child_row).collect(),
+        next_cursor: page.next_cursor.clone(),
+        has_more: page.has_more,
+        query_hash: page.query_hash.clone(),
+    }
+}
+
+fn workflow_child_row(
+    child: &neo_agent_core::workflow::WorkflowChildRow,
+) -> TaskBrowserWorkflowChild {
+    let now_ms = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis()
+        .try_into()
+        .unwrap_or(u64::MAX);
+    let end_ms = child.terminal_at_ms.unwrap_or(now_ms);
+    let elapsed = child.started_at_ms.map_or(Duration::ZERO, |started| {
+        Duration::from_millis(end_ms.saturating_sub(started))
+    });
+    TaskBrowserWorkflowChild {
+        key: child.key.clone(),
+        title: child
+            .title
+            .clone()
+            .unwrap_or_else(|| match child.child_kind {
+                neo_agent_core::workflow::WorkflowChildKind::Delegate => "Delegate".to_owned(),
+                neo_agent_core::workflow::WorkflowChildKind::SwarmItem => "Work item".to_owned(),
+            }),
+        role: child.role.clone(),
+        state: match child.state {
+            neo_agent_core::workflow::WorkflowChildState::Queued => {
+                TaskBrowserWorkflowRowState::Pending
+            }
+            neo_agent_core::workflow::WorkflowChildState::Running => {
+                TaskBrowserWorkflowRowState::Working
+            }
+            neo_agent_core::workflow::WorkflowChildState::Completed => {
+                TaskBrowserWorkflowRowState::Completed
+            }
+            neo_agent_core::workflow::WorkflowChildState::Failed
+            | neo_agent_core::workflow::WorkflowChildState::Cancelled
+            | neo_agent_core::workflow::WorkflowChildState::Interrupted => {
+                TaskBrowserWorkflowRowState::Failed
+            }
+            neo_agent_core::workflow::WorkflowChildState::Recovering => {
+                TaskBrowserWorkflowRowState::Recovering
+            }
+        },
+        elapsed: format_elapsed(elapsed),
+        actual_usage: child.actual_usage.clone(),
+        latest_activity: child.latest_activity.clone(),
+        terminal_summary: child
+            .error_summary
+            .clone()
+            .or_else(|| child.terminal_summary.clone()),
     }
 }
 
@@ -221,12 +409,6 @@ fn detail_lines(snapshot: &BackgroundTaskSnapshot, status: TaskBrowserStatus) ->
                     }
                 ));
                 lines.push(format!("artifacts:   {}", meta.artifact_count));
-                if let Some(parent) = &meta.parent_run_id {
-                    lines.push(format!("parent:      {parent}"));
-                }
-                if let Some(request_id) = &meta.pending_request_id {
-                    lines.push(format!("awaiting:    {request_id}"));
-                }
                 if let Some(reason) = &meta.terminal_reason {
                     lines.push(format!("terminal:    {reason}"));
                 }
@@ -773,5 +955,65 @@ mod tests {
         assert!(details.contains("aggregate:"), "{details}");
         assert!(details.contains("completed"), "{details}");
         assert!(details.contains("agent_"), "{details}");
+    }
+
+    #[test]
+    fn workflow_child_row_displays_projected_live_and_durable_terminal_facts() {
+        use neo_agent_core::workflow::{
+            WorkflowChildKey, WorkflowChildKind, WorkflowChildRow, WorkflowChildState,
+        };
+
+        let mut child = WorkflowChildRow {
+            key: WorkflowChildKey::DirectDelegate {
+                invocation_id: "inv-1".to_owned(),
+            },
+            child_kind: WorkflowChildKind::Delegate,
+            phase_id: None,
+            agent_id: Some("agent-workflow-live".to_owned()),
+            state: WorkflowChildState::Running,
+            title: Some("Review".to_owned()),
+            role: None,
+            queued_at_ms: Some(1_000),
+            started_at_ms: Some(2_000),
+            updated_at_ms: 2_000,
+            terminal_at_ms: None,
+            terminal_summary: None,
+            error_summary: None,
+            actual_usage: Some(serde_json::json!({"total_tokens": 15})),
+            latest_activity: Some("Read: src/lib.rs".to_owned()),
+            generated_files: Vec::new(),
+        };
+
+        let row = workflow_child_row(&child);
+        assert_eq!(row.state, TaskBrowserWorkflowRowState::Working);
+        assert_eq!(
+            row.actual_usage,
+            Some(serde_json::json!({"total_tokens": 15}))
+        );
+        assert_eq!(row.latest_activity.as_deref(), Some("Read: src/lib.rs"));
+
+        child.state = WorkflowChildState::Completed;
+        child.terminal_at_ms = Some(3_000);
+        child.terminal_summary = Some("durable result".to_owned());
+        child.actual_usage = Some(serde_json::json!({
+            "input_tokens": 1,
+            "output_tokens": 2,
+            "input_cache_read_tokens": 3,
+            "input_cache_write_tokens": 4,
+        }));
+        child.latest_activity = None;
+        let terminal = workflow_child_row(&child);
+        assert_eq!(terminal.state, TaskBrowserWorkflowRowState::Completed);
+        assert_eq!(
+            terminal.actual_usage,
+            Some(serde_json::json!({
+                "input_tokens": 1,
+                "output_tokens": 2,
+                "input_cache_read_tokens": 3,
+                "input_cache_write_tokens": 4,
+            }))
+        );
+        assert_eq!(terminal.latest_activity, None);
+        assert_eq!(terminal.terminal_summary.as_deref(), Some("durable result"));
     }
 }

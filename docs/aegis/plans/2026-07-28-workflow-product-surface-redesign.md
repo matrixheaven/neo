@@ -32,7 +32,7 @@ Human / Model / CLI launch
 WorkflowLaunchCoordinator
           |
           v
-WorkflowRuntime + V3 journal  <---- durable lifecycle and child facts
+WorkflowRuntime + journal  <---- durable lifecycle and child facts
           |
           +---- BackgroundTaskManager ---- MultiAgentRuntime live snapshots
           |              |
@@ -110,8 +110,7 @@ Preserve:
 - exact bare `/workflow` authoring entry;
 - Lua, host schemas, child-effect permission checks, typed approvals, and
   root-only `Workflow` / `TaskAnswer` registration;
-- V1 existing read-only behavior;
-- V2 journal readability without migration or rewrite;
+- the canonical journal envelope, scanner, recovery, and child records;
 - linked-run lineage, artifacts, final results, actual usage, and task controls;
 - existing Workflow, Delegate, DelegateGroup, and DelegateSwarm transcript card
   layout, content, expansion, timing, and placement.
@@ -124,7 +123,7 @@ Intentionally break and delete:
 - mandatory model call ordering before `run_*` or `save`;
 - prompt-keyword admission that blocks otherwise valid Workflow actions;
 - TUI workflow fork/prune and empty-object answer behavior;
-- V3 writes of legacy `SwarmItem*` events;
+- legacy `SwarmItem*` events and all format-generation branches;
 - hidden aliases, compatibility branches, and duplicate owners.
 
 External CLI scripts may break. The approved spec explicitly chooses a clean
@@ -151,8 +150,8 @@ breaking surface; do not retain aliases for unknown consumers.
   `validate_inline`, blocking valid `save` and `run_saved` intents.
 - `run_inline`, `run_saved`, and `save` already converge on typed preflight
   owners; the defect is contract and gating, not missing validation machinery.
-- V2 records swarm item lifecycle but direct delegates expose durable identity
-  only in terminal invocation child refs.
+- swarm-specific records and terminal-only direct child refs do not provide one
+  complete child lifecycle.
 - `BackgroundTaskManager` currently projects aggregate workflow counts and has
   no child roster/live merge.
 - `/tasks` currently submits `{}` for a workflow answer.
@@ -248,12 +247,12 @@ adapter.
 - Canonical contract: one launch coordinator, one runtime, one task manager,
   one model Workflow tool, one Operator projection.
 - Responsibility overlap to avoid: TUI journal parsing, title-based child joins,
-  CLI-local Lua execution, queue-local completion reconstruction, and dual V2/V3
-  writes.
+  CLI-local Lua execution, queue-local completion reconstruction, and multiple
+  journal read or write paths.
 - Higher-level simplification: all adapters use the same launch/save/control
-  owners; V3 child lifecycle replaces new legacy swarm writes.
+  owners; generic child lifecycle replaces legacy swarm writes.
 - Retirement falsifier: any active old CLI route, mandatory action choreography,
-  V3 `SwarmItem*` writer, workflow fork/prune key, or `{}` answer path.
+  `SwarmItem*` writer, format branch, workflow fork/prune key, or `{}` answer path.
 - Verdict: proceed with delete-first internal retirement.
 
 ## Anti-Entropy Declaration
@@ -262,10 +261,10 @@ adapter.
 - Old paths: five CLI variants, old flags/helpers, synthetic headless runner,
   buffered JSONL, prompt-keyword route gate, old TUI workflow controls, empty
   answer confirmation, new-run legacy swarm writes.
-- New canonical owners: existing coordinator/runtime/task/control owners plus V3
+- New canonical owners: existing coordinator/runtime/task/control owners plus
   generic child records and the workflow-specific `/tasks` projection.
 - Expected preserved behavior: all seven Workflow actions, runtime fork/lineage,
-  registry save, task answer/control, automatic storage safety, and V2 reads.
+  registry save, task answer/control, and automatic storage safety.
 - Expected retired behavior: public low-level assembly and duplicate writer/UI
   paths.
 - External boundary touched: yes, CLI is deliberately breaking.
@@ -281,8 +280,7 @@ Retirement Decision:
 - Path: `delete-first`
 - Why: removed paths are internal or explicitly retired public CLI contracts;
   no active external dependency evidence justifies compatibility aliases.
-- Non-edits: no migration or rewrite of V1/V2 journals, historical specs, old
-  ADRs/baselines, or prior evidence.
+- Non-edits: no migration logic and no changes to historical ADRs or baselines.
 
 ## Complexity Budget
 
@@ -313,7 +311,7 @@ Plan-Time Complexity Check:
 - `crates/neo-agent-core/src/workflow/child_projection.rs`
 - `crates/neo-agent-core/src/workflow/operator.rs`
 - `crates/neo-agent-core/src/tools/background_tasks/workflow_operator.rs`
-- `crates/neo-agent-core/tests/workflow_journal_v3.rs`
+- `crates/neo-agent-core/tests/workflow_child_journal.rs`
 - `crates/neo-agent-core/tests/workflow_operator.rs`
 
 ### New TUI/Host Files
@@ -530,37 +528,37 @@ the exact definition; one terminal notification arrives without polling.
 
 Commit: `feat(workflow): pin product metadata for run delivery`
 
-## Task 3: Introduce V3 Journal And Read-Only V2 Projection
+## Task 3: Establish One Canonical Journal And Child Projection
 
 Files:
 
 - `crates/neo-agent-core/src/workflow/{journal,journal_scan,recovery,state,output,mod}.rs`
 - `crates/neo-agent-core/src/workflow/child_projection.rs`
-- `crates/neo-agent-core/tests/workflow_journal_v3.rs`
+- `crates/neo-agent-core/tests/workflow_child_journal.rs`
 
 Why: the Operator cannot truthfully show direct delegates or recover child rows
 without generic durable child facts.
 
 Repair Track:
 
-- Root cause: V2 swarm-specific events and terminal-only direct child refs do not
+- Root cause: swarm-specific events and terminal-only direct child refs do not
   form one generic lifecycle.
 - Canonical owner: journal envelope + runtime child projection.
-- Stable repair: V3 generic events and a version-aware read-only projector.
-- Compatibility: V1/V2 remain readable and untouched.
+- Stable repair: one generic event stream, scanner, recovery path, and projector.
+- Compatibility: deliberately removed; old format branches and fixtures are
+  deleted instead of migrated.
 
 Retirement Track:
 
 - Old owner: `SwarmItemQueued/Started/Finished` for new writes.
-- Active status: V2 read compatibility only.
-- Deletion trigger: no new-run writer references after Task 4.
+- Active status: deleted.
+- Deletion proof: no writer, reader, fixture, or test references remain.
 
 Steps:
 
-1. Add `JOURNAL_FORMAT_V3` and version-aware validation/scanning. Do not silently
-   accept unknown versions.
-2. Generalize the current V2 envelope writer name/constructor so new runs write
-   version 3 while an existing V2 run is never opened for append.
+1. Keep one journal envelope and reject records outside its exact schema.
+2. Route new runs, resume, output paging, retention, harnesses, and child
+   projection through the same scanner and recovery path.
 3. Add `ChildQueued`, `ChildStarted`, and `ChildFinished` with the exact keys and
    payload-ref rules from spec section 19.
 4. Reuse `JournalPayloadRef` and the artifact store. A specification/outcome is
@@ -568,25 +566,24 @@ Steps:
    payload.
 5. Add bounded child projection by journal scan/page. Duplicate keys fail with a
    typed projection error.
-6. Map V2 `SwarmItem*` to generic rows; reconstruct a V2 direct delegate only
-   from terminal child refs.
+6. Delete `SwarmItem*` records and project both direct and swarm children only
+   through the generic records.
 7. Project a started child without a durable finish as `Recovering`; never
    `Running` after restart.
-8. Make V2 strictly read-only: no migration, tail repair append, reconciliation
-   append, or writer open. Existing fail-closed corruption behavior remains.
+8. Delete format dispatch, compatibility readers, migration code, old fixtures,
+   and tests that exist only for retired data.
 9. Derive step occurrences from phase marker envelope sequence. A workflow with
    no marker gets view-only `Execution`.
 
 Verification:
 
 ```bash
-rtk cargo test --package neo-agent-core --test workflow_journal_v3 -- journal_v3_generic_child_lifecycle_round_trips_and_replays --exact --nocapture --include-ignored
-rtk cargo test --package neo-agent-core --test workflow_journal_v3 -- v2_terminal_children_project_read_only_without_rewrite --exact --nocapture --include-ignored
-rtk cargo test --package neo-agent-core --test workflow_journal_v3 -- started_without_finished_projects_recovering --exact --nocapture --include-ignored
-rtk cargo test --package neo-agent-core --test workflow_journal_v3 -- unknown_or_torn_v3_data_remains_fail_closed --exact --nocapture --include-ignored
+rtk cargo test --package neo-agent-core --test workflow_child_journal -- journal_child_lifecycle_validates_and_projects_terminal_facts --exact --nocapture --include-ignored
+rtk cargo test --package neo-agent-core --test workflow_child_journal -- started_without_finished_projects_recovering --exact --nocapture --include-ignored
+rtk cargo test --package neo-agent-core --test workflow_journal -- journal_scan_rejects_total_bytes_above_limit --exact --nocapture --include-ignored
 ```
 
-Commit: `feat(workflow): add journal v3 child lifecycle`
+Commit: `feat(workflow): unify journal child lifecycle`
 
 ## Task 4: Emit One Generic Lifecycle For Direct And Swarm Children
 
@@ -595,9 +592,9 @@ Files:
 - `crates/neo-agent-core/src/workflow/{effect,runtime,lua}.rs`
 - `crates/neo-agent-core/src/runtime/{workflow_dispatch,tool_dispatch}.rs`
 - `crates/neo-agent-core/src/tools/{mod,delegate}.rs`
-- `crates/neo-agent-core/tests/{workflow_dispatch,workflow_journal_v3}.rs`
+- `crates/neo-agent-core/tests/{workflow_dispatch,workflow_child_journal}.rs`
 
-Why: the V3 schema is useful only if every production child path records it
+Why: the generic schema is useful only if every production child path records it
 before live work and exactly once at terminal state.
 
 Steps:
@@ -617,7 +614,7 @@ Steps:
    prepared child snapshot.
 7. Normalize all supported `neo.swarm` forms to `ChildPlan` and one per-item
    producer path. Remove any new-run homogeneous special writer.
-8. Delete V3 writes of `SwarmItem*`; retain only V2 reader projection.
+8. Delete all writes and reads of `SwarmItem*`.
 9. Do not create top-level Delegate/Swarm background task rows for workflow
    children.
 10. Keep schema repair/resource admission as activity/reason fields, not child
@@ -628,7 +625,7 @@ Verification:
 ```bash
 rtk cargo test --package neo-agent-core --test workflow_dispatch -- delegate_usage_and_child_ref_are_journaled_and_aggregated --exact --nocapture --include-ignored
 rtk cargo test --package neo-agent-core --test workflow_dispatch -- swarm_preserves_ids_terminal_children_and_aggregate_usage --exact --nocapture --include-ignored
-rtk cargo test --package neo-agent-core --test workflow_journal_v3 -- direct_and_swarm_children_replay_exactly_once_with_unresolved_started_as_recovering --exact --nocapture --include-ignored
+rtk cargo test --package neo-agent-core --test workflow_child_journal -- direct_and_swarm_children_replay_exactly_once_with_unresolved_started_as_recovering --exact --nocapture --include-ignored
 ```
 
 Commit: `feat(workflow): journal direct and swarm children uniformly`
@@ -956,7 +953,7 @@ user intent -> Skill(create-workflow) when needed -> Workflow(run_inline)
    and verify stable paging without total cap or full-frame materialization.
 9. Verify existing transcript cards are logically unchanged.
 10. Obtain native macOS, Linux, and Windows proof for CLI TTY/non-TTY, Ctrl+C,
-    Operator key/mouse/layout, and V3 create/replay/path safety.
+    Operator key/mouse/layout, and journal create/replay/path safety.
 11. Follow project VM rules: check memory, use only one VM at a time, and shut it
     down after use. Never treat a cross target build as native execution.
 12. Record command, platform, commit, exit, and key assertion in `90-evidence`.
@@ -999,11 +996,11 @@ Steps:
    optional check-only validation, skill role, and automatic completion.
 3. Document `/tasks` Steps/Agents/Details, smart entry, Needs input, controls,
    responsive behavior, and actual-usage placement.
-4. Document V3 writes and V2 read-only compatibility without telling users to
+4. Document the single canonical journal lifecycle without telling users to
    operate on journals.
 5. Keep EN/ZH behavior equivalent.
-6. ADR-0008 records CLI four-command surface, seven-action semantics, V3 child
-   lifecycle, completion delivery, Operator, automatic retention, and V2 reads.
+6. ADR-0008 records CLI four-command surface, seven-action semantics, canonical
+   child lifecycle, completion delivery, Operator, and automatic retention.
 7. ADR-0008 supersedes only the human/model/operator portions of ADR-0007.
    ADR-0006/0007 remain historical files and are not edited.
 8. New baseline cites exact tested commit and evidence. Do not call pending or
@@ -1041,8 +1038,8 @@ Commit: `docs(workflow): publish redesigned product surfaces`
 | Skill optional as capability | Task 1 skill/policy tests |
 | Completion without polling | Task 2 notification tests |
 | Completion includes generated files | Task 5 runtime-owned aggregate test |
-| V3 direct/swarm lifecycle | Tasks 3-4 journal tests |
-| V2 read-only | Task 3 byte-for-byte no-write test |
+| Direct/swarm lifecycle | Tasks 3-4 journal tests |
+| Single journal path | Task 3 stale-path scan and recovery tests |
 | Recovering truth | Task 3 replay test |
 | Durable/live merge | Task 5 merge test |
 | 10,000 rows/no cap | Task 5 scale test |
@@ -1078,8 +1075,8 @@ Commit: `docs(workflow): publish redesigned product surfaces`
   generated-files aggregate and completion enrichment.
 - Type consistency: keys, step occurrence, request/page, metadata, and state
   contracts match the approved spec.
-- Compatibility check: V1/V2 are read-only; V3 only is written for new runs;
-  no migration or alias.
+- Compatibility check: old journal generations, fixtures, readers, writers, and
+  migrations are deleted; no CLI alias remains.
 - Complexity check: oversized files receive deletion/wiring only; new
   responsibilities have bounded owner files.
 - UI check: ordinary browser and transcript cards remain unchanged; no new page
@@ -1094,11 +1091,11 @@ Commit: `docs(workflow): publish redesigned product surfaces`
 - Scope Fence: Tasks 1-11 only; unrelated defects and `.gitignore` are excluded.
 - Baseline Lock: ADR-0006/0007 and 2026-07-26/27 baselines are read-only inputs.
 - Approved Behavior: four CLI commands, seven self-contained model actions,
-  V3 child facts, Grok-inspired workflow-only Operator, typed input, automatic
+  canonical child facts, Grok-inspired workflow-only Operator, typed input, automatic
   retention, and completion delivery.
 - Owner/Contract Constraints: no second owner; TUI never parses or persists
   runtime state; CLI never builds a second runner.
-- Compatibility Boundary: V1/V2 read-only, new V3 writer, no old CLI aliases.
+- Compatibility Boundary: one journal reader/writer/recovery path and no old CLI aliases.
 - Retirement Boundary: remove old CLI/gate/TUI/writer paths only after their
   approved replacement is proven.
 - Task Batches: model (1-2), durability (3-5), TUI (6-7), storage/CLI (8-9),
@@ -1118,7 +1115,7 @@ Commit: `docs(workflow): publish redesigned product surfaces`
 Stop and ask the user if any of these occur:
 
 - preserving an active external CLI dependency would require an alias;
-- V2 recovery would require writing or migrating a V2 journal;
+- recovery would require adding a compatibility reader or migration path;
 - child identity cannot be established without title matching or a random UUID;
 - CLI real execution would require a second ToolRegistry/runtime/model resolver;
 - contextual Save cannot use pinned metadata and canonical permission/registry;

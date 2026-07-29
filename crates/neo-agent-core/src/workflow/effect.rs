@@ -1,4 +1,4 @@
-//! Durable external-effect protocol for workflow V2 (design §17.2).
+//! Durable external-effect protocol for workflows (design §17.2).
 //!
 //! Ordering for every host-visible effect:
 //!
@@ -61,7 +61,7 @@ pub struct PreparedTransition {
     pub reason: String,
 }
 
-/// Whether the journal still has room for a start record plus a compact finish
+/// Whether the journal still has room for a start record plus a bounded finish
 /// and a terminal workflow state (design §17.2 reserve rule).
 pub fn has_invocation_reservation(
     bytes_written: u64,

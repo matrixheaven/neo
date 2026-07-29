@@ -1,4 +1,3 @@
-use std::collections::HashSet;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 
@@ -8,72 +7,18 @@ use super::error::{WorkflowError, WorkflowErrorCode};
 use super::limits::WorkflowLimits;
 use super::state::{
     WorkflowActor, WorkflowArtifactId, WorkflowFinalResultMetadata, WorkflowId,
-    WorkflowInvocationKind, WorkflowInvocationOutcome, WorkflowLineageMetadata, WorkflowState,
+    WorkflowInvocationKind, WorkflowInvocationOutcome, WorkflowOutcomeStatus, WorkflowState,
 };
+use super::user_input::UserAnswerPolicy;
 use crate::AgentTokenUsage;
 use crate::session::atomic_file;
-
-/// Journal format version for legacy V1 records (unversioned wire shape).
-pub const JOURNAL_FORMAT_V1: u32 = 1;
-/// Journal format version for versioned V2 envelopes.
-pub const JOURNAL_FORMAT_V2: u32 = 2;
-/// Journal format version for V3 with generic child lifecycle events.
-pub const JOURNAL_FORMAT_V3: u32 = 3;
 
 #[path = "journal_scan.rs"]
 pub mod journal_scan;
 
 pub use journal_scan::{
-    JournalPage, JournalScanIndex, collect_journal, collect_journal_v1, scan_journal,
-    scan_journal_page, scan_journal_v1_index,
+    JournalPage, JournalScanIndex, collect_journal, scan_journal, scan_journal_page,
 };
-
-// ---------------------------------------------------------------------------
-// V1 wire records (read-only fixtures + current runtime writer path)
-// ---------------------------------------------------------------------------
-
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
-#[serde(tag = "type", rename_all = "snake_case")]
-pub enum JournalRecord {
-    StateChanged {
-        seq: u64,
-        timestamp_ms: u64,
-        previous: WorkflowState,
-        new: WorkflowState,
-        reason: String,
-        actor: WorkflowActor,
-    },
-    InvocationStarted {
-        seq: u64,
-        timestamp_ms: u64,
-        invocation_id: String,
-        call_index: u64,
-        kind: WorkflowInvocationKind,
-        canonical_input: serde_json::Value,
-        canonical_input_hash: String,
-    },
-    InvocationFinished {
-        seq: u64,
-        timestamp_ms: u64,
-        invocation_id: String,
-        outcome: WorkflowInvocationOutcome,
-    },
-}
-
-impl JournalRecord {
-    #[must_use]
-    pub fn seq(&self) -> u64 {
-        match self {
-            Self::StateChanged { seq, .. }
-            | Self::InvocationStarted { seq, .. }
-            | Self::InvocationFinished { seq, .. } => *seq,
-        }
-    }
-}
-
-// ---------------------------------------------------------------------------
-// Versioned envelope + record families
-// ---------------------------------------------------------------------------
 
 /// Hash-addressed payload reference for large journal bodies.
 ///
@@ -120,10 +65,10 @@ pub enum WorkflowChildKind {
     SwarmItem,
 }
 
-/// Versioned journal envelope (design §17).
+/// Canonical journal envelope.
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct JournalEnvelope {
-    pub version: u32,
     pub seq: u64,
     pub timestamp_ms: u64,
     pub run_id: WorkflowId,
@@ -140,30 +85,10 @@ impl JournalEnvelope {
         self.seq
     }
 
-    /// Build a V2 envelope for `run_id` with the given payload.
+    /// Build a canonical envelope for `run_id` with the given payload.
     #[must_use]
     pub fn new(seq: u64, timestamp_ms: u64, run_id: WorkflowId, payload: JournalPayload) -> Self {
         Self {
-            version: JOURNAL_FORMAT_V2,
-            seq,
-            timestamp_ms,
-            run_id,
-            payload,
-            canonical_input_hash: None,
-            payload_refs: Vec::new(),
-        }
-    }
-
-    /// Build a V3 envelope for `run_id` with the given payload.
-    #[must_use]
-    pub fn new_v3(
-        seq: u64,
-        timestamp_ms: u64,
-        run_id: WorkflowId,
-        payload: JournalPayload,
-    ) -> Self {
-        Self {
-            version: JOURNAL_FORMAT_V3,
             seq,
             timestamp_ms,
             run_id,
@@ -186,7 +111,7 @@ impl JournalEnvelope {
     }
 }
 
-/// Typed V2 journal payloads. Unknown kinds fail closed at decode time.
+/// Typed journal payloads. Unknown kinds fail closed at decode time.
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum JournalPayload {
@@ -216,23 +141,6 @@ pub enum JournalPayload {
         /// Outcome keeps usage, terminal status, and child_refs inline.
         outcome: WorkflowInvocationOutcome,
     },
-    SwarmItemQueued {
-        swarm_id: String,
-        item_id: String,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        canonical_input: Option<serde_json::Value>,
-    },
-    SwarmItemStarted {
-        swarm_id: String,
-        item_id: String,
-        invocation_id: String,
-    },
-    SwarmItemFinished {
-        swarm_id: String,
-        item_id: String,
-        invocation_id: String,
-        outcome: WorkflowInvocationOutcome,
-    },
     SchemaRepairStarted {
         repair_id: String,
         invocation_id: String,
@@ -244,10 +152,13 @@ pub enum JournalPayload {
     },
     UserInputRequested {
         request_id: String,
-        /// Request body: string prompt (legacy) or structured object with
-        /// `prompt`, `answer_schema`, `default`, `title`, `answer_policy`.
+        prompt: String,
+        answer_schema: serde_json::Value,
         #[serde(default, skip_serializing_if = "Option::is_none")]
-        prompt: Option<serde_json::Value>,
+        default: Option<serde_json::Value>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        title: Option<String>,
+        answer_policy: UserAnswerPolicy,
     },
     UserInputAnswered {
         request_id: String,
@@ -265,11 +176,6 @@ pub enum JournalPayload {
     },
     FinalResultRecorded {
         metadata: WorkflowFinalResultMetadata,
-    },
-    LineageSeedImported {
-        lineage: WorkflowLineageMetadata,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        prefix_digest: Option<String>,
     },
     RecoveryActionApplied {
         action: String,
@@ -300,38 +206,40 @@ pub enum JournalPayload {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         swarm_item_id: Option<String>,
     },
-    /// V3 generic child queued: spec is durable before dispatch.
+    /// Generic child queued: spec is durable before dispatch.
     ChildQueued {
         child_key: WorkflowChildKey,
         child_kind: WorkflowChildKind,
         invocation_id: String,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         phase_id: Option<String>,
-        spec_payload_ref: JournalPayloadRef,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        title: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        role: Option<String>,
     },
-    /// V3 generic child started: binds runtime agent_id before live work.
+    /// Generic child started: binds runtime agent_id before live work.
     ChildStarted {
         child_key: WorkflowChildKey,
-        agent_id: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        agent_id: Option<String>,
     },
-    /// V3 generic child finished: references the canonical outcome payload.
+    /// Generic child finished: references the canonical outcome payload.
     ChildFinished {
         child_key: WorkflowChildKey,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         agent_id: Option<String>,
-        outcome_payload_ref: JournalPayloadRef,
+        status: WorkflowOutcomeStatus,
+        summary: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        actual_usage: Option<AgentTokenUsage>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        error: Option<String>,
     },
 }
 
-/// Validate envelope-local invariants (version, hash vs inline input).
+/// Validate envelope-local invariants.
 pub fn validate_envelope(envelope: &JournalEnvelope) -> Result<(), WorkflowError> {
-    if envelope.version != JOURNAL_FORMAT_V2 && envelope.version != JOURNAL_FORMAT_V3 {
-        return Err(WorkflowError::coded(
-            WorkflowErrorCode::JournalCorrupt,
-            format!("unknown journal format version {}", envelope.version),
-        ));
-    }
-
     if let JournalPayload::InvocationStarted {
         invocation_id,
         canonical_input: Some(input),
@@ -397,189 +305,6 @@ pub fn canonicalize_json(value: &serde_json::Value) -> serde_json::Value {
     }
 }
 
-// ---------------------------------------------------------------------------
-// Read-only record writer retained for pre-canonical journals.
-// ---------------------------------------------------------------------------
-
-pub struct JournalRecordWriter {
-    file: std::fs::File,
-    next_seq: u64,
-    bytes_written: u64,
-    started_invocations: HashSet<String>,
-    finished_invocations: HashSet<String>,
-}
-
-impl JournalRecordWriter {
-    pub fn open(path: &Path) -> Result<Self, WorkflowError> {
-        if let Some(parent) = path.parent() {
-            atomic_file::ensure_safe_directory_tree(parent)
-                .map_err(|e| WorkflowError::Journal(e.to_string()))?;
-        }
-
-        let created = match std::fs::OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .open(path)
-        {
-            Ok(file) => {
-                file.sync_all()
-                    .map_err(|e| WorkflowError::Journal(e.to_string()))?;
-                true
-            }
-            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => false,
-            Err(error) => return Err(WorkflowError::Journal(error.to_string())),
-        };
-        if created && let Some(parent) = path.parent() {
-            atomic_file::sync_directory(parent)
-                .map_err(|e| WorkflowError::Journal(e.to_string()))?;
-        }
-
-        // Bounded index scan — no full-journal Vec retention for open state.
-        let index = if path.exists() {
-            scan_journal_v1_index(path)?
-        } else {
-            JournalScanIndex::default()
-        };
-        let file = std::fs::OpenOptions::new()
-            .append(true)
-            .create(true)
-            .open(path)
-            .map_err(|e| WorkflowError::Journal(e.to_string()))?;
-
-        Ok(Self {
-            file,
-            next_seq: index.next_seq,
-            bytes_written: index.bytes_scanned,
-            started_invocations: index.started_invocations,
-            finished_invocations: index.finished_invocations,
-        })
-    }
-
-    pub fn append(
-        &mut self,
-        record: &JournalRecord,
-        limits: &WorkflowLimits,
-    ) -> Result<u64, WorkflowError> {
-        validate_v1_record(
-            record,
-            self.next_seq,
-            &self.started_invocations,
-            &self.finished_invocations,
-        )?;
-
-        let line =
-            serde_json::to_string(record).map_err(|e| WorkflowError::Journal(e.to_string()))?;
-        let line_bytes = u64::try_from(line.len())
-            .ok()
-            .and_then(|bytes| bytes.checked_add(1))
-            .ok_or_else(|| WorkflowError::Journal("record size overflow".to_owned()))?;
-
-        if line_bytes > limits.journal_record_bytes {
-            return Err(WorkflowError::JournalRecordLimitExceeded {
-                observed: line_bytes,
-                limit: limits.journal_record_bytes,
-            });
-        }
-
-        if matches!(record, JournalRecord::InvocationStarted { .. })
-            && !self.has_reservation_for_serialized_start(line_bytes, limits)
-        {
-            return Err(WorkflowError::JournalTotalLimitExceeded);
-        }
-
-        if self
-            .bytes_written
-            .checked_add(line_bytes)
-            .is_none_or(|bytes| bytes > limits.journal_total_bytes)
-        {
-            return Err(WorkflowError::JournalTotalLimitExceeded);
-        }
-
-        self.file
-            .write_all(line.as_bytes())
-            .and_then(|()| self.file.write_all(b"\n"))
-            .and_then(|()| self.file.sync_all())
-            .map_err(|e| WorkflowError::Journal(e.to_string()))?;
-
-        let seq = self.next_seq;
-        observe_v1_record(
-            record,
-            &mut self.started_invocations,
-            &mut self.finished_invocations,
-        );
-        self.next_seq = self
-            .next_seq
-            .checked_add(1)
-            .ok_or_else(|| WorkflowError::Journal("journal sequence overflow".to_owned()))?;
-        self.bytes_written = self
-            .bytes_written
-            .checked_add(line_bytes)
-            .ok_or_else(|| WorkflowError::Journal("journal size overflow".to_owned()))?;
-        Ok(seq)
-    }
-
-    pub fn has_reservation_for_invocation(
-        &self,
-        start: &JournalRecord,
-        limits: &WorkflowLimits,
-    ) -> Result<bool, WorkflowError> {
-        validate_v1_record(
-            start,
-            self.next_seq,
-            &self.started_invocations,
-            &self.finished_invocations,
-        )?;
-        if !matches!(start, JournalRecord::InvocationStarted { .. }) {
-            return Err(WorkflowError::Journal(
-                "invocation reservation requires an invocation_started record".to_owned(),
-            ));
-        }
-
-        let line =
-            serde_json::to_string(start).map_err(|e| WorkflowError::Journal(e.to_string()))?;
-        let line_bytes = u64::try_from(line.len())
-            .ok()
-            .and_then(|bytes| bytes.checked_add(1))
-            .ok_or_else(|| WorkflowError::Journal("record size overflow".to_owned()))?;
-        if line_bytes > limits.journal_record_bytes {
-            return Ok(false);
-        }
-        Ok(self.has_reservation_for_serialized_start(line_bytes, limits))
-    }
-
-    fn has_reservation_for_serialized_start(
-        &self,
-        start_record_bytes: u64,
-        limits: &WorkflowLimits,
-    ) -> bool {
-        limits
-            .invocation_reservation_bytes(start_record_bytes)
-            .and_then(|reservation| self.bytes_written.checked_add(reservation))
-            .is_some_and(|bytes| bytes <= limits.journal_total_bytes)
-    }
-
-    #[must_use]
-    pub fn next_seq(&self) -> u64 {
-        self.next_seq
-    }
-
-    #[must_use]
-    pub fn bytes_written(&self) -> u64 {
-        self.bytes_written
-    }
-
-    #[must_use]
-    pub fn has_incomplete_invocations(&self) -> bool {
-        self.started_invocations
-            .iter()
-            .any(|id| !self.finished_invocations.contains(id))
-    }
-}
-
-// ---------------------------------------------------------------------------
-// Canonical writer — sole owner of versioned appends
-// ---------------------------------------------------------------------------
-
 pub struct JournalWriter {
     file: std::fs::File,
     run_id: WorkflowId,
@@ -594,7 +319,11 @@ impl JournalWriter {
     /// Applies torn-tail recovery (normalize valid unterminated final record or
     /// quarantine+truncate invalid EOF suffix) before indexing. Fail-closed
     /// corruption is not repaired.
-    pub fn open(path: &Path, run_id: WorkflowId) -> Result<Self, WorkflowError> {
+    pub fn open(
+        path: &Path,
+        run_id: WorkflowId,
+        limits: &WorkflowLimits,
+    ) -> Result<Self, WorkflowError> {
         if let Some(parent) = path.parent() {
             atomic_file::ensure_safe_directory_tree(parent)
                 .map_err(|e| WorkflowError::Journal(e.to_string()))?;
@@ -618,37 +347,13 @@ impl JournalWriter {
                 .map_err(|e| WorkflowError::Journal(e.to_string()))?;
         }
 
-        let report = if path.exists() && std::fs::metadata(path).map_or(0, |m| m.len()) > 0 {
-            crate::workflow::recovery::recover_journal(path, Some(&run_id))?
-        } else {
-            crate::workflow::recovery::JournalRecoveryReport {
-                action: crate::workflow::recovery::JournalRecoveryAction::None,
-                index: JournalScanIndex {
-                    run_id: Some(run_id.clone()),
-                    ..Default::default()
-                },
-                recovery_record_appended: false,
-            }
-        };
-        Self::open_recovered(path, run_id, &report)
-    }
-
-    /// Open a journal after recovery has already been applied (no second recovery pass).
-    pub fn open_recovered(
-        path: &Path,
-        run_id: WorkflowId,
-        report: &crate::workflow::recovery::JournalRecoveryReport,
-    ) -> Result<Self, WorkflowError> {
-        let index = if report.index.run_id.is_some() || report.index.record_count > 0 {
-            report.index.clone()
-        } else if path.exists() && std::fs::metadata(path).map_or(0, |m| m.len()) > 0 {
-            scan_journal(path, Some(&run_id))?
-        } else {
-            JournalScanIndex {
-                run_id: Some(run_id.clone()),
-                ..Default::default()
-            }
-        };
+        let index = crate::workflow::recovery::recover_journal(
+            path,
+            Some(&run_id),
+            limits.journal_record_bytes,
+            limits.journal_total_bytes,
+        )?
+        .index;
 
         let file = std::fs::OpenOptions::new()
             .append(true)
@@ -759,76 +464,6 @@ impl JournalWriter {
     }
 }
 
-/// Read a V1 journal via the streaming scanner (collects for small journals).
-pub fn read_journal(path: &Path) -> Result<Vec<JournalRecord>, WorkflowError> {
-    collect_journal_v1(path)
-}
-
-fn validate_v1_record(
-    record: &JournalRecord,
-    expected_seq: u64,
-    started_invocations: &HashSet<String>,
-    finished_invocations: &HashSet<String>,
-) -> Result<(), WorkflowError> {
-    if record.seq() != expected_seq {
-        return Err(WorkflowError::Journal(format!(
-            "sequence gap: expected {expected_seq}, got {}",
-            record.seq()
-        )));
-    }
-
-    match record {
-        JournalRecord::InvocationStarted {
-            invocation_id,
-            canonical_input,
-            canonical_input_hash: recorded_hash,
-            ..
-        } => {
-            let expected_hash = canonical_input_hash(canonical_input);
-            if *recorded_hash != expected_hash {
-                return Err(WorkflowError::Journal(format!(
-                    "canonical input hash mismatch for invocation {invocation_id}"
-                )));
-            }
-            if started_invocations.contains(invocation_id) {
-                return Err(WorkflowError::Journal(format!(
-                    "duplicate invocation_started for invocation {invocation_id}"
-                )));
-            }
-        }
-        JournalRecord::InvocationFinished { invocation_id, .. } => {
-            if !started_invocations.contains(invocation_id) {
-                return Err(WorkflowError::Journal(format!(
-                    "invocation_finished without invocation_started for invocation {invocation_id}"
-                )));
-            }
-            if finished_invocations.contains(invocation_id) {
-                return Err(WorkflowError::Journal(format!(
-                    "duplicate invocation_finished for invocation {invocation_id}"
-                )));
-            }
-        }
-        JournalRecord::StateChanged { .. } => {}
-    }
-    Ok(())
-}
-
-fn observe_v1_record(
-    record: &JournalRecord,
-    started_invocations: &mut HashSet<String>,
-    finished_invocations: &mut HashSet<String>,
-) {
-    match record {
-        JournalRecord::InvocationStarted { invocation_id, .. } => {
-            started_invocations.insert(invocation_id.clone());
-        }
-        JournalRecord::InvocationFinished { invocation_id, .. } => {
-            finished_invocations.insert(invocation_id.clone());
-        }
-        JournalRecord::StateChanged { .. } => {}
-    }
-}
-
 #[derive(Debug)]
 pub struct IncompleteInvocation {
     pub invocation_id: String,
@@ -837,41 +472,7 @@ pub struct IncompleteInvocation {
     pub canonical_input_hash: String,
 }
 
-#[must_use]
-pub fn find_incomplete_record_invocations(records: &[JournalRecord]) -> Vec<IncompleteInvocation> {
-    let mut started: Vec<IncompleteInvocation> = Vec::new();
-    let mut finished_ids: std::collections::HashSet<&str> = std::collections::HashSet::new();
-
-    for record in records {
-        match record {
-            JournalRecord::InvocationFinished { invocation_id, .. } => {
-                finished_ids.insert(invocation_id.as_str());
-            }
-            JournalRecord::InvocationStarted {
-                invocation_id,
-                call_index,
-                kind,
-                canonical_input_hash,
-                ..
-            } => {
-                started.push(IncompleteInvocation {
-                    invocation_id: invocation_id.clone(),
-                    call_index: *call_index,
-                    kind: *kind,
-                    canonical_input_hash: canonical_input_hash.clone(),
-                });
-            }
-            JournalRecord::StateChanged { .. } => {}
-        }
-    }
-
-    started
-        .into_iter()
-        .filter(|inv| !finished_ids.contains(inv.invocation_id.as_str()))
-        .collect()
-}
-
-/// Incomplete V2 starts (durable InvocationStarted without InvocationFinished).
+/// Durable invocation starts without a matching finish.
 #[must_use]
 pub fn find_incomplete_invocations(envelopes: &[JournalEnvelope]) -> Vec<IncompleteInvocation> {
     let mut started: Vec<IncompleteInvocation> = Vec::new();

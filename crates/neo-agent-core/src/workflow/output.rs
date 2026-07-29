@@ -20,7 +20,7 @@ use super::artifacts::{
 };
 use super::error::{WorkflowError, WorkflowErrorCode};
 use super::journal::{
-    self, JournalEnvelope, JournalPage, JournalPayload, canonicalize_json, scan_journal_page,
+    JournalEnvelope, JournalPage, JournalPayload, canonicalize_json, scan_journal_page,
 };
 use super::limits::WorkflowLimits;
 use super::state::{
@@ -325,7 +325,8 @@ impl TaskOutputRequest {
 pub struct TaskOutputMaterials {
     pub run_id: WorkflowId,
     pub journal_path: PathBuf,
-    pub journal_format_version: u32,
+    pub journal_record_bytes: u64,
+    pub journal_total_bytes: u64,
     pub metadata: WorkflowRunMetadata,
     pub state: WorkflowState,
     pub current_phase: Option<String>,
@@ -333,7 +334,6 @@ pub struct TaskOutputMaterials {
     pub invocation_count: u64,
     pub failure_count: u64,
     pub actual_usage: Option<AgentTokenUsage>,
-    pub inherited_usage: Option<AgentTokenUsage>,
     pub terminal_reason: Option<String>,
     pub latest_log_summary: Option<String>,
     pub latest_report_summary: Option<String>,
@@ -377,8 +377,6 @@ pub struct WorkflowOutputSummary {
     pub name: String,
     pub origin: String,
     pub revision: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub lineage: Option<serde_json::Value>,
     pub state: WorkflowState,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub current_phase: Option<String>,
@@ -391,8 +389,6 @@ pub struct WorkflowOutputSummary {
     pub failure_count: u64,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub actual_usage: Option<AgentTokenUsage>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub inherited_usage: Option<AgentTokenUsage>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pending_user: Option<PendingUserInputMeta>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -594,16 +590,12 @@ fn payload_type_name(payload: &JournalPayload) -> &'static str {
         JournalPayload::StateChanged { .. } => "state_changed",
         JournalPayload::InvocationStarted { .. } => "invocation_started",
         JournalPayload::InvocationFinished { .. } => "invocation_finished",
-        JournalPayload::SwarmItemQueued { .. } => "swarm_item_queued",
-        JournalPayload::SwarmItemStarted { .. } => "swarm_item_started",
-        JournalPayload::SwarmItemFinished { .. } => "swarm_item_finished",
         JournalPayload::SchemaRepairStarted { .. } => "schema_repair_started",
         JournalPayload::SchemaRepairFinished { .. } => "schema_repair_finished",
         JournalPayload::UserInputRequested { .. } => "user_input_requested",
         JournalPayload::UserInputAnswered { .. } => "user_input_answered",
         JournalPayload::ArtifactCommitted { .. } => "artifact_committed",
         JournalPayload::FinalResultRecorded { .. } => "final_result_recorded",
-        JournalPayload::LineageSeedImported { .. } => "lineage_seed_imported",
         JournalPayload::RecoveryActionApplied { .. } => "recovery_action_applied",
         JournalPayload::UsageRecorded { .. } => "usage_recorded",
         JournalPayload::ProvenanceRecorded { .. } => "provenance_recorded",
@@ -617,8 +609,6 @@ fn envelope_invocation_id(payload: &JournalPayload) -> Option<String> {
     match payload {
         JournalPayload::InvocationStarted { invocation_id, .. }
         | JournalPayload::InvocationFinished { invocation_id, .. }
-        | JournalPayload::SwarmItemStarted { invocation_id, .. }
-        | JournalPayload::SwarmItemFinished { invocation_id, .. }
         | JournalPayload::SchemaRepairStarted { invocation_id, .. }
         | JournalPayload::UsageRecorded {
             invocation_id: Some(invocation_id),
@@ -640,8 +630,8 @@ fn envelope_summary_text(payload: &JournalPayload) -> Option<String> {
         JournalPayload::StateChanged { reason, new, .. } => {
             Some(format!("{} ({reason})", new.as_str()))
         }
-        JournalPayload::InvocationFinished { outcome, .. }
-        | JournalPayload::SwarmItemFinished { outcome, .. } => Some(outcome.summary.clone()),
+        JournalPayload::InvocationFinished { outcome, .. } => Some(outcome.summary.clone()),
+        JournalPayload::ChildFinished { summary, .. } => Some(summary.clone()),
         JournalPayload::SchemaRepairFinished { summary, .. } => Some(summary.clone()),
         JournalPayload::FinalResultRecorded { .. } => Some("final_result".to_owned()),
         JournalPayload::RecoveryActionApplied { action, .. } => Some(action.clone()),
@@ -794,15 +784,11 @@ pub fn build_summary_page(
         .rev()
         .collect();
 
-    let journal_next_cursor = if materials.journal_format_version >= journal::JOURNAL_FORMAT_V2 {
-        Some(journal_cursor(
-            &materials.run_id,
-            0,
-            &query_hash_for_view(TaskOutputView::Journal, None),
-        )?)
-    } else {
-        None
-    };
+    let journal_next_cursor = Some(journal_cursor(
+        &materials.run_id,
+        0,
+        &query_hash_for_view(TaskOutputView::Journal, None),
+    )?);
     let artifacts_next_cursor = if artifact_metadata.is_empty() {
         None
     } else {
@@ -819,11 +805,6 @@ pub fn build_summary_page(
         name: materials.metadata.name.clone(),
         origin: materials.metadata.launch_source.clone(),
         revision: materials.metadata.script_sha256.clone(),
-        lineage: materials.metadata.parent_run_id.as_ref().map(|parent| {
-            serde_json::json!({
-                "parent_run_id": parent.as_str(),
-            })
-        }),
         state: materials.state,
         current_phase: materials.current_phase.clone(),
         admission_wait_reason: materials.admission_wait_reason.clone(),
@@ -833,7 +814,6 @@ pub fn build_summary_page(
         invocation_count: materials.invocation_count,
         failure_count: materials.failure_count,
         actual_usage: materials.actual_usage,
-        inherited_usage: materials.inherited_usage,
         pending_user: materials.pending_user.as_ref().map(pending_meta),
         final_result: materials.final_result.clone(),
         terminal_reason: materials.terminal_reason.clone(),
@@ -872,7 +852,7 @@ fn query_hash_for_view(view: TaskOutputView, artifact_id: Option<&WorkflowArtifa
     compute_query_hash(view, artifact_id)
 }
 
-/// Page a V2 journal outside runtime locks.
+/// Page a workflow journal outside runtime locks.
 pub fn page_journal_from_path(
     path: &Path,
     materials: &TaskOutputMaterials,
@@ -889,17 +869,11 @@ pub fn page_journal_from_path(
     let budget = page_budget(request.max_output_bytes);
     let query_hash = request.query_hash();
 
-    if materials.journal_format_version < journal::JOURNAL_FORMAT_V2 {
-        // V1 journals are inspectable via summary only; full-journal TaskOutput is retired.
-        return Err(WorkflowError::coded(
-            WorkflowErrorCode::InvalidInput,
-            "journal view requires a V2 journal; use summary for V1 read-only projections",
-        ));
-    }
-
     let raw_page = scan_journal_page(
         path,
         Some(&materials.run_id),
+        materials.journal_record_bytes,
+        materials.journal_total_bytes,
         from_seq,
         MAX_JOURNAL_RECORDS_PER_PAGE,
         budget,
