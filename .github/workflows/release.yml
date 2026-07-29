@@ -10,6 +10,9 @@ permissions:
 
 env:
   CARGO_TERM_COLOR: always
+  GIT_CONFIG_COUNT: "1"
+  GIT_CONFIG_KEY_0: init.defaultBranch
+  GIT_CONFIG_VALUE_0: main
 
 jobs:
   validate:
@@ -80,10 +83,6 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: ${{ matrix.target }}
-
-      - uses: swatinem/rust-cache@v2
-        with:
-          key: ${{ matrix.target }}-${{ matrix.cross || 'native' }}
 
       - uses: goto-bus-stop/setup-zig@v2
         if: matrix.cross == 'zigbuild'
