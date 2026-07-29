@@ -543,11 +543,8 @@ impl InteractiveController {
             }
             InputEvent::ScrollUp(_) => Some(TaskBrowserAction::SelectUp),
             InputEvent::ScrollDown(_) => Some(TaskBrowserAction::SelectDown),
-            InputEvent::Action(KeybindingAction::SelectConfirm) | InputEvent::Submit => self
-                .tui
-                .chrome()
-                .task_browser_state()
-                .and_then(|state| {
+            InputEvent::Action(KeybindingAction::SelectConfirm) | InputEvent::Submit => {
+                self.tui.chrome().task_browser_state().and_then(|state| {
                     if state.stop_confirmation_task_id().is_some() {
                         Some(TaskBrowserAction::ConfirmStop)
                     } else if state
@@ -570,7 +567,8 @@ impl InteractiveController {
                     } else {
                         Some(TaskBrowserAction::OpenTaskDetails)
                     }
-                }),
+                })
+            }
             InputEvent::Action(KeybindingAction::SelectCancel) | InputEvent::Cancel => {
                 Some(TaskBrowserAction::Cancel)
             }
