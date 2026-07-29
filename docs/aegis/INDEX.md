@@ -5,6 +5,8 @@ Entries are workspace records, not authoritative runtime decisions.
 
 | Date | Kind | Path | Title |
 | --- | --- | --- | --- |
+| 2026-07-30 | plan | docs/aegis/plans/2026-07-30-workflow-intent-slash.md | Neo Workflow Intent Slash Implementation Plan |
+| 2026-07-30 | spec | docs/aegis/specs/2026-07-30-workflow-intent-slash-design.md | Neo Workflow Intent Slash Design |
 | 2026-07-28 | handoff | docs/aegis/handoffs/2026-07-28-workflow-product-surface-redesign.md | Implement Neo Workflow Product Surface Redesign Handoff Prompt |
 | 2026-07-28 | plan | docs/aegis/plans/2026-07-28-workflow-product-surface-redesign.md | Neo Workflow Product Surface Redesign Implementation Plan |
 | 2026-07-27 | spec | docs/aegis/specs/2026-07-27-workflow-product-surface-redesign.md | Neo Workflow Product Surface Redesign |
