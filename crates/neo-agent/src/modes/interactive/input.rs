@@ -544,28 +544,28 @@ impl InteractiveController {
             InputEvent::ScrollUp(_) => Some(TaskBrowserAction::SelectUp),
             InputEvent::ScrollDown(_) => Some(TaskBrowserAction::SelectDown),
             InputEvent::Action(KeybindingAction::SelectConfirm) | InputEvent::Submit => {
-                self.tui.chrome().task_browser_state().and_then(|state| {
+                self.tui.chrome().task_browser_state().map(|state| {
                     if state.stop_confirmation_task_id().is_some() {
-                        Some(TaskBrowserAction::ConfirmStop)
+                        TaskBrowserAction::ConfirmStop
                     } else if state
                         .workflow_item()
                         .and_then(|item| item.workflow.as_ref())
                         .is_some_and(|workflow| workflow.pending_user.is_some())
                     {
-                        Some(TaskBrowserAction::OpenAnswer)
+                        TaskBrowserAction::OpenAnswer
                     } else if state.workflow_item().is_some() {
-                        Some(match state.focus() {
+                        match state.focus() {
                             neo_tui::tasks_browser::TaskBrowserFocus::Agents => {
                                 TaskBrowserAction::OpenWorkflowChildDetails
                             }
                             _ => TaskBrowserAction::ToggleWorkflowFocus,
-                        })
+                        }
                     } else if state.selected_item().is_some_and(|item| {
                         item.kind == neo_tui::tasks_browser::TaskBrowserKind::Workflow
                     }) {
-                        Some(TaskBrowserAction::OpenWorkflow)
+                        TaskBrowserAction::OpenWorkflow
                     } else {
-                        Some(TaskBrowserAction::OpenTaskDetails)
+                        TaskBrowserAction::OpenTaskDetails
                     }
                 })
             }
