@@ -90,15 +90,17 @@ fn task_browser_overlay_blocks_prompt_and_renders_own_footer() {
 
     assert!(cursor.is_none());
     assert!(rendered.contains("TASK BROWSER"));
-    assert!(rendered.contains("Tasks [all]"));
-    assert!(rendered.contains("Detail"));
-    assert!(rendered.contains("Preview Output"));
-    assert!(rendered.contains("Q/Esc close"));
+    assert!(rendered.contains("filter=all"));
+    assert!(rendered.contains("Tasks"));
+    assert!(rendered.contains("bash-1"));
+    assert!(rendered.contains("cargo test"));
+    assert!(rendered.contains("Tab filter"));
+    assert!(rendered.contains("Esc close"));
     assert!(!rendered.contains("/tmp/neo-ws"));
     assert_eq!(
         plain
             .iter()
-            .filter(|line| line.contains("Q/Esc close"))
+            .filter(|line| line.contains("Esc close"))
             .count(),
         1
     );

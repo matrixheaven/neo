@@ -3584,6 +3584,10 @@ async fn event_loop_tabs_through_local_slash_prompt_template_completions() {
     controller
         .handle_input_event(InputEvent::Action(KeybindingAction::InputTab))
         .await
+        .expect("tab opens slash prompt picker");
+    controller
+        .handle_input_event(InputEvent::Action(KeybindingAction::InputTab))
+        .await
         .expect("tab completes slash prompt");
 
     assert_eq!(controller.chrome().prompt().text, "/review");
