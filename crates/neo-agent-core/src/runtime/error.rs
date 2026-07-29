@@ -12,6 +12,10 @@ pub enum AgentRuntimeError {
     Io(#[from] std::io::Error),
     #[error("compaction failed: {0}")]
     Compaction(#[from] compaction::CompactionError),
+    #[error(
+        "The workflow catalog is too large for the selected model. Remove unused workflow definitions or choose a model with a larger context window."
+    )]
+    WorkflowContextTooLarge,
     #[error("turn cancelled")]
     Cancelled,
 }
@@ -26,7 +30,11 @@ impl AgentRuntimeError {
     pub fn code(&self) -> Option<&'static str> {
         match self {
             Self::Model(ai) => Some(ai.code()),
-            Self::Tool(_) | Self::Io(_) | Self::Compaction(_) | Self::Cancelled => None,
+            Self::Tool(_)
+            | Self::Io(_)
+            | Self::Compaction(_)
+            | Self::WorkflowContextTooLarge
+            | Self::Cancelled => None,
         }
     }
 }

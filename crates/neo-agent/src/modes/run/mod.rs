@@ -504,7 +504,12 @@ pub async fn run_prompt_in_session_streaming(
         Some(&channels),
     )
     .await?;
-    ensure_workflow_context_capacity(&runtime, &request, &prepared.user_message)?;
+    ensure_workflow_context_capacity(
+        &runtime,
+        &request,
+        &prepared.context,
+        &prepared.user_message,
+    )?;
     runtime.restore_plan_mode(&prepared.context);
     run_prepared_streaming_turn(
         prepared,
@@ -725,10 +730,11 @@ async fn runtime_for_config(
 fn ensure_workflow_context_capacity(
     runtime: &AgentRuntime,
     request: &TurnRequest,
+    context: &AgentContext,
     user_message: &AgentMessage,
 ) -> anyhow::Result<()> {
     if request.workflow_context.is_some()
-        && !runtime.turn_messages_fit_after_compaction(std::slice::from_ref(user_message))
+        && !runtime.turn_messages_fit_after_compaction(context, std::slice::from_ref(user_message))
     {
         anyhow::bail!(crate::modes::interactive::workflow_slash::WORKFLOW_CONTEXT_TOO_LARGE);
     }
@@ -751,12 +757,13 @@ async fn ensure_new_workflow_context_capacity(
         Some(channels),
     )
     .await?;
+    let context = streaming_context(request.skill_context.clone());
     let user_message = user_message(
         request.prompt.clone(),
         request.prompt_origin.clone(),
         request.prompt_display_text.clone(),
     );
-    ensure_workflow_context_capacity(&runtime, request, &user_message)
+    ensure_workflow_context_capacity(&runtime, request, &context, &user_message)
 }
 
 fn skill_store_reloader(

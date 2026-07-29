@@ -2346,6 +2346,23 @@ impl InteractiveController {
         self.tui.transcript_mut().push_user_message(text);
     }
 
+    fn rollback_workflow_capacity_rejection(&mut self) {
+        let Some(expected) = self.pending_local_user_message_to_suppress.take() else {
+            return;
+        };
+        let transcript = self.tui.transcript_mut().transcript_mut();
+        let Some(index) = transcript.entries().iter().rposition(|entry| {
+            matches!(
+                entry,
+                neo_tui::transcript::TranscriptEntry::UserMessage { content, .. }
+                    if content.trim() == expected.trim()
+            )
+        }) else {
+            return;
+        };
+        let _ = transcript.remove(index);
+    }
+
     fn sync_inline_approval_selection(&mut self) {
         let Some((id, selected, feedback_input, collecting_feedback)) =
             self.tui.chrome().approval_selection()

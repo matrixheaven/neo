@@ -12121,6 +12121,56 @@ async fn automatic_workflow_slash_starts_visible_model_turn_with_complete_contex
 }
 
 #[tokio::test]
+async fn workflow_capacity_rejection_rolls_back_optimistic_user_message_before_retry() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let config = demo_named_workflow_config(&temp, PermissionMode::Yolo);
+    let mut controller = InteractiveController::new_for_test(
+        "neo",
+        "test-session",
+        "openai/gpt-4.1",
+        temp.path(),
+        |_request| async {
+            Err::<Vec<AgentEvent>, _>(anyhow::anyhow!(
+                crate::modes::interactive::workflow_slash::WORKFLOW_CONTEXT_TOO_LARGE
+            ))
+        },
+    );
+    controller.local_config = Some(config);
+
+    controller.type_text("/workflow Research this API");
+    for _ in 0..2 {
+        controller
+            .handle_input_event(InputEvent::Action(KeybindingAction::InputSubmit))
+            .await
+            .expect("capacity rejection is handled");
+        controller
+            .wait_for_active_turn()
+            .await
+            .expect("capacity rejection turn completes");
+
+        assert_eq!(
+            controller.chrome().prompt().text,
+            "/workflow Research this API"
+        );
+        assert_eq!(controller.pending_local_user_message_to_suppress, None);
+        assert_eq!(controller.pending_workflow_restore_prompt, None);
+        assert_eq!(
+            transcript_entries(&controller)
+                .iter()
+                .filter(|entry| {
+                    matches!(
+                        entry,
+                        TranscriptEntry::UserMessage { content, .. }
+                            if content == "/workflow Research this API"
+                    )
+                })
+                .count(),
+            0
+        );
+    }
+}
+
+#[tokio::test]
 async fn workflowish_is_not_workflow() {
     let temp = tempfile::tempdir().expect("tempdir");
     let config = test_config(temp.path(), temp.path().join("sessions"));

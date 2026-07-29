@@ -180,6 +180,7 @@ impl InteractiveController {
                     if error.to_string()
                         == crate::modes::interactive::workflow_slash::WORKFLOW_CONTEXT_TOO_LARGE
                     {
+                        self.rollback_workflow_capacity_rejection();
                         if let Some(prompt) = self.pending_workflow_restore_prompt.take() {
                             self.tui.chrome_mut().prompt_mut().set_text(prompt);
                         }

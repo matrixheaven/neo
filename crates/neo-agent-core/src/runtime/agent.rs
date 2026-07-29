@@ -19,8 +19,8 @@ use super::plan_orchestration::*;
 use super::queue::*;
 use super::skill_dispatch::*;
 use super::turn_loop::{
-    AgentTurnRuntime, append_available_skills_snapshot, emit_run_finished,
-    establish_instruction_baseline, run_agent_turn,
+    AgentTurnRuntime, append_available_skills_snapshot, append_runtime_reminders,
+    emit_run_finished, establish_instruction_baseline, run_agent_turn,
 };
 use crate::compaction::projection::ProjectionPlan;
 use crate::compaction::summary::{FullCompactionInput, run_full_compaction};
@@ -200,29 +200,26 @@ impl AgentRuntime {
 
     /// Check a minimal post-compaction turn against the existing request budget.
     #[must_use]
-    pub fn turn_messages_fit_after_compaction(&self, messages: &[AgentMessage]) -> bool {
-        let mut context = AgentContext::new();
-        for message in messages {
-            context.append_message(message.clone());
+    pub fn turn_messages_fit_after_compaction(
+        &self,
+        context: &AgentContext,
+        messages: &[AgentMessage],
+    ) -> bool {
+        let (sender, _receiver) = mpsc::unbounded_channel();
+        let mut projected_emitter = EventEmitter::new(sender, context.clone());
+        if let Some(skill_context) = projected_emitter.context.take_skill_context() {
+            projected_emitter.emit(AgentEvent::MessageAppended {
+                message: skill_context,
+            });
         }
-        let snapshot = ContextBudgetEstimator::snapshot(
-            &self.config,
-            &context,
-            crate::compaction::projection::ProjectionPlan::disabled(),
-        );
-        let Some(cap) = [
-            snapshot.effective_max_context_tokens,
-            snapshot.absolute_max_tokens,
-        ]
-        .into_iter()
-        .flatten()
-        .min() else {
-            return true;
-        };
-        snapshot
-            .projected_tokens
-            .saturating_add(snapshot.reserved_headroom_tokens)
-            <= cap
+        append_available_skills_snapshot(self.skills.as_ref(), &mut projected_emitter);
+        for message in messages {
+            projected_emitter.emit(AgentEvent::MessageAppended {
+                message: message.clone(),
+            });
+        }
+        append_runtime_reminders(&self.config, &mut projected_emitter);
+        context_fits_after_compaction(&self.config, &projected_emitter.context)
     }
 
     /// Publish this runtime's canonical dependencies for recovered workflows.
@@ -538,6 +535,27 @@ impl AgentRuntime {
     }
 }
 
+pub(super) fn context_fits_after_compaction(config: &AgentConfig, context: &AgentContext) -> bool {
+    let snapshot = ContextBudgetEstimator::snapshot(
+        config,
+        context,
+        crate::compaction::projection::ProjectionPlan::disabled(),
+    );
+    let Some(cap) = [
+        snapshot.effective_max_context_tokens,
+        snapshot.absolute_max_tokens,
+    ]
+    .into_iter()
+    .flatten()
+    .min() else {
+        return true;
+    };
+    snapshot
+        .projected_tokens
+        .saturating_add(snapshot.reserved_headroom_tokens)
+        <= cap
+}
+
 struct SpawnedRun<'a> {
     receiver: mpsc::UnboundedReceiver<Result<AgentEvent, AgentRuntimeError>>,
     final_receiver: Option<oneshot::Receiver<AgentContext>>,
@@ -583,11 +601,10 @@ mod tests {
             Arc::new(neo_ai::providers::fake::FakeModelClient::default()),
         );
 
-        assert!(
-            !runtime.turn_messages_fit_after_compaction(&[AgentMessage::user_text(
-                "run this workflow"
-            )])
-        );
+        assert!(!runtime.turn_messages_fit_after_compaction(
+            &AgentContext::new(),
+            &[AgentMessage::user_text("run this workflow")],
+        ));
 
         let mut small_config = fake_compaction_config();
         small_config.turn_system_context = Some("complete workflow catalog".to_owned());
@@ -595,11 +612,68 @@ mod tests {
             small_config,
             Arc::new(neo_ai::providers::fake::FakeModelClient::default()),
         );
-        assert!(
-            small_runtime.turn_messages_fit_after_compaction(&[AgentMessage::user_text(
-                "run this workflow"
-            )])
+        assert!(small_runtime.turn_messages_fit_after_compaction(
+            &AgentContext::new(),
+            &[AgentMessage::user_text("run this workflow")],
+        ));
+
+        let mut existing_context = AgentContext::new();
+        existing_context.append_message(AgentMessage::user_text("history ".repeat(300_000)));
+        assert!(!small_runtime.turn_messages_fit_after_compaction(
+            &existing_context,
+            &[AgentMessage::user_text("run this workflow")],
+        ));
+    }
+
+    #[test]
+    fn turn_messages_fit_after_compaction_includes_runtime_skill_catalog() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let skill_dir = temp.path().join("large-skill");
+        std::fs::create_dir_all(&skill_dir).expect("skill directory");
+        std::fs::write(
+            skill_dir.join("SKILL.md"),
+            format!(
+                "---\nname: large-skill\ndescription: {}\n---\nBody\n",
+                "large ".repeat(60_000)
+            ),
+        )
+        .expect("skill file");
+
+        let mut config = fake_compaction_config();
+        config.turn_system_context = Some("complete workflow catalog".to_owned());
+        let runtime = AgentRuntime::with_tools_and_skills(
+            config,
+            Arc::new(neo_ai::providers::fake::FakeModelClient::default()),
+            ToolRegistry::new(),
+            SkillStore::load(&[], &[temp.path().to_path_buf()], Vec::new()),
         );
+
+        assert!(!runtime.turn_messages_fit_after_compaction(
+            &AgentContext::new(),
+            &[AgentMessage::user_text("run this workflow")],
+        ));
+    }
+
+    #[tokio::test]
+    async fn workflow_context_capacity_guard_runs_before_provider_request() {
+        let mut config = fake_compaction_config();
+        config.turn_system_context = Some("complete workflow catalog".to_owned());
+        let runtime = AgentRuntime::new(
+            config,
+            Arc::new(neo_ai::providers::fake::FakeModelClient::default()),
+        );
+        let mut context = AgentContext::new();
+        context.append_message(AgentMessage::user_text("history ".repeat(300_000)));
+
+        let events = runtime
+            .run_turn(&mut context, AgentMessage::user_text("run this workflow"))
+            .collect::<Vec<_>>()
+            .await;
+
+        assert!(matches!(
+            events.last(),
+            Some(Err(AgentRuntimeError::WorkflowContextTooLarge))
+        ));
     }
 
     #[tokio::test]

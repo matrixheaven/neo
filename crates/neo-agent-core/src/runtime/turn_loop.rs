@@ -325,6 +325,11 @@ pub(super) async fn run_agent_turn(
         append_available_skills_snapshot(skills.as_ref(), emitter);
         append_runtime_reminders(&config, emitter);
         rehydrate_instruction_context_after_compaction(emitter, false).await;
+        if config.turn_system_context.is_some()
+            && !super::agent::context_fits_after_compaction(&config, &emitter.context)
+        {
+            return Err(AgentRuntimeError::WorkflowContextTooLarge);
+        }
 
         let next_turn = run_next_model_turn(
             &model,
@@ -858,7 +863,7 @@ async fn reconcile_after_tool_execution(
     Ok(())
 }
 
-fn append_runtime_reminders(config: &AgentConfig, emitter: &mut EventEmitter) {
+pub(super) fn append_runtime_reminders(config: &AgentConfig, emitter: &mut EventEmitter) {
     append_permission_mode_reminder(config, emitter);
     append_plan_mode_reminder(config, emitter);
     append_goal_mode_authoring_reminder(config, emitter);
