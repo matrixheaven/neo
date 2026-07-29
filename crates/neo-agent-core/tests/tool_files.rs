@@ -124,7 +124,7 @@ async fn edit_match_mismatch_returns_compact_recovery_guidance() {
         .with_access(neo_agent_core::ToolAccess::all());
     let path = workspace.path().join("sample.txt");
     let original = "alpha\nbeta\n";
-    std::fs::write(&path, &original).expect("seed");
+    std::fs::write(&path, original).expect("seed");
 
     let edit = registry
         .run(
