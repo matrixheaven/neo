@@ -10,3 +10,7 @@ docs/aegis/work/
 docs/node_modules/
 docs/.vitepress/cache/
 docs/.vitepress/dist/
+# neo-webui
+neo-webui/node_modules/
+neo-webui/.next/
+neo-webui/out/

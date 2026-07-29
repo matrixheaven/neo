@@ -1,0 +1,135 @@
+/* ── Neo WebUI Theme Variables ──────────────────────────────────────── */
+
+:root {
+  /* Colors */
+  --color-bg-primary: #ffffff;
+  --color-bg-secondary: #f6f8fa;
+  --color-bg-tertiary: #eff2f5;
+  --color-bg-hover: #f0f2f5;
+  --color-text-primary: #1a1a2e;
+  --color-text-secondary: #586069;
+  --color-text-tertiary: #8b949e;
+  --color-text-inverse: #ffffff;
+  --color-border: #d0d7de;
+  --color-border-light: #e8ecf0;
+  --color-accent: #4f46e5;
+  --color-accent-hover: #4338ca;
+  --color-accent-subtle: #eef2ff;
+  --color-success: #16a34a;
+  --color-warning: #d97706;
+  --color-error: #dc2626;
+  --color-tool-call: #fef3c7;
+  --color-tool-result: #f0fdf4;
+  --color-thinking: #f3e8ff;
+  --color-diff-added: #dcfce7;
+  --color-diff-removed: #fee2e2;
+
+  /* Spacing */
+  --space-xs: 4px;
+  --space-sm: 8px;
+  --space-md: 12px;
+  --space-lg: 16px;
+  --space-xl: 24px;
+
+  /* Typography */
+  --font-mono: ui-monospace, "Cascadia Code", "Fira Code", Menlo, monospace;
+  --font-sans: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+  --font-size-sm: 12px;
+  --font-size-base: 14px;
+  --font-size-lg: 16px;
+  --font-size-xl: 20px;
+
+  /* Border radius */
+  --radius-sm: 4px;
+  --radius-md: 8px;
+  --radius-lg: 12px;
+
+  /* Shadows */
+  --shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.06);
+  --shadow-md: 0 4px 12px rgba(0, 0, 0, 0.1);
+  --shadow-lg: 0 8px 24px rgba(0, 0, 0, 0.12);
+
+  /* Layout */
+  --sidebar-width: 280px;
+  --tab-height: 36px;
+  --statusbar-height: 24px;
+}
+
+.dark {
+  --color-bg-primary: #0d1117;
+  --color-bg-secondary: #161b22;
+  --color-bg-tertiary: #21262d;
+  --color-bg-hover: #1c2128;
+  --color-text-primary: #e6edf3;
+  --color-text-secondary: #8b949e;
+  --color-text-tertiary: #6e7681;
+  --color-text-inverse: #0d1117;
+  --color-border: #30363d;
+  --color-border-light: #21262d;
+  --color-accent: #6366f1;
+  --color-accent-hover: #818cf8;
+  --color-accent-subtle: #1e1b4b;
+  --color-success: #22c55e;
+  --color-warning: #f59e0b;
+  --color-error: #ef4444;
+  --color-tool-call: #422006;
+  --color-tool-result: #052e16;
+  --color-thinking: #1e1b4b;
+  --color-diff-added: #052e16;
+  --color-diff-removed: #450a0a;
+  --shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.3);
+  --shadow-md: 0 4px 12px rgba(0, 0, 0, 0.4);
+  --shadow-lg: 0 8px 24px rgba(0, 0, 0, 0.5);
+}
+
+/* Reset */
+*, *::before, *::after {
+  box-sizing: border-box;
+  margin: 0;
+  padding: 0;
+}
+
+html, body {
+  height: 100%;
+  font-family: var(--font-sans);
+  font-size: var(--font-size-base);
+  color: var(--color-text-primary);
+  background: var(--color-bg-primary);
+  -webkit-font-smoothing: antialiased;
+}
+
+#__next {
+  height: 100%;
+}
+
+code, pre {
+  font-family: var(--font-mono);
+}
+
+a {
+  color: var(--color-accent);
+  text-decoration: none;
+}
+
+a:hover {
+  text-decoration: underline;
+}
+
+/* Scrollbar */
+::-webkit-scrollbar {
+  width: 6px;
+  height: 6px;
+}
+
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+::-webkit-scrollbar-thumb {
+  background: var(--color-border);
+  border-radius: 3px;
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background: var(--color-text-tertiary);
+}
