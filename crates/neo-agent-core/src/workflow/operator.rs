@@ -116,6 +116,12 @@ struct StepCounts {
     failed: u64,
 }
 
+type StepScan = (
+    Vec<WorkflowStepRow>,
+    BTreeMap<WorkflowStepKey, StepCounts>,
+    Option<WorkflowStepKey>,
+);
+
 impl StepCounts {
     fn add(&mut self, state: WorkflowChildState) {
         match state {
@@ -325,14 +331,7 @@ fn scan_steps(
     journal_path: &std::path::Path,
     journal_record_bytes: u64,
     journal_total_bytes: u64,
-) -> Result<
-    (
-        Vec<WorkflowStepRow>,
-        BTreeMap<WorkflowStepKey, StepCounts>,
-        Option<WorkflowStepKey>,
-    ),
-    WorkflowError,
-> {
+) -> Result<StepScan, WorkflowError> {
     let definitions = step_definitions(metadata);
     let mut dynamic_steps = BTreeMap::new();
     let mut counts = BTreeMap::<WorkflowStepKey, StepCounts>::new();

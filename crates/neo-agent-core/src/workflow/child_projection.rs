@@ -132,12 +132,24 @@ pub fn project_children(
             } => insert_row(
                 &mut rows,
                 &mut duplicate_keys,
-                child_key,
-                child_kind,
-                child_phase.or_else(|| phase_id.clone()),
-                title,
-                role,
-                envelope.timestamp_ms,
+                WorkflowChildRow {
+                    key: child_key,
+                    child_kind,
+                    phase_id: child_phase.or_else(|| phase_id.clone()),
+                    agent_id: None,
+                    state: WorkflowChildState::Queued,
+                    title,
+                    role,
+                    queued_at_ms: Some(envelope.timestamp_ms),
+                    started_at_ms: None,
+                    updated_at_ms: envelope.timestamp_ms,
+                    terminal_at_ms: None,
+                    terminal_summary: None,
+                    error_summary: None,
+                    actual_usage: None,
+                    latest_activity: None,
+                    generated_files: Vec::new(),
+                },
             ),
             JournalPayload::ChildStarted {
                 child_key,
@@ -184,38 +196,14 @@ pub fn project_children(
 fn insert_row(
     rows: &mut BTreeMap<WorkflowChildKey, WorkflowChildRow>,
     duplicate_keys: &mut Vec<WorkflowChildKey>,
-    key: WorkflowChildKey,
-    child_kind: WorkflowChildKind,
-    phase_id: Option<String>,
-    title: Option<String>,
-    role: Option<String>,
-    timestamp_ms: u64,
+    row: WorkflowChildRow,
 ) {
+    let key = row.key.clone();
     if rows.contains_key(&key) {
         duplicate_keys.push(key);
         return;
     }
-    rows.insert(
-        key.clone(),
-        WorkflowChildRow {
-            key,
-            child_kind,
-            phase_id,
-            agent_id: None,
-            state: WorkflowChildState::Queued,
-            title,
-            role,
-            queued_at_ms: Some(timestamp_ms),
-            started_at_ms: None,
-            updated_at_ms: timestamp_ms,
-            terminal_at_ms: None,
-            terminal_summary: None,
-            error_summary: None,
-            actual_usage: None,
-            latest_activity: None,
-            generated_files: Vec::new(),
-        },
-    );
+    rows.insert(key, row);
 }
 
 fn child_state(status: WorkflowOutcomeStatus) -> WorkflowChildState {

@@ -2090,8 +2090,7 @@ impl MultiAgentRuntime {
             .run_started_swarm_child_turn_with_schema(
                 deps,
                 snapshot,
-                swarm_id,
-                item,
+                (swarm_id, item),
                 DelegateContext::None,
                 None,
                 |_| {},
@@ -2112,7 +2111,12 @@ impl MultiAgentRuntime {
         F: FnMut(AgentProgressSnapshot) + Send,
     {
         self.run_started_swarm_child_turn_with_schema(
-            deps, snapshot, swarm_id, swarm_item, context, None, on_update,
+            deps,
+            snapshot,
+            (swarm_id, swarm_item),
+            context,
+            None,
+            on_update,
         )
         .await
     }
@@ -2121,8 +2125,7 @@ impl MultiAgentRuntime {
         &self,
         deps: ChildRuntimeDeps,
         snapshot: AgentSnapshot,
-        swarm_id: &str,
-        swarm_item: &str,
+        swarm: (&str, &str),
         context: DelegateContext,
         output_schema: Option<&serde_json::Value>,
         mut on_update: F,
@@ -2130,6 +2133,7 @@ impl MultiAgentRuntime {
     where
         F: FnMut(AgentProgressSnapshot) + Send,
     {
+        let (swarm_id, swarm_item) = swarm;
         let started_at = Instant::now();
         let snapshot = self.mark_delegate_running(&snapshot.id).unwrap_or(snapshot);
         on_update(snapshot.progress_snapshot());

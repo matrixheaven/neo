@@ -201,6 +201,8 @@ enum DirectoryIdentity {
     Portable(PathBuf),
 }
 
+type RetentionScan = (Vec<(RetentionSubject, PathBuf, DirectoryIdentity)>, u64);
+
 fn journal_state_proof(
     run_dir: &Path,
     run_id: &WorkflowId,
@@ -318,7 +320,7 @@ fn collect_retention_entries_at(
     max_record_bytes: u64,
     max_total_bytes: u64,
     now_ms: u64,
-) -> io::Result<(Vec<(RetentionSubject, PathBuf, DirectoryIdentity)>, u64)> {
+) -> io::Result<RetentionScan> {
     let mut subjects = Vec::new();
     let mut total_bytes = 0_u64;
 

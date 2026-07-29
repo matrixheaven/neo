@@ -515,11 +515,14 @@ impl WorkflowRuntime {
         };
 
         let control = Arc::new(RunControl::new());
-        let artifacts = ArtifactStore::open(&run_dir, run_id.clone()).map_err(|error| {
-            self.admission.release_storage_owner(run_id.as_str());
-            let _ = std::fs::remove_dir_all(&run_dir);
-            error
-        })?;
+        let artifacts = match ArtifactStore::open(&run_dir, run_id.clone()) {
+            Ok(artifacts) => artifacts,
+            Err(error) => {
+                self.admission.release_storage_owner(run_id.as_str());
+                let _ = std::fs::remove_dir_all(&run_dir);
+                return Err(error);
+            }
+        };
         let state = Arc::new(Mutex::new(RunState {
             metadata,
             state: WorkflowState::Queued,
@@ -1783,8 +1786,7 @@ impl WorkflowRuntime {
                                 .run_started_swarm_child_turn_with_schema(
                                     deps,
                                     child.agent,
-                                    &swarm_id_run,
-                                    &item_label,
+                                    (&swarm_id_run, &item_label),
                                     child_context,
                                     plan.output_schema.as_ref(),
                                     |_| {},
@@ -2896,15 +2898,14 @@ impl WorkflowRuntime {
                 ));
             }
             if !guard.replay_live {
-                if let Some(entry) = guard.replay_entries.get(guard.replay_cursor) {
-                    if entry.call_index == call_index
-                        && entry.kind == kind
-                        && entry.canonical_input_hash == input_hash
-                    {
-                        let outcome = entry.outcome.clone();
-                        guard.replay_cursor += 1;
-                        return Ok(outcome);
-                    }
+                if let Some(entry) = guard.replay_entries.get(guard.replay_cursor)
+                    && entry.call_index == call_index
+                    && entry.kind == kind
+                    && entry.canonical_input_hash == input_hash
+                {
+                    let outcome = entry.outcome.clone();
+                    guard.replay_cursor += 1;
+                    return Ok(outcome);
                 }
                 guard.replay_live = true;
             }

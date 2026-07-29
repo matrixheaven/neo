@@ -254,8 +254,10 @@ async fn launch_errors_report_side_effects_from_the_coordinator_stage() {
     let neo_home = tempfile::tempdir().expect("neo home");
     let session = tempfile::tempdir().expect("session");
 
-    let mut limits = WorkflowLimits::default();
-    limits.global_storage_bytes = 1;
+    let limits = WorkflowLimits {
+        global_storage_bytes: 1,
+        ..WorkflowLimits::default()
+    };
     let blocked_runtime = crate::workflow::WorkflowRuntime::new(limits);
     let blocked_registry = WorkflowDefinitionRegistry::new(WorkflowDefinitionRegistryConfig {
         neo_home: neo_home.path().to_path_buf(),

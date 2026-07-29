@@ -1040,7 +1040,7 @@ async fn dispatch_prepared(
             )
         }
         PreparedWorkflowAction::Show { name } => {
-            let definition = match registry.resolve(&name) {
+            let definition = match registry.resolve(name) {
                 Ok(definition) => definition,
                 Err(error) => return workflow_error_result(action, error),
             };
@@ -1106,7 +1106,7 @@ async fn dispatch_prepared(
             )
         }
         PreparedWorkflowAction::ValidateSaved { name } => {
-            let definition = match registry.resolve(&name) {
+            let definition = match registry.resolve(name) {
                 Ok(definition) => definition,
                 Err(error) => return workflow_error_result(action, error),
             };
@@ -1160,7 +1160,7 @@ async fn dispatch_prepared(
             if let Err(error) = validate_definition(ctx, &candidate, action) {
                 return workflow_error_result(action, error);
             }
-            let definition = match registry.save(*scope, &request, *replace) {
+            let definition = match registry.save(*scope, request, *replace) {
                 Ok(definition) => definition,
                 Err(error) => {
                     let next_actions = (error.code() == WorkflowErrorCode::DefinitionConflict)
@@ -1222,7 +1222,7 @@ async fn dispatch_prepared(
             launch_definition(ctx, &definition, args.clone(), action).await
         }
         PreparedWorkflowAction::RunSaved { name, args } => {
-            let definition = match registry.resolve(&name) {
+            let definition = match registry.resolve(name) {
                 Ok(definition) => definition,
                 Err(error) => return workflow_error_result(action, error),
             };
