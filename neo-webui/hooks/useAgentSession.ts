@@ -38,6 +38,69 @@ const generateId = (): string => {
   return `${Math.random().toString(36).slice(2)}${Math.random().toString(36).slice(2)}`;
 };
 
+// ── Historical message parsing ─────────────────────────────────────────────
+
+function findLastIndex<T>(arr: T[], predicate: (item: T) => boolean): number {
+  for (let i = arr.length - 1; i >= 0; i--) {
+    if (predicate(arr[i])) return i;
+  }
+  return -1;
+}
+
+interface HistoryContentPart {
+  Text?: { text: string };
+  Thinking?: { text: string; signature?: string; redacted?: boolean };
+  ToolCall?: { id: string; name: string; arguments: string };
+  ToolResult?: { id: string; name: string; content: unknown[] };
+}
+
+interface HistoryMessage {
+  User?: { content: HistoryContentPart[] };
+  Assistant?: { content: HistoryContentPart[]; tool_calls?: Array<{ id: string; name: string; arguments: string }> };
+}
+
+function parseHistoryMessage(raw: unknown, index: number): Message | null {
+  const msg = raw as HistoryMessage;
+  if (!msg || typeof msg !== 'object') return null;
+
+  if (msg.User) {
+    const textParts = msg.User.content
+      .filter(p => p.Text)
+      .map(p => p.Text!.text)
+      .join('');
+    return { id: `hist-user-${index}`, role: 'user', content: textParts };
+  }
+
+  if (msg.Assistant) {
+    const assistant = msg.Assistant;
+    const textParts = assistant.content
+      .filter(p => p.Text)
+      .map(p => p.Text!.text)
+      .join('');
+    const thinkingParts = assistant.content
+      .filter(p => p.Thinking)
+      .map(p => p.Thinking!.text)
+      .join('');
+
+    const toolCalls: ToolCallInfo[] | undefined = assistant.tool_calls?.map(tc => ({
+      id: tc.id,
+      name: tc.name,
+      arguments: tc.arguments,
+      status: 'done' as const,
+    }));
+
+    return {
+      id: `hist-assistant-${index}`,
+      role: 'assistant',
+      content: textParts,
+      thinking: thinkingParts ? { text: thinkingParts, collapsed: true } : undefined,
+      toolCalls: toolCalls && toolCalls.length > 0 ? toolCalls : undefined,
+    };
+  }
+
+  return null;
+}
+
 export function useAgentSession(sessionId: string): UseAgentSessionReturn {
   const [messages, setMessages] = useState<Message[]>([]);
   const [isStreaming, setIsStreaming] = useState(false);
@@ -45,6 +108,33 @@ export function useAgentSession(sessionId: string): UseAgentSessionReturn {
   const [pendingApproval, setPendingApproval] = useState<ApprovalRequest | null>(null);
   const eventSourceRef = useRef<EventSource | null>(null);
   const messagesRef = useRef<Message[]>([]);
+  const loadedRef = useRef(false);
+
+  // Load historical messages on mount / session change
+  useEffect(() => {
+    let cancelled = false;
+    loadedRef.current = false;
+    messagesRef.current = [];
+    setMessages([]);
+
+    fetch(`/api/sessions/${sessionId}/messages`)
+      .then(r => r.json())
+      .then((data: { messages?: unknown[]; error?: string }) => {
+        if (cancelled || data.error) return;
+        const parsed = (data.messages || []).map(parseHistoryMessage).filter(Boolean) as Message[];
+        // Only keep the last turn (last user message + everything after it)
+        const lastUserIdx = findLastIndex(parsed, m => m.role === 'user');
+        const recent = lastUserIdx >= 0 ? parsed.slice(lastUserIdx) : parsed.slice(-4);
+        messagesRef.current = recent;
+        setMessages(recent);
+        loadedRef.current = true;
+      })
+      .catch(() => {
+        loadedRef.current = true;
+      });
+
+    return () => { cancelled = true; };
+  }, [sessionId]);
 
   const connectSSE = useCallback(() => {
     if (eventSourceRef.current) {

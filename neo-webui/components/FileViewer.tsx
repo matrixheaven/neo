@@ -3,21 +3,29 @@ import React, { useEffect, useState } from 'react';
 
 interface FileViewerProps {
   filePath: string;
+  workspace?: string;
 }
 
-export function FileViewer({ filePath }: FileViewerProps) {
+export function FileViewer({ filePath, workspace }: FileViewerProps) {
   const [content, setContent] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
+    if (!filePath) {
+      setError('No file path provided');
+      setLoading(false);
+      return;
+    }
     setLoading(true);
     setError(null);
     const segments = filePath
       .split('/')
       .map((s) => encodeURIComponent(s))
       .join('/');
-    fetch(`/api/files/${segments}`)
+    let url = `/api/files/${segments}`;
+    if (workspace) url += `?root=${encodeURIComponent(workspace)}`;
+    fetch(url)
       .then((r) => r.json())
       .then((data: { content?: string; error?: string }) => {
         if (data.error) setError(data.error);
@@ -25,7 +33,7 @@ export function FileViewer({ filePath }: FileViewerProps) {
       })
       .catch((e: Error) => setError(e.message))
       .finally(() => setLoading(false));
-  }, [filePath]);
+  }, [filePath, workspace]);
 
   const extension = filePath.split('.').pop()?.toLowerCase();
   const getLanguage = (): string => {

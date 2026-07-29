@@ -31,7 +31,7 @@ export class SessionRegistry {
 
   // ── ensure ────────────────────────────────────────────────────────────
 
-  async ensure(sessionId: string): Promise<SessionEntry> {
+  async ensure(sessionId: string, workspaceDir?: string): Promise<SessionEntry> {
     // Fast path: already running
     const existing = this.sessions.get(sessionId);
     if (existing) {
@@ -48,7 +48,7 @@ export class SessionRegistry {
     }
 
     // Start a new process under the start-lock
-    const startPromise = this.startProcess(sessionId);
+    const startPromise = this.startProcess(sessionId, workspaceDir);
     this.startLocks.set(sessionId, startPromise);
 
     try {
@@ -61,8 +61,8 @@ export class SessionRegistry {
 
   // ── internal ───────────────────────────────────────────────────────────
 
-  private async startProcess(sessionId: string): Promise<SessionEntry> {
-    const process = new NeoRpcProcess();
+  private async startProcess(sessionId: string, workspaceDir?: string): Promise<SessionEntry> {
+    const process = new NeoRpcProcess("neo", workspaceDir);
     const now = Date.now();
     const entry: SessionEntry = {
       process,

@@ -9,17 +9,22 @@ export function useTheme() {
     if (stored === 'light') {
       document.documentElement.classList.remove('dark');
       setIsDark(false);
+    } else {
+      // Default to dark mode
+      document.documentElement.classList.add('dark');
     }
   }, []);
 
   const toggle = useCallback(() => {
-    setIsDark(prev => {
-      const next = !prev;
-      localStorage.setItem('neo-theme', next ? 'dark' : 'light');
-      document.documentElement.classList.toggle('dark', next);
-      return next;
-    });
-  }, []);
+    const next = !isDark;
+    setIsDark(next);
+    localStorage.setItem('neo-theme', next ? 'dark' : 'light');
+    if (next) {
+      document.documentElement.classList.add('dark');
+    } else {
+      document.documentElement.classList.remove('dark');
+    }
+  }, [isDark]);
 
   return { isDark, toggle };
 }

@@ -3,11 +3,12 @@ import React, { useEffect } from 'react';
 import { useFileExplorer, type FileNode } from '@/hooks/useFileExplorer';
 
 interface FileExplorerProps {
+  workspace: string | null;
   onOpenFile: (path: string) => void;
 }
 
-export function FileExplorer({ onOpenFile }: FileExplorerProps) {
-  const { files, expandedDirs, loading, loadDirectory, toggleDir } = useFileExplorer();
+export function FileExplorer({ workspace, onOpenFile }: FileExplorerProps) {
+  const { files, expandedDirs, loading, loadDirectory, toggleDir } = useFileExplorer(workspace);
 
   useEffect(() => {
     loadDirectory('');

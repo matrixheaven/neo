@@ -10,7 +10,7 @@ export default function HomePage() {
 
   const handleStartChat = async (message: string) => {
     setIsStarting(true);
-    const sessionId = `new-${Date.now()}`;
+    const sessionId = `session_${crypto.randomUUID()}`;
     await fetch(`/api/sessions/${sessionId}/prompt`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },

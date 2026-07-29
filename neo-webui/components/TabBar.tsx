@@ -7,6 +7,7 @@ export interface Tab {
   type: 'chat' | 'file';
   path?: string;
   sessionId?: string;
+  workspace?: string;
 }
 
 interface TabBarProps {

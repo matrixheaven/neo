@@ -1,29 +1,31 @@
 import * as fs from 'fs';
 import * as path from 'path';
 
-const WORKSPACE_ROOT = process.cwd();
+const DEFAULT_WORKSPACE_ROOT = process.cwd();
 
-export function resolveFile(subpath: string): { valid: boolean; fullPath?: string; error?: string } {
+export function resolveFile(subpath: string, root?: string): { valid: boolean; fullPath?: string; error?: string } {
+  const workspaceRoot = root || DEFAULT_WORKSPACE_ROOT;
   const normalized = path.normalize(subpath).replace(/^[/\\]+/, '');
-  const fullPath = path.resolve(WORKSPACE_ROOT, normalized);
+  const fullPath = path.resolve(workspaceRoot, normalized);
 
   // Security: must be within workspace
-  if (!fullPath.startsWith(WORKSPACE_ROOT)) {
+  if (!fullPath.startsWith(workspaceRoot)) {
     return { valid: false, error: 'Path escapes workspace' };
   }
 
   return { valid: true, fullPath };
 }
 
-export function readTextFile(fullPath: string): { content?: string; error?: string } {
+export function readTextFile(fullPath: string, requestSubpath?: string): { content?: string; error?: string } {
   try {
     const stat = fs.statSync(fullPath);
     if (stat.isDirectory()) {
       // List directory
+      const prefix = requestSubpath ? requestSubpath.replace(/\\/g, '/') + '/' : '';
       const entries = fs.readdirSync(fullPath).map(name => {
         const p = path.join(fullPath, name);
         const s = fs.statSync(p);
-        return { name, isDirectory: s.isDirectory(), size: s.size };
+        return { name, path: prefix + name, isDirectory: s.isDirectory(), size: s.size };
       });
       return { content: JSON.stringify(entries) };
     }

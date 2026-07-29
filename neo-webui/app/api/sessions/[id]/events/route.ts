@@ -1,5 +1,6 @@
 import { NextRequest } from 'next/server';
 import { sessionRegistry } from '@/lib/session-registry';
+import { findSessionWorkdir } from '@/lib/session-index';
 
 export async function GET(
   request: NextRequest,
@@ -19,7 +20,8 @@ export async function GET(
       };
 
       try {
-        const entry = await sessionRegistry.ensure(id);
+        const workdir = findSessionWorkdir(id) ?? undefined;
+        const entry = await sessionRegistry.ensure(id, workdir);
 
         // Send initial connection event
         sendEvent('connected', { session_id: id });

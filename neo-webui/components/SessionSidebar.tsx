@@ -1,11 +1,12 @@
 'use client';
 import React, { useEffect, useState } from 'react';
 import { SessionNode } from './SessionNode';
+import { NewChatDialog } from './NewChatDialog';
 import type { SessionState } from '@/lib/types';
 
 interface SessionSidebarProps {
   activeSessionId: string | null;
-  onSelectSession: (id: string) => void;
+  onSelectSession: (id: string, workdir: string) => void;
   onToggleFileExplorer: () => void;
   showFileExplorer: boolean;
 }
@@ -13,6 +14,8 @@ interface SessionSidebarProps {
 export function SessionSidebar({ activeSessionId, onSelectSession, onToggleFileExplorer, showFileExplorer }: SessionSidebarProps) {
   const [groups, setGroups] = useState<Array<{ workdir: string; sessions: SessionState[] }>>([]);
   const [search, setSearch] = useState('');
+  const [showNewChat, setShowNewChat] = useState(false);
+  const [expandedGroups, setExpandedGroups] = useState<Set<string>>(new Set());
 
   useEffect(() => {
     fetch('/api/sessions')
@@ -94,6 +97,22 @@ export function SessionSidebar({ activeSessionId, onSelectSession, onToggleFileE
           }}
         />
         <button
+          onClick={() => setShowNewChat(true)}
+          title="New chat"
+          style={{
+            background: 'var(--color-bg-tertiary)',
+            border: '1px solid var(--color-border)',
+            borderRadius: 'var(--radius-sm)',
+            padding: 'var(--space-sm) var(--space-md)',
+            color: 'var(--color-text-secondary)',
+            cursor: 'pointer',
+            fontSize: 'var(--font-size-sm)',
+            fontWeight: 700,
+          }}
+        >
+          +
+        </button>
+        <button
           onClick={onToggleFileExplorer}
           style={{
             background: showFileExplorer ? 'var(--color-accent)' : 'var(--color-bg-tertiary)',
@@ -110,31 +129,49 @@ export function SessionSidebar({ activeSessionId, onSelectSession, onToggleFileE
       </div>
 
       <div style={{ flex: 1, overflowY: 'auto', padding: 'var(--space-sm) 0' }}>
-        {filtered.map(group => (
+        {filtered.map(group => {
+          const isExpanded = search ? true : expandedGroups.has(group.workdir);
+          return (
           <div key={group.workdir}>
-            <div style={{
-              padding: 'var(--space-sm) var(--space-md)',
-              fontSize: 'var(--font-size-xs, 11px)',
-              color: 'var(--color-text-tertiary)',
-              textTransform: 'uppercase',
-              letterSpacing: '0.5px',
-              fontWeight: 600,
-            }}>
-              {group.workdir.split(/[/\\]/).pop() || group.workdir}
+            <div
+              onClick={() => setExpandedGroups(prev => {
+                const next = new Set(prev);
+                if (next.has(group.workdir)) next.delete(group.workdir);
+                else next.add(group.workdir);
+                return next;
+              })}
+              style={{
+                padding: 'var(--space-sm) var(--space-md)',
+                fontSize: 'var(--font-size-xs, 11px)',
+                color: 'var(--color-text-tertiary)',
+                textTransform: 'uppercase',
+                letterSpacing: '0.5px',
+                fontWeight: 600,
+                cursor: 'pointer',
+                display: 'flex',
+                alignItems: 'center',
+                gap: '4px',
+                userSelect: 'none',
+              }}
+            >
+              <span style={{ fontSize: '10px' }}>{isExpanded ? '▼' : '▶'}</span>
+              {typeof group.workdir === 'string' ? (group.workdir.split(/[/\\]/).pop() || group.workdir) : 'Unknown'}
+              <span style={{ marginLeft: 'auto', opacity: 0.5, fontSize: '10px' }}>{group.sessions.length}</span>
             </div>
-            {group.sessions.map(session => (
+            {isExpanded && group.sessions.map(session => (
               <SessionNode
                 key={session.id}
                 session={session}
                 isActive={session.id === activeSessionId}
-                onClick={() => onSelectSession(session.id)}
+                onClick={() => onSelectSession(session.id, group.workdir)}
                 onRename={(name) => handleRename(session.id, name)}
                 onExport={(format) => handleExport(session.id, format)}
               />
             ))}
           </div>
-        ))}
+        )})}
       </div>
+      {showNewChat && <NewChatDialog onClose={() => setShowNewChat(false)} />}
     </div>
   );
 }

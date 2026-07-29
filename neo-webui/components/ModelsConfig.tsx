@@ -124,9 +124,9 @@ export function ModelsConfig({ onClose }: ModelsConfigProps) {
                   No skills found
                 </p>
               ) : (
-                skills.map((skill: UserSkill) => (
+                skills.map((skill: UserSkill, i: number) => (
                   <div
-                    key={skill.name}
+                    key={`${skill.tier}/${skill.name}`}
                     style={{
                       padding: 'var(--space-sm) var(--space-md)',
                       marginBottom: 'var(--space-sm)',

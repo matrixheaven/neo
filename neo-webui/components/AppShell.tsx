@@ -1,5 +1,6 @@
 'use client';
 import React, { useState, useCallback } from 'react';
+import { useRouter } from 'next/navigation';
 import { SessionSidebar } from './SessionSidebar';
 import { TabBar, type Tab } from './TabBar';
 import { FileExplorer } from './FileExplorer';
@@ -8,8 +9,10 @@ import { FileViewer } from './FileViewer';
 import { useTheme } from '@/hooks/useTheme';
 
 export function AppShell({ children }: { children: React.ReactNode }) {
+  const router = useRouter();
   const { isDark, toggle } = useTheme();
   const [activeSessionId, setActiveSessionId] = useState<string | null>(null);
+  const [activeSessionWorkdir, setActiveSessionWorkdir] = useState<string | null>(null);
   const [showFileExplorer, setShowFileExplorer] = useState(false);
   const [showConfig, setShowConfig] = useState(false);
   const [tabs, setTabs] = useState<Tab[]>([
@@ -17,15 +20,17 @@ export function AppShell({ children }: { children: React.ReactNode }) {
   ]);
   const [activeTabId, setActiveTabId] = useState('home');
 
-  const handleSelectSession = useCallback((id: string) => {
+  const handleSelectSession = useCallback((id: string, workdir: string) => {
     setActiveSessionId(id);
+    setActiveSessionWorkdir(workdir);
     const tabId = `chat-${id}`;
     const existing = tabs.find(t => t.id === tabId);
     if (!existing) {
       setTabs(prev => [...prev, { id: tabId, label: id.slice(0, 12), type: 'chat', sessionId: id }]);
     }
     setActiveTabId(tabId);
-  }, [tabs]);
+    router.push(`/session/${id}`);
+  }, [tabs, router]);
 
   const handleCloseTab = useCallback((id: string) => {
     setTabs(prev => {
@@ -49,11 +54,12 @@ export function AppShell({ children }: { children: React.ReactNode }) {
 
         {showFileExplorer && (
           <FileExplorer
+            workspace={activeSessionWorkdir}
             onOpenFile={(path) => {
               const tabId = `file-${path}`;
               const existing = tabs.find(t => t.id === tabId);
               if (!existing) {
-                setTabs(prev => [...prev, { id: tabId, label: path.split('/').pop() || path, type: 'file', path }]);
+                setTabs(prev => [...prev, { id: tabId, label: path.split('/').pop() || path, type: 'file', path, workspace: activeSessionWorkdir ?? undefined }]);
               }
               setActiveTabId(tabId);
             }}
@@ -71,7 +77,7 @@ export function AppShell({ children }: { children: React.ReactNode }) {
             {(() => {
               const activeTab = tabs.find(t => t.id === activeTabId);
               if (activeTab?.type === 'file' && activeTab.path) {
-                return <FileViewer filePath={activeTab.path} />;
+                return <FileViewer filePath={activeTab.path} workspace={activeTab.workspace} />;
               }
               return children;
             })()}
