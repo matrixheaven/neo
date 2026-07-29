@@ -268,24 +268,7 @@ mod windows_input_mode {
         winapi_util::console::set_mode(&io::stdin(), mode)
     }
 
-    // Non-Windows stubs exist only so `cfg(test)` can compile the seamed unit
-    // tests on Unix hosts. Production entry uses this module solely on Windows.
-    #[cfg(not(windows))]
-    fn query_console_mode() -> io::Result<u32> {
-        Err(io::Error::new(
-            io::ErrorKind::Unsupported,
-            "windows console mode is unavailable on this host",
-        ))
-    }
-
-    #[cfg(not(windows))]
-    fn set_console_mode(_mode: u32) -> io::Result<()> {
-        Err(io::Error::new(
-            io::ErrorKind::Unsupported,
-            "windows console mode is unavailable on this host",
-        ))
-    }
-
+    #[cfg(windows)]
     const fn default_console_mode_ops() -> ConsoleModeOps {
         ConsoleModeOps {
             query: query_console_mode,
@@ -307,11 +290,12 @@ mod windows_input_mode {
             }
         }
 
-        #[cfg(test)]
+        #[cfg(all(test, windows))]
         pub(super) const fn for_test() -> Self {
             Self::inactive()
         }
 
+        #[cfg(windows)]
         pub(super) fn enter() -> io::Result<Self> {
             Self::enter_with(default_console_mode_ops())
         }
@@ -330,6 +314,7 @@ mod windows_input_mode {
             })
         }
 
+        #[cfg(windows)]
         pub(super) fn restore(&mut self) {
             self.restore_with(set_console_mode);
         }

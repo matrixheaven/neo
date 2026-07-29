@@ -1945,14 +1945,14 @@ fn workflow_list_and_check_have_stable_output() {
         for entry in entries.flatten() {
             let p = entry.path();
             if p.is_dir() {
-                if p.file_name().and_then(|n| n.to_str()) == Some("workflows") && path != home {
-                    if p.join("run.json").exists()
+                if p.file_name().and_then(|n| n.to_str()) == Some("workflows")
+                    && path != home
+                    && (p.join("run.json").exists()
                         || fs::read_dir(&p).is_ok_and(|mut d| {
                             d.any(|e| e.is_ok_and(|e| e.path().join("run.json").exists()))
-                        })
-                    {
-                        found_run = true;
-                    }
+                        }))
+                {
+                    found_run = true;
                 }
                 stack.push(p);
             }
