@@ -107,6 +107,11 @@ export class NeoRpcProcess extends EventEmitter {
     });
   }
 
+  off(event: string, listener: (...args: any[]) => void): this {
+    super.off(event, listener);
+    return this;
+  }
+
   destroy(): void {
     if (this.destroyed) return;
     this.destroyed = true;
