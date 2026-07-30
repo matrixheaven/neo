@@ -846,6 +846,7 @@ fn render_tool_body_with_palette(
         })
         .or_else(|| render_list_delegates_body(state, expanded, width, palette))
         .or_else(|| render_sleep_body(state, expanded, width, palette))
+        .or_else(|| render_delegate_schema_failure_body(state, expanded, width, palette))
         .or_else(|| render_result_body(state, expanded, width, palette))
         .unwrap_or_default()
 }
@@ -1073,6 +1074,55 @@ fn render_result_body(
 ) -> Option<Vec<Line>> {
     let result = state.result.as_deref().filter(|value| !value.is_empty())?;
     Some(render_result_preview(result, expanded, width, palette))
+}
+
+fn render_delegate_schema_failure_body(
+    state: &ToolCallState,
+    expanded: bool,
+    width: usize,
+    palette: ToolBodyPalette<'_>,
+) -> Option<Vec<Line>> {
+    if state.status != ToolStatusKind::Failed
+        || !matches!(state.name.as_str(), "Delegate" | "DelegateSwarm")
+    {
+        return None;
+    }
+    let details = state.details.as_ref()?;
+    let expected_kind = if state.name == "Delegate" {
+        "delegate"
+    } else {
+        "delegate_swarm"
+    };
+    if details.get("kind").and_then(serde_json::Value::as_str) != Some(expected_kind)
+        || details.get("status").and_then(serde_json::Value::as_str) != Some("completed")
+        || details
+            .get("schema_error_code")
+            .and_then(serde_json::Value::as_str)
+            .is_none()
+    {
+        return None;
+    }
+    let schema_error = details
+        .get("schema_error")
+        .and_then(serde_json::Value::as_str)?;
+    let mut rows = vec![
+        palette.body_line("  Agent lifecycle: completed".to_owned()),
+        palette.body_line("  Requested result: failed".to_owned()),
+        palette.body_line("  Reason: output did not match the requested format".to_owned()),
+    ];
+    if expanded {
+        rows.extend(render_result_preview(
+            &format!("schema error: {schema_error}"),
+            true,
+            width,
+            palette,
+        ));
+    }
+    Some(
+        rows.into_iter()
+            .map(|row| row.truncate_to_width(width))
+            .collect(),
+    )
 }
 
 fn render_result_preview(

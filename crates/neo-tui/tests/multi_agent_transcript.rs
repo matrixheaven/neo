@@ -1567,6 +1567,63 @@ fn option_b_delegate_absorption_restores_failed_tool_result() {
 }
 
 #[test]
+fn option_b_delegate_absorption_distinguishes_completed_agent_from_failed_schema_result() {
+    let mut pane = TranscriptPane::new(140, 30);
+    pane.apply_agent_event(AgentEvent::ToolExecutionStarted {
+        turn: 18,
+        id: "tool_delegate_schema_failure".to_owned(),
+        name: "Delegate".to_owned(),
+        arguments: serde_json::json!({"task": "answer 5+5"}),
+        workflow_origin: None,
+    });
+    pane.apply_agent_event(AgentEvent::DelegateStarted {
+        turn: 18,
+        agent: running_delegate(),
+    });
+    pane.apply_agent_event(AgentEvent::DelegateFinished {
+        turn: 18,
+        agent: completed_delegate(),
+    });
+    pane.apply_agent_event(AgentEvent::ToolExecutionFinished {
+        turn: 18,
+        id: "tool_delegate_schema_failure".to_owned(),
+        name: "Delegate".to_owned(),
+        result: neo_agent_core::ToolResult::error("required property `echoed` is missing")
+            .with_details(serde_json::json!({
+                "kind": "delegate",
+                "agent_id": "agent_test",
+                "status": "completed",
+                "schema_error_code": "schema_invalid",
+                "schema_error": "required property `echoed` is missing"
+            })),
+        workflow_origin: None,
+    });
+
+    pane.set_tool_output_expanded(true);
+    let _ = pane.render_frame(140, 30);
+    let text = pane
+        .frame_ansi_lines()
+        .iter()
+        .map(|line| strip_ansi(line))
+        .collect::<Vec<_>>()
+        .join("\n");
+
+    assert!(text.contains("Failed Delegate"), "{text}");
+    assert!(text.contains("Agent lifecycle: completed"), "{text}");
+    assert!(text.contains("Requested result: failed"), "{text}");
+    assert!(
+        text.contains("output did not match the requested format"),
+        "{text}"
+    );
+    assert!(
+        text.contains("schema error: required property `echoed` is missing"),
+        "{text}"
+    );
+    assert!(!text.contains("status: completed"), "{text}");
+    assert!(text.contains("Gibbs  [Coder] · Delegate"), "{text}");
+}
+
+#[test]
 fn option_b_delegate_absorption_restores_mismatched_tool_result_details() {
     let mut pane = TranscriptPane::new(140, 30);
     pane.apply_agent_event(AgentEvent::ToolExecutionStarted {
