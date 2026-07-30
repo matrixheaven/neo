@@ -3,6 +3,7 @@ use std::time::Duration;
 use futures::StreamExt;
 use neo_agent_core::harness::FakeHarness;
 use neo_agent_core::runtime::WorkflowDispatchResolver;
+use neo_agent_core::workflow::WorkflowRuntime;
 use neo_agent_core::{
     AgentConfig, AgentContext, AgentEvent, AgentMessage, AgentRuntime, PermissionMode, ToolRegistry,
 };
@@ -185,6 +186,7 @@ async fn production_workflow_result_reaches_the_next_model_request() {
     let workspace = tempfile::tempdir().expect("workspace");
     let session = tempfile::tempdir().expect("session");
     let resolver = WorkflowDispatchResolver::default();
+    let workflow_runtime = WorkflowRuntime::default();
     let first_harness = FakeHarness::from_turns([
         tool_call_turn(
             "workflow-call",
@@ -200,6 +202,7 @@ async fn production_workflow_result_reaches_the_next_model_request() {
         .expect("workspace root")
         .with_session_directory(session.path())
         .with_agent_id("main")
+        .with_workflow_runtime(workflow_runtime)
         .with_workflow_dispatch_resolver(resolver.clone());
     assert!(
         config
@@ -309,6 +312,10 @@ async fn production_workflow_result_reaches_the_next_model_request() {
         2,
         "TaskOutput must be followed by the next model request"
     );
+    let replayed_launch: Value =
+        serde_json::from_str(&tool_result_text(&requests[0], "workflow-call"))
+            .expect("launch JSON remains in the next turn context");
+    assert_eq!(replayed_launch, launch_content);
     let next_model_content = tool_result_text(&requests[1], "task-output-call");
     let next_model_json: Value = serde_json::from_str(&next_model_content)
         .expect("next model request contains TaskOutput JSON");
