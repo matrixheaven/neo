@@ -1,3 +1,5 @@
+use std::fmt::Write as _;
+
 use neo_agent_core::workflow::{
     ResolvedWorkflowDefinition, WorkflowDefinitionRegistry, WorkflowListScope, WorkflowSourceOrigin,
 };
@@ -135,7 +137,6 @@ pub(super) fn render_automatic_workflow_context(catalog: &[WorkflowCatalogItem])
         } else {
             item.required_inputs.join(", ")
         };
-        use std::fmt::Write as _;
         let _ = writeln!(
             context,
             "<workflow name=\"{}\" source=\"{}\">\n<display-name>{}</display-name>\n<description>{}</description>\n<required-inputs>{}</required-inputs>\n</workflow>",
