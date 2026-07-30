@@ -286,7 +286,7 @@ fn inline_definition(
         description: required_string(action, "description", &input.description)?,
         phases: required_phases(action, &input.phases)?,
         script: required_string(action, "script", &input.script)?,
-        input_schema: input.input_schema.clone(),
+        input_schema: Some(required_object(action, "input_schema", &input.input_schema)?),
         output_schema: required_object(action, "output_schema", &input.output_schema)?,
     })
 }
@@ -311,21 +311,24 @@ fn expected_shape(action: Option<WorkflowAction>) -> Value {
         }),
         WorkflowAction::ValidateInline => json!({
             "required": [
-                "action", "name", "description", "phases", "script", "output_schema"
+                "action", "name", "description", "phases", "script", "input_schema",
+                "output_schema"
             ],
-            "optional": ["input_schema"]
+            "optional": []
         }),
         WorkflowAction::Save => json!({
             "required": [
-                "action", "name", "description", "phases", "script", "output_schema", "scope"
+                "action", "name", "description", "phases", "script", "input_schema",
+                "output_schema", "scope"
             ],
-            "optional": ["input_schema", "replace"]
+            "optional": ["replace"]
         }),
         WorkflowAction::RunInline => json!({
             "required": [
-                "action", "name", "description", "phases", "script", "output_schema"
+                "action", "name", "description", "phases", "script", "input_schema",
+                "output_schema"
             ],
-            "optional": ["input_schema", "args"]
+            "optional": ["args"]
         }),
         WorkflowAction::RunSaved => json!({
             "required": ["action", "name"],
@@ -983,7 +986,7 @@ impl Tool for WorkflowTool {
     }
 
     fn description(&self) -> &'static str {
-        "Canonical first-party tool for every Neo workflow action. If the user asks to use a workflow without naming one, call Workflow(list), choose a suitable definition, call Workflow(show) only when its full input schema is needed, then call Workflow(run_saved). If the user names a saved workflow, call Workflow(show) only when needed and then Workflow(run_saved). For creation, change, adaptation, or one-off authoring, activate Skill(create-workflow) and use the appropriate Workflow(save), Workflow(validate_inline), or Workflow(run_inline) action. run_inline, run_saved, and save each perform their complete validation internally; validate_inline and validate_saved are explicit check-only actions. Do not read Neo source, run Cargo, invoke the workflow CLI through Bash or Terminal. Saved and inline runs require no slash capability; do not ask for slash capability. They return a task handle; use TaskOutput to inspect details or answer pending workflow questions; terminal completion arrives automatically."
+        "Canonical first-party tool for every Neo workflow action. Begin every call with an explicit action. For creation, change, adaptation, or one-off authoring, use Skill(create-workflow). Inline validate_inline, save, and run_inline calls require both input_schema and output_schema. For a known saved workflow, use run_saved without resending definition fields. Workflow runs return task IDs; read them with TaskOutput. Use list/show to discover or view definitions, and validate_inline/validate_saved only for explicit checks. Do not read Neo source, run Cargo, or invoke the workflow CLI through Bash or Terminal. Saved and inline runs require no slash capability."
     }
 
     fn input_schema(&self) -> Value {

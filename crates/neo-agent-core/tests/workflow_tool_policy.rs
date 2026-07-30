@@ -209,32 +209,25 @@ fn workflow_tool_is_root_only_and_description_has_no_choreography() {
     assert!(description.contains("create-workflow"));
     assert!(description.contains("TaskOutput"));
     assert!(description.contains("no slash capability"));
-    assert!(description.contains("Workflow(list)"));
-    assert!(description.contains("Workflow(run_saved)"));
-    assert!(description.contains("without naming one"));
-    assert!(description.contains("creation, change, adaptation"));
-    assert!(!description.contains("Use list/show only when the user explicitly asks"));
-    assert!(description.contains("each perform their complete validation internally"));
+    assert!(description.contains("explicit action"));
+    assert!(description.contains("both input_schema and output_schema"));
+    assert!(description.contains("without resending definition fields"));
+    assert!(description.contains("task IDs"));
+    assert!(description.contains("list/show"));
+    assert!(description.contains("run_saved"));
+    assert!(!description.contains("inspect"));
     assert!(
         !description.contains("MUST call Workflow(validate_inline), then Workflow(run_inline)")
     );
     assert!(!description.contains("REQUIRED FIRST ACTION"));
 
     let schema = neo_agent_core::tools::WorkflowTool.input_schema();
-    assert_eq!(
-        schema["$defs"]["WorkflowAction"]["enum"][0],
-        "validate_inline"
-    );
-    assert!(
-        !schema["properties"]["action"]["description"]
-            .as_str()
-            .is_some_and(|text| text.contains("start with validate_inline"))
-    );
-    assert!(
-        schema["properties"]["action"]["description"]
-            .as_str()
-            .is_some_and(|text| text.contains("validate internally"))
-    );
+    assert!(schema["oneOf"].as_array().is_some_and(|branches| {
+        branches.iter().any(|branch| {
+            branch["properties"]["action"]["const"] == "validate_inline"
+        })
+    }));
+    assert!(!schema.to_string().contains("start with validate_inline"));
 }
 
 /// Workflow provenance is typed on approvals and tool events.

@@ -61,33 +61,24 @@ test Neo's workflow implementation or CLI itself, ordinary source examination,
 Cargo tests, and CLI invocation are allowed and this skill's routing rules do
 not apply.
 
-## Authoring procedure
+## Authoring checklist
 
-1. **Gather intent**, conversationally: what should it do, what fans out, what
-   must be verified, what is the final structured result, and whether children
-   are read-only or may mutate (isolated worktrees for mutation).
-2. **Pick a name** (portable grammar `[a-z0-9][a-z0-9_-]{0,63}`) and, for
-   saves, a scope: `project` (trusted workspace only) or `user` (all
-   workspaces). Builtin scope is not writable.
-3. **Author the Lua source** from the example below. It reads `neo.args`,
-   calls host APIs, and **returns** one JSON-compatible table matching
-   `output_schema`. Keep child prompts imperative and self-contained (see
-   Pitfalls). Declare ordered phases and JSON Schemas alongside the source.
-4. **Validate** (optional, explicit check-only): `Workflow(validate_inline)`
-   for inline definitions or `Workflow(validate_saved)` for saved ones compiles
-   the definition and Lua; it creates no files, runs, or tasks. `run_inline`,
-   `run_saved`, and `save` already validate internally before acting, so a
-   standalone validation step is not required before launching.
-5. **Route by intent** using the table above. `Workflow(save)` persists the
-   pair (use `replace: true` only when the user wants to overwrite an existing
-  definition). Run actions return a task ID and continue under the workflow
-  runtime. `TaskOutput` is the workflow task's reading and waiting entry point:
-  use it with that task ID for status, bounded result or journal pages, artifact
-  content, or pending input. `WaitDelegate` is only for delegate and swarm IDs,
-  never workflow task IDs.
-6. **Report**: workflow name, validation/save/run structured outcomes, task
-   terminal state, saved scope, and remaining risks (e.g. live child quality,
-   human gates).
+1. Choose the `Workflow` action before writing its arguments.
+2. Declare both `input_schema` and `output_schema` for every inline definition.
+3. Make Lua return exactly the result declared by `output_schema`.
+4. Check every host outcome's `ok` field before using its result.
+5. Call `neo.fail` with the preserved summary when a required outcome fails.
+6. Call `neo.tool` with `{ name = "ToolName", input = { ... } }`.
+7. Put an `output_schema` on every heterogeneous `neo.swarm` item.
+8. Use `neo.json_array` and `neo.json_object` only as Lua table type markers.
+
+Before authoring, gather the goal, fan-out, required checks, final structured
+result, and whether children may mutate. Pick a portable name
+(`[a-z0-9][a-z0-9_-]{0,63}`) and a save scope (`project` or `user`). Author a
+paired definition, then route it through the Workflow tool. `save`, `run_inline`,
+and `run_saved` validate internally; explicit validation remains optional.
+Use the returned task ID with `TaskOutput`, and report the real terminal state
+and remaining risks.
 
 Prefer the smallest workflow that satisfies the request. Do not invent host
 APIs that are not listed below. Do not launch workflows from workflows.
@@ -98,8 +89,11 @@ APIs that are not listed below. Do not launch workflows from workflows.
 take the same definition fields the host validates canonically:
 
 - `name`, `description`, ordered `phases` (`{id, description}`), exact Lua
-  `script`, `input_schema` (object, optional; omit it to accept no arguments),
-  `output_schema` (object, **required**).
+  `script`, `input_schema` (object, **required**), and `output_schema` (object,
+  **required**). For a workflow with no arguments use
+  `{"type":"object","additionalProperties":false}`. For a required argument
+  use, for example,
+  `{"type":"object","additionalProperties":false,"required":["text"],"properties":{"text":{"type":"string"}}}`.
 - `save` additionally requires `scope` (`user` | `project`) and accepts
   `replace` (default `false`).
 - Run actions accept `args` (object, default `{}`).

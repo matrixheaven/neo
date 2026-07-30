@@ -295,6 +295,16 @@ mod tests {
             "the host owns",
             "escape hatch",
             "Do **not** ask the user to run `/workflow` first",
+            "## Authoring checklist",
+            "Choose the `Workflow` action",
+            "Declare both `input_schema` and `output_schema`",
+            "Check every host outcome's `ok` field",
+            "Call `neo.fail`",
+            "Call `neo.tool` with `{ name = \"ToolName\", input = { ... } }`",
+            "Put an `output_schema` on every heterogeneous `neo.swarm` item",
+            "Use `neo.json_array` and `neo.json_object` only as Lua table type markers",
+            "{\"type\":\"object\",\"additionalProperties\":false}",
+            "\"required\":[\"text\"]",
         ] {
             assert!(
                 create_workflow.body.contains(required),

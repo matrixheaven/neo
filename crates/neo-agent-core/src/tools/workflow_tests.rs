@@ -61,9 +61,10 @@ fn workflow_schema_declares_action_specific_required_fields() {
                 "description",
                 "phases",
                 "script",
+                "input_schema",
                 "output_schema"
             ]),
-            json!(["input_schema"]),
+            json!([]),
         ),
         ("validate_saved", json!(["action", "name"]), json!([])),
         (
@@ -74,10 +75,11 @@ fn workflow_schema_declares_action_specific_required_fields() {
                 "description",
                 "phases",
                 "script",
+                "input_schema",
                 "output_schema",
                 "scope"
             ]),
-            json!(["input_schema", "replace"]),
+            json!(["replace"]),
         ),
         (
             "run_inline",
@@ -87,9 +89,10 @@ fn workflow_schema_declares_action_specific_required_fields() {
                 "description",
                 "phases",
                 "script",
+                "input_schema",
                 "output_schema"
             ]),
-            json!(["input_schema", "args"]),
+            json!(["args"]),
         ),
         ("run_saved", json!(["action", "name"]), json!(["args"])),
     ];
@@ -130,6 +133,30 @@ fn workflow_schema_declares_action_specific_required_fields() {
         error.message.contains("unknown field `limits`"),
         "{error:?}"
     );
+}
+
+#[test]
+fn inline_actions_reject_missing_input_schema_with_expected_shape() {
+    for action in ["validate_inline", "save", "run_inline"] {
+        let mut input = inline_input(action);
+        if action == "save" {
+            input["scope"] = json!("user");
+        }
+        input
+            .as_object_mut()
+            .expect("inline input object")
+            .remove("input_schema");
+
+        let error = prepare_action(&input).expect_err("missing input_schema was accepted");
+        assert_eq!(error.action, WorkflowAction::parse(action));
+        assert_eq!(error.field, Some("input_schema"));
+        assert!(
+            expected_shape(error.action)["required"]
+                .as_array()
+                .is_some_and(|fields| fields.iter().any(|field| field == "input_schema")),
+            "{action} expected shape must require input_schema"
+        );
+    }
 }
 
 #[test]
