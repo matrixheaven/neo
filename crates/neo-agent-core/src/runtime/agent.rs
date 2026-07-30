@@ -189,6 +189,12 @@ impl AgentRuntime {
         self
     }
 
+    #[must_use]
+    pub fn with_async_approval_handler(mut self, handler: AsyncApprovalHandler) -> Self {
+        self.config.async_approval_handler = Some(handler);
+        self
+    }
+
     pub fn tools_mut(&mut self) -> Option<&mut Arc<ToolRegistry>> {
         self.tools.as_mut()
     }

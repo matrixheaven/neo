@@ -32,6 +32,7 @@ use std::{
 use anyhow::Context;
 use futures::StreamExt;
 use neo_agent_core::goal::GoalManager;
+use neo_agent_core::runtime::AsyncApprovalHandler;
 use neo_agent_core::session::{JsonlSessionReader, JsonlSessionWriter, SessionEventPersistence};
 use neo_agent_core::{
     AgentContext, AgentEvent, AgentMessage, AgentRuntime, ApprovalRequest, ApprovalResponse,
@@ -260,14 +261,16 @@ pub async fn run_prompt_with_event_stream(
     prompt: &[String],
     config: &AppConfig,
     event_tx: mpsc::UnboundedSender<anyhow::Result<AgentEvent>>,
+    approval_handler: Option<AsyncApprovalHandler>,
 ) -> anyhow::Result<PromptTurn> {
-    run_prompt_streaming_with_retry_notices(prompt, config, event_tx).await
+    run_prompt_streaming_with_retry_notices(prompt, config, event_tx, approval_handler).await
 }
 
 async fn run_prompt_streaming_with_retry_notices(
     prompt: &[String],
     config: &AppConfig,
     event_tx: mpsc::UnboundedSender<anyhow::Result<AgentEvent>>,
+    approval_handler: Option<AsyncApprovalHandler>,
 ) -> anyhow::Result<PromptTurn> {
     let prompt_text = prompt.join(" ");
     let content = vec![Content::text(prompt_text.as_str())];
@@ -297,6 +300,11 @@ async fn run_prompt_streaming_with_retry_notices(
             writer.flush().await?;
             return Err(error);
         }
+    };
+    let runtime = if let Some(handler) = approval_handler {
+        runtime.with_async_approval_handler(handler)
+    } else {
+        runtime
     };
     let streaming = StreamingTurnIo {
         event_tx,
@@ -512,6 +520,51 @@ pub async fn run_prompt_in_session_streaming(
         request.compaction_only,
     )
     .await
+}
+
+pub(crate) async fn run_prompt_in_session_with_event_stream(
+    session_id: &str,
+    prompt: &[String],
+    config: &AppConfig,
+    event_tx: mpsc::UnboundedSender<anyhow::Result<AgentEvent>>,
+    approval_handler: Option<AsyncApprovalHandler>,
+) -> anyhow::Result<PromptTurn> {
+    let prompt_text = prompt.join(" ");
+    let user_content = vec![Content::text(prompt_text.as_str())];
+    let session_path = sessions::session_path(session_id, config)?;
+    let replayed_events = JsonlSessionReader::read_all(&session_path)
+        .await
+        .with_context(|| format!("failed to replay session {}", session_path.display()))?;
+    let context = AgentContext::from_replay(replayed_events.iter());
+    let session_dir = session_root_from_wire_path(&session_path)?;
+    let _ = rehydrate_session_workflows(config, session_id, &session_dir, &replayed_events).await?;
+    let mut writer = JsonlSessionWriter::open_append(&session_path)
+        .await
+        .with_context(|| format!("failed to append session {}", session_path.display()))?;
+    let user_message = user_message(user_content, MessageOrigin::User, None);
+    record_session_activity(config, session_id, &prompt_text);
+    let runtime = runtime_for_config(config, Some(session_dir), None, None).await?;
+    let runtime = if let Some(handler) = approval_handler {
+        runtime.with_async_approval_handler(handler)
+    } else {
+        runtime
+    };
+    runtime.restore_plan_mode(&context);
+    let streaming = StreamingTurnIo {
+        event_tx,
+        session_id: session_id.to_owned(),
+        cancel_token: CancellationToken::new(),
+    };
+    let turn = finish_prompt_turn_streaming(
+        user_message,
+        context,
+        &mut writer,
+        runtime,
+        Vec::new(),
+        streaming,
+    )
+    .await?;
+    Ok(turn)
 }
 
 async fn prepare_new_streaming_turn(
