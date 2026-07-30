@@ -141,7 +141,9 @@ fn action_matrix_rejects_saved_inline_mixtures_without_side_effects() {
     assert_eq!(error.field, Some("description"));
 
     let result = input_error_result(error);
+    let content: Value = serde_json::from_str(&result.content).expect("model error JSON");
     let details = result.details.expect("structured details");
+    assert_eq!(content, details);
     assert_eq!(details["ok"], false);
     assert_eq!(details["action"], "run_saved");
     assert_eq!(details["error"]["code"], "workflow_input_invalid");
@@ -237,9 +239,12 @@ async fn save_uses_registry_hash_and_writes_resolvable_pair_without_launching() 
         "save launched a task"
     );
     let details = result.details.expect("structured details");
+    let content: Value = serde_json::from_str(&result.content).expect("model result JSON");
+    assert_eq!(content, details);
     assert_eq!(details["action"], "save");
     assert_eq!(details["status"], "saved");
-    assert_eq!(details["workflow"]["source_sha256"], resolved.source_sha256);
+    assert!(details["workflow"].get("source_sha256").is_none());
+    assert!(content["workflow"].get("source_locator").is_none());
 }
 
 #[tokio::test]
@@ -355,8 +360,10 @@ fn non_save_conflicts_preserve_registry_error_without_replace_recovery() {
             "same-scope registry conflict",
         ),
     );
+    let content: Value = serde_json::from_str(&result.content).expect("model error JSON");
     let details = result.details.expect("details");
 
+    assert_eq!(content, details);
     assert_eq!(details["error"]["code"], "workflow_conflict");
     assert!(
         details["error"]["message"]
@@ -419,23 +426,29 @@ async fn saved_actions_list_show_validate_run_and_recover_from_conflict() {
         .details
         .expect("project save details");
 
-    let listed = WorkflowTool
+    let listed_result = WorkflowTool
         .execute(&ctx, json!({"action": "list", "scope": "user"}))
         .await
-        .expect("list")
-        .details
-        .expect("list details");
+        .expect("list");
+    let listed_content: Value =
+        serde_json::from_str(&listed_result.content).expect("list model JSON");
+    let listed = listed_result.details.expect("list details");
+    assert_eq!(listed_content, listed);
     assert_eq!(listed["items"]["entries"][0]["name"], "adapter-test");
+    assert_eq!(listed_content["items"]["total"], 1);
+    assert!(listed_content["items"].get("cursor").is_some());
     assert_eq!(
         listed["items"]["entries"][0]["schema"]["input"]["property_count"],
         0
     );
-    let project_listed = WorkflowTool
+    let project_listed_result = WorkflowTool
         .execute(&ctx, json!({"action": "list", "scope": "project"}))
         .await
-        .expect("project list")
-        .details
-        .expect("project list details");
+        .expect("project list");
+    let project_listed_content: Value =
+        serde_json::from_str(&project_listed_result.content).expect("project list model JSON");
+    let project_listed = project_listed_result.details.expect("project list details");
+    assert_eq!(project_listed_content, project_listed);
     assert_eq!(
         project_listed["items"]["entries"][0]["schema"]["input"]["property_count"],
         1
@@ -445,23 +458,28 @@ async fn saved_actions_list_show_validate_run_and_recover_from_conflict() {
         json!(["project_only"])
     );
 
-    let shown = WorkflowTool
+    let shown_result = WorkflowTool
         .execute(&ctx, json!({"action": "show", "name": "adapter-test"}))
         .await
-        .expect("show")
-        .details
-        .expect("show details");
+        .expect("show");
+    let shown_content: Value =
+        serde_json::from_str(&shown_result.content).expect("show model JSON");
+    let shown = shown_result.details.expect("show details");
+    assert_eq!(shown_content, shown);
     assert_eq!(shown["workflow"]["script"], "return { ok = true }");
+    assert!(shown_content["workflow"].get("source_sha256").is_none());
 
-    let validated = WorkflowTool
+    let validated_result = WorkflowTool
         .execute(
             &ctx,
             json!({"action": "validate_saved", "name": "adapter-test"}),
         )
         .await
-        .expect("validate saved")
-        .details
-        .expect("validate details");
+        .expect("validate saved");
+    let validated_content: Value =
+        serde_json::from_str(&validated_result.content).expect("validate model JSON");
+    let validated = validated_result.details.expect("validate details");
+    assert_eq!(validated_content, validated);
     assert_eq!(validated["validation"]["valid"], true);
 
     let mut conflicting = save;
@@ -471,7 +489,10 @@ async fn saved_actions_list_show_validate_run_and_recover_from_conflict() {
         .await
         .expect("conflicting save");
     assert!(conflict.is_error);
+    let conflict_content: Value =
+        serde_json::from_str(&conflict.content).expect("conflict model JSON");
     let conflict = conflict.details.expect("conflict details");
+    assert_eq!(conflict_content, conflict);
     assert_eq!(conflict["error"]["code"], "workflow_conflict");
     assert_eq!(conflict["next_actions"][0]["arguments"]["replace"], true);
     assert!(
@@ -483,7 +504,7 @@ async fn saved_actions_list_show_validate_run_and_recover_from_conflict() {
     prepare_action(&conflict["next_actions"][0]["arguments"])
         .expect("conflict recovery action must be directly executable");
 
-    let running = WorkflowTool
+    let running_result = WorkflowTool
         .execute(
             &ctx,
             json!({
@@ -493,9 +514,11 @@ async fn saved_actions_list_show_validate_run_and_recover_from_conflict() {
             }),
         )
         .await
-        .expect("run saved")
-        .details
-        .expect("run details");
+        .expect("run saved");
+    let running_content: Value =
+        serde_json::from_str(&running_result.content).expect("run model JSON");
+    let running = running_result.details.expect("run details");
+    assert_eq!(running_content, running);
     let task_id = running["task"]["task_id"].as_str().expect("task id");
     assert_eq!(running["next_actions"][0]["tool"], "TaskOutput");
     assert!(
@@ -519,13 +542,16 @@ async fn run_inline_returns_registered_task_and_task_output_next_action() {
         .expect("execute run");
 
     assert!(!result.is_error, "{}", result.content);
+    let content: Value = serde_json::from_str(&result.content).expect("run model JSON");
     let details = result.details.expect("structured details");
+    assert_eq!(content, details);
     let task_id = details["task"]["task_id"].as_str().expect("task id");
     assert_eq!(details["ok"], true);
     assert_eq!(details["action"], "run_inline");
     assert_eq!(details["status"], "started");
     assert_eq!(details["next_actions"][0]["tool"], "TaskOutput");
     assert_eq!(details["next_actions"][0]["arguments"]["task_id"], task_id);
+    assert_eq!(content["next_actions"][0]["arguments"]["task_id"], task_id);
     assert!(
         ctx.background_tasks
             .workflow_handle(task_id)

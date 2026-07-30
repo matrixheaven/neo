@@ -585,19 +585,22 @@ pub(crate) fn prepare_action(input: &Value) -> Result<PreparedWorkflowAction, Wo
 
 pub(crate) fn input_error_result(error: WorkflowInputError) -> ToolResult {
     let action = error.action.map(WorkflowAction::as_str);
-    ToolResult::error(error.message.clone()).with_details(json!({
-        "ok": false,
-        "action": action,
-        "status": "error",
-        "error": {
-            "code": error.code,
-            "message": error.message,
-            "field": error.field,
-            "expected_shape": expected_shape(error.action),
-            "side_effect_occurred": false,
-        },
-        "next_actions": [],
-    }))
+    model_result(
+        true,
+        json!({
+            "ok": false,
+            "action": action,
+            "status": "error",
+            "error": {
+                "code": error.code,
+                "message": error.message,
+                "field": error.field,
+                "expected_shape": expected_shape(error.action),
+                "side_effect_occurred": false,
+            },
+            "next_actions": [],
+        }),
+    )
 }
 
 /// Structured zero-side-effect error for pre-approval validation failures.
@@ -659,19 +662,22 @@ fn workflow_error_result_with_context(
         }]),
         _ => json!([]),
     });
-    ToolResult::error(message.clone()).with_details(json!({
-        "ok": false,
-        "action": action.as_str(),
-        "status": "error",
-        "error": {
-            "code": code,
-            "message": message,
-            "field": field,
-            "expected_shape": expected_shape(Some(action)),
-            "side_effect_occurred": side_effect_occurred,
-        },
-        "next_actions": next_actions,
-    }))
+    model_result(
+        true,
+        json!({
+            "ok": false,
+            "action": action.as_str(),
+            "status": "error",
+            "error": {
+                "code": code,
+                "message": message,
+                "field": field,
+                "expected_shape": expected_shape(Some(action)),
+                "side_effect_occurred": side_effect_occurred,
+            },
+            "next_actions": next_actions,
+        }),
+    )
 }
 
 fn workflow_error_result(action: WorkflowAction, error: WorkflowError) -> ToolResult {
@@ -691,19 +697,22 @@ fn workflow_save_error_result(error: WorkflowError, next_actions: Option<Value>)
 
 fn feature_error(action: WorkflowAction, message: impl Into<String>) -> ToolResult {
     let message = message.into();
-    ToolResult::error(message.clone()).with_details(json!({
-        "ok": false,
-        "action": action.as_str(),
-        "status": "error",
-        "error": {
-            "code": "workflow_feature_unavailable",
-            "message": message,
-            "field": null,
-            "expected_shape": expected_shape(Some(action)),
-            "side_effect_occurred": false,
-        },
-        "next_actions": [],
-    }))
+    model_result(
+        true,
+        json!({
+            "ok": false,
+            "action": action.as_str(),
+            "status": "error",
+            "error": {
+                "code": "workflow_feature_unavailable",
+                "message": message,
+                "field": null,
+                "expected_shape": expected_shape(Some(action)),
+                "side_effect_occurred": false,
+            },
+            "next_actions": [],
+        }),
+    )
 }
 
 fn workflow_details(definition: &ResolvedWorkflowDefinition, include_source: bool) -> Value {
@@ -714,10 +723,6 @@ fn workflow_details(definition: &ResolvedWorkflowDefinition, include_source: boo
         "phases": definition.phases,
         "input_schema": definition.input_schema,
         "output_schema": definition.output_schema,
-        "source_origin": definition.source_origin.as_str(),
-        "source_locator": definition.source_locator,
-        "source_sha256": definition.source_sha256,
-        "revision": definition.revision.as_str(),
         "script": include_source.then_some(definition.lua_source.as_str()),
     })
 }
@@ -748,19 +753,34 @@ struct WorkflowResultDetails {
 fn result(
     action: WorkflowAction,
     status: &'static str,
-    content: impl Into<String>,
     details: WorkflowResultDetails,
 ) -> ToolResult {
-    ToolResult::ok(content).with_details(json!({
-        "ok": true,
-        "action": action.as_str(),
-        "status": status,
-        "workflow": details.workflow,
-        "validation": details.validation,
-        "items": details.items,
-        "task": details.task,
-        "next_actions": details.next_actions,
-    }))
+    model_result(
+        false,
+        json!({
+            "ok": true,
+            "action": action.as_str(),
+            "status": status,
+            "workflow": details.workflow,
+            "validation": details.validation,
+            "items": details.items,
+            "task": details.task,
+            "next_actions": details.next_actions,
+        }),
+    )
+}
+
+fn model_result(is_error: bool, payload: Value) -> ToolResult {
+    let mut payload = payload;
+    if let Some(object) = payload.as_object_mut() {
+        object.retain(|_, value| !value.is_null());
+    }
+    let content = payload.to_string();
+    if is_error {
+        ToolResult::error(content).with_details(payload)
+    } else {
+        ToolResult::ok(content).with_details(payload)
+    }
 }
 
 fn permission_mode(ctx: &ToolContext) -> crate::PermissionMode {
@@ -922,10 +942,6 @@ async fn launch_definition(
     result(
         action,
         "started",
-        format!(
-            "Workflow '{display_name}' started as task {task_id}. \
-             Completion arrives automatically; use TaskOutput for optional details."
-        ),
         WorkflowResultDetails {
             workflow: Some(workflow_details(definition, false)),
             validation: None,
@@ -1048,7 +1064,6 @@ async fn dispatch_prepared(
             result(
                 action,
                 "listed",
-                format!("Listed {} workflow(s).", items.len()),
                 WorkflowResultDetails {
                     workflow: None,
                     validation: None,
@@ -1070,7 +1085,6 @@ async fn dispatch_prepared(
             result(
                 action,
                 "shown",
-                format!("Showing workflow `{}`.", definition.name.as_str()),
                 WorkflowResultDetails {
                     workflow: Some(workflow_details(&definition, true)),
                     validation: None,
@@ -1107,7 +1121,6 @@ async fn dispatch_prepared(
             result(
                 action,
                 "valid",
-                format!("Workflow `{}` is valid.", definition.name.as_str()),
                 WorkflowResultDetails {
                     workflow: Some(workflow_details(&definition, false)),
                     validation: Some(json!({"valid": true})),
@@ -1139,7 +1152,6 @@ async fn dispatch_prepared(
             result(
                 action,
                 "valid",
-                format!("Workflow `{}` is valid.", definition.name.as_str()),
                 WorkflowResultDetails {
                     workflow: Some(workflow_details(&definition, false)),
                     validation: Some(json!({"valid": true})),
@@ -1213,7 +1225,6 @@ async fn dispatch_prepared(
             result(
                 action,
                 "saved",
-                format!("Saved workflow `{}`.", definition.name.as_str()),
                 WorkflowResultDetails {
                     workflow: Some(workflow_details(&definition, false)),
                     validation: Some(json!({"valid": true})),
