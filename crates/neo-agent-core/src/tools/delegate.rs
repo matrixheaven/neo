@@ -25,6 +25,13 @@ use crate::workflow::{CompiledSchema, StructuredOutputSource, accept_structured_
 
 type SwarmProgressUpdate = (SwarmChildProgress, SwarmAggregate, AgentLifecycleState);
 
+fn schema_error_content(details: &serde_json::Value) -> Option<String> {
+    details
+        .get("schema_error")
+        .and_then(serde_json::Value::as_str)
+        .map(ToOwned::to_owned)
+}
+
 struct SwarmRunOutput {
     snapshot: SwarmSnapshot,
     actual_usage: Option<crate::AgentTokenUsage>,
@@ -203,10 +210,8 @@ async fn execute_delegate(
         .await;
     let (result, details_extra) = apply_child_output_schema(ctx, &deps, &request, output).await?;
     let completed = result.snapshot;
-    let is_schema_error = details_extra
-        .get("schema_error_code")
-        .and_then(serde_json::Value::as_str)
-        .is_some();
+    let schema_error = schema_error_content(&details_extra);
+    let is_schema_error = schema_error.is_some();
     ctx.emit_event(AgentEvent::DelegateFinished {
         turn,
         agent: completed.clone(),
@@ -225,11 +230,9 @@ async fn execute_delegate(
             details[k] = v.clone();
         }
     }
-    let content = if let Some(value) = details.get("structured_output") {
-        value.to_string()
-    } else {
-        delegate_result_content(&completed, request.context)
-    };
+    let content = schema_error
+        .or_else(|| details.get("structured_output").map(ToString::to_string))
+        .unwrap_or_else(|| delegate_result_content(&completed, request.context));
     if is_schema_error {
         Ok(ToolResult::error(content).with_details(details))
     } else {
@@ -1262,6 +1265,19 @@ fn reject_unknown_placeholders(tool: &str, template: &str) -> Result<(), ToolErr
 mod tests {
     use super::*;
     use crate::multi_agent::apply_swarm_template;
+
+    #[test]
+    fn delegate_schema_error_content_uses_validation_reason() {
+        let details = json!({
+            "schema_error_code": "schema_invalid",
+            "schema_error": "required property `ok` is missing",
+        });
+
+        assert_eq!(
+            schema_error_content(&details).as_deref(),
+            Some("required property `ok` is missing")
+        );
+    }
 
     #[test]
     fn delegate_swarm_schema_describes_resume_agent_ids_as_object_map() {

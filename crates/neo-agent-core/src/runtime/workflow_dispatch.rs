@@ -957,12 +957,11 @@ fn canonical_delegate_outcome(
         });
     }
     let status = canonical_child_status("Delegate", decoded.status, decoded.mode)?;
-    if result_is_error && status == WorkflowOutcomeStatus::Completed {
-        return Err(
-            "invalid canonical Delegate outcome details: error result cannot be completed"
-                .to_owned(),
-        );
-    }
+    let status = if result_is_error && status == WorkflowOutcomeStatus::Completed {
+        WorkflowOutcomeStatus::Failed
+    } else {
+        status
+    };
     Ok(Some(CanonicalChildOutcome {
         status,
         actual_usage: decoded.actual_usage,
@@ -1017,12 +1016,11 @@ fn canonical_swarm_outcome(
         });
     }
     let status = canonical_child_status("DelegateSwarm", decoded.status, decoded.mode)?;
-    if result_is_error && status == WorkflowOutcomeStatus::Completed {
-        return Err(
-            "invalid canonical DelegateSwarm outcome details: error result cannot be completed"
-                .to_owned(),
-        );
-    }
+    let status = if result_is_error && status == WorkflowOutcomeStatus::Completed {
+        WorkflowOutcomeStatus::Failed
+    } else {
+        status
+    };
     Ok(Some(CanonicalChildOutcome {
         status,
         actual_usage: decoded.actual_usage,

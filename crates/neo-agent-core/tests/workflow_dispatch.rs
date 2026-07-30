@@ -275,7 +275,11 @@ impl Tool for CanonicalChildOutcomeTool {
         let details = self.details.clone();
         let is_error = self.is_error;
         Box::pin(async move {
-            let mut result = ToolResult::ok("canonical child outcome").with_details(details);
+            let content = details
+                .get("schema_error")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or("canonical child outcome");
+            let mut result = ToolResult::ok(content).with_details(details);
             result.is_error = is_error;
             Ok(result)
         })
@@ -493,7 +497,7 @@ async fn expected_child_tool_rejects_missing_or_mismatched_kind() {
 }
 
 #[tokio::test]
-async fn child_error_result_cannot_claim_completed_status() {
+async fn completed_delegate_with_schema_error_maps_to_failed_and_preserves_correlation() {
     let outcome = run_canonical_child_result(
         "Delegate",
         json!({
@@ -501,6 +505,8 @@ async fn child_error_result_cannot_claim_completed_status() {
             "agent_id": "contradictory-agent",
             "status": "completed",
             "mode": "foreground",
+            "schema_error_code": "schema_invalid",
+            "schema_error": "required property `ok` is missing",
             "actual_usage": {"input_tokens": 9, "output_tokens": 9},
         }),
         true,
@@ -508,9 +514,33 @@ async fn child_error_result_cannot_claim_completed_status() {
     .await;
 
     assert_eq!(outcome.status, WorkflowOutcomeStatus::Failed);
-    assert!(outcome.summary.contains("error result cannot be completed"));
-    assert!(outcome.actual_usage.is_none());
-    assert!(outcome.child_refs.is_empty());
+    assert_eq!(outcome.summary, "required property `ok` is missing");
+    assert_eq!(outcome.details["schema_error_code"], "schema_invalid");
+    assert_eq!(outcome.details["schema_error"], "required property `ok` is missing");
+    assert!(outcome.details.get("workflow_outcome_error").is_none());
+    assert_eq!(outcome.actual_usage.expect("usage").input_tokens, 9);
+    assert_eq!(outcome.child_refs.len(), 1);
+    assert_eq!(outcome.child_refs[0].id, "contradictory-agent");
+}
+
+#[tokio::test]
+async fn completed_swarm_error_maps_to_failed() {
+    let outcome = run_canonical_child_result(
+        "DelegateSwarm",
+        json!({
+            "kind": "delegate_swarm",
+            "swarm_id": "swarm_completed_with_error",
+            "status": "completed",
+            "mode": "foreground",
+            "items": [{"agent_id": "agent_completed", "status": "completed"}],
+            "actual_usage": {"input_tokens": 4, "output_tokens": 6},
+        }),
+        true,
+    )
+    .await;
+
+    assert_eq!(outcome.status, WorkflowOutcomeStatus::Failed);
+    assert!(!outcome.ok);
 }
 
 #[tokio::test]
