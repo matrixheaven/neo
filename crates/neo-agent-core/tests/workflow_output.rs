@@ -7,9 +7,9 @@ use neo_agent_core::workflow::journal::{
     JournalEnvelope, JournalPayload, JournalWriter, collect_journal,
 };
 use neo_agent_core::workflow::{
-    TaskOutputRequest, TaskOutputView, WorkflowActor, WorkflowId, WorkflowLaunchRequest,
-    WorkflowLimits, WorkflowPhase, WorkflowRuntime, WorkflowState, measure_tool_result_bytes,
-    page_to_tool_result,
+    CanonicalFinalResult, FinalResultBody, TaskOutputPage, TaskOutputRequest, TaskOutputView,
+    WorkflowActor, WorkflowId, WorkflowLaunchRequest, WorkflowLimits, WorkflowPhase,
+    WorkflowRuntime, WorkflowState, measure_tool_result_bytes, page_to_tool_result,
 };
 use serde_json::json;
 
@@ -125,6 +125,8 @@ async fn multi_gigabyte_logical_journal_pages_under_tool_result_cap() {
         let page = handle.task_output(request).await.expect("page");
         let (content, details) =
             page_to_tool_result(&page, page_cap).expect("tool result under cap");
+        let content_value: serde_json::Value =
+            serde_json::from_str(&content).expect("journal content JSON");
         let total = measure_tool_result_bytes(&content, &details) as u64;
         assert!(
             total <= page_cap,
@@ -133,6 +135,9 @@ async fn multi_gigabyte_logical_journal_pages_under_tool_result_cap() {
         // Summary must never embed the complete journal.
         assert!(page.summary.is_none() || page.journal.is_empty());
         assert_eq!(page.view, TaskOutputView::Journal);
+        assert_eq!(content_value["journal"], details["journal"]);
+        assert_eq!(content_value["has_more"], details["has_more"]);
+        assert_eq!(content_value["next_cursor"], details["next_cursor"]);
         if let (Some(first), Some(last)) = (page.first_seq, page.last_seq) {
             assert!(first <= last);
             for record in &page.journal {
@@ -173,6 +178,47 @@ async fn multi_gigabyte_logical_journal_pages_under_tool_result_cap() {
     assert!(
         !summary_json.contains("heartbeat-0-"),
         "summary must not embed full journal record bodies"
+    );
+}
+
+#[test]
+fn result_content_contains_actual_final_json() {
+    let page = TaskOutputPage {
+        view: TaskOutputView::Result,
+        run_id: "run-result".to_owned(),
+        kind: "workflow".to_owned(),
+        status: "completed".to_owned(),
+        first_seq: None,
+        last_seq: None,
+        has_more: false,
+        next_cursor: None,
+        returned_bytes: 34,
+        summary: None,
+        journal: Vec::new(),
+        result: Some(CanonicalFinalResult {
+            body: FinalResultBody::Inline {
+                value: json!({"answer": "visible", "count": 3}),
+            },
+            schema_revision: None,
+            actual_usage: None,
+            child_refs: Vec::new(),
+            terminal_reason: None,
+        }),
+        artifacts: Vec::new(),
+        artifact_content: None,
+        pending_user: None,
+        state: WorkflowState::Completed,
+        failure_count: 0,
+        invocation_count: 1,
+    };
+
+    let (content, details) = page_to_tool_result(&page, 8 * 1024).expect("result page");
+    let content_value: serde_json::Value =
+        serde_json::from_str(&content).expect("result content JSON");
+    assert_eq!(content_value, details);
+    assert_eq!(
+        content_value["result"]["body"]["inline"]["value"],
+        json!({"answer": "visible", "count": 3})
     );
 }
 

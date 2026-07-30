@@ -8,7 +8,6 @@
 //! are summary / journal / result / artifacts / artifact_content; cursors bind
 //! run, view, and query hash; the complete ToolResult is byte-capped.
 
-use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
 
 use base64::Engine;
@@ -1187,13 +1186,7 @@ pub fn page_to_tool_result(
     page: &TaskOutputPage,
     max_output_bytes: u64,
 ) -> Result<(String, serde_json::Value), WorkflowError> {
-    let details = serde_json::to_value(page).map_err(|e| {
-        WorkflowError::coded(
-            WorkflowErrorCode::InvalidInput,
-            format!("TaskOutput details serialization failed: {e}"),
-        )
-    })?;
-    let content = format_page_content(page);
+    let (content, details) = serialize_page(page)?;
     let total = measure_tool_result_bytes(&content, &details);
     if total as u64 > max_output_bytes {
         return Err(WorkflowError::coded(
@@ -1212,66 +1205,20 @@ pub fn measure_tool_result_bytes(content: &str, details: &serde_json::Value) -> 
     content.len().saturating_add(details_len)
 }
 
-fn format_page_content(page: &TaskOutputPage) -> String {
-    let mut content = match page.view {
-        TaskOutputView::Summary => format!(
-            "task_id: {}\nkind: workflow\nstatus: {}\nview: summary\ninvocations: {}\nfailures: {}",
-            page.run_id, page.status, page.invocation_count, page.failure_count
-        ),
-        TaskOutputView::Journal => format!(
-            "task_id: {}\nkind: workflow\nstatus: {}\nview: journal\nfirst_seq: {:?}\nlast_seq: {:?}\nhas_more: {}\nreturned_bytes: {}\nrecords: {}",
-            page.run_id,
-            page.status,
-            page.first_seq,
-            page.last_seq,
-            page.has_more,
-            page.returned_bytes,
-            page.journal.len()
-        ),
-        TaskOutputView::Result => format!(
-            "task_id: {}\nkind: workflow\nstatus: {}\nview: result\nhas_result: {}",
-            page.run_id,
-            page.status,
-            page.result.is_some()
-        ),
-        TaskOutputView::Artifacts => format!(
-            "task_id: {}\nkind: workflow\nstatus: {}\nview: artifacts\ncount: {}\nhas_more: {}",
-            page.run_id,
-            page.status,
-            page.artifacts.len(),
-            page.has_more
-        ),
-        TaskOutputView::ArtifactContent => {
-            let (offset, bytes, more) = page
-                .artifact_content
-                .as_ref()
-                .map_or((0, 0, false), |c| (c.offset, c.content_bytes, c.has_more));
-            format!(
-                "task_id: {}\nkind: workflow\nstatus: {}\nview: artifact_content\noffset: {}\ncontent_bytes: {}\nhas_more: {}",
-                page.run_id, page.status, offset, bytes, more
-            )
-        }
-    };
-    if let Some(pending) = &page.pending_user {
-        let _ = write!(
-            content,
-            "\npending_request_id: {}\nprompt: {}\nanswer_policy: {}\nanswer_schema: {}",
-            pending.request_id, pending.prompt, pending.answer_policy, pending.answer_schema
-        );
-        if let Some(default) = &pending.default {
-            let _ = write!(content, "\ndefault_answer: {default}");
-        }
-        if pending.next_action == "TaskAnswer" {
-            let _ = write!(
-                content,
-                "\nnext_action: TaskAnswer(task_id=\"{}\", request_id=\"{}\", answer=<JSON matching answer_schema>)",
-                page.run_id, pending.request_id
-            );
-        } else {
-            let _ = write!(content, "\nnext_action: {}", pending.next_action);
-        }
-    }
-    content
+fn serialize_page(page: &TaskOutputPage) -> Result<(String, serde_json::Value), WorkflowError> {
+    let details = serde_json::to_value(page).map_err(|e| {
+        WorkflowError::coded(
+            WorkflowErrorCode::InvalidInput,
+            format!("TaskOutput details serialization failed: {e}"),
+        )
+    })?;
+    let content = serde_json::to_string(&details).map_err(|e| {
+        WorkflowError::coded(
+            WorkflowErrorCode::InvalidInput,
+            format!("TaskOutput content serialization failed: {e}"),
+        )
+    })?;
+    Ok((content, details))
 }
 
 /// Dispatch a view after materials were collected (I/O-safe / lock-free).
@@ -1299,16 +1246,7 @@ fn shrink_page_to_tool_result_cap(
 ) -> Result<(), WorkflowError> {
     let max = request.max_output_bytes.max(1);
     for _ in 0..256 {
-        let (content, details) = {
-            let content = format_page_content(page);
-            let details = serde_json::to_value(&*page).map_err(|e| {
-                WorkflowError::coded(
-                    WorkflowErrorCode::InvalidInput,
-                    format!("TaskOutput details serialization failed: {e}"),
-                )
-            })?;
-            (content, details)
-        };
+        let (content, details) = serialize_page(page)?;
         let total = measure_tool_result_bytes(&content, &details) as u64;
         if total <= max {
             page.returned_bytes = page

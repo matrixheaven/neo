@@ -514,14 +514,11 @@ async fn task_output_exposes_actionable_pending_request_without_journal_view() {
         .await
         .expect("default TaskOutput");
     assert!(!output.is_error, "{}", output.content);
-    assert!(output.content.contains("view: summary"));
-    assert!(output.content.contains("pending_request_id: req_c0"));
-    assert!(output.content.contains("answer_policy: human_or_model"));
-    assert!(output.content.contains("answer_schema:"));
-    assert!(output.content.contains("default_answer: {\"ok\":true}"));
-    assert!(output.content.contains("next_action: TaskAnswer("));
-
+    let output_content: serde_json::Value =
+        serde_json::from_str(&output.content).expect("summary content JSON");
     let details = output.details.expect("TaskOutput details");
+    assert_eq!(output_content, details);
+    assert_eq!(output_content["view"], "summary");
     let pending = details
         .get("pending_user")
         .expect("top-level pending request");
@@ -546,9 +543,13 @@ async fn task_output_exposes_actionable_pending_request_without_journal_view() {
         )
         .await
         .expect("result TaskOutput");
-    assert!(result_view.content.contains("view: result"));
-    assert!(result_view.content.contains("pending_request_id: req_c0"));
-    assert!(result_view.content.contains("next_action: TaskAnswer("));
+    let result_content: serde_json::Value =
+        serde_json::from_str(&result_view.content).expect("result content JSON");
+    let result_details = result_view.details.expect("result TaskOutput details");
+    assert_eq!(result_content, result_details);
+    assert_eq!(result_content["view"], "result");
+    assert_eq!(result_content["pending_user"]["request_id"], "req_c0");
+    assert_eq!(result_content["pending_user"]["next_action"], "TaskAnswer");
 
     let answered = registry
         .run(
