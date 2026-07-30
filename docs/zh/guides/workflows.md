@@ -46,7 +46,7 @@ description = "范围与路径"
 id = "execute"
 description = "执行工作"
 
-# 可选 input JSON Schema（Draft 2020-12）
+# 可选 input JSON Schema（Draft 2020-12）。省略表示不接受参数。
 [input_schema]
 type = "object"
 additionalProperties = false
@@ -107,9 +107,10 @@ Skill(create-workflow) -> Workflow(run_inline)
 ```
 
 创建并测试则走 `Workflow(save) -> Workflow(run_saved)`。run action 返回 task
-ID，并由 workflow runtime 持续执行。只有需要状态、结果、artifact 或待回答输入时
-才使用 `TaskOutput`。这些路径均不需要 slash、capability、手工 manifest/hash
-操作或 `neo workflow` CLI 调用。
+ID，并由 workflow runtime 持续执行。`TaskOutput` 是 workflow 任务唯一的读取与等待
+入口：用该 task ID 获取状态、有界结果或 journal 页、artifact 内容，或待回答输入。
+`WaitDelegate` 只处理 delegate 和 swarm ID，不处理 workflow task ID。这些路径均不
+需要 slash、capability、手工 manifest/hash 操作或 `neo workflow` CLI 调用。
 
 workflow 等待输入时，每个 `TaskOutput` view 都会暴露可执行的
 `pending_user`：`request_id`、`prompt`、`answer_schema`、可选 `default`、
@@ -167,8 +168,8 @@ neo workflow run <name> [--args <object> | --args-file <path>]
 | `neo.swarm(input)` | 直接 child spec 批；包括同构 fan-out 在内，**每项** `output_schema` 都必需 |
 | `neo.tool({ name, input })` | 通过规范 `ToolRegistry` 调用合格工具 |
 | `neo.await_user(input)` | 持久化类型化用户输入（见下） |
-| `neo.verify(condition, message)` | 本地断言 |
-| `neo.verify_command({ command, cwd?, failure_message? })` | 经 Bash 的 shell 校验 |
+| `neo.verify(condition, message)` | 返回不可变结果，直接检查 `outcome.ok` |
+| `neo.verify_command({ command, cwd?, failure_message? })` | 经 Bash 执行，成功和普通失败都返回结果 |
 | `neo.report(value)` | 中间报告（不能当作最终结果回退） |
 | `neo.fail(message)` | 显式终态失败 |
 | `neo.json_array(table)` | 将表标记为 JSON 数组（含空数组） |
@@ -185,6 +186,10 @@ ok, status, summary, details?, actual_usage?, references?, schema?
 ```
 
 `status` 为：`completed` | `failed` | `denied` | `cancelled` | `resource_limited` | `interrupted` | `schema_invalid`。
+
+普通校验和工具失败会返回 `ok = false` 的结果值，脚本可以直接分支处理，不需要
+使用 `pcall`。`neo.fail`、未捕获的 Lua 错误、资源耗尽、取消以及最终结果无效会
+终止 workflow。
 
 ### 最终结果
 
@@ -289,6 +294,9 @@ answer_policy?  # human | human_or_model；默认 human
 
 每个非 summary 视图接受绑定 run、view 与 query hash 的稳定 **cursor**。错误 cursor 会被拒绝。响应报告 `has_more` / `next_cursor` / 返回字节数。记录不会被静默中途截断。
 
+使用返回的 task ID 调用 `TaskOutput`，等待完成并读取真实的有界结果、journal 页或
+artifact 内容。`WaitDelegate` 不读取 workflow 任务。
+
 ## `/tasks` 面板
 
 `/tasks` 已扩展 workflow 支持：可过滤列表、phase/进度、排队/准入原因、等待输入状态、实际用量、详情/输出，以及合法控制（暂停、恢复、回答、停止）。它仍是 background task 与 workflow 快照的投影 — 不是第二状态所有者。Delegate / Bash / Terminal 卡片布局保持不变。
@@ -311,7 +319,7 @@ assistant 用 `Workflow(list)`、`Workflow(show)` 与 `Workflow(run_saved)`。�
 
 1. 通过 `Workflow` 编写；需要编写指导时再激活 `create-workflow`。
 2. 仅通过 `Workflow(save)` 持久化，并通过 `Workflow(run_inline)` 或 `Workflow(run_saved)` 运行。
-3. 只有需要状态、结果、artifact 或待回答输入时才使用 `TaskOutput`。
+3. 使用返回的 task ID 调用 `TaskOutput`，读取状态、结果、artifact、journal 页或待回答输入。
 4. 只在 `human_or_model` gate 使用 `TaskAnswer`；仅手动回答留给用户。
 5. 不要要求用户先输入裸 slash、调用 `neo workflow`，或手写 manifest/hash。
 

@@ -33,10 +33,10 @@ compile the definition and Lua without persisting, running, or creating tasks.
 | User intent | Procedure |
 |-------------|-----------|
 | Create/save only | author -> `Workflow(save)` -> ask whether to run now |
-| Create and run/test | author -> `Workflow(save)` -> `Workflow(run_saved)`; use `TaskOutput` only when status, result, artifacts, or a pending question are needed |
-| One-off run/test/evaluate | author -> `Workflow(run_inline)`; use `TaskOutput` only when status, result, artifacts, or a pending question are needed |
+| Create and run/test | author -> `Workflow(save)` -> `Workflow(run_saved)`; use the returned task ID with `TaskOutput` when status, result, artifacts, or a pending question is needed |
+| One-off run/test/evaluate | author -> `Workflow(run_inline)`; use the returned task ID with `TaskOutput` when status, result, artifacts, or a pending question is needed |
 | Explicit check-only | author -> `Workflow(validate_inline)` / `Workflow(validate_saved)` -> report |
-| Run a known saved workflow | `Workflow(run_saved)`; use `TaskOutput` only for requested details or pending input |
+| Run a known saved workflow | `Workflow(run_saved)`; use the returned task ID with `TaskOutput` for status, result, artifacts, or pending input |
 | Discover saved workflows | `Workflow(list)` / `Workflow(show)` -> `Workflow(run_saved)` |
 | Use a workflow without naming one | `Workflow(list)` -> choose a suitable definition -> `Workflow(show)` only when needed -> `Workflow(run_saved)` |
 | Modify/debug Neo's workflow implementation | leave this skill; use normal repository diagnosis |
@@ -80,9 +80,11 @@ not apply.
    standalone validation step is not required before launching.
 5. **Route by intent** using the table above. `Workflow(save)` persists the
    pair (use `replace: true` only when the user wants to overwrite an existing
-   definition). Run actions return a task ID and continue under the workflow
-   runtime. Use `TaskOutput` only when the user asks for status/result/artifacts
-   or the run needs a pending question answered.
+  definition). Run actions return a task ID and continue under the workflow
+  runtime. `TaskOutput` is the workflow task's reading and waiting entry point:
+  use it with that task ID for status, bounded result or journal pages, artifact
+  content, or pending input. `WaitDelegate` is only for delegate and swarm IDs,
+  never workflow task IDs.
 6. **Report**: workflow name, validation/save/run structured outcomes, task
    terminal state, saved scope, and remaining risks (e.g. live child quality,
    human gates).
@@ -96,8 +98,8 @@ APIs that are not listed below. Do not launch workflows from workflows.
 take the same definition fields the host validates canonically:
 
 - `name`, `description`, ordered `phases` (`{id, description}`), exact Lua
-  `script`, `input_schema` (object, optional-but-preferred), `output_schema`
-  (object, **required**).
+  `script`, `input_schema` (object, optional; omit it to accept no arguments),
+  `output_schema` (object, **required**).
 - `save` additionally requires `scope` (`user` | `project`) and accepts
   `replace` (default `false`).
 - Run actions accept `args` (object, default `{}`).
@@ -228,7 +230,7 @@ matching the return table.
 | `neo.log(message)` | Non-empty progress line for the user/dashboard. |
 | `neo.report(value)` | Record a JSON-compatible intermediate report. |
 | `neo.fail(message)` | Fatal abort; subsequent host calls fail. |
-| `neo.verify(condition, message)` | If `condition` is false, throws (fail-closed gate). If true, returns nil. |
+| `neo.verify(condition, message)` | Returns an immutable outcome. Check `outcome.ok`; false is an ordinary failed result, while `neo.fail` is terminal. |
 | `neo.json_array(t)` / `neo.json_object(t)` | Mark table JSON kind for serialization. |
 
 ### Children
@@ -277,7 +279,7 @@ matching the return table.
 | Call | Behavior |
 |------|----------|
 | `neo.tool({ name, input })` | Canonical `ToolRegistry` tool. `input` must be a JSON object. |
-| `neo.verify_command({ command, cwd?, failure_message? })` | Runs via `Bash`. Success returns outcome; failure throws (wrapper). |
+| `neo.verify_command({ command, cwd?, failure_message? })` | Runs via `Bash` and returns an immutable outcome for both success and ordinary failure. |
 | `neo.await_user({...})` | Durable human (or policy-allowed) gate; returns **answer value**. |
 
 **`neo.tool` deny list** (exact names; not eligible):  
@@ -286,8 +288,9 @@ matching the return table.
 `StartGoal`, `ExitGoalMode`, `UpdateGoalStatus`, `GetGoalStatus`, `Todo`,
 `TodoList`, `ListDelegates`, `WaitDelegate`, `InterruptDelegate`,
 `MessageDelegate`.  
-`TaskOutput` cannot target the **current** workflow run id. Unknown names fail.
-Ordinary registered tools are eligible by default.
+`TaskOutput` cannot target the **current** workflow run id. Unknown names return a
+failed outcome. Check `outcome.ok` before using details; ordinary failures do not
+require `pcall`. Ordinary registered tools are eligible by default.
 
 **`neo.await_user` fields:**
 
@@ -360,8 +363,9 @@ Evidence gates must fail closed (`neo.verify` / `neo.fail`).
   `output_schema`.
 - **Terse child prompts.** Cold children return empty structured shells without
   tools. Tell children to use tools and define what a valid empty answer requires.
-- **Unguarded outcomes.** Always check `outcome.ok` (or `neo.verify`) before
-  trusting `details`.
+- **Unguarded outcomes.** Always check `outcome.ok` before trusting `details`.
+  Ordinary verification and tool failures are values, so do not wrap them in
+  `pcall`; reserve `pcall` for catchable Lua errors.
 - **Phase id typos.** `neo.phase` only accepts ids declared in `phases`.
 - **Project scope without trust.** Untrusted project definitions cannot be
   saved; use `user` scope or ask the user about trust.
@@ -417,8 +421,9 @@ Report only after the requested terminal state is real:
    or `Workflow(validate_saved)` success exists.
 3. Run/test/evaluate: a real task was launched through `Workflow(run_inline)`
    or `Workflow(run_saved)` (each validates the definition internally), or a
-   real typed failure is reported verbatim. Use `TaskOutput` only when terminal
-   details, artifacts, status, or pending input are part of the request.
+   real typed failure is reported verbatim. Use `TaskOutput` with the returned
+   task ID for terminal details, artifacts, status, journal pages, or pending
+   input.
 4. No slash capability, CLI invocation, or manual hash/manifest step was used
    or requested.
 5. Any intentional limits (read-only, no auto-merge, schema caps) and

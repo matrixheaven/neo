@@ -46,7 +46,7 @@ description = "Scope and approach"
 id = "execute"
 description = "Do the work"
 
-# Optional input JSON Schema (Draft 2020-12)
+# Optional input JSON Schema (Draft 2020-12). Omit it to accept no arguments.
 [input_schema]
 type = "object"
 additionalProperties = false
@@ -108,8 +108,10 @@ Skill(create-workflow) -> Workflow(run_inline)
 ```
 
 Create-and-test requests instead use `Workflow(save) -> Workflow(run_saved)`.
-Run actions return a task ID and continue under the workflow runtime. Use
-`TaskOutput` only when status, result, artifacts, or pending input are needed.
+Run actions return a task ID and continue under the workflow runtime. `TaskOutput`
+is the workflow task's only reading and waiting entry point: use that task ID for
+status, bounded result or journal pages, artifact content, or pending input.
+`WaitDelegate` is only for delegate and swarm IDs, never workflow task IDs.
 These routes need no slash command,
 capability, manual manifest/hash work, or `neo workflow` CLI invocation.
 
@@ -172,8 +174,8 @@ The sandbox is **mlua only**. No filesystem, process, network, package, debug, t
 | `neo.swarm(input)` | Direct child-spec batch; **per-item `output_schema` required**, including uniform fan-out |
 | `neo.tool({ name, input })` | Eligible tools via canonical `ToolRegistry` |
 | `neo.await_user(input)` | Durable typed user input (see below) |
-| `neo.verify(condition, message)` | Local assertion |
-| `neo.verify_command({ command, cwd?, failure_message? })` | Shell verification via Bash |
+| `neo.verify(condition, message)` | Returns an immutable outcome; check `outcome.ok` directly |
+| `neo.verify_command({ command, cwd?, failure_message? })` | Runs through Bash and returns an outcome for both success and ordinary failure |
 | `neo.report(value)` | Intermediate report (not a final-result fallback) |
 | `neo.fail(message)` | Explicit terminal failure |
 | `neo.json_array(table)` | Mark a table as a JSON array (including empty) |
@@ -190,6 +192,11 @@ ok, status, summary, details?, actual_usage?, references?, schema?
 ```
 
 `status` is one of: `completed` | `failed` | `denied` | `cancelled` | `resource_limited` | `interrupted` | `schema_invalid`.
+
+Ordinary verification and tool failures return `ok = false` values that the
+script can branch on; they do not require `pcall`. `neo.fail`, uncaught Lua
+errors, resource exhaustion, cancellation, and invalid final results terminate
+the workflow.
 
 ### Final result
 
@@ -295,6 +302,10 @@ For workflow tasks, `TaskOutput` never loads the complete journal. Supported vie
 
 Each non-summary view accepts a stable **cursor** bound to run, view, and query hash. Wrong cursors are rejected. Responses report `has_more` / `next_cursor` / returned byte counts. Records are never silently mid-cut.
 
+Use `TaskOutput` with the returned task ID to wait for completion and read the
+actual bounded result, journal pages, or artifact content. `WaitDelegate` does
+not read workflow tasks.
+
 ## `/tasks` dashboard
 
 `/tasks` is extended for workflows: filterable list, phase/progress, queue/admission reason, awaiting-input state, actual usage, details/output, and valid controls (pause, resume, answer, stop). It remains a projection over background tasks and workflow snapshots — not a second state owner. Delegate / Bash / Terminal card layouts are unchanged.
@@ -317,7 +328,8 @@ The assistant uses `Workflow(list)`, `Workflow(show)`, and `Workflow(run_saved)`
 
 1. Author through `Workflow`; activate `create-workflow` when authoring guidance is useful.
 2. Persist only through `Workflow(save)` and run through `Workflow(run_inline)` or `Workflow(run_saved)`.
-3. Use `TaskOutput` only when status, result, artifacts, or pending input are needed.
+3. Use the returned task ID with `TaskOutput` for status, result, artifacts,
+   journal pages, or pending input.
 4. Use `TaskAnswer` only for a `human_or_model` gate; leave human-only answers to the user.
 5. Never ask the user for a bare slash, invoke `neo workflow`, or hand-author a manifest/hash.
 

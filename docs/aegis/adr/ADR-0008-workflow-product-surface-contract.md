@@ -31,6 +31,27 @@ The `Workflow` tool has seven actions: `list`, `show`, `validate_inline`,
 `validate_saved`, `save`, `run_inline`, `run_saved`. Each mutation action
 performs complete preflight internally. No mandatory validation ordering.
 
+### Model-visible action results
+
+`Workflow` returns one compact JSON object in its model-visible result content.
+The object contains the action-specific fields needed for the next decision:
+available definitions, definition schemas, validation errors, task IDs, and the
+exact `TaskOutput` next action. `TaskOutput` likewise returns the requested
+bounded summary, journal, result, artifact, or artifact-content page in its
+content. Typed `details` remains the richer UI and event projection; the model
+does not need it to choose the next action. Omitted `input_schema` means the
+workflow accepts no arguments, while `output_schema` remains required.
+
+### Ordinary failures and terminal failures
+
+Ordinary host operations return immutable `ok = false` outcomes so Lua can
+branch directly on `outcome.ok`. This includes failed verification, failed
+command verification, unknown tools, and tools outside the workflow allowlist.
+These outcomes do not require `pcall` and do not terminate the run. Explicit
+`neo.fail`, uncaught Lua errors, resource exhaustion, cancellation, and invalid
+final results remain terminal workflow failures. `TaskOutput` is the workflow
+task read/wait path; `WaitDelegate` remains limited to delegate and swarm IDs.
+
 ### Definition And Runtime Ownership
 
 `WorkflowDefinitionRegistry` is the sole owner of stored workflow definitions
