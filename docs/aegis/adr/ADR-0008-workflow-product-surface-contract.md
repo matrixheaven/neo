@@ -2,6 +2,7 @@
 
 Status: `recorded-from-work`
 Date: `2026-07-28`
+Updated: `2026-07-31`
 
 ## Context
 
@@ -39,8 +40,31 @@ available definitions, definition schemas, validation errors, task IDs, and the
 exact `TaskOutput` next action. `TaskOutput` likewise returns the requested
 bounded summary, journal, result, artifact, or artifact-content page in its
 content. Typed `details` remains the richer UI and event projection; the model
-does not need it to choose the next action. Omitted `input_schema` means the
-workflow accepts no arguments, while `output_schema` remains required.
+does not need it to choose the next action. Historical saved definitions may
+omit `input_schema` to represent no arguments, while `output_schema` remains
+required.
+
+Inline workflow definitions must declare both `input_schema` and
+`output_schema`. A no-argument inline workflow declares the explicit object
+schema `{"type":"object","additionalProperties":false}`. Historical saved
+definitions may still omit `input_schema` and remain readable and runnable
+without migration.
+
+Schema-constrained child requests carry the exact output schema through the
+provider-neutral strict response format on the initial turn and on the one
+tools-disabled repair turn. Host acceptance stays strict: one JSON value, no
+fence, no prose, and no formatting tool call. A completed child lifecycle and
+an accepted requested result are separate facts. When the child completes but
+its structured result fails validation, Delegate and the workflow invocation
+are failed while `schema_error`, its error code, actual usage, and child
+references remain available. This state does not create a
+`workflow_outcome_error`.
+
+Required built-in child and verification outcomes call `neo.fail` on failure;
+they do not manufacture placeholder success. The outer TUI renders this
+two-layer status from typed details, while Delegate, DelegateGroup, and
+DelegateSwarm cards, grouping, activity, expansion, and placement remain
+unchanged.
 
 ### Ordinary failures and terminal failures
 
@@ -88,6 +112,9 @@ Only terminal runs older than the configured minimum age are eligible.
   need one lifecycle contract and one projection path.
 - Keep multiple journal readers or writers. Rejected: duplicate contracts make
   durable ownership and recovery ambiguous.
+- Treat a completed child lifecycle as a successful requested result. Rejected:
+  lifecycle completion does not prove that the declared structured result was
+  accepted.
 
 ## Consequences
 
@@ -96,6 +123,9 @@ Only terminal runs older than the configured minimum age are eligible.
 - Saved workflow runs, resume, output paging, retention, the harness, and child
   projection use the same journal contract.
 - Automatic retention prevents unbounded storage growth without user-facing CLI.
+- Strict provider-neutral child response formats improve first-turn schema
+  adherence without weakening host validation. Provider capability and model
+  authoring quality remain runtime verification concerns.
 
 ## Supersedes
 
