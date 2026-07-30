@@ -516,7 +516,10 @@ async fn completed_delegate_with_schema_error_maps_to_failed_and_preserves_corre
     assert_eq!(outcome.status, WorkflowOutcomeStatus::Failed);
     assert_eq!(outcome.summary, "required property `ok` is missing");
     assert_eq!(outcome.details["schema_error_code"], "schema_invalid");
-    assert_eq!(outcome.details["schema_error"], "required property `ok` is missing");
+    assert_eq!(
+        outcome.details["schema_error"],
+        "required property `ok` is missing"
+    );
     assert!(outcome.details.get("workflow_outcome_error").is_none());
     assert_eq!(outcome.actual_usage.expect("usage").input_tokens, 9);
     assert_eq!(outcome.child_refs.len(), 1);

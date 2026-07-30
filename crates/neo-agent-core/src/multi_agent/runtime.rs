@@ -1946,12 +1946,7 @@ impl MultiAgentRuntime {
         if let Err(error) = self.register_persistent_agent(&snapshot, None, None).await {
             return self.finish_child_run(&snapshot, started_at, Err(error));
         }
-        let prompt = child_prompt(
-            &snapshot.task,
-            context,
-            snapshot.role,
-            output_schema,
-        );
+        let prompt = child_prompt(&snapshot.task, context, snapshot.role, output_schema);
         let prior_context = match self.replay_child_context(&snapshot).await {
             Ok(context) => context,
             Err(error) => return self.finish_child_run(&snapshot, started_at, Err(error)),
@@ -2172,12 +2167,7 @@ impl MultiAgentRuntime {
         {
             return self.finish_child_run(&snapshot, started_at, Err(error));
         }
-        let prompt = child_prompt(
-            &snapshot.task,
-            context,
-            snapshot.role,
-            output_schema,
-        );
+        let prompt = child_prompt(&snapshot.task, context, snapshot.role, output_schema);
         let prior_context = match self.replay_child_context(&snapshot).await {
             Ok(context) => context,
             Err(error) => return self.finish_child_run(&snapshot, started_at, Err(error)),

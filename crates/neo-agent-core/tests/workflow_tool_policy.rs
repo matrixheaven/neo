@@ -223,9 +223,9 @@ fn workflow_tool_is_root_only_and_description_has_no_choreography() {
 
     let schema = neo_agent_core::tools::WorkflowTool.input_schema();
     assert!(schema["oneOf"].as_array().is_some_and(|branches| {
-        branches.iter().any(|branch| {
-            branch["properties"]["action"]["const"] == "validate_inline"
-        })
+        branches
+            .iter()
+            .any(|branch| branch["properties"]["action"]["const"] == "validate_inline")
     }));
     assert!(!schema.to_string().contains("start with validate_inline"));
 }

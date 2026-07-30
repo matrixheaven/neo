@@ -286,7 +286,11 @@ fn inline_definition(
         description: required_string(action, "description", &input.description)?,
         phases: required_phases(action, &input.phases)?,
         script: required_string(action, "script", &input.script)?,
-        input_schema: Some(required_object(action, "input_schema", &input.input_schema)?),
+        input_schema: Some(required_object(
+            action,
+            "input_schema",
+            &input.input_schema,
+        )?),
         output_schema: required_object(action, "output_schema", &input.output_schema)?,
     })
 }
