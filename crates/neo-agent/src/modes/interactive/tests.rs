@@ -16708,14 +16708,13 @@ async fn task_browser_mouse_wheel_moves_selection_without_prompt_history() {
         .await
         .expect("show tasks");
 
-    assert_eq!(
-        controller
-            .chrome()
-            .task_browser_state()
-            .unwrap()
-            .selected_task_id(),
-        Some("question-1")
-    );
+    let browser = controller
+        .chrome()
+        .task_browser_state()
+        .expect("browser open");
+    let first_task_id = browser.snapshot().items()[0].id.clone();
+    let second_task_id = browser.snapshot().items()[1].id.clone();
+    assert_eq!(browser.selected_task_id(), Some(first_task_id.as_str()));
     controller
         .handle_input_event(InputEvent::ScrollDown(3))
         .await
@@ -16726,7 +16725,7 @@ async fn task_browser_mouse_wheel_moves_selection_without_prompt_history() {
             .task_browser_state()
             .unwrap()
             .selected_task_id(),
-        Some("question-2")
+        Some(second_task_id.as_str())
     );
     assert!(controller.chrome().prompt().text.is_empty());
 }
@@ -16941,10 +16940,16 @@ async fn task_browser_workflow_controls_use_human_handle() {
             neo_agent_core::workflow::WorkflowLaunchRequest {
                 name: "browser-controls".to_owned(),
                 description: "browser controls".to_owned(),
-                phases: vec![neo_agent_core::workflow::WorkflowPhase {
-                    id: "work".to_owned(),
-                    description: "work".to_owned(),
-                }],
+                phases: vec![
+                    neo_agent_core::workflow::WorkflowPhase {
+                        id: "work".to_owned(),
+                        description: "work".to_owned(),
+                    },
+                    neo_agent_core::workflow::WorkflowPhase {
+                        id: "verify".to_owned(),
+                        description: "verify".to_owned(),
+                    },
+                ],
                 script: "neo.phase('work')".to_owned(),
                 args: serde_json::json!({}),
                 launch_source: "test".to_owned(),
@@ -16985,6 +16990,77 @@ async fn task_browser_workflow_controls_use_human_handle() {
             .and_then(neo_tui::tasks_browser::TaskBrowserState::workflow_item)
             .map(|item| item.id.as_str()),
         Some(run_id.0.as_str())
+    );
+    assert_eq!(
+        controller
+            .chrome()
+            .task_browser_state()
+            .expect("browser open")
+            .focus(),
+        neo_tui::tasks_browser::TaskBrowserFocus::Steps
+    );
+    assert_eq!(
+        controller
+            .chrome()
+            .task_browser_state()
+            .expect("browser open")
+            .selected_workflow_step()
+            .and_then(|step| step.key.phase_id.as_deref()),
+        Some("work")
+    );
+    controller
+        .handle_input_event(InputEvent::Key(KeyId::new("down").expect("down key")))
+        .await
+        .expect("down selects next workflow step");
+    assert_eq!(
+        controller
+            .chrome()
+            .task_browser_state()
+            .expect("browser open")
+            .selected_workflow_step()
+            .and_then(|step| step.key.phase_id.as_deref()),
+        Some("verify")
+    );
+    controller
+        .handle_input_event(InputEvent::Key(KeyId::new("up").expect("up key")))
+        .await
+        .expect("up selects previous workflow step");
+    assert_eq!(
+        controller
+            .chrome()
+            .task_browser_state()
+            .expect("browser open")
+            .selected_workflow_step()
+            .and_then(|step| step.key.phase_id.as_deref()),
+        Some("work")
+    );
+    controller
+        .handle_input_event(InputEvent::Key(KeyId::new("right").expect("right key")))
+        .await
+        .expect("right switches workflow focus");
+    assert_eq!(
+        controller
+            .chrome()
+            .task_browser_state()
+            .expect("browser open")
+            .focus(),
+        neo_tui::tasks_browser::TaskBrowserFocus::Agents
+    );
+    controller
+        .handle_input_event(InputEvent::Key(KeyId::new("left").expect("left key")))
+        .await
+        .expect("left switches workflow focus");
+    controller
+        .handle_input_event(InputEvent::Key(KeyId::new("tab").expect("tab key")))
+        .await
+        .expect("tab switches workflow focus");
+    assert_eq!(
+        controller
+            .chrome()
+            .task_browser_state()
+            .expect("browser open")
+            .focus(),
+        neo_tui::tasks_browser::TaskBrowserFocus::Agents
     );
     controller
         .handle_input_event(InputEvent::Insert('p'))
@@ -17194,7 +17270,7 @@ async fn workflow_operator_answers_controls_and_saves_through_canonical_owners()
     );
 
     controller
-        .handle_input_event(InputEvent::MoveRight)
+        .handle_input_event(InputEvent::Key(KeyId::new("right").expect("right key")))
         .await
         .expect("choose text branch");
     controller

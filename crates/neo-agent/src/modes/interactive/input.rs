@@ -301,6 +301,23 @@ impl InteractiveController {
         if self.tui.chrome().task_browser_state().is_none() {
             return Ok(false);
         }
+        let event = match event {
+            InputEvent::Key(key) => {
+                let action = OVERLAY_ACTION_PRIORITY
+                    .iter()
+                    .chain(std::iter::once(&KeybindingAction::InputTab))
+                    .chain([
+                        &KeybindingAction::EditorCursorUp,
+                        &KeybindingAction::EditorCursorDown,
+                        &KeybindingAction::EditorCursorLeft,
+                        &KeybindingAction::EditorCursorRight,
+                    ])
+                    .copied()
+                    .find(|action| self.keybindings.matches(&key, *action));
+                action.map_or(InputEvent::Key(key), InputEvent::Action)
+            }
+            event => event,
+        };
         if matches!(event, InputEvent::Insert('r' | 'R'))
             && self
                 .tui
@@ -331,20 +348,23 @@ impl InteractiveController {
                     InputEvent::Action(KeybindingAction::SelectCancel) | InputEvent::Cancel => {
                         Some(TaskBrowserAction::DismissAnswer)
                     }
-                    InputEvent::Action(KeybindingAction::SelectUp) | InputEvent::ScrollUp(_) => {
-                        Some(TaskBrowserAction::SelectPreviousAnswerField)
-                    }
+                    InputEvent::Action(KeybindingAction::SelectUp)
+                    | InputEvent::Action(KeybindingAction::EditorCursorUp)
+                    | InputEvent::ScrollUp(_) => Some(TaskBrowserAction::SelectPreviousAnswerField),
                     InputEvent::Action(KeybindingAction::SelectDown)
+                    | InputEvent::Action(KeybindingAction::EditorCursorDown)
                     | InputEvent::ScrollDown(_)
                     | InputEvent::Action(KeybindingAction::InputTab)
                     | InputEvent::Insert('\t') => Some(TaskBrowserAction::SelectNextAnswerField),
-                    InputEvent::MoveLeft => {
+                    InputEvent::MoveLeft
+                    | InputEvent::Action(KeybindingAction::EditorCursorLeft) => {
                         if let Some(state) = self.tui.chrome_mut().task_browser_state_mut() {
                             state.cycle_selected_answer_value(-1);
                         }
                         return Ok(true);
                     }
-                    InputEvent::MoveRight => {
+                    InputEvent::MoveRight
+                    | InputEvent::Action(KeybindingAction::EditorCursorRight) => {
                         if let Some(state) = self.tui.chrome_mut().task_browser_state_mut() {
                             state.cycle_selected_answer_value(1);
                         }
@@ -484,7 +504,9 @@ impl InteractiveController {
                 InputEvent::Action(KeybindingAction::InputTab)
                 | InputEvent::Insert('\t')
                 | InputEvent::Action(KeybindingAction::SelectUp)
-                | InputEvent::Action(KeybindingAction::SelectDown) => {
+                | InputEvent::Action(KeybindingAction::SelectDown)
+                | InputEvent::Action(KeybindingAction::EditorCursorUp)
+                | InputEvent::Action(KeybindingAction::EditorCursorDown) => {
                     Some(TaskBrowserAction::ToggleSaveDestination)
                 }
                 InputEvent::Insert(ch) => {
@@ -532,8 +554,14 @@ impl InteractiveController {
         event: InputEvent,
     ) -> Option<TaskBrowserAction> {
         match event {
-            InputEvent::Action(KeybindingAction::SelectUp) => Some(TaskBrowserAction::SelectUp),
-            InputEvent::Action(KeybindingAction::SelectDown) => Some(TaskBrowserAction::SelectDown),
+            InputEvent::Action(KeybindingAction::SelectUp)
+            | InputEvent::Action(KeybindingAction::EditorCursorUp) => {
+                Some(TaskBrowserAction::SelectUp)
+            }
+            InputEvent::Action(KeybindingAction::SelectDown)
+            | InputEvent::Action(KeybindingAction::EditorCursorDown) => {
+                Some(TaskBrowserAction::SelectDown)
+            }
             InputEvent::Action(KeybindingAction::SelectPageUp) => {
                 Some(TaskBrowserAction::SelectPageUp)
             }
@@ -582,6 +610,15 @@ impl InteractiveController {
                         Some(TaskBrowserAction::ToggleFilter)
                     }
                 }),
+            InputEvent::MoveLeft
+            | InputEvent::MoveRight
+            | InputEvent::Action(KeybindingAction::EditorCursorLeft)
+            | InputEvent::Action(KeybindingAction::EditorCursorRight) => self
+                .tui
+                .chrome()
+                .task_browser_state()
+                .filter(|state| state.workflow_item().is_some())
+                .map(|_| TaskBrowserAction::ToggleWorkflowFocus),
             InputEvent::MoveHome => Some(TaskBrowserAction::SelectFirst),
             InputEvent::MoveEnd => Some(TaskBrowserAction::SelectLast),
             InputEvent::Insert('q' | 'Q') => Some(TaskBrowserAction::Close),
@@ -625,6 +662,12 @@ impl InteractiveController {
                 OVERLAY_ACTION_PRIORITY
                     .iter()
                     .chain(std::iter::once(&KeybindingAction::InputTab))
+                    .chain([
+                        &KeybindingAction::EditorCursorUp,
+                        &KeybindingAction::EditorCursorDown,
+                        &KeybindingAction::EditorCursorLeft,
+                        &KeybindingAction::EditorCursorRight,
+                    ])
                     .copied()
                     .find(|action| actions.contains(action))
                     .and_then(|action| {

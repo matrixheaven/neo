@@ -69,6 +69,8 @@ impl GeometryObservation {
 const CURSOR_PROBE_TIMEOUT: Duration = Duration::from_secs(2);
 #[cfg(not(windows))]
 const CSI_REQUEST_CURSOR: &[u8] = b"\x1b[6n";
+const MAX_PENDING_SCROLL_EVENTS: usize = 32;
+const STDIN_CHUNK_QUEUE_CAPACITY: usize = 32;
 
 pub(crate) trait TerminalEvents {
     fn next_input_event(&mut self) -> Result<InputEvent>;
@@ -94,11 +96,12 @@ pub(super) struct RawStdinEvents {
     rx: std::sync::mpsc::Receiver<Vec<u8>>,
     last_size: Option<(u16, u16)>,
     geometry: GeometryObservation,
+    stdin_disconnected: bool,
 }
 
 impl RawStdinEvents {
     pub(super) fn new(keybindings: KeybindingsManager, geometry: GeometryObservation) -> Self {
-        let (tx, rx) = std::sync::mpsc::channel::<Vec<u8>>();
+        let (tx, rx) = std::sync::mpsc::sync_channel::<Vec<u8>>(STDIN_CHUNK_QUEUE_CAPACITY);
         // Spawn a background thread that blocks on raw stdin reads and forwards
         // byte chunks through the channel. The thread exits on EOF or read error
         // (e.g. terminal closed). The JoinHandle is intentionally dropped — the
@@ -119,22 +122,45 @@ impl RawStdinEvents {
             rx,
             last_size,
             geometry,
+            stdin_disconnected: false,
         }
     }
 
     fn drain_parser_into_pending(&mut self, bytes: &[u8]) {
         // feed_bytes never yields CPR as InputEvent; it is stored on the parser.
-        self.pending.extend(self.parser.feed_bytes(bytes));
+        for event in self.parser.feed_bytes(bytes) {
+            self.enqueue_pending(event);
+        }
     }
 
-    fn observe_cursor_for_size(&mut self, width: u16, height: u16) -> Result<(u16, u16)> {
+    fn enqueue_pending(&mut self, event: InputEvent) {
+        if is_scroll_event(&event) {
+            let scroll_count = self
+                .pending
+                .iter()
+                .filter(|pending| is_scroll_event(pending))
+                .count();
+            if scroll_count >= MAX_PENDING_SCROLL_EVENTS
+                && let Some(index) = self.pending.iter().position(is_scroll_event)
+            {
+                self.pending.remove(index);
+            }
+        } else {
+            // Wheel input is transient. A fresh keyboard event should never
+            // wait behind stale wheel events captured by a blocking overlay.
+            self.pending.retain(|pending| !is_scroll_event(pending));
+        }
+        self.pending.push_back(event);
+    }
+
+    fn observe_cursor_for_size(&mut self, width: u16, height: u16) -> Result<Option<(u16, u16)>> {
         #[cfg(windows)]
         {
             let _ = (width, height);
             let (col, row) = crossterm::cursor::position().map_err(|error| {
                 anyhow::anyhow!("failed to read console cursor position: {error}")
             })?;
-            return Ok((col, row));
+            return Ok(Some((col, row)));
         }
         #[cfg(not(windows))]
         {
@@ -153,7 +179,7 @@ impl RawStdinEvents {
                             "cursor position report ({col},{row}) outside screen {width}x{height}"
                         );
                     }
-                    return Ok((col, row));
+                    return Ok(Some((col, row)));
                 }
                 let remaining = deadline.saturating_duration_since(Instant::now());
                 if remaining.is_zero() {
@@ -162,15 +188,13 @@ impl RawStdinEvents {
                 match self.rx.recv_timeout(remaining) {
                     Ok(bytes) => {
                         self.drain_parser_into_pending(&bytes);
-                        while let Ok(more) = self.rx.try_recv() {
-                            self.drain_parser_into_pending(&more);
-                        }
                     }
                     Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
                         anyhow::bail!("timed out waiting for cursor position report");
                     }
                     Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
-                        anyhow::bail!("stdin reader closed while waiting for cursor position");
+                        self.stdin_disconnected = true;
+                        return Ok(None);
                     }
                 }
             }
@@ -186,7 +210,10 @@ impl RawStdinEvents {
             return Ok(None);
         }
         let generation = self.geometry.next_generation();
-        let (cursor_col, cursor_row) = self.observe_cursor_for_size(current.0, current.1)?;
+        let Some((cursor_col, cursor_row)) = self.observe_cursor_for_size(current.0, current.1)?
+        else {
+            return Ok(None);
+        };
         if size().ok().filter(|size| size.0 > 0 && size.1 > 0) != Some(current) {
             // The CPR belongs to a screen that changed while the probe was in
             // flight. Keep last_size unchanged so the next poll probes again.
@@ -220,24 +247,30 @@ impl TerminalEvents for RawStdinEvents {
     }
 
     fn poll_input_event(&mut self, timeout: Duration) -> Result<Option<InputEvent>> {
-        if let Some(input) = self.pending.pop_front() {
-            return Ok(Some(input));
+        if self.stdin_disconnected && self.pending.is_empty() {
+            anyhow::bail!("stdin reader closed");
         }
-
         let mut got_data = false;
-        if !timeout.is_zero() {
+        if !self.stdin_disconnected && self.pending.is_empty() && !timeout.is_zero() {
             match self.rx.recv_timeout(timeout) {
                 Ok(bytes) => {
                     self.drain_parser_into_pending(&bytes);
-                    // Drain any more immediately available bytes
-                    while let Ok(more_bytes) = self.rx.try_recv() {
-                        self.drain_parser_into_pending(&more_bytes);
-                    }
                     got_data = true;
                 }
                 Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {}
                 Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
-                    anyhow::bail!("stdin reader closed");
+                    self.stdin_disconnected = true;
+                }
+            }
+        } else if !self.stdin_disconnected {
+            match self.rx.try_recv() {
+                Ok(bytes) => {
+                    self.drain_parser_into_pending(&bytes);
+                    got_data = true;
+                }
+                Err(std::sync::mpsc::TryRecvError::Empty) => {}
+                Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                    self.stdin_disconnected = true;
                 }
             }
         }
@@ -246,15 +279,27 @@ impl TerminalEvents for RawStdinEvents {
         // window. Flushing immediately after receiving data could break a partial
         // escape sequence that hasn't fully arrived yet.
         if !got_data {
-            self.pending.extend(self.parser.flush_timeout());
+            for event in self.parser.flush_timeout() {
+                self.enqueue_pending(event);
+            }
         }
 
-        if let Some(event) = self.poll_resize()? {
-            self.pending.push_back(event);
+        if self.pending.is_empty()
+            && let Some(event) = self.poll_resize()?
+        {
+            self.enqueue_pending(event);
+        }
+
+        if self.stdin_disconnected && self.pending.is_empty() {
+            anyhow::bail!("stdin reader closed");
         }
 
         Ok(self.pending.pop_front())
     }
+}
+
+fn is_scroll_event(event: &InputEvent) -> bool {
+    matches!(event, InputEvent::ScrollUp(_) | InputEvent::ScrollDown(_))
 }
 
 fn read_stdin_chunks(reader: &mut impl Read, mut on_chunk: impl FnMut(&[u8]) -> bool) {
@@ -482,6 +527,7 @@ mod tests {
             rx,
             last_size: Some((80, 24)),
             geometry,
+            stdin_disconnected: false,
         };
 
         let error = events
@@ -489,6 +535,59 @@ mod tests {
             .expect_err("closed stdin channel must not look like an idle timeout");
 
         assert_eq!(error.to_string(), "stdin reader closed");
+    }
+
+    #[test]
+    fn poll_input_event_returns_queued_input_before_disconnect() {
+        let (tx, rx) = std::sync::mpsc::channel::<Vec<u8>>();
+        tx.send(b"x".to_vec()).expect("stdin chunk is queued");
+        drop(tx);
+        let geometry = GeometryObservation::new(80, 24, 0, 0);
+        let mut events = RawStdinEvents {
+            parser: InputParser::with_keybindings(KeybindingsManager::default()),
+            pending: VecDeque::new(),
+            rx,
+            last_size: Some((80, 24)),
+            geometry,
+            stdin_disconnected: false,
+        };
+
+        assert_eq!(
+            events
+                .poll_input_event(Duration::from_millis(1))
+                .expect("queued input must be delivered"),
+            Some(InputEvent::Insert('x'))
+        );
+        let error = events
+            .poll_input_event(Duration::from_millis(1))
+            .expect_err("disconnect must be reported after queued input");
+        assert_eq!(error.to_string(), "stdin reader closed");
+    }
+
+    #[test]
+    fn fresh_keyboard_input_overtakes_pending_scroll_backlog() {
+        let (tx, rx) = std::sync::mpsc::channel::<Vec<u8>>();
+        let geometry = GeometryObservation::new(80, 24, 0, 0);
+        let mut events = RawStdinEvents {
+            parser: InputParser::with_keybindings(KeybindingsManager::default()),
+            pending: VecDeque::new(),
+            rx,
+            last_size: Some((80, 24)),
+            geometry,
+            stdin_disconnected: false,
+        };
+        for _ in 0..(MAX_PENDING_SCROLL_EVENTS * 4) {
+            events.enqueue_pending(InputEvent::ScrollDown(3));
+        }
+        tx.send(b"x".to_vec()).expect("stdin chunk is queued");
+
+        assert_eq!(
+            events
+                .poll_input_event(Duration::from_millis(0))
+                .expect("poll input"),
+            Some(InputEvent::Insert('x'))
+        );
+        assert!(events.pending.is_empty());
     }
 
     #[test]
