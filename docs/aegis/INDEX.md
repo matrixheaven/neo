@@ -303,3 +303,4 @@ Entries are workspace records, not authoritative runtime decisions.
 | 2026-07-30 | artifact | docs/aegis/work/2026-07-30-workflow-intent-slash/todo-checkpoint-draft.json | Workflow intent slash execution todo checkpoint draft |
 | 2026-07-30 | artifact | docs/aegis/work/2026-07-30-workflow-intent-slash/drift-check-draft.json | Workflow intent slash execution drift check draft |
 | 2026-07-30 | artifact | docs/aegis/work/2026-07-30-workflow-intent-slash/resume-state-hint.json | 2026-07-30-workflow-intent-slash resume state hint |
+| 2026-07-30 | spec | docs/aegis/specs/2026-07-30-workflow-model-visible-results-design.md | Workflow Model-Visible Results And Recoverable Failures Design |
