@@ -27,30 +27,6 @@ use crate::tools::{
     validate_swarm_request,
 };
 
-const VERIFY_WRAPPER: &str = r"
-return function(host_verify)
-    return function(...)
-        local outcome = host_verify(...)
-        if outcome.ok then
-            return nil
-        end
-        error(outcome, 0)
-    end
-end
-";
-
-const VERIFY_COMMAND_WRAPPER: &str = r"
-return function(host_verify_command)
-    return function(...)
-        local outcome = host_verify_command(...)
-        if outcome.ok then
-            return outcome
-        end
-        error(outcome, 0)
-    end
-end
-";
-
 #[derive(Debug, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 struct DelegateInput {
@@ -803,11 +779,8 @@ impl LuaWorkflowRunner {
                 }
             })
             .map_err(|error| WorkflowError::Host(error.to_string()))?;
-        neo.set(
-            "verify",
-            wrap_host_function(lua, VERIFY_WRAPPER, host_verify)?,
-        )
-        .map_err(|error| WorkflowError::Host(error.to_string()))?;
+        neo.set("verify", host_verify)
+            .map_err(|error| WorkflowError::Host(error.to_string()))?;
 
         let dispatch = self.dispatch.clone();
         let handle = self.handle.clone();
@@ -863,11 +836,8 @@ impl LuaWorkflowRunner {
                 }
             })
             .map_err(|error| WorkflowError::Host(error.to_string()))?;
-        neo.set(
-            "verify_command",
-            wrap_host_function(lua, VERIFY_COMMAND_WRAPPER, host_verify_command)?,
-        )
-        .map_err(|error| WorkflowError::Host(error.to_string()))?;
+        neo.set("verify_command", host_verify_command)
+            .map_err(|error| WorkflowError::Host(error.to_string()))?;
 
         let handle = self.handle.clone();
         let call_index = Arc::clone(&next_call);
@@ -956,17 +926,28 @@ impl LuaWorkflowRunner {
                             "tool input must be a JSON object".to_owned(),
                         )));
                     }
-                    if !dispatch.registry.contains(&input.name) {
-                        return Err(mlua::Error::external(WorkflowError::InvalidInput(format!(
-                            "unknown tool: {}",
-                            input.name
-                        ))));
-                    }
-                    if is_workflow_tool_denied(&input.name) {
-                        return Err(mlua::Error::external(WorkflowError::coded(
-                            WorkflowErrorCode::ToolNotWorkflowEligible,
-                            format!("tool `{}` is not workflow-eligible", input.name),
-                        )));
+                    let tool_name = input.name.clone();
+                    let failure = if !dispatch.registry.contains(&tool_name) {
+                        Some(("unknown_tool", format!("unknown tool: {tool_name}")))
+                    } else if is_workflow_tool_denied(&tool_name) {
+                        Some((
+                            "tool_not_workflow_eligible",
+                            format!("tool `{tool_name}` is not workflow-eligible"),
+                        ))
+                    } else {
+                        None
+                    };
+                    if let Some((code, summary)) = failure {
+                        let outcome = invoke_local(
+                            &handle,
+                            &call_index,
+                            WorkflowInvocationKind::Tool,
+                            canonical_input,
+                            failed_outcome(summary, json!({"code": code, "tool": tool_name})),
+                        )
+                        .await?;
+                        boundary.store(0, Ordering::Relaxed);
+                        return immutable_outcome(&lua, &outcome);
                     }
                     // Same-run recursive TaskOutput would re-enter the workflow
                     // output lock/path; reject before durable start.
@@ -983,7 +964,6 @@ impl LuaWorkflowRunner {
                             )));
                         }
                     }
-                    let tool_name = input.name.clone();
                     let tool_input = input.input.clone();
                     let index = call_index.fetch_add(1, Ordering::Relaxed);
                     let origin = handle.execution_origin(None).await;
@@ -1091,20 +1071,6 @@ fn restrict_base_globals(lua: &Lua) -> Result<(), WorkflowError> {
         .map_err(|error| WorkflowError::Host(error.to_string()))?;
     math.set("random", Value::Nil)
         .and_then(|()| math.set("randomseed", Value::Nil))
-        .map_err(|error| WorkflowError::Host(error.to_string()))
-}
-
-fn wrap_host_function(
-    lua: &Lua,
-    wrapper_source: &str,
-    host: Function,
-) -> Result<Function, WorkflowError> {
-    let factory: Function = lua
-        .load(wrapper_source)
-        .eval()
-        .map_err(|error| WorkflowError::Host(error.to_string()))?;
-    factory
-        .call(host)
         .map_err(|error| WorkflowError::Host(error.to_string()))
 }
 

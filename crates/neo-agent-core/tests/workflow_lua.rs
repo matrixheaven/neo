@@ -402,14 +402,14 @@ async fn neo_fail_is_terminal_even_when_pcall_catches_it() {
 }
 
 #[tokio::test]
-async fn neo_verify_failure_is_a_catchable_outcome_table() {
+async fn neo_verify_failure_returns_an_immutable_outcome() {
     let fixture = make_runner().await;
     let result = fixture
         .runner
         .execute(
             r#"
             local ok, outcome = pcall(function()
-                neo.verify(false, "should have passed")
+                return neo.verify(false, "should have passed")
             end)
             local top_mutable = pcall(function() outcome.status = "completed" end)
             local nested_mutable = pcall(function() outcome.details.message = "changed" end)
@@ -426,7 +426,7 @@ async fn neo_verify_failure_is_a_catchable_outcome_table() {
         .await
         .expect("verification failure should be catchable");
 
-    assert_eq!(result["caught"], true);
+    assert_eq!(result["caught"], false);
     assert_eq!(result["status"], "failed");
     assert_eq!(result["summary"], "should have passed");
     assert_eq!(result["detail"], "should have passed");
@@ -434,30 +434,57 @@ async fn neo_verify_failure_is_a_catchable_outcome_table() {
 }
 
 #[tokio::test]
-async fn denied_neo_tool_is_catchable_without_aborting_the_workflow() {
+async fn denied_neo_tool_returns_failed_outcome_without_aborting() {
     let fixture = make_runner().await;
     let result = fixture
         .runner
         .execute(
             r#"
-            local ok, err = pcall(function()
-                neo.tool({ name = "Workflow", input = {} })
-            end)
-            assert(not ok)
-            return { caught = true, message = tostring(err) }
+            local denied = neo.tool({ name = "Workflow", input = {} })
+            local continued = neo.verify(true, "continued")
+            return {
+                ok = denied.ok,
+                status = denied.status,
+                code = denied.details.code,
+                continued = continued.ok,
+            }
             "#,
             serde_json::json!({}),
         )
         .await
         .expect("denied generic tool remains catchable");
 
-    assert_eq!(result["caught"], true, "{result}");
-    assert!(
-        result["message"]
-            .as_str()
-            .is_some_and(|message| message.contains("tool_not_workflow_eligible")),
-        "{result}"
-    );
+    assert_eq!(result["ok"], false, "{result}");
+    assert_eq!(result["status"], "failed", "{result}");
+    assert_eq!(result["code"], "tool_not_workflow_eligible", "{result}");
+    assert_eq!(result["continued"], true, "{result}");
+}
+
+#[tokio::test]
+async fn unknown_neo_tool_returns_failed_outcome_without_aborting() {
+    let fixture = make_runner().await;
+    let result = fixture
+        .runner
+        .execute(
+            r#"
+            local unknown = neo.tool({ name = "MissingTool", input = {} })
+            local continued = neo.verify(true, "continued")
+            return {
+                ok = unknown.ok,
+                status = unknown.status,
+                code = unknown.details.code,
+                continued = continued.ok,
+            }
+            "#,
+            serde_json::json!({}),
+        )
+        .await
+        .expect("unknown tool should be a failed outcome");
+
+    assert_eq!(result["ok"], false, "{result}");
+    assert_eq!(result["status"], "failed", "{result}");
+    assert_eq!(result["code"], "unknown_tool", "{result}");
+    assert_eq!(result["continued"], true, "{result}");
 }
 
 #[tokio::test]
@@ -582,7 +609,7 @@ async fn verify_command_failure_message_is_durable_and_script_visible() {
         .execute(
             r#"
             local ok, outcome = pcall(function()
-                neo.verify_command({
+                return neo.verify_command({
                     command = "pwd",
                     cwd = ".",
                     failure_message = "custom failure"
@@ -605,7 +632,7 @@ async fn verify_command_failure_message_is_durable_and_script_visible() {
             "cwd": "."
         }))
     );
-    assert_eq!(result["caught"], true, "{result}");
+    assert_eq!(result["caught"], false, "{result}");
     assert_eq!(result["outcome_type"], "table", "{result}");
     assert_eq!(result["summary"], "custom failure", "{result}");
     let summaries = finished_summaries(&fixture);
