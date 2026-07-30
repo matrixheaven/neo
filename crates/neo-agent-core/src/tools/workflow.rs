@@ -286,11 +286,7 @@ fn inline_definition(
         description: required_string(action, "description", &input.description)?,
         phases: required_phases(action, &input.phases)?,
         script: required_string(action, "script", &input.script)?,
-        input_schema: Some(required_object(
-            action,
-            "input_schema",
-            &input.input_schema,
-        )?),
+        input_schema: input.input_schema.clone(),
         output_schema: required_object(action, "output_schema", &input.output_schema)?,
     })
 }
@@ -315,30 +311,65 @@ fn expected_shape(action: Option<WorkflowAction>) -> Value {
         }),
         WorkflowAction::ValidateInline => json!({
             "required": [
-                "action", "name", "description", "phases", "script", "input_schema",
-                "output_schema"
+                "action", "name", "description", "phases", "script", "output_schema"
             ],
-            "optional": []
+            "optional": ["input_schema"]
         }),
         WorkflowAction::Save => json!({
             "required": [
-                "action", "name", "description", "phases", "script", "input_schema",
-                "output_schema", "scope"
+                "action", "name", "description", "phases", "script", "output_schema", "scope"
             ],
-            "optional": ["replace"]
+            "optional": ["input_schema", "replace"]
         }),
         WorkflowAction::RunInline => json!({
             "required": [
-                "action", "name", "description", "phases", "script", "input_schema",
-                "output_schema"
+                "action", "name", "description", "phases", "script", "output_schema"
             ],
-            "optional": ["args"]
+            "optional": ["input_schema", "args"]
         }),
         WorkflowAction::RunSaved => json!({
             "required": ["action", "name"],
             "optional": ["args"]
         }),
     }
+}
+
+fn workflow_input_schema() -> Value {
+    let properties = schema::<WorkflowInput>()["properties"].clone();
+    let branches = [
+        WorkflowAction::List,
+        WorkflowAction::Show,
+        WorkflowAction::ValidateInline,
+        WorkflowAction::ValidateSaved,
+        WorkflowAction::Save,
+        WorkflowAction::RunInline,
+        WorkflowAction::RunSaved,
+    ]
+    .into_iter()
+    .map(|action| {
+        let shape = expected_shape(Some(action));
+        let required = shape["required"].clone();
+        let optional = shape["optional"].clone();
+        let mut branch_properties = properties.clone();
+        if let Some(branch_properties) = branch_properties.as_object_mut() {
+            let contains = |fields: &Value, field: &str| {
+                fields
+                    .as_array()
+                    .is_some_and(|fields| fields.iter().any(|value| value.as_str() == Some(field)))
+            };
+            branch_properties
+                .retain(|field, _| contains(&required, field) || contains(&optional, field));
+            branch_properties.insert("action".to_owned(), json!({"const": action.as_str()}));
+        }
+        json!({
+            "type": "object",
+            "properties": branch_properties,
+            "required": required,
+            "additionalProperties": false,
+        })
+    })
+    .collect::<Vec<_>>();
+    json!({"oneOf": branches})
 }
 
 fn parse_cursor(action: WorkflowAction, cursor: Option<&str>) -> Result<usize, WorkflowInputError> {
@@ -940,7 +971,7 @@ impl Tool for WorkflowTool {
     }
 
     fn input_schema(&self) -> Value {
-        schema::<WorkflowInput>()
+        workflow_input_schema()
     }
 
     fn execute<'a>(&'a self, ctx: &'a ToolContext, input: Value) -> ToolFuture<'a> {

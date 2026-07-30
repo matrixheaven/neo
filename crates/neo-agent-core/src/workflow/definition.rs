@@ -219,13 +219,13 @@ pub fn resolve_dynamic_definition(
     let phases = validate_phases(&input.phases)?;
     let output_schema = input.output_schema;
     reject_schema_limit(&output_schema, "output_schema", limits)?;
-    let input_schema = match input.input_schema {
-        Some(schema) => {
-            reject_schema_limit(&schema, "input_schema", limits)?;
-            Some(schema)
-        }
-        None => None,
-    };
+    let input_schema = input.input_schema.unwrap_or_else(|| {
+        serde_json::json!({
+            "type": "object",
+            "additionalProperties": false,
+        })
+    });
+    reject_schema_limit(&input_schema, "input_schema", limits)?;
 
     let source_sha256 = source_sha256_hex(source_bytes);
     let typed = CanonicalWorkflowManifest {
@@ -233,7 +233,7 @@ pub fn resolve_dynamic_definition(
         description,
         phases,
         source_sha256: source_sha256.clone(),
-        input_schema,
+        input_schema: Some(input_schema),
         output_schema,
     };
     finish_resolved(

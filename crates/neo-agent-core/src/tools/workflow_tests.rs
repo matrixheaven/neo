@@ -42,40 +42,85 @@ fn test_context(
 }
 
 #[test]
-fn workflow_schema_is_flat_and_exact() {
+fn workflow_schema_declares_action_specific_required_fields() {
     let schema = WorkflowTool.input_schema();
-    let properties = schema["properties"]
-        .as_object()
-        .expect("workflow schema properties");
-    let names = properties
-        .keys()
-        .map(String::as_str)
-        .collect::<BTreeSet<_>>();
-
-    assert_eq!(
-        names,
-        BTreeSet::from([
-            "action",
-            "args",
-            "cursor",
-            "description",
-            "input_schema",
-            "limit",
-            "name",
-            "output_schema",
-            "phases",
-            "replace",
-            "scope",
-            "script",
-        ])
-    );
-    assert_eq!(schema["additionalProperties"], false);
-    assert_eq!(schema["required"], json!(["action"]));
-    for field in ["args", "input_schema", "output_schema"] {
-        assert_eq!(
-            schema["properties"][field]["type"], "object",
-            "{field} must be model-visible as an object"
-        );
+    let branches = schema["oneOf"].as_array().expect("action branches");
+    let expected = [
+        (
+            "list",
+            json!(["action"]),
+            json!(["scope", "cursor", "limit"]),
+        ),
+        ("show", json!(["action", "name"]), json!([])),
+        (
+            "validate_inline",
+            json!([
+                "action",
+                "name",
+                "description",
+                "phases",
+                "script",
+                "output_schema"
+            ]),
+            json!(["input_schema"]),
+        ),
+        ("validate_saved", json!(["action", "name"]), json!([])),
+        (
+            "save",
+            json!([
+                "action",
+                "name",
+                "description",
+                "phases",
+                "script",
+                "output_schema",
+                "scope"
+            ]),
+            json!(["input_schema", "replace"]),
+        ),
+        (
+            "run_inline",
+            json!([
+                "action",
+                "name",
+                "description",
+                "phases",
+                "script",
+                "output_schema"
+            ]),
+            json!(["input_schema", "args"]),
+        ),
+        ("run_saved", json!(["action", "name"]), json!(["args"])),
+    ];
+    assert_eq!(branches.len(), expected.len());
+    for (branch, (action, required, optional)) in branches.iter().zip(expected) {
+        assert_eq!(branch["properties"]["action"]["const"], action);
+        assert_eq!(branch["required"], required);
+        assert_eq!(branch["additionalProperties"], false);
+        let fields = branch["properties"]
+            .as_object()
+            .expect("branch properties")
+            .keys()
+            .cloned()
+            .collect::<BTreeSet<_>>();
+        let mut expected_fields = required
+            .as_array()
+            .expect("required fields")
+            .iter()
+            .chain(optional.as_array().expect("optional fields"))
+            .filter_map(Value::as_str)
+            .map(str::to_owned)
+            .collect::<BTreeSet<_>>();
+        assert_eq!(fields, expected_fields, "unexpected fields for {action}");
+        expected_fields.remove("action");
+        for field in ["args", "input_schema", "output_schema"] {
+            if expected_fields.contains(field) {
+                assert_eq!(
+                    branch["properties"][field]["type"], "object",
+                    "{field} must be model-visible as an object"
+                );
+            }
+        }
     }
 
     let error = prepare_action(&json!({"action": "list", "limits": {"token_cap": 1}}))

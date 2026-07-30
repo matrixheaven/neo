@@ -28,6 +28,13 @@ fn minimal_output_schema() -> Value {
     })
 }
 
+fn minimal_input_schema() -> Value {
+    json!({
+        "type": "object",
+        "additionalProperties": false,
+    })
+}
+
 fn sample_script() -> &'static str {
     "return { ok = true }\n"
 }
@@ -41,7 +48,7 @@ fn golden_manifest(source_sha256: &str) -> CanonicalWorkflowManifest {
             description: "execute".to_owned(),
         }],
         source_sha256: source_sha256.to_owned(),
-        input_schema: None,
+        input_schema: Some(minimal_input_schema()),
         output_schema: minimal_output_schema(),
     }
 }
@@ -118,6 +125,10 @@ required = ["ok"]
 
 [output_schema.properties.ok]
 type = "boolean"
+
+[input_schema]
+type = "object"
+additionalProperties = false
 "#
     );
     let paired = resolve_paired_definition(
@@ -153,9 +164,9 @@ type = "boolean"
 // Pinned after fixture resolve. Update only when the golden fixture changes.
 const GOLDEN_SOURCE_SHA256: &str =
     "0467d5837e47b9b59fa85b2914df8bc62206b88545943869b0a659a9b617b821";
-const GOLDEN_CANONICAL_MANIFEST_JSON: &str = r#"{"description":"stable revision fixture","display_name":"Golden Demo","output_schema":{"additionalProperties":false,"properties":{"ok":{"type":"boolean"}},"required":["ok"],"type":"object"},"phases":[{"description":"execute","id":"run"}],"source_sha256":"0467d5837e47b9b59fa85b2914df8bc62206b88545943869b0a659a9b617b821"}"#;
+const GOLDEN_CANONICAL_MANIFEST_JSON: &str = r#"{"description":"stable revision fixture","display_name":"Golden Demo","input_schema":{"additionalProperties":false,"type":"object"},"output_schema":{"additionalProperties":false,"properties":{"ok":{"type":"boolean"}},"required":["ok"],"type":"object"},"phases":[{"description":"execute","id":"run"}],"source_sha256":"0467d5837e47b9b59fa85b2914df8bc62206b88545943869b0a659a9b617b821"}"#;
 const GOLDEN_DEFINITION_REVISION: &str =
-    "da83c9b4499969f02f09296c9549dc1613db42ab9ec04cd2b0577b787365ffd0";
+    "f70f9fd64ac0649b982b9cf3a92d0d62c4b614d1db35b97d99245daeec4661f6";
 
 /// Object-key reorder preserves revision; length-prefix framing prevents
 /// field-boundary collisions from producing the same digest.
@@ -344,6 +355,42 @@ fn dynamic_definition_requires_final_output_schema() {
     .expect("valid dynamic definition");
     assert!(ok.compiled_output_schema.schema().is_object());
     assert_eq!(ok.display_name, "with-schema");
+}
+
+#[test]
+fn omitted_input_schema_is_strictly_no_arguments() {
+    let definition = resolve_dynamic_definition(
+        DynamicWorkflowDefinitionInput {
+            name: "no-arguments".to_owned(),
+            display_name: None,
+            description: "accepts no arguments".to_owned(),
+            phases: vec![WorkflowPhase {
+                id: "run".to_owned(),
+                description: "run".to_owned(),
+            }],
+            script: sample_script().to_owned(),
+            input_schema: None,
+            output_schema: minimal_output_schema(),
+        },
+        &WorkflowLimits::default(),
+    )
+    .expect("dynamic definition");
+
+    let expected = json!({
+        "type": "object",
+        "additionalProperties": false,
+    });
+    assert_eq!(definition.input_schema.as_ref(), Some(&expected));
+    let input_schema = definition
+        .compiled_input_schema
+        .as_ref()
+        .expect("normalized input schema compiles");
+    assert!(input_schema.validate_instance(&json!({})).is_ok());
+    assert!(
+        input_schema
+            .validate_instance(&json!({"unexpected": true}))
+            .is_err()
+    );
 }
 
 // ---------------------------------------------------------------------------
