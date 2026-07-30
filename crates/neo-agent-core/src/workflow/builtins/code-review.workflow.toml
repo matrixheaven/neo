@@ -1,7 +1,7 @@
 name = "code-review"
 display_name = "Code Review"
 description = "Read-only multi-domain code review with structured findings-first output. Never modifies code."
-source_sha256 = "a6eb3810d96711028184a60ffa4179266c0599d04db90218ebca079d5fe6d76d"
+source_sha256 = "c91c1f0f71d9f79d67e0ba3cf005d94da07be71552fa206cdea015f7e41b4a2a"
 
 [[phases]]
 id = "scope"

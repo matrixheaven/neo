@@ -60,7 +60,9 @@ local primary = neo.delegate({
   tool_allow = { "Read", "List", "Grep", "Find", "Glob" },
   output_schema = finding_schema,
 })
-neo.verify(primary.ok, "primary_sources child failed: " .. tostring(primary.summary))
+if not primary.ok then
+  neo.fail(primary.summary)
+end
 
 local counterpoints = neo.delegate({
   title = "counterpoints",
@@ -70,7 +72,9 @@ local counterpoints = neo.delegate({
   tool_allow = { "Read", "List", "Grep", "Find", "Glob" },
   output_schema = finding_schema,
 })
-neo.verify(counterpoints.ok, "counterpoints child failed: " .. tostring(counterpoints.summary))
+if not counterpoints.ok then
+  neo.fail(counterpoints.summary)
+end
 
 local context_child = neo.delegate({
   title = "context",
@@ -80,73 +84,39 @@ local context_child = neo.delegate({
   tool_allow = { "Read", "List", "Grep", "Find", "Glob" },
   output_schema = finding_schema,
 })
-neo.verify(context_child.ok, "context child failed: " .. tostring(context_child.summary))
-
--- Prefer structured child findings; fall back to summary-backed placeholders.
-local findings = {}
-local function push_summary_finding(outcome, domain)
-  findings[#findings + 1] = {
-    claim = tostring(outcome.summary or domain),
-    source = domain,
-    evidence = "child summary",
-  }
+if not context_child.ok then
+  neo.fail(context_child.summary)
 end
+
+-- Prefer structured child findings; valid empty findings remain empty.
+local findings = {}
 
 local function try_child_findings(outcome, domain)
   local details = outcome.details
   if type(details) ~= "table" then
-    push_summary_finding(outcome, domain)
     return
   end
   local structured = details.structured_output
   local list = type(structured) == "table" and structured.findings or nil
   if type(list) ~= "table" then
-    push_summary_finding(outcome, domain)
     return
   end
-  local count = 0
   for i = 1, 32 do
     local finding = list[i]
     if finding == nil then
       break
     end
-    count = count + 1
     findings[#findings + 1] = {
       claim = tostring(finding.claim or ""),
       source = tostring(finding.source or domain),
       evidence = tostring(finding.evidence or ""),
     }
   end
-  if count == 0 then
-    push_summary_finding(outcome, domain)
-  end
 end
 
-local ok_collect, err_collect = pcall(function()
-  try_child_findings(primary, "primary_sources")
-  try_child_findings(counterpoints, "counterpoints")
-  try_child_findings(context_child, "context")
-end)
-if not ok_collect then
-  neo.log("findings collection fell back: " .. tostring(err_collect))
-  findings = {
-    {
-      claim = tostring(primary.summary),
-      source = "primary_sources",
-      evidence = "fallback",
-    },
-    {
-      claim = tostring(counterpoints.summary),
-      source = "counterpoints",
-      evidence = "fallback",
-    },
-    {
-      claim = tostring(context_child.summary),
-      source = "context",
-      evidence = "fallback",
-    },
-  }
-end
+try_child_findings(primary, "primary_sources")
+try_child_findings(counterpoints, "counterpoints")
+try_child_findings(context_child, "context")
 
 neo.phase("verify")
 local verification = neo.delegate({
@@ -166,7 +136,14 @@ local verification = neo.delegate({
     },
   },
 })
-neo.verify(verification.ok, "verification child failed: " .. tostring(verification.summary))
+if not verification.ok then
+  neo.fail(verification.summary)
+end
+local verification_output = type(verification.details) == "table"
+  and verification.details.structured_output
+if type(verification_output) ~= "table" or verification_output.ok ~= true then
+  neo.fail("verification child reported ok=false")
+end
 
 if args.clarify == true then
   local answer = neo.await_user({
@@ -182,7 +159,9 @@ if args.clarify == true then
     },
     answer_policy = "human",
   })
-  neo.verify(answer.continue == true, "user declined to continue research")
+  if answer.continue ~= true then
+    neo.fail("user declined to continue research")
+  end
 end
 
 neo.phase("synthesize")

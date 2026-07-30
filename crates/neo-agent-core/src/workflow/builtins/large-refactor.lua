@@ -46,7 +46,9 @@ local slice_a = neo.delegate({
   worktree = "isolated",
   output_schema = slice_schema,
 })
-neo.verify(slice_a.ok, "slice_a failed: " .. tostring(slice_a.summary))
+if not slice_a.ok then
+  neo.fail(slice_a.summary)
+end
 
 local slice_b = neo.delegate({
   title = "slice_b",
@@ -55,7 +57,9 @@ local slice_b = neo.delegate({
   worktree = "isolated",
   output_schema = slice_schema,
 })
-neo.verify(slice_b.ok, "slice_b failed: " .. tostring(slice_b.summary))
+if not slice_b.ok then
+  neo.fail(slice_b.summary)
+end
 
 local review = neo.delegate({
   title = "slice_review",
@@ -74,7 +78,9 @@ local review = neo.delegate({
     },
   },
 })
-neo.verify(review.ok, "slice review failed: " .. tostring(review.summary))
+if not review.ok then
+  neo.fail(review.summary)
+end
 
 neo.report({
   kind = "slice_results",
@@ -120,18 +126,16 @@ if decision.retire_worktrees ~= true then
   unresolved[#unresolved + 1] = "worktree retirement not approved; no auto-delete"
 end
 
-pcall(function()
-  local structured = type(review.details) == "table" and review.details.structured_output or nil
-  if type(structured) == "table" and type(structured.risks) == "table" then
-    for i = 1, 32 do
-      local risk = structured.risks[i]
-      if risk == nil then
-        break
-      end
-      unresolved[#unresolved + 1] = tostring(risk)
+local structured = type(review.details) == "table" and review.details.structured_output or nil
+if type(structured) == "table" and type(structured.risks) == "table" then
+  for i = 1, 32 do
+    local risk = structured.risks[i]
+    if risk == nil then
+      break
     end
+    unresolved[#unresolved + 1] = tostring(risk)
   end
-end)
+end
 
 neo.phase("report")
 local lineage = {

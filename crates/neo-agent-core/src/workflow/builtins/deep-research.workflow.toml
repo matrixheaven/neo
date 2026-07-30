@@ -1,7 +1,7 @@
 name = "deep-research"
 display_name = "Deep Research"
 description = "Plan, fan out heterogeneous research children, verify gaps, and synthesize a structured report with durable artifacts."
-source_sha256 = "d821c7e6d36719c733311d95a365bb5db23c1ca2abb9a1cce6454f7f695d9fa8"
+source_sha256 = "01c8b0f122a9327928b1732f6596f61b8a936d62d50285f5b8c104b796e2e8cb"
 
 [[phases]]
 id = "plan"

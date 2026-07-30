@@ -58,7 +58,9 @@ local security = neo.delegate({
   tool_allow = READ_ONLY_TOOLS,
   output_schema = finding_schema,
 })
-neo.verify(security.ok, "security review failed: " .. tostring(security.summary))
+if not security.ok then
+  neo.fail(security.summary)
+end
 
 local correctness = neo.delegate({
   title = "correctness",
@@ -68,7 +70,9 @@ local correctness = neo.delegate({
   tool_allow = READ_ONLY_TOOLS,
   output_schema = finding_schema,
 })
-neo.verify(correctness.ok, "correctness review failed: " .. tostring(correctness.summary))
+if not correctness.ok then
+  neo.fail(correctness.summary)
+end
 
 local maintainability = neo.delegate({
   title = "maintainability",
@@ -78,7 +82,9 @@ local maintainability = neo.delegate({
   tool_allow = READ_ONLY_TOOLS,
   output_schema = finding_schema,
 })
-neo.verify(maintainability.ok, "maintainability review failed: " .. tostring(maintainability.summary))
+if not maintainability.ok then
+  neo.fail(maintainability.summary)
+end
 
 local findings = {}
 local seen = {}
@@ -115,14 +121,9 @@ local function append_findings(outcome)
   end
 end
 
-local ok_collect, err_collect = pcall(function()
-  append_findings(security)
-  append_findings(correctness)
-  append_findings(maintainability)
-end)
-if not ok_collect then
-  neo.log("findings collection fell back: " .. tostring(err_collect))
-end
+append_findings(security)
+append_findings(correctness)
+append_findings(maintainability)
 
 neo.phase("challenge")
 local challenge = neo.delegate({
@@ -133,20 +134,8 @@ local challenge = neo.delegate({
   tool_allow = READ_ONLY_TOOLS,
   output_schema = finding_schema,
 })
-neo.verify(challenge.ok, "challenge pass failed: " .. tostring(challenge.summary))
-pcall(function()
-  append_findings(challenge)
-end)
-
--- Ensure non-empty findings array for schema-friendly sequential tables.
-if #findings == 0 then
-  findings[1] = {
-    severity = "info",
-    path = scope,
-    line = 0,
-    evidence = "no structured findings emitted by children",
-    test_gap = "none",
-  }
+if not challenge.ok then
+  neo.fail(challenge.summary)
 end
 
 neo.report({

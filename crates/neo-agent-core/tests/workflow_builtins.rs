@@ -5,8 +5,8 @@ use std::path::PathBuf;
 use neo_agent_core::workflow::{
     WorkflowDefinitionRegistry, WorkflowLimits, WorkflowListScope, WorkflowSourceOrigin,
     builtin_manifest_revision_vectors, builtin_workflow_definition, builtin_workflow_definitions,
-    check_definition, load_fixture, resolve_builtin_definition, run_builtin_fixture,
-    run_fixture_retained, source_sha256_hex,
+    check_definition, load_fixture, parse_fixture, resolve_builtin_definition,
+    run_builtin_fixture, run_fixture_retained, source_sha256_hex,
 };
 use serde_json::json;
 use tempfile::tempdir;
@@ -95,6 +95,31 @@ fn all_builtin_definitions_validate_through_public_registry() {
                 def.name
             );
         }
+    }
+}
+
+#[tokio::test]
+async fn required_child_failure_aborts_builtin_without_placeholder_result() {
+    for (name, args) in [
+        ("code-review", json!({"scope": "crates/neo-agent-core"})),
+        ("deep-research", json!({"question": "workflow failure handling"})),
+        ("large-refactor", json!({"spec": "workflow failure handling"})),
+    ] {
+        let fixture = parse_fixture(
+            &json!({
+                "args": args,
+                "delegate_outcomes": [{"ok": false, "summary": "required child failed"}],
+                "expected_result": {"ok": true},
+            })
+            .to_string(),
+        )
+        .expect("failure fixture");
+        let report = run_builtin_fixture(name, &fixture, WorkflowLimits::default())
+            .await
+            .expect("run failure fixture");
+
+        assert_eq!(report.state, "failed", "{name}: {:?}", report.diagnostics);
+        assert!(report.final_result.is_none(), "{name} returned a placeholder");
     }
 }
 
