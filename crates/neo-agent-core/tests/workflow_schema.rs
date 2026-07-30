@@ -405,6 +405,46 @@ async fn child_schema_invalid_output_gets_exactly_one_tools_disabled_repair() {
         "repair turn must advertise no tools: {:?}",
         requests[1].tools
     );
+    let response_format = requests[0]
+        .options
+        .response_format
+        .as_ref()
+        .expect("initial child response format");
+    assert_eq!(response_format.name, "child_output");
+    assert!(response_format.strict);
+    assert_eq!(response_format.schema, child_schema_doc());
+    assert_eq!(
+        requests[1].options.response_format.as_ref(),
+        Some(response_format),
+        "repair must reuse the exact strict response format"
+    );
+    for request in &requests {
+        let prompt = request
+            .messages
+            .iter()
+            .rev()
+            .find_map(|message| match message {
+                neo_ai::ChatMessage::User { content } => Some(
+                    content
+                        .iter()
+                        .filter_map(|part| match part {
+                            neo_ai::ContentPart::Text { text } => Some(text.as_str()),
+                            _ => None,
+                        })
+                        .collect::<String>(),
+                ),
+                _ => None,
+            })
+            .expect("child prompt");
+        assert!(prompt.contains(&child_schema_doc().to_string()), "{prompt}");
+        assert!(prompt.contains("exactly one JSON value"), "{prompt}");
+        assert!(
+            prompt.contains("Every required field must be present"),
+            "{prompt}"
+        );
+        assert!(prompt.contains("Do not use a Markdown fence"), "{prompt}");
+        assert!(prompt.contains("Do not call a formatting tool"), "{prompt}");
+    }
 
     let usage = accepted.actual_usage.expect("usage");
     assert_eq!(usage.input_tokens, 15);

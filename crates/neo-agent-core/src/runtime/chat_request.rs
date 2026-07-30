@@ -68,6 +68,7 @@ pub(super) async fn chat_request(
             reasoning: config.reasoning.clone(),
             replay_reasoning: config.replay_reasoning,
             session_id: prompt_cache_key(config),
+            response_format: config.response_format.clone(),
             ..RequestOptions::default()
         },
     }

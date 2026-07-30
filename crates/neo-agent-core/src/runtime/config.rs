@@ -5,7 +5,7 @@ use std::{
 };
 
 use futures::{FutureExt, future::BoxFuture};
-use neo_ai::{ModelSpec, ReasoningSelection, ToolSpec};
+use neo_ai::{ModelSpec, ReasoningSelection, ResponseFormat, ToolSpec};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use tokio_util::sync::CancellationToken;
@@ -62,6 +62,9 @@ pub struct AgentConfig {
     pub system_prompt: Option<String>,
     pub temperature: Option<f64>,
     pub max_tokens: Option<u32>,
+    #[serde(skip)]
+    #[schemars(skip)]
+    pub response_format: Option<ResponseFormat>,
     pub max_retries: u32,
     pub first_event_timeout_secs: u64,
     pub stream_idle_timeout_secs: u64,
@@ -257,6 +260,7 @@ impl AgentConfig {
             system_prompt: None,
             temperature: None,
             max_tokens: None,
+            response_format: None,
             max_retries: 5,
             first_event_timeout_secs: DEFAULT_FIRST_EVENT_TIMEOUT_SECS,
             stream_idle_timeout_secs: DEFAULT_STREAM_IDLE_TIMEOUT_SECS,

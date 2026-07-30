@@ -6,7 +6,7 @@ use std::{
 };
 
 use futures::StreamExt;
-use neo_ai::ModelClient;
+use neo_ai::{ModelClient, RequestOptions};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use tokio_util::sync::CancellationToken;
@@ -34,6 +34,21 @@ use super::{
     AgentToolFileStatus, AgentToolOutputPreview,
 };
 use super::{apply_agent_progress, apply_swarm_child_progress};
+
+fn set_child_response_format(config: &mut AgentConfig, schema: Option<&serde_json::Value>) {
+    config.response_format = None;
+    let Some(schema) = schema else {
+        return;
+    };
+    let mut options = RequestOptions::default();
+    crate::workflow::attach_response_format_hint(
+        &mut options,
+        "child_output",
+        schema.clone(),
+        true,
+    );
+    config.response_format = options.response_format;
+}
 
 #[derive(Debug, Clone, Deserialize, JsonSchema)]
 pub struct DelegateRequest {
@@ -1453,8 +1468,8 @@ pub fn schema_repair_correction_prompt(
     schema: &serde_json::Value,
 ) -> String {
     format!(
-        "Your previous response did not match the required output schema.\n\nValidation error: {validation_error}\n\nRequired schema:\n{}\n\nReply with exactly one JSON value that satisfies the schema. Do not call tools. Do not include prose, markdown fences, or explanations.",
-        serde_json::to_string_pretty(schema).unwrap_or_else(|_| schema.to_string())
+        "Your previous response did not match the required output schema.\n\nValidation error: {validation_error}\n\nRequired JSON Schema:\n{}\n\nReply with exactly one JSON value matching the schema. Every required field must be present. Do not use a Markdown fence or add prose before or after the JSON. Do not call a formatting tool.",
+        schema
     )
 }
 
@@ -1926,6 +1941,8 @@ impl MultiAgentRuntime {
                 messages: Vec::new(),
             };
         }
+        let mut deps = deps;
+        set_child_response_format(&mut deps.config, output_schema);
         if let Err(error) = self.register_persistent_agent(&snapshot, None, None).await {
             return self.finish_child_run(&snapshot, started_at, Err(error));
         }
@@ -1933,7 +1950,7 @@ impl MultiAgentRuntime {
             &snapshot.task,
             context,
             snapshot.role,
-            output_schema.is_some(),
+            output_schema,
         );
         let prior_context = match self.replay_child_context(&snapshot).await {
             Ok(context) => context,
@@ -1990,6 +2007,7 @@ impl MultiAgentRuntime {
         // attempt cannot execute external effects (turn_loop breaks when tools
         // is None). Host still flags the attempt as schema_repair_tool_forbidden.
         deps.config.tools.clear();
+        set_child_response_format(&mut deps.config, Some(schema));
         let prior_context = self.replay_child_context(&snapshot).await?;
         let prompt = schema_repair_correction_prompt(validation_error, schema);
         let live_cancel = self.register_live_cancel(agent_id.as_str(), &deps.cancel_token);
@@ -2146,6 +2164,8 @@ impl MultiAgentRuntime {
                 messages: Vec::new(),
             };
         }
+        let mut deps = deps;
+        set_child_response_format(&mut deps.config, output_schema);
         if let Err(error) = self
             .register_persistent_agent(&snapshot, Some(swarm_id), Some(swarm_item))
             .await
@@ -2156,7 +2176,7 @@ impl MultiAgentRuntime {
             &snapshot.task,
             context,
             snapshot.role,
-            output_schema.is_some(),
+            output_schema,
         );
         let prior_context = match self.replay_child_context(&snapshot).await {
             Ok(context) => context,
@@ -3949,16 +3969,17 @@ fn child_prompt(
     task: &str,
     context: DelegateContext,
     role: AgentRole,
-    requires_structured_output: bool,
+    output_schema: Option<&serde_json::Value>,
 ) -> String {
     let mut prompt = format!(
         "You are a bounded Neo subagent.\n\nRole: {role:?}\nTask: {task}\nContext mode: {}\n\nReturn a concise result for the parent agent. Do not perform git mutations. Do not run git add, git commit, git reset, git checkout, git restore, git stash, git clean, git rebase, git push, git rm, git branch, git switch, git merge, git cherry-pick, git tag, or git worktree.",
         context.as_str()
     );
-    if requires_structured_output {
-        prompt.push_str(
-            "\n\nYour final response must be exactly one JSON value matching the requested output schema. Do not wrap it in Markdown or a code fence, and do not add explanatory text before or after the JSON.",
-        );
+    if let Some(schema) = output_schema {
+        prompt.push_str(&format!(
+            "\n\nYour final response must be exactly one JSON value matching this JSON Schema:\n{}\nEvery required field must be present. Do not use a Markdown fence or add prose before or after the JSON. Do not call a formatting tool.",
+            schema
+        ));
     }
     prompt
 }
@@ -4005,18 +4026,22 @@ mod tests {
             "inspect the change",
             DelegateContext::None,
             AgentRole::Coder,
-            false,
+            None,
         );
         assert!(!ordinary.contains("exactly one JSON value"));
 
+        let schema = serde_json::json!({"type":"object","required":["ok"]});
         let structured = child_prompt(
             "inspect the change",
             DelegateContext::None,
             AgentRole::Coder,
-            true,
+            Some(&schema),
         );
         assert!(structured.contains("exactly one JSON value"));
-        assert!(structured.contains("Do not wrap it in Markdown or a code fence"));
+        assert!(structured.contains(&schema.to_string()));
+        assert!(structured.contains("Every required field must be present"));
+        assert!(structured.contains("Do not use a Markdown fence"));
+        assert!(structured.contains("Do not call a formatting tool"));
     }
 
     #[test]
