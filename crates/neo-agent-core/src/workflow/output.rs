@@ -138,7 +138,7 @@ pub fn serialize_canonical_json_bytes(value: &serde_json::Value) -> Result<Vec<u
 pub fn final_result_exceeds_inline_budget(byte_len: u64, limits: &WorkflowLimits) -> bool {
     // Page-sized TaskOutput budget: keep small results inline; larger ones are
     // content-addressed so journal/result views stay bounded.
-    byte_len > limits.task_output_page_bytes
+    byte_len > page_budget(limits.task_output_page_bytes)
 }
 
 /// Decide inline vs artifact staging for exactly one top-level return value.
@@ -573,7 +573,14 @@ fn bind_cursor(
             ),
         ));
     }
-    let expected_hash = request.query_hash();
+    let cursor_artifact_id = cursor
+        .artifact_id
+        .as_deref()
+        .and_then(|raw| serde_json::from_str::<WorkflowArtifactId>(raw).ok());
+    let expected_hash = compute_query_hash(
+        request.view,
+        request.artifact_id.as_ref().or(cursor_artifact_id.as_ref()),
+    );
     if cursor.query_hash != expected_hash {
         return Err(WorkflowError::coded(
             WorkflowErrorCode::InvalidInput,
@@ -662,9 +669,13 @@ fn summarize_envelope(envelope: &JournalEnvelope, include_body: bool) -> Journal
 }
 
 fn page_budget(max_output_bytes: u64) -> u64 {
-    max_output_bytes
+    (max_output_bytes / 2)
         .saturating_sub(TOOL_RESULT_OVERHEAD_RESERVE)
         .max(256)
+}
+
+fn artifact_content_budget(max_output_bytes: u64) -> u64 {
+    page_budget(max_output_bytes) / 6
 }
 
 fn state_status_str(state: WorkflowState) -> &'static str {
@@ -697,6 +708,30 @@ fn pending_meta(pending: &PendingUserInput) -> PendingUserInputMeta {
             "wait_for_human".to_owned()
         },
     }
+}
+
+pub(super) fn validate_pending_user_input_projection(
+    pending: &PendingUserInput,
+    max_output_bytes: u64,
+) -> Result<(), WorkflowError> {
+    let meta = pending_meta(pending);
+    let projected_bytes = serde_json::to_vec(&(&meta, &meta)).map_err(|error| {
+        WorkflowError::coded(
+            WorkflowErrorCode::InvalidInput,
+            format!("await_user projection serialization failed: {error}"),
+        )
+    })?;
+    let budget = page_budget(max_output_bytes);
+    if projected_bytes.len() as u64 > budget {
+        return Err(WorkflowError::coded(
+            WorkflowErrorCode::ResourceLimited,
+            format!(
+                "await_user request needs {} bytes of TaskOutput payload, exceeding the {budget}-byte payload budget",
+                projected_bytes.len()
+            ),
+        ));
+    }
+    Ok(())
 }
 
 fn journal_cursor(
@@ -837,7 +872,7 @@ pub fn build_summary_page(
         returned_bytes,
         summary: Some(summary),
         journal: Vec::new(),
-        result: materials.final_result.clone(),
+        result: None,
         artifacts: Vec::new(),
         artifact_content: None,
         pending_user: materials.pending_user.as_ref().map(pending_meta),
@@ -1088,8 +1123,8 @@ pub fn build_artifact_content_page(
     let cursor = bind_cursor(request, &materials.run_id)?;
     let artifact_id = resolve_artifact_id(request, materials, cursor.as_ref())?;
     let offset = cursor.and_then(|c| c.offset).unwrap_or(0);
-    let budget = page_budget(request.max_output_bytes);
-    let query_hash = request.query_hash();
+    let budget = artifact_content_budget(request.max_output_bytes);
+    let query_hash = query_hash_for_view(TaskOutputView::ArtifactContent, Some(&artifact_id));
 
     let range: ArtifactContentRange =
         materials
@@ -1255,6 +1290,30 @@ fn shrink_page_to_tool_result_cap(
             return Ok(());
         }
         match page.view {
+            TaskOutputView::Summary
+                if page
+                    .summary
+                    .as_ref()
+                    .is_some_and(|summary| !summary.latest_reports.is_empty()) =>
+            {
+                page.summary
+                    .as_mut()
+                    .expect("summary view has summary")
+                    .latest_reports
+                    .clear();
+            }
+            TaskOutputView::Summary
+                if page
+                    .summary
+                    .as_ref()
+                    .is_some_and(|summary| !summary.artifact_metadata.is_empty()) =>
+            {
+                page.summary
+                    .as_mut()
+                    .expect("summary view has summary")
+                    .artifact_metadata
+                    .clear();
+            }
             TaskOutputView::Journal if page.journal.len() > 1 => {
                 let removed = page.journal.pop().expect("len > 1");
                 page.has_more = true;
@@ -1274,12 +1333,19 @@ fn shrink_page_to_tool_result_cap(
             TaskOutputView::Artifacts if page.artifacts.len() > 1 => {
                 page.artifacts.pop();
                 page.has_more = true;
+                let start = bind_cursor(request, &WorkflowId::from_existing(page.run_id.clone()))?
+                    .and_then(|cursor| cursor.artifact_index)
+                    .unwrap_or(0);
                 page.next_cursor = Some(artifacts_cursor(
                     &WorkflowId::from_existing(page.run_id.clone()),
-                    // Cannot recover exact index; client restarts artifacts paging.
-                    0,
+                    start.saturating_add(page.artifacts.len()),
                     &compute_query_hash(TaskOutputView::Artifacts, None),
                 )?);
+                page.returned_bytes = page
+                    .artifacts
+                    .iter()
+                    .map(|item| serde_json::to_vec(item).map_or(128, |bytes| bytes.len() as u64))
+                    .sum();
             }
             TaskOutputView::Journal if page.journal.len() == 1 => {
                 // Keep metadata-only for the single oversized record.
@@ -1287,11 +1353,7 @@ fn shrink_page_to_tool_result_cap(
                     if rec.envelope.is_none() && rec.oversized == Some(true) {
                         // Already metadata-only; truncate summary text.
                         if let Some(summary) = rec.summary.as_mut() {
-                            const MAX: usize = 128;
-                            if summary.len() > MAX {
-                                summary.truncate(MAX);
-                                summary.push('…');
-                            }
+                            truncate_summary(summary);
                         }
                         rec.record_bytes = 0;
                     } else {
@@ -1299,11 +1361,7 @@ fn shrink_page_to_tool_result_cap(
                         rec.oversized = Some(true);
                         rec.minimum_bytes = Some(rec.record_bytes);
                         if let Some(summary) = rec.summary.as_mut() {
-                            const MAX: usize = 128;
-                            if summary.len() > MAX {
-                                summary.truncate(MAX);
-                                summary.push('…');
-                            }
+                            truncate_summary(summary);
                         }
                     }
                 }
@@ -1328,3 +1386,20 @@ fn shrink_page_to_tool_result_cap(
         format!("TaskOutput could not shrink under max_output_bytes {max}"),
     ))
 }
+
+fn truncate_summary(summary: &mut String) {
+    const MAX_BYTES: usize = 128;
+    if summary.len() <= MAX_BYTES {
+        return;
+    }
+    let mut boundary = MAX_BYTES;
+    while !summary.is_char_boundary(boundary) {
+        boundary -= 1;
+    }
+    summary.truncate(boundary);
+    summary.push('…');
+}
+
+#[cfg(test)]
+#[path = "output_tests.rs"]
+mod tests;

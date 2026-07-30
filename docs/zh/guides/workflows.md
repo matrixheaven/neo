@@ -182,10 +182,10 @@ neo workflow run <name> [--args <object> | --args-file <path>]
 有副作用的调用返回同一不可变表形态：
 
 ```text
-ok, status, summary, details?, actual_usage?, references?, schema?
+ok, status, summary, details?, actual_usage?, agent_id?, swarm_id?, task_id?
 ```
 
-`status` 为：`completed` | `failed` | `denied` | `cancelled` | `resource_limited` | `interrupted` | `schema_invalid`。
+`status` 为：`completed` | `failed` | `denied` | `cancelled` | `resource_limited` | `interrupted`。
 
 普通校验和工具失败会返回 `ok = false` 的结果值，脚本可以直接分支处理，不需要
 使用 `pcall`。`neo.fail`、未捕获的 Lua 错误、资源耗尽、取消以及最终结果无效会

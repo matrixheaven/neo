@@ -186,7 +186,7 @@ artifact_record_bytes = 16777216
 artifact_total_bytes = 4294967296
 global_storage_bytes = 34359738368
 pending_record_bytes = 268435456
-task_output_page_bytes = 262144
+task_output_page_bytes = 65536
 max_active_vms = 8
 max_active_workers = 8
 max_active_executors = 32
@@ -206,7 +206,7 @@ swarm_concurrency = 4
 | `artifact_total_bytes` | u64 | `4294967296` (4 GiB) | Maximum artifact bytes per run |
 | `global_storage_bytes` | u64 | `34359738368` (32 GiB) | Global workflow storage ceiling (journals + artifacts + metadata) |
 | `pending_record_bytes` | u64 | `268435456` (256 MiB) | Global pending (not yet durable-synced) record bytes |
-| `task_output_page_bytes` | u64 | `262144` (256 KiB) | Maximum TaskOutput page payload |
+| `task_output_page_bytes` | u64 | `65536` (64 KiB) | Maximum complete TaskOutput tool result, capped by `runtime.shell.output_bytes` |
 | `max_active_vms` | usize | `8` | Simultaneously active Lua VMs |
 | `max_active_workers` | usize | `8` | Simultaneously active workflow worker tasks |
 | `max_active_executors` | usize | `32` | Simultaneously active host executors (child/tool slots) |

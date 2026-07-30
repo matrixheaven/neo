@@ -44,6 +44,7 @@ fn test_context(
 #[test]
 fn workflow_schema_declares_action_specific_required_fields() {
     let schema = WorkflowTool.input_schema();
+    assert_eq!(schema["type"], "object");
     let branches = schema["oneOf"].as_array().expect("action branches");
     let expected = [
         (
@@ -437,6 +438,14 @@ async fn saved_actions_list_show_validate_run_and_recover_from_conflict() {
     assert_eq!(listed["items"]["entries"][0]["name"], "adapter-test");
     assert_eq!(listed_content["items"]["total"], 1);
     assert!(listed_content["items"].get("cursor").is_some());
+    for internal in ["revision", "source_origin", "source_locator"] {
+        assert!(
+            listed_content["items"]["entries"][0]
+                .get(internal)
+                .is_none(),
+            "{internal} leaked into model-visible list output"
+        );
+    }
     assert_eq!(
         listed["items"]["entries"][0]["schema"]["input"]["property_count"],
         0

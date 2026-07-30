@@ -150,7 +150,13 @@ local security = neo.delegate({
   tool_allow = READ_ONLY,
   output_schema = finding_schema,
 })
-neo.verify(security.ok, "security failed: " .. tostring(security.summary))
+local security_check = neo.verify(
+  security.ok,
+  "security failed: " .. tostring(security.summary)
+)
+if not security_check.ok then
+  neo.fail(security_check.summary)
+end
 
 local correctness = neo.delegate({
   title = "correctness",
@@ -161,7 +167,13 @@ local correctness = neo.delegate({
   tool_allow = READ_ONLY,
   output_schema = finding_schema,
 })
-neo.verify(correctness.ok, "correctness failed: " .. tostring(correctness.summary))
+local correctness_check = neo.verify(
+  correctness.ok,
+  "correctness failed: " .. tostring(correctness.summary)
+)
+if not correctness_check.ok then
+  neo.fail(correctness_check.summary)
+end
 
 local findings = {}
 local function append(outcome)

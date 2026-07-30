@@ -393,6 +393,48 @@ fn omitted_input_schema_is_strictly_no_arguments() {
     );
 }
 
+#[test]
+fn paired_definition_without_input_schema_is_strictly_no_arguments() {
+    let script = sample_script();
+    let manifest = format!(
+        r#"
+display_name = "No Arguments"
+description = "accepts no arguments"
+source_sha256 = "{}"
+
+[[phases]]
+id = "run"
+description = "run"
+
+[output_schema]
+type = "object"
+additionalProperties = false
+"#,
+        source_sha256_hex(script.as_bytes())
+    );
+
+    let definition = resolve_paired_definition(
+        "no-arguments",
+        manifest.as_bytes(),
+        script.as_bytes(),
+        WorkflowSourceOrigin::User,
+        None,
+        &WorkflowLimits::default(),
+    )
+    .expect("paired definition");
+
+    let input_schema = definition
+        .compiled_input_schema
+        .as_ref()
+        .expect("normalized input schema compiles");
+    assert!(input_schema.validate_instance(&json!({})).is_ok());
+    assert!(
+        input_schema
+            .validate_instance(&json!({"unexpected": true}))
+            .is_err()
+    );
+}
+
 // ---------------------------------------------------------------------------
 // Task 10 helpers
 // ---------------------------------------------------------------------------

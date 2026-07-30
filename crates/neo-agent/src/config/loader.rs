@@ -230,6 +230,11 @@ fn runtime_from_file(runtime: Option<FileRuntimeConfig>) -> RuntimeConfig {
         return RuntimeConfig::default();
     };
     let retry = runtime.retry.unwrap_or_default();
+    let shell = runtime_shell_from_file(runtime.shell);
+    let mut workflow = runtime_workflow_from_file(runtime.workflow);
+    workflow.task_output_page_bytes = workflow
+        .task_output_page_bytes
+        .min(shell.max_output_bytes as u64);
     RuntimeConfig {
         temperature: runtime.temperature,
         max_tokens: runtime.max_tokens,
@@ -256,8 +261,8 @@ fn runtime_from_file(runtime: Option<FileRuntimeConfig>) -> RuntimeConfig {
                 .unwrap_or(DEFAULT_STREAM_IDLE_TIMEOUT_SECS),
         },
         compaction: Some(runtime_compaction_from_file(runtime.compaction)),
-        shell: runtime_shell_from_file(runtime.shell),
-        workflow: runtime_workflow_from_file(runtime.workflow),
+        shell,
+        workflow,
         shell_runtime: ShellRuntime::default(),
     }
 }

@@ -505,6 +505,28 @@ max_command_parallelism = 2
     }
 
     #[test]
+    fn workflow_task_output_limit_is_capped_by_tool_output_limit() {
+        let (_temp, config_path, project_dir) = temp_project_config(
+            r#"
+[runtime.shell]
+output_bytes = 32768
+
+[runtime.workflow]
+task_output_page_bytes = 65536
+"#,
+        );
+
+        let config = load_config(config_path, project_dir);
+
+        assert_eq!(config.runtime.shell.max_output_bytes, 32_768);
+        assert_eq!(config.runtime.workflow.task_output_page_bytes, 32_768);
+        assert_eq!(
+            config.workflow_runtime.limits().task_output_page_bytes,
+            32_768
+        );
+    }
+
+    #[test]
     fn config_loads_builtin_workflow_definitions() {
         let (_temp, config_path, project_dir) = temp_project_config("");
         let config = load_config(config_path, project_dir);

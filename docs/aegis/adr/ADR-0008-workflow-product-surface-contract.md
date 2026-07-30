@@ -46,7 +46,7 @@ workflow accepts no arguments, while `output_schema` remains required.
 
 Ordinary host operations return immutable `ok = false` outcomes so Lua can
 branch directly on `outcome.ok`. This includes failed verification, failed
-command verification, unknown tools, and tools outside the workflow allowlist.
+command verification, unknown tools, and centrally denied orchestration or control tools.
 These outcomes do not require `pcall` and do not terminate the run. Explicit
 `neo.fail`, uncaught Lua errors, resource exhaustion, cancellation, and invalid
 final results remain terminal workflow failures. `TaskOutput` is the workflow

@@ -188,10 +188,10 @@ There is no `neo.parallel`, recursive workflow launch, detached workflow task, r
 Effectful calls return one immutable table shape:
 
 ```text
-ok, status, summary, details?, actual_usage?, references?, schema?
+ok, status, summary, details?, actual_usage?, agent_id?, swarm_id?, task_id?
 ```
 
-`status` is one of: `completed` | `failed` | `denied` | `cancelled` | `resource_limited` | `interrupted` | `schema_invalid`.
+`status` is one of: `completed` | `failed` | `denied` | `cancelled` | `resource_limited` | `interrupted`.
 
 Ordinary verification and tool failures return `ok = false` values that the
 script can branch on; they do not require `pcall`. `neo.fail`, uncaught Lua

@@ -9,9 +9,9 @@ use neo_agent_core::workflow::journal::{
 };
 use neo_agent_core::workflow::{
     ArtifactKind, ArtifactStore, ArtifactValue, FINAL_RESULT_LOGICAL_NAME, FinalResultBody,
-    WorkflowErrorCode, WorkflowId, WorkflowInvocationKind, WorkflowInvocationOutcome,
-    WorkflowLaunchRequest, WorkflowLimits, WorkflowOutcomeStatus, WorkflowPhase, WorkflowRuntime,
-    WorkflowState, artifacts_dir,
+    PreparedFinalBody, WorkflowErrorCode, WorkflowId, WorkflowInvocationKind,
+    WorkflowInvocationOutcome, WorkflowLaunchRequest, WorkflowLimits, WorkflowOutcomeStatus,
+    WorkflowPhase, WorkflowRuntime, WorkflowState, artifacts_dir, prepare_final_body,
 };
 use sha2::{Digest, Sha256};
 
@@ -40,6 +40,15 @@ fn limits_small_inline() -> WorkflowLimits {
         artifact_record_bytes: 1024 * 1024,
         ..WorkflowLimits::default()
     }
+}
+
+#[test]
+fn default_final_result_that_cannot_fit_complete_tool_result_uses_artifact() {
+    let result = serde_json::json!({"body": "x".repeat(40 * 1024)});
+
+    let prepared = prepare_final_body(result, &WorkflowLimits::default()).expect("prepare");
+
+    assert!(matches!(prepared, PreparedFinalBody::NeedsArtifact { .. }));
 }
 
 fn append_run_created(writer: &mut JournalWriter, run_id: &WorkflowId) {

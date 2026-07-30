@@ -7,9 +7,10 @@ use neo_agent_core::workflow::journal::{
     JournalEnvelope, JournalPayload, JournalWriter, collect_journal,
 };
 use neo_agent_core::workflow::{
-    CanonicalFinalResult, FinalResultBody, TaskOutputPage, TaskOutputRequest, TaskOutputView,
-    WorkflowActor, WorkflowId, WorkflowLaunchRequest, WorkflowLimits, WorkflowPhase,
-    WorkflowRuntime, WorkflowState, measure_tool_result_bytes, page_to_tool_result,
+    ArtifactKind, ArtifactValue, CanonicalFinalResult, FinalResultBody, TaskOutputPage,
+    TaskOutputRequest, TaskOutputView, WorkflowActor, WorkflowId, WorkflowLaunchRequest,
+    WorkflowLimits, WorkflowPhase, WorkflowRuntime, WorkflowState, measure_tool_result_bytes,
+    page_to_tool_result,
 };
 use serde_json::json;
 
@@ -40,6 +41,16 @@ async fn wait_running(handle: &neo_agent_core::workflow::WorkflowHandle) {
         tokio::time::sleep(Duration::from_millis(10)).await;
     }
     panic!("run did not become Running");
+}
+
+async fn wait_terminal(handle: &neo_agent_core::workflow::WorkflowHandle) {
+    for _ in 0..200 {
+        if handle.snapshot().await.state.is_terminal() {
+            return;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    panic!("run did not become terminal");
 }
 
 /// Append many large recovery records after the durable head so total
@@ -220,6 +231,94 @@ fn result_content_contains_actual_final_json() {
         content_value["result"]["body"]["inline"]["value"],
         json!({"answer": "visible", "count": 3})
     );
+}
+
+#[tokio::test]
+async fn summary_with_largest_inline_result_fits_default_complete_cap() {
+    let session = tempfile::tempdir().expect("session");
+    let runtime = WorkflowRuntime::default();
+    runtime
+        .bind_runner(|handle, _meta, _session| async move {
+            handle
+                .persist_canonical_final_result(json!({"body": "x".repeat(20 * 1024)}), None)
+                .await?;
+            Ok(())
+        })
+        .expect("bind runner");
+    let handle = runtime
+        .create_run(session.path(), launch_request("inline-summary-cap"))
+        .await
+        .expect("create");
+    runtime
+        .start_worker(&handle.run_id)
+        .await
+        .expect("start worker");
+    wait_terminal(&handle).await;
+
+    let page = handle
+        .task_output(TaskOutputRequest::summary(64 * 1024))
+        .await
+        .expect("summary page");
+    let (content, details) = page_to_tool_result(&page, 64 * 1024).expect("tool result");
+
+    assert!(measure_tool_result_bytes(&content, &details) <= 64 * 1024);
+    assert!(page.result.is_none());
+    assert!(
+        page.summary
+            .as_ref()
+            .and_then(|summary| summary.final_result.as_ref())
+            .is_some()
+    );
+}
+
+#[tokio::test]
+async fn artifact_content_pages_fit_the_complete_tool_result_cap() {
+    let session = tempfile::tempdir().expect("session");
+    let runtime = WorkflowRuntime::default();
+    let handle = runtime
+        .create_run(session.path(), launch_request("artifact-content-cap"))
+        .await
+        .expect("create");
+    let artifact_text = "\"\\\n\u{0001}".repeat(20 * 1024);
+    let artifact = handle
+        .commit_artifact(
+            "large-output",
+            ArtifactKind::Text,
+            ArtifactValue::Text(artifact_text.clone()),
+            None,
+        )
+        .await
+        .expect("commit artifact");
+    let cap = 64 * 1024;
+    let mut cursor = None;
+    let mut artifact_id = Some(artifact.artifact_id);
+    let mut returned_bytes = 0u64;
+    let mut pages = 0usize;
+    loop {
+        let page = handle
+            .task_output(TaskOutputRequest {
+                view: TaskOutputView::ArtifactContent,
+                cursor: cursor.take(),
+                max_output_bytes: cap,
+                artifact_id: artifact_id.take(),
+            })
+            .await
+            .expect("content page");
+        let (content, details) = page_to_tool_result(&page, cap).expect("tool result");
+        let artifact_content = page.artifact_content.as_ref().expect("content");
+
+        assert!(measure_tool_result_bytes(&content, &details) as u64 <= cap);
+        assert_eq!(artifact_content.offset, returned_bytes);
+        returned_bytes = returned_bytes.saturating_add(artifact_content.content_bytes);
+        pages += 1;
+        if !page.has_more {
+            break;
+        }
+        cursor = page.next_cursor;
+    }
+
+    assert!(pages > 2);
+    assert_eq!(returned_bytes, artifact_text.len() as u64);
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

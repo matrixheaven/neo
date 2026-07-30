@@ -27,7 +27,7 @@ pub struct WorkflowLimits {
     pub global_storage_bytes: u64,
     /// Global pending (not yet durable-synced) record byte ceiling.
     pub pending_record_bytes: u64,
-    /// Maximum TaskOutput page payload bytes.
+    /// Maximum complete TaskOutput tool-result bytes.
     pub task_output_page_bytes: u64,
     /// Simultaneously active Lua VMs.
     pub max_active_vms: usize,
@@ -53,7 +53,7 @@ impl Default for WorkflowLimits {
             artifact_total_bytes: 4 * 1024 * 1024 * 1024, // 4 GiB
             global_storage_bytes: 32 * 1024 * 1024 * 1024, // 32 GiB
             pending_record_bytes: 256 * 1024 * 1024, // 256 MiB
-            task_output_page_bytes: 256 * 1024,     // 256 KiB
+            task_output_page_bytes: 64 * 1024,      // 64 KiB
             max_active_vms: 8,
             max_active_workers: 8,
             max_active_executors: 32,

@@ -766,6 +766,10 @@ impl TranscriptPane {
                     .as_ref()
                     .and_then(shell_detail_from_tool_result_details)
                     .unwrap_or(result.content)
+            } else if let Some(content) = details.as_ref().and_then(|details| {
+                super::workflow_tool_presentation::workflow_tool_result_summary(&tool_name, details)
+            }) {
+                content
             } else {
                 result.content
             };

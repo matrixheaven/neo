@@ -113,8 +113,15 @@ struct LiveFixture {
 }
 
 async fn live_await_user_fixture(script: String) -> LiveFixture {
+    live_fixture(script, limits_one_worker(), WorkflowState::AwaitingUser).await
+}
+
+async fn live_fixture(
+    script: String,
+    limits: WorkflowLimits,
+    expected_state: WorkflowState,
+) -> LiveFixture {
     let dir = tempfile::tempdir().unwrap();
-    let limits = limits_one_worker();
     let harness = FakeHarness::from_turns([]);
     let config = neo_agent_core::AgentConfig::for_model(harness.model())
         .with_workspace_root(dir.path().to_path_buf())
@@ -159,12 +166,89 @@ async fn live_await_user_fixture(script: String) -> LiveFixture {
         .start_worker(&handle.run_id)
         .await
         .expect("start worker");
-    wait_state(&handle, WorkflowState::AwaitingUser).await;
+    wait_state(&handle, expected_state).await;
     LiveFixture {
         dir,
         runtime,
         handle,
     }
+}
+
+#[tokio::test]
+async fn oversized_await_user_request_fails_before_entering_awaiting_user() {
+    let prompt = "x".repeat(40 * 1024);
+    let script = format!(
+        "return neo.await_user({{ prompt = {}, answer_schema = {{ type = \"boolean\" }} }})",
+        serde_json::to_string(&prompt).expect("prompt")
+    );
+
+    let fixture = live_fixture(script, limits_one_worker(), WorkflowState::Failed).await;
+
+    let output = fixture.handle.output().await.expect("workflow output");
+    assert!(
+        output
+            .terminal_reason
+            .as_deref()
+            .is_some_and(|reason| reason.contains("await_user request needs"))
+    );
+    assert!(
+        fixture
+            .handle
+            .pending_user_input()
+            .await
+            .expect("pending request")
+            .is_none()
+    );
+    let journal_path = run_dir(fixture.dir.path(), &fixture.handle.run_id).join("journal.jsonl");
+    let envelopes = collect_journal(
+        &journal_path,
+        Some(&fixture.handle.run_id),
+        WorkflowLimits::default().journal_record_bytes,
+        WorkflowLimits::default().journal_total_bytes,
+    )
+    .expect("journal");
+    assert!(!envelopes.iter().any(|envelope| matches!(
+        envelope.payload,
+        JournalPayload::UserInputRequested { .. }
+            | JournalPayload::StateChanged {
+                new: WorkflowState::AwaitingUser,
+                ..
+            }
+    )));
+}
+
+#[tokio::test]
+async fn large_report_does_not_hide_a_pending_user_request_from_task_output() {
+    let script = r#"
+neo.report({ body = string.rep("x", 40 * 1024) })
+return neo.await_user({
+  prompt = "Continue?",
+  answer_schema = { type = "boolean" },
+  answer_policy = "human_or_model"
+})
+"#
+    .to_owned();
+    let fixture = live_await_user_fixture(script).await;
+
+    let page = fixture
+        .handle
+        .task_output(neo_agent_core::workflow::TaskOutputRequest::summary(
+            WorkflowLimits::default().task_output_page_bytes,
+        ))
+        .await
+        .expect("summary with pending request");
+
+    assert_eq!(
+        page.pending_user
+            .as_ref()
+            .map(|pending| pending.request_id.as_str()),
+        Some("req_c1")
+    );
+    assert!(
+        page.summary
+            .as_ref()
+            .is_some_and(|summary| summary.latest_reports.is_empty())
+    );
 }
 
 /// Full worker path: await_user releases VM/worker permits and survives restart

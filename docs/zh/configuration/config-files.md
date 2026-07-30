@@ -186,7 +186,7 @@ artifact_record_bytes = 16777216
 artifact_total_bytes = 4294967296
 global_storage_bytes = 34359738368
 pending_record_bytes = 268435456
-task_output_page_bytes = 262144
+task_output_page_bytes = 65536
 max_active_vms = 8
 max_active_workers = 8
 max_active_executors = 32
@@ -206,7 +206,7 @@ swarm_concurrency = 4
 | `artifact_total_bytes` | u64 | `4294967296`（4 GiB） | 每个 run 的 artifact 字节上限 |
 | `global_storage_bytes` | u64 | `34359738368`（32 GiB） | 全局 workflow 存储上限（journal + artifact + metadata） |
 | `pending_record_bytes` | u64 | `268435456`（256 MiB） | 全局尚未 durable-sync 的 pending record 字节 |
-| `task_output_page_bytes` | u64 | `262144`（256 KiB） | TaskOutput 单页载荷上限 |
+| `task_output_page_bytes` | u64 | `65536`（64 KiB） | TaskOutput 完整工具结果上限，不超过 `runtime.shell.output_bytes` |
 | `max_active_vms` | usize | `8` | 同时活动的 Lua VM 数 |
 | `max_active_workers` | usize | `8` | 同时活动的 workflow worker 数 |
 | `max_active_executors` | usize | `32` | 同时活动的宿主 executor（child/tool 槽） |

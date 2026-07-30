@@ -22,7 +22,7 @@ use super::limits::WorkflowLimits;
 use super::output::{
     CanonicalFinalResult, PreparedFinalBody, TaskOutputMaterials, TaskOutputPage,
     TaskOutputRequest, prepare_final_body, reconstruct_canonical_final_result,
-    render_task_output_page,
+    render_task_output_page, validate_pending_user_input_projection,
 };
 use super::schema::{
     CompiledSchema, StructuredOutputSource, accept_structured_output, validate_final_lua_result,
@@ -1042,6 +1042,17 @@ impl WorkflowRuntime {
             }
         }
 
+        let pending = PendingUserInput {
+            request_id: request_id.clone(),
+            prompt: prepared.prompt.clone(),
+            answer_schema: prepared.answer_schema.clone(),
+            default: prepared.default.clone(),
+            title: prepared.title.clone(),
+            answer_policy: prepared.answer_policy,
+            answer: None,
+        };
+        validate_pending_user_input_projection(&pending, self.limits.task_output_page_bytes)?;
+
         // Append+sync UserInputRequested before state transition.
         let (journal, run_id_owned) = {
             let guard = state.lock().await;
@@ -1086,15 +1097,7 @@ impl WorkflowRuntime {
             let mut guard = state.lock().await;
             guard.projection_sequence = Some(sequence);
             guard.updated_at_ms = Some(timestamp_ms);
-            guard.pending_user_input = Some(PendingUserInput {
-                request_id: request_id.clone(),
-                prompt: prepared.prompt.clone(),
-                answer_schema: prepared.answer_schema.clone(),
-                default: prepared.default.clone(),
-                title: prepared.title.clone(),
-                answer_policy: prepared.answer_policy,
-                answer: None,
-            });
+            guard.pending_user_input = Some(pending);
             self.emit_projection(&guard, WorkflowProjectionStage::Updated);
         }
 

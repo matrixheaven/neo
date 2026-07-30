@@ -219,21 +219,13 @@ pub fn resolve_dynamic_definition(
     let phases = validate_phases(&input.phases)?;
     let output_schema = input.output_schema;
     reject_schema_limit(&output_schema, "output_schema", limits)?;
-    let input_schema = input.input_schema.unwrap_or_else(|| {
-        serde_json::json!({
-            "type": "object",
-            "additionalProperties": false,
-        })
-    });
-    reject_schema_limit(&input_schema, "input_schema", limits)?;
-
     let source_sha256 = source_sha256_hex(source_bytes);
     let typed = CanonicalWorkflowManifest {
         display_name,
         description,
         phases,
         source_sha256: source_sha256.clone(),
-        input_schema: Some(input_schema),
+        input_schema: input.input_schema,
         output_schema,
     };
     finish_resolved(
@@ -409,13 +401,20 @@ fn materialize_file_manifest_fields(
 
 fn finish_resolved(
     name: WorkflowName,
-    typed: CanonicalWorkflowManifest,
+    mut typed: CanonicalWorkflowManifest,
     lua_source: String,
     source_sha256: String,
     source_origin: WorkflowSourceOrigin,
     source_locator: Option<String>,
     limits: &WorkflowLimits,
 ) -> Result<ResolvedWorkflowDefinition, WorkflowError> {
+    let input_schema = typed.input_schema.get_or_insert_with(|| {
+        serde_json::json!({
+            "type": "object",
+            "additionalProperties": false,
+        })
+    });
+    reject_schema_limit(input_schema, "input_schema", limits)?;
     let canonical_manifest_json = serialize_canonical_manifest(&typed)?;
     reject_manifest_limit(&canonical_manifest_json, limits)?;
 

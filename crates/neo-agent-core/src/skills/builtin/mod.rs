@@ -228,6 +228,12 @@ mod tests {
                     .contains("findings = neo.json_array(findings)"),
             "create-workflow example must consume canonical child JSON and preserve empty arrays"
         );
+        for check in ["if not security_check.ok", "if not correctness_check.ok"] {
+            assert!(
+                create_workflow.body.contains(check),
+                "create-workflow evidence gates must fail closed: {check}"
+            );
+        }
 
         let (frontmatter, _) = crate::skills::split_frontmatter(CREATE_WORKFLOW)
             .expect("create-workflow must have raw frontmatter");

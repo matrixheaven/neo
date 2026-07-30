@@ -369,7 +369,7 @@ fn workflow_input_schema() -> Value {
         })
     })
     .collect::<Vec<_>>();
-    json!({"oneOf": branches})
+    json!({"type": "object", "oneOf": branches})
 }
 
 fn parse_cursor(action: WorkflowAction, cursor: Option<&str>) -> Result<usize, WorkflowInputError> {
@@ -1027,7 +1027,15 @@ async fn dispatch_prepared(
                 ));
             }
             let end = offset.saturating_add(*limit).min(summaries.len());
-            let items = match serde_json::to_value(&summaries[*offset..end]) {
+            let model_summaries = summaries[*offset..end].iter().map(|summary| {
+                json!({
+                    "name": summary.name,
+                    "display_name": summary.display_name,
+                    "description": summary.description,
+                    "schema": summary.schema,
+                })
+            });
+            let items = match serde_json::to_value(model_summaries.collect::<Vec<_>>()) {
                 Ok(Value::Array(items)) => items,
                 Ok(_) => {
                     return feature_error(
