@@ -1,6 +1,6 @@
 # Workflow Model-Visible Results And Recoverable Failures Design
 
-Status: `proposed-for-user-review`
+Status: `approved`
 Date: `2026-07-30`
 
 ## 1. Purpose
