@@ -5,6 +5,8 @@ Entries are workspace records, not authoritative runtime decisions.
 
 | Date | Kind | Path | Title |
 | --- | --- | --- | --- |
+| 2026-07-30 | handoff | docs/aegis/handoffs/2026-07-30-dynamic-workflow-ai-reliability.md | Implement Dynamic Workflow AI Reliability Handoff Prompt |
+| 2026-07-30 | plan | docs/aegis/plans/2026-07-30-dynamic-workflow-ai-reliability.md | Neo Dynamic Workflow AI Reliability Implementation Plan |
 | 2026-07-30 | plan | docs/aegis/plans/2026-07-30-workflow-model-visible-results.md | Neo Workflow Model-Visible Results Implementation Plan |
 | 2026-07-30 | spec | docs/aegis/specs/2026-07-30-workflow-model-visible-results-design.md | Workflow Model-Visible Results And Recoverable Failures Design |
 | 2026-07-30 | spec | docs/aegis/specs/2026-07-30-dynamic-workflow-ai-reliability-design.md | Dynamic Workflow AI Reliability Design |
