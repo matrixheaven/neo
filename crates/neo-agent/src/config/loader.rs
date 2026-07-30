@@ -120,15 +120,13 @@ impl AppConfig {
                 .parent()
                 .map_or_else(|| project_dir.clone(), std::path::Path::to_path_buf)
         });
-        let workflow_definitions = neo_agent_core::workflow::WorkflowDefinitionRegistry::new(
-            neo_agent_core::workflow::WorkflowDefinitionRegistryConfig {
-                neo_home: workflow_home,
-                workspace: project_dir.clone(),
+        let workflow_definitions =
+            neo_agent_core::workflow::WorkflowDefinitionRegistry::with_builtin_definitions(
+                workflow_home,
+                project_dir.clone(),
                 project_trusted,
-                limits: runtime.workflow.clone(),
-                builtins: Vec::new(),
-            },
-        );
+                runtime.workflow.clone(),
+            );
         configure_shell_runtime(&mut runtime, &config_path)?;
         let tui = tui_from_file(file_config.tui);
         validate_tui_config(&tui)?;

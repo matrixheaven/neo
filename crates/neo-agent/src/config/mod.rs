@@ -505,6 +505,24 @@ max_command_parallelism = 2
     }
 
     #[test]
+    fn config_loads_builtin_workflow_definitions() {
+        let (_temp, config_path, project_dir) = temp_project_config("");
+        let config = load_config(config_path, project_dir);
+        let builtins = config
+            .workflow_definitions
+            .list(neo_agent_core::workflow::WorkflowListScope::Builtin)
+            .expect("list built-in workflows");
+
+        assert_eq!(
+            builtins
+                .iter()
+                .map(|definition| definition.name.as_str())
+                .collect::<Vec<_>>(),
+            vec!["code-review", "deep-research", "large-refactor"]
+        );
+    }
+
+    #[test]
     fn workflow_machine_limits_map_all_v2_fields() {
         let (_temp, config_path, project_dir) = temp_project_config(
             r"

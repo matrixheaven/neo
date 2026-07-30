@@ -163,13 +163,15 @@ impl WorkflowPickerState {
         let normal = Style::default().fg(self.theme.text_primary);
         let body_width = inner_width.saturating_sub(2).max(1);
         let mut lines = vec![border_line("─ Run a workflow ", inner_width, border)];
-        lines.push(box_line(
-            &format!("Search  {}█", self.query),
-            inner_width,
-            muted,
-            border,
-        ));
-        lines.push(separator_line(inner_width, border));
+        if !self.items.is_empty() {
+            lines.push(box_line(
+                &format!("Search  {}█", self.query),
+                inner_width,
+                muted,
+                border,
+            ));
+            lines.push(separator_line(inner_width, border));
+        }
 
         if self.items.is_empty() {
             lines.push(box_line(
@@ -227,8 +229,10 @@ impl WorkflowPickerState {
         }
         lines.push(separator_line(inner_width, border));
         lines.push(box_line(
-            if self.items.is_empty() || self.filtered_len() == 0 {
+            if self.items.is_empty() {
                 "Esc close"
+            } else if self.filtered_len() == 0 {
+                "Esc cancel"
             } else if width < 80 {
                 "↑↓ · Enter choose · Esc cancel"
             } else {
@@ -238,7 +242,7 @@ impl WorkflowPickerState {
             muted,
             border,
         ));
-        lines.push(border_line("", inner_width, border));
+        lines.push(bottom_border_line(inner_width, border));
         lines
     }
 
@@ -346,8 +350,12 @@ fn border_line(title: &str, width: usize, style: Style) -> String {
     paint(&format!("╭{title}{fill}╮"), style)
 }
 
+fn bottom_border_line(width: usize, style: Style) -> String {
+    paint(&format!("╰{}╯", "─".repeat(width)), style)
+}
+
 fn separator_line(width: usize, style: Style) -> String {
-    paint(&format!("├{}┤", "─".repeat(width)), style)
+    paint(&format!("├{}╢", "─".repeat(width)), style)
 }
 
 fn box_line(content: &str, width: usize, content_style: Style, border_style: Style) -> String {
@@ -398,6 +406,28 @@ mod tests {
             items: Vec::new(),
             theme: TuiTheme::default(),
         });
+        let rendered = picker
+            .render_lines(80)
+            .into_iter()
+            .map(|line| crate::primitive::strip_ansi(&line))
+            .collect::<Vec<_>>();
+        assert!(
+            rendered
+                .first()
+                .is_some_and(|line| line.starts_with('╭') && line.ends_with('╮'))
+        );
+        assert!(
+            rendered
+                .last()
+                .is_some_and(|line| line.starts_with('╰') && line.ends_with('╯'))
+        );
+        assert!(!rendered.iter().any(|line| line.contains("Search")));
+        assert!(
+            rendered
+                .iter()
+                .any(|line| line.starts_with('├') && line.ends_with('╢'))
+        );
+        assert!(rendered.iter().any(|line| line.contains("Esc close")));
         assert_eq!(
             picker.handle_input(&InputEvent::Submit),
             InputResult::Ignored
@@ -410,6 +440,23 @@ mod tests {
             picker.take_result(),
             Some(WorkflowPickerResult::Cancelled)
         ));
+
+        let mut no_match = WorkflowPickerState::new(WorkflowPickerOptions {
+            items: vec![item("deep-research", "Deep Research", "Research topics")],
+            theme: TuiTheme::default(),
+        });
+        no_match.handle_input(&InputEvent::Paste("missing".to_owned()));
+        let no_match_rendered = no_match
+            .render_lines(80)
+            .into_iter()
+            .map(|line| crate::primitive::strip_ansi(&line))
+            .collect::<Vec<_>>();
+        assert!(no_match_rendered.iter().any(|line| line.contains("Search")));
+        assert!(
+            no_match_rendered
+                .iter()
+                .any(|line| line.contains("Esc cancel"))
+        );
     }
 
     #[test]
