@@ -4,7 +4,8 @@ use neo_tui::primitive::strip_ansi;
 use neo_tui::screen_output::{InlineTerminal, TerminalFrame};
 use neo_tui::shell::NeoChromeState;
 use neo_tui::transcript::{
-    FinalizedBlock, TranscriptBrowserState, TranscriptPane, TranscriptTerminalUpdate,
+    FinalizedBlock, TranscriptBrowserState, TranscriptEntry, TranscriptPane,
+    TranscriptTerminalUpdate,
 };
 
 #[test]
@@ -1135,4 +1136,259 @@ fn assert_sentinels_once_in_order(actual: &[String], expected: &[String]) {
         }
         previous = Some(matches[0]);
     }
+}
+
+/// Tall Delegate, workflow, and approval content stays on the normal screen
+/// with terminal-owned scrolling: no alternate-screen enter, no mouse
+/// capture, stable facts exactly once, and no duplicate final card.
+#[test]
+fn delegate_workflow_approval_live_content_stays_on_normal_screen_without_capture() {
+    use neo_agent_core::multi_agent::{
+        AgentActivityEntry, AgentActivityKind, AgentDisplayName, AgentId, AgentLifecycleState,
+        AgentPath, AgentRole, AgentRunMode, AgentSnapshot, AgentToolActivityPhase, DelegateContext,
+    };
+    use neo_agent_core::workflow::{WorkflowId, WorkflowSnapshot, WorkflowState};
+    use neo_agent_core::{
+        ApprovalAction, ApprovalOption, ApprovalPresentation, ApprovalRequest, ApprovalResolution,
+        PermissionOperation,
+    };
+
+    let height = 12u16;
+    let width = 80u16;
+    let mut screen = vt100::Parser::new(height, width, 512);
+    screen.process(b"shell-delegate-launch-line\r\n");
+    let mut inline = InlineTerminal::for_test_with_cursor(width, height, 0, height - 1);
+    let mut output = Vec::new();
+
+    let chrome = NeoChromeState::new("neo", "session", "model", ".");
+    let mut transcript = TranscriptPane::new(usize::from(width), usize::from(height));
+    transcript.push_status("pre-live-sentinel");
+    let mut tui = NeoTui::new(chrome, transcript);
+    let primary = tui.render_terminal_frame(usize::from(width), usize::from(height));
+    render_and_process(&mut inline, &mut screen, &primary, &mut output);
+    tui.acknowledge_history(&primary);
+
+    // A running Delegate with one completed tool, a running workflow, and a
+    // pending approval arrive while the turn is live.
+    let done_tool = AgentActivityEntry {
+        kind: AgentActivityKind::Tool {
+            id: "read-1".to_owned(),
+            name: "Read".to_owned(),
+            summary: Some("one.rs".to_owned()),
+            phase: AgentToolActivityPhase::Done,
+            output: None,
+            files: Vec::new(),
+        },
+    };
+    let agent = AgentSnapshot {
+        id: AgentId::from_suffix_for_test("agent-a"),
+        display_name: AgentDisplayName::new("agent-a"),
+        path: AgentPath::root_child(&AgentDisplayName::new("agent-a")),
+        role: AgentRole::Coder,
+        mode: AgentRunMode::Foreground,
+        context: DelegateContext::Inherit,
+        state: AgentLifecycleState::Running,
+        task: "delegate task".to_owned(),
+        task_title: "delegate task".to_owned(),
+        created_at_ms: 1,
+        updated_at_ms: 2,
+        started_at_ms: Some(1),
+        terminal_at_ms: None,
+        detached_from_foreground: false,
+        terminal_reason: None,
+        run_count: 1,
+        live_messages_received: 0,
+        previous_status: None,
+        terminal_status_history: Vec::new(),
+        resumed_from: None,
+        tool_count: 1,
+        token_count: 0,
+        cache_read_token_count: 0,
+        cache_write_token_count: 0,
+        elapsed: std::time::Duration::ZERO,
+        latest_text: None,
+        activity: vec![done_tool],
+        prior_messages: Vec::new(),
+        outcome: None,
+    };
+    tui.transcript_mut()
+        .transcript_mut()
+        .upsert_delegate(1, agent);
+    tui.transcript_mut()
+        .transcript_mut()
+        .upsert_workflow(WorkflowSnapshot {
+            id: WorkflowId("wf-1".to_owned()),
+            title: "delegate workflow".to_owned(),
+            state: WorkflowState::Running,
+            current_phase: Some("verify".to_owned()),
+            projection_sequence: Some(1),
+            recovery_failure: false,
+            started_at_ms: Some(1_000),
+            updated_at_ms: Some(2_000),
+            invocation_count: 1,
+            failure_count: 0,
+            actual_usage: None,
+            latest_log_summary: None,
+            latest_report_summary: None,
+            terminal_reason: None,
+            display_name: "delegate workflow".to_owned(),
+            purpose: "test".to_owned(),
+        });
+    tui.transcript_mut()
+        .apply_agent_event(AgentEvent::ApprovalRequested {
+            request: ApprovalRequest {
+                turn: 1,
+                id: "approval-1".to_owned(),
+                operation: PermissionOperation::Shell,
+                presentation: ApprovalPresentation::Tool {
+                    title: "Run tests?".to_owned(),
+                    details: vec!["cargo test".to_owned()],
+                },
+                options: vec![ApprovalOption {
+                    action: ApprovalAction::PermitOnce,
+                    label: "Allow once".to_owned(),
+                    description: None,
+                }],
+                workflow_origin: None,
+            },
+        });
+
+    let live = tui.render_terminal_frame(usize::from(width), usize::from(height));
+    assert!(
+        !live.review_surface,
+        "delegate/workflow/approval content must stay on the normal screen"
+    );
+    assert!(!live.mouse_capture, "no automatic mouse capture");
+    render_and_process(&mut inline, &mut screen, &live, &mut output);
+    tui.acknowledge_history(&live);
+
+    // Complete the delegate and workflow and resolve the approval.
+    let mut completed = tui
+        .transcript_mut()
+        .transcript()
+        .entries()
+        .iter()
+        .find_map(|entry| match entry {
+            TranscriptEntry::Delegate { component } => Some(component.snapshot().clone()),
+            _ => None,
+        })
+        .expect("delegate snapshot");
+    completed.state = AgentLifecycleState::Completed;
+    completed.terminal_at_ms = Some(3);
+    completed.updated_at_ms = 3;
+    completed.outcome = Some(neo_agent_core::multi_agent::AgentTerminalOutcome {
+        summary: "delegate done".to_owned(),
+        is_error: false,
+    });
+    tui.transcript_mut()
+        .transcript_mut()
+        .upsert_delegate(1, completed);
+    let finished_workflow = WorkflowSnapshot {
+        id: WorkflowId("wf-1".to_owned()),
+        title: "delegate workflow".to_owned(),
+        state: WorkflowState::Completed,
+        current_phase: Some("verify".to_owned()),
+        projection_sequence: Some(9),
+        recovery_failure: false,
+        started_at_ms: Some(1_000),
+        updated_at_ms: Some(9_000),
+        invocation_count: 1,
+        failure_count: 0,
+        actual_usage: None,
+        latest_log_summary: None,
+        latest_report_summary: None,
+        terminal_reason: Some("workflow completed".to_owned()),
+        display_name: "delegate workflow".to_owned(),
+        purpose: "test".to_owned(),
+    };
+    tui.transcript_mut()
+        .transcript_mut()
+        .upsert_workflow(finished_workflow);
+    tui.transcript_mut().resolve_approval(
+        "approval-1",
+        &ApprovalResolution::Selected {
+            action: ApprovalAction::PermitOnce,
+            label: "Allow once".to_owned(),
+            feedback: None,
+        },
+    );
+
+    let final_frame = tui.render_terminal_frame(usize::from(width), usize::from(height));
+    assert!(!final_frame.review_surface);
+    render_and_process(&mut inline, &mut screen, &final_frame, &mut output);
+    tui.acknowledge_history(&final_frame);
+
+    let retained = all_terminal_rows(&mut screen);
+    let output_text = String::from_utf8_lossy(&output);
+
+    // Ordinary conversation never enters the alternate screen and never
+    // captures the mouse.
+    assert_eq!(
+        output_text.matches("?1049h").count(),
+        0,
+        "no automatic alternate-screen enter: {output_text}"
+    );
+    assert!(
+        !output_text.contains("?1000h") && !output_text.contains("?1002h"),
+        "no automatic mouse capture: {output_text}"
+    );
+
+    // The shell launch line stays in native scrollback.
+    assert_eq!(
+        retained
+            .iter()
+            .filter(|row| row.contains("shell-delegate-launch-line"))
+            .count(),
+        1,
+        "shell launch line must remain once: {retained:#?}"
+    );
+
+    // The delegate tool fact commits exactly once; no complete duplicate card
+    // repeats it afterwards.
+    assert_eq!(
+        retained
+            .iter()
+            .filter(|row| row.contains("Used Read"))
+            .count(),
+        1,
+        "delegate tool fact must appear exactly once: {retained:#?}"
+    );
+    assert!(
+        retained.iter().any(|row| row.contains("delegate done")),
+        "delegate terminal status missing: {retained:#?}"
+    );
+
+    // The workflow transition and terminal outcome each appear once.
+    assert_eq!(
+        retained
+            .iter()
+            .filter(|row| row.contains("delegate workflow") && row.contains("running"))
+            .count(),
+        1,
+        "workflow transition must appear once: {retained:#?}"
+    );
+    assert_eq!(
+        retained
+            .iter()
+            .filter(|row| row.contains("delegate workflow") && row.contains("completed"))
+            .count(),
+        1,
+        "workflow terminal outcome must appear once: {retained:#?}"
+    );
+
+    // The resolved approval commits as one terminal fact.
+    assert_eq!(
+        retained
+            .iter()
+            .filter(|row| row.contains("approval: Allow once"))
+            .count(),
+        1,
+        "resolved approval must appear once: {retained:#?}"
+    );
+    assert!(
+        retained
+            .iter()
+            .all(|row| !row.contains("earlier rows omitted")),
+        "no presentation-level omission: {retained:#?}"
+    );
 }
