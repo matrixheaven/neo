@@ -1,0 +1,8 @@
+{
+  "schemaVersion": "aegis.schema.v0",
+  "artifactKey": "baseline-question-event-serialization",
+  "type": "test",
+  "source": "cargo test --package neo-agent-core --lib events::tests::question_requested_serializes -- --exact --nocapture",
+  "summary": "Baseline passed: 1 test passed, 0 failed, 680 filtered out",
+  "verifier": "root"
+}

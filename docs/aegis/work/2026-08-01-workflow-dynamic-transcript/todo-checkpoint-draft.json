@@ -1,0 +1,14 @@
+{
+  "schemaVersion": "aegis.schema.v0",
+  "taskId": "2026-08-01-workflow-dynamic-transcript",
+  "currentTodo": "Tasks 1-7: implement approved workflow dynamic transcript",
+  "completedTodos": [],
+  "activeSlice": "Task 1: carry live workflow provenance through Delegate-family and question events",
+  "evidenceRefs": [
+    "docs/aegis/plans/2026-08-01-workflow-dynamic-transcript.md",
+    "ed7ceb49"
+  ],
+  "blockedOn": null,
+  "nextStep": "Dispatch Task 1 implementer, then spec review and code-quality review",
+  "updatedAt": "2026-08-01"
+}
