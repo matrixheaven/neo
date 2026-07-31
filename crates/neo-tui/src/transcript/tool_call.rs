@@ -4,6 +4,7 @@ use crate::primitive::wrap_width;
 use crate::primitive::{Component, Expandable, Finalization, Line, Span, strip_ansi};
 use crate::shell::ToolStatusKind;
 use crate::token_estimate::format_elapsed;
+use neo_agent_core::workflow::WorkflowExecutionOrigin;
 
 use super::live_output::LiveOutput;
 use super::plan_box::PlanBoxComponent;
@@ -50,6 +51,8 @@ pub struct ToolCallComponent {
     workspace_dir: Option<PathBuf>,
     streaming_started_at: Option<Instant>,
     queue: Option<QueueDisplayState>,
+    workflow_origin: Option<WorkflowExecutionOrigin>,
+    workflow_activity_route_error: bool,
 }
 
 const MAX_LIVE_OUTPUT_LINES: usize = 6;
@@ -67,10 +70,42 @@ impl ToolCallComponent {
             workspace_dir: None,
             streaming_started_at,
             queue: None,
+            workflow_origin: None,
+            workflow_activity_route_error: false,
         }
     }
 
+    pub(crate) fn attach_workflow_origin(
+        &mut self,
+        workflow_origin: WorkflowExecutionOrigin,
+    ) -> bool {
+        if self.workflow_origin.is_some() {
+            return false;
+        }
+        self.workflow_origin = Some(workflow_origin);
+        true
+    }
+
+    #[must_use]
+    pub(crate) fn accepts_workflow_origin(
+        &self,
+        workflow_origin: &WorkflowExecutionOrigin,
+    ) -> bool {
+        self.workflow_origin.as_ref().is_none_or(|current| {
+            current.run_id == workflow_origin.run_id
+                && current.invocation_id == workflow_origin.invocation_id
+        })
+    }
+
+    #[must_use]
+    pub const fn workflow_origin(&self) -> Option<&WorkflowExecutionOrigin> {
+        self.workflow_origin.as_ref()
+    }
+
     pub fn update_call(&mut self, arguments: Option<String>) -> bool {
+        if self.workflow_activity_route_error || tool_status_is_terminal(self.state.status) {
+            return false;
+        }
         let mut changed = self.state.arguments != arguments;
         if let Some(args) = &arguments
             && !args.is_empty()
@@ -93,6 +128,9 @@ impl ToolCallComponent {
         arguments: Option<String>,
         status: ToolStatusKind,
     ) -> bool {
+        if self.workflow_activity_route_error || tool_status_is_terminal(self.state.status) {
+            return false;
+        }
         let mut changed = self.state.name != name || self.state.status != status;
         if arguments.is_some() && self.state.arguments != arguments {
             changed = true;
@@ -124,7 +162,7 @@ impl ToolCallComponent {
     ///
     /// Queue updates after the tool has left `Queued` (Started/Finished) are ignored.
     pub fn set_queued(&mut self, position: usize, waiting_ms: u64) -> bool {
-        if self.state.status != ToolStatusKind::Queued {
+        if self.workflow_activity_route_error || self.state.status != ToolStatusKind::Queued {
             return false;
         }
         if self
@@ -143,11 +181,17 @@ impl ToolCallComponent {
     }
 
     pub fn append_live_output(&mut self, output: impl Into<String>) -> bool {
+        if self.workflow_activity_route_error || tool_status_is_terminal(self.state.status) {
+            return false;
+        }
         self.live_output.append(&output.into())
     }
 
     /// Retain structured Edit progress/prepared details on the live card.
     pub fn set_live_details(&mut self, details: serde_json::Value) -> bool {
+        if self.workflow_activity_route_error || tool_status_is_terminal(self.state.status) {
+            return false;
+        }
         if self.state.details.as_ref() == Some(&details) {
             return false;
         }
@@ -162,6 +206,9 @@ impl ToolCallComponent {
         is_error: bool,
         exit_code: Option<i32>,
     ) -> bool {
+        if self.workflow_activity_route_error {
+            return false;
+        }
         let status = if is_error {
             ToolStatusKind::Failed
         } else {
@@ -188,6 +235,29 @@ impl ToolCallComponent {
     }
 
     pub fn set_terminal_status(&mut self, status: ToolStatusKind, result: Option<String>) -> bool {
+        if self.workflow_activity_route_error {
+            return false;
+        }
+        self.set_terminal_status_unchecked(status, result)
+    }
+
+    pub(crate) fn set_workflow_activity_route_error(&mut self) -> bool {
+        if self.workflow_activity_route_error {
+            return false;
+        }
+        self.set_terminal_status_unchecked(
+            ToolStatusKind::Failed,
+            Some("Workflow activity stopped because its origin changed.".to_owned()),
+        );
+        self.workflow_activity_route_error = true;
+        true
+    }
+
+    fn set_terminal_status_unchecked(
+        &mut self,
+        status: ToolStatusKind,
+        result: Option<String>,
+    ) -> bool {
         // Edit/Write interruptions retain last structured progress details.
         let clear_details = self.state.name != "Edit" && self.state.name != "Write";
         let changed = self.state.result != result
@@ -288,6 +358,13 @@ impl ToolCallComponent {
             && (is_file_write_tool(&self.state.name) || self.state.name == "WaitDelegate")
             && self.streaming_started_at.is_some()
     }
+}
+
+const fn tool_status_is_terminal(status: ToolStatusKind) -> bool {
+    matches!(
+        status,
+        ToolStatusKind::Succeeded | ToolStatusKind::Failed | ToolStatusKind::Cancelled
+    )
 }
 
 impl Expandable for ToolCallComponent {
@@ -441,6 +518,27 @@ mod tests {
     use std::time::Duration;
 
     use super::*;
+
+    #[test]
+    fn queued_tool_can_start() {
+        let mut component = ToolCallComponent::new(ToolCallState {
+            id: "read-1".to_owned(),
+            name: "Read".to_owned(),
+            arguments: Some("{}".to_owned()),
+            result: None,
+            details: None,
+            status: ToolStatusKind::Queued,
+            exit_code: None,
+        });
+
+        assert!(component.update_call_state(
+            "Read".to_owned(),
+            Some("{\"path\":\"README.md\"}".to_owned()),
+            ToolStatusKind::Running,
+        ));
+        assert_eq!(component.status(), ToolStatusKind::Running);
+        assert_eq!(component.arguments(), Some("{\"path\":\"README.md\"}"));
+    }
 
     #[test]
     fn file_write_streaming_chip_formats_elapsed_seconds() {

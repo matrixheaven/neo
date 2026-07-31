@@ -331,3 +331,4 @@ Entries are workspace records, not authoritative runtime decisions.
 | 2026-08-01 | artifact | docs/aegis/work/2026-08-01-workflow-dynamic-transcript/evidence-bundle-draft-baseline-question-event-serialization.json | 2026-08-01-workflow-dynamic-transcript evidence baseline-question-event-serialization |
 | 2026-08-01 | artifact | docs/aegis/work/2026-08-01-workflow-dynamic-transcript/evidence-bundle-draft-task1-workflow-origin-tests.json | 2026-08-01-workflow-dynamic-transcript evidence task1-workflow-origin-tests |
 | 2026-08-01 | artifact | docs/aegis/work/2026-08-01-workflow-dynamic-transcript/evidence-bundle-draft-task1-two-stage-review.json | 2026-08-01-workflow-dynamic-transcript evidence task1-two-stage-review |
+| 2026-08-01 | artifact | docs/aegis/work/2026-08-01-workflow-dynamic-transcript/evidence-bundle-draft-task2-typed-workflow-activity.json | 2026-08-01-workflow-dynamic-transcript evidence task2-typed-workflow-activity |

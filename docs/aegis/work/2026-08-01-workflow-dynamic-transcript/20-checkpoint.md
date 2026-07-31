@@ -47,3 +47,24 @@
 - New risk signals:
 - Representative JSON test covers one variant; all nine fields carry identical serde and schemars skip attributes, leaving low residual schema-regression risk.
 - Advisory decision: continue
+
+## DriftCheckDraft
+
+- Scope status: Task 2 aligned after review repairs; terminal_scrollback assertion changed only to retire the obsolete transition-history expectation.
+- Compatibility status: Session persistence and origin-free Delegate-family paths remain unchanged; shell events now update only existing model tool entries.
+- Retirement status: WorkflowTransition and its capture/render paths remain deleted; no queue, origin inference, compatibility renderer, or second activity store was added.
+- New risk signals:
+- Task 2 proof is deterministic local Rust coverage; native terminal and cross-platform behavior remain for later tasks.
+- Advisory decision: continue
+
+## Checkpoint Update
+
+- Current todo: Tasks 3-7 concurrent implementation followed by unified review
+- Active slice: Dispatch disjoint renderer, presentation-geometry, and decision-record implementation agents
+- Completed todos:
+- Task 1: live workflow provenance
+- Task 2: one workflow entry owns typed activity
+- Evidence refs:
+- task2-typed-workflow-activity
+- Blocked on: none
+- Next step: Commit Task 2, then dispatch Tasks 3-7 in parallel with disjoint file ownership and perform one unified spec review plus one unified quality review.

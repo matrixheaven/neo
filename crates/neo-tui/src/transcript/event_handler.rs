@@ -1,17 +1,19 @@
 use std::borrow::Borrow;
 
+use neo_agent_core::workflow::WorkflowExecutionOrigin;
 use neo_agent_core::{
     AgentEvent, AgentToolCall, ShellCommandOrigin, ShellCommandOutcome, ToolResult,
 };
 
 use crate::shell::ToolStatusKind;
 use crate::transcript::ShellRunComponent;
-use crate::transcript::TranscriptEntry;
 use crate::transcript::entry::{
     GoalCardKind, RetryPhase, RetryStatusData, StatusSeverity, monotonic_time_ms,
 };
+use crate::transcript::{ToolCallState, TranscriptEntry};
 
 use super::pane::{AbsorbedToolKind, TranscriptPane};
+use super::store::WorkflowActivityRouteError;
 
 impl TranscriptPane {
     pub fn apply_agent_event<E>(&mut self, event: E)
@@ -214,9 +216,28 @@ impl TranscriptPane {
 
     fn apply_delegate_event(&mut self, event: &AgentEvent) -> bool {
         match event {
-            AgentEvent::DelegateStarted { turn, agent, .. }
-            | AgentEvent::DelegateUpdated { turn, agent, .. }
-            | AgentEvent::DelegateFinished { turn, agent, .. } => {
+            AgentEvent::DelegateStarted {
+                turn,
+                agent,
+                workflow_origin,
+            }
+            | AgentEvent::DelegateUpdated {
+                turn,
+                agent,
+                workflow_origin,
+            }
+            | AgentEvent::DelegateFinished {
+                turn,
+                agent,
+                workflow_origin,
+            } => {
+                if let Some(workflow_origin) = workflow_origin {
+                    let result = self
+                        .transcript
+                        .upsert_workflow_delegate(workflow_origin, agent.clone());
+                    self.handle_workflow_activity_result(workflow_origin, result);
+                    return true;
+                }
                 self.transcript.upsert_delegate(*turn, agent.clone());
                 self.record_delegate_absorption_target(
                     *turn,
@@ -226,7 +247,18 @@ impl TranscriptPane {
                 self.mark_dirty();
                 true
             }
-            AgentEvent::DelegateProgressUpdated { turn, progress, .. } => {
+            AgentEvent::DelegateProgressUpdated {
+                turn,
+                progress,
+                workflow_origin,
+            } => {
+                if let Some(workflow_origin) = workflow_origin {
+                    let result = self
+                        .transcript
+                        .upsert_workflow_delegate_progress(workflow_origin, progress);
+                    self.handle_workflow_activity_result(workflow_origin, result);
+                    return true;
+                }
                 self.transcript.upsert_delegate_progress(*turn, progress);
                 self.record_delegate_absorption_target(
                     *turn,
@@ -236,9 +268,28 @@ impl TranscriptPane {
                 self.mark_dirty();
                 true
             }
-            AgentEvent::DelegateSwarmStarted { turn, swarm, .. }
-            | AgentEvent::DelegateSwarmUpdated { turn, swarm, .. }
-            | AgentEvent::DelegateSwarmFinished { turn, swarm, .. } => {
+            AgentEvent::DelegateSwarmStarted {
+                turn,
+                swarm,
+                workflow_origin,
+            }
+            | AgentEvent::DelegateSwarmUpdated {
+                turn,
+                swarm,
+                workflow_origin,
+            }
+            | AgentEvent::DelegateSwarmFinished {
+                turn,
+                swarm,
+                workflow_origin,
+            } => {
+                if let Some(workflow_origin) = workflow_origin {
+                    let result = self
+                        .transcript
+                        .upsert_workflow_swarm(workflow_origin, swarm.clone());
+                    self.handle_workflow_activity_result(workflow_origin, result);
+                    return true;
+                }
                 self.transcript.upsert_delegate_swarm(swarm.clone());
                 self.apply_expand_state_to_delegate_swarm(&swarm.swarm_id);
                 self.record_delegate_absorption_target(
@@ -255,8 +306,19 @@ impl TranscriptPane {
                 state,
                 aggregate,
                 child_progress,
-                ..
+                workflow_origin,
             } => {
+                if let Some(workflow_origin) = workflow_origin {
+                    let result = self.transcript.upsert_workflow_swarm_progress(
+                        workflow_origin,
+                        swarm_id,
+                        *state,
+                        *aggregate,
+                        child_progress,
+                    );
+                    self.handle_workflow_activity_result(workflow_origin, result);
+                    return true;
+                }
                 self.transcript.upsert_delegate_swarm_progress(
                     swarm_id,
                     *state,
@@ -281,6 +343,55 @@ impl TranscriptPane {
             }
             _ => false,
         }
+    }
+
+    fn handle_workflow_activity_result(
+        &mut self,
+        workflow_origin: &WorkflowExecutionOrigin,
+        result: Result<bool, WorkflowActivityRouteError>,
+    ) -> bool {
+        match result {
+            Ok(changed) => {
+                if changed {
+                    self.mark_dirty();
+                }
+                true
+            }
+            Err(WorkflowActivityRouteError::MissingWorkflow) => {
+                self.report_workflow_activity_before_start(workflow_origin);
+                false
+            }
+            Err(error @ WorkflowActivityRouteError::ConflictingOrigin { .. }) => {
+                tracing::error!(
+                    run_id = %workflow_origin.run_id.0,
+                    invocation_id = ?workflow_origin.invocation_id,
+                    "rejected conflicting workflow activity origin"
+                );
+                if self.transcript.record_workflow_activity_route_error(&error) {
+                    self.mark_dirty();
+                }
+                false
+            }
+        }
+    }
+
+    fn report_workflow_activity_before_start(&mut self, workflow_origin: &WorkflowExecutionOrigin) {
+        const MESSAGE: &str =
+            "Workflow activity could not be displayed because the workflow has not started.";
+        tracing::error!(
+            run_id = %workflow_origin.run_id.0,
+            invocation_id = ?workflow_origin.invocation_id,
+            "workflow activity arrived before its workflow entry"
+        );
+        if self
+            .transcript
+            .entries()
+            .iter()
+            .any(|entry| matches!(entry, TranscriptEntry::Status { text, .. } if text == MESSAGE))
+        {
+            return;
+        }
+        self.push_status_with_severity(MESSAGE, StatusSeverity::Error);
     }
 
     fn apply_tool_event(&mut self, event: &AgentEvent) -> bool {
@@ -312,9 +423,15 @@ impl TranscriptPane {
                 id,
                 name,
                 arguments,
-                workflow_origin: _,
+                workflow_origin,
             } => {
-                self.start_tool_execution(*turn, id, name.clone(), arguments);
+                self.start_tool_execution(
+                    *turn,
+                    id,
+                    name.clone(),
+                    arguments,
+                    workflow_origin.as_ref(),
+                );
                 true
             }
             AgentEvent::ToolExecutionQueued {
@@ -322,9 +439,15 @@ impl TranscriptPane {
                 id,
                 name,
                 arguments,
-                workflow_origin: _,
+                workflow_origin,
             } => {
-                self.queue_tool_execution(*turn, id, name.clone(), arguments);
+                self.queue_tool_execution(
+                    *turn,
+                    id,
+                    name.clone(),
+                    arguments,
+                    workflow_origin.as_ref(),
+                );
                 true
             }
             AgentEvent::ToolExecutionQueueUpdated {
@@ -346,13 +469,18 @@ impl TranscriptPane {
                 id,
                 name,
                 partial_result,
-                workflow_origin: _,
+                workflow_origin,
             } => {
                 if self.transcript.has_shell_run(id) {
                     self.update_shell_run(id, partial_result.clone());
                 } else {
-                    self.remember_tool_call(*turn, id, name);
-                    self.update_tool_execution(id, name.clone(), partial_result.clone());
+                    self.update_tool_execution(
+                        *turn,
+                        id,
+                        name.clone(),
+                        partial_result.clone(),
+                        workflow_origin.as_ref(),
+                    );
                 }
                 true
             }
@@ -361,9 +489,15 @@ impl TranscriptPane {
                 id,
                 name,
                 result,
-                workflow_origin: _,
+                workflow_origin,
             } => {
-                self.finish_tool_execution(*turn, id.clone(), name.clone(), result.clone());
+                self.finish_tool_execution(
+                    *turn,
+                    id.clone(),
+                    name.clone(),
+                    result.clone(),
+                    workflow_origin.as_ref(),
+                );
                 true
             }
             _ => false,
@@ -676,16 +810,37 @@ impl TranscriptPane {
         id: &str,
         name: String,
         arguments: &serde_json::Value,
+        workflow_origin: Option<&WorkflowExecutionOrigin>,
     ) {
         let arguments = self
             .streaming_tool_args
             .get(id)
             .cloned()
             .unwrap_or_else(|| arguments.to_string());
-        self.remember_tool_call(turn, id, &name);
         if is_skill_tool(&name) {
             return;
         }
+        if let Some(workflow_origin) = workflow_origin {
+            let result = self.transcript.upsert_workflow_tool(
+                workflow_origin.clone(),
+                ToolCallState {
+                    id: id.to_owned(),
+                    name,
+                    arguments: Some(arguments),
+                    result: None,
+                    details: None,
+                    status: ToolStatusKind::Running,
+                    exit_code: None,
+                },
+            );
+            if !self.handle_workflow_activity_result(workflow_origin, result)
+                && !self.transcript.has_tool(id)
+            {
+                self.streaming_tool_args.remove(id);
+            }
+            return;
+        }
+        self.remember_tool_call(turn, id, &name);
         self.upsert_tool(id, name, Some(arguments), ToolStatusKind::Running);
         self.mark_dirty();
     }
@@ -696,6 +851,7 @@ impl TranscriptPane {
         id: &str,
         name: String,
         arguments: &serde_json::Value,
+        workflow_origin: Option<&WorkflowExecutionOrigin>,
     ) {
         let arguments = self
             .streaming_tool_args
@@ -704,16 +860,62 @@ impl TranscriptPane {
             .unwrap_or_else(|| arguments.to_string());
         self.streaming_tool_args
             .insert(id.to_owned(), arguments.clone());
-        self.remember_tool_call(turn, id, &name);
         if is_skill_tool(&name) {
             return;
         }
+        if let Some(workflow_origin) = workflow_origin {
+            let result = self.transcript.upsert_workflow_tool(
+                workflow_origin.clone(),
+                ToolCallState {
+                    id: id.to_owned(),
+                    name,
+                    arguments: Some(arguments),
+                    result: None,
+                    details: None,
+                    status: ToolStatusKind::Queued,
+                    exit_code: None,
+                },
+            );
+            if !self.handle_workflow_activity_result(workflow_origin, result)
+                && !self.transcript.has_tool(id)
+            {
+                self.streaming_tool_args.remove(id);
+            }
+            return;
+        }
+        self.remember_tool_call(turn, id, &name);
         self.upsert_tool(id, name, Some(arguments), ToolStatusKind::Queued);
         self.mark_dirty();
     }
 
-    fn update_tool_execution(&mut self, id: &str, name: String, partial_result: ToolResult) {
-        self.upsert_tool(id, name.clone(), None, ToolStatusKind::Running);
+    fn update_tool_execution(
+        &mut self,
+        turn: u32,
+        id: &str,
+        name: String,
+        partial_result: ToolResult,
+        workflow_origin: Option<&WorkflowExecutionOrigin>,
+    ) {
+        if let Some(workflow_origin) = workflow_origin {
+            let result = self.transcript.upsert_workflow_tool(
+                workflow_origin.clone(),
+                ToolCallState {
+                    id: id.to_owned(),
+                    name: name.clone(),
+                    arguments: None,
+                    result: None,
+                    details: None,
+                    status: ToolStatusKind::Running,
+                    exit_code: None,
+                },
+            );
+            if !self.handle_workflow_activity_result(workflow_origin, result) {
+                return;
+            }
+        } else {
+            self.remember_tool_call(turn, id, &name);
+            self.upsert_tool(id, name.clone(), None, ToolStatusKind::Running);
+        }
         let is_structured_mutation = matches!(name.as_str(), "Edit" | "Write");
         let details = partial_result.details.clone();
         let content = partial_result.content;
@@ -743,15 +945,42 @@ impl TranscriptPane {
         }
     }
 
-    fn finish_tool_execution(&mut self, turn: u32, id: String, name: String, result: ToolResult) {
-        self.remember_tool_call(turn, &id, &name);
+    fn finish_tool_execution(
+        &mut self,
+        turn: u32,
+        id: String,
+        name: String,
+        result: ToolResult,
+        workflow_origin: Option<&WorkflowExecutionOrigin>,
+    ) {
         if is_skill_tool(&name) {
             self.streaming_tool_args.remove(&id);
             self.completed_tool_result_ids.push(id);
             return;
         }
         let tool_name = name.clone();
-        self.upsert_tool(&id, name, None, ToolStatusKind::Running);
+        if let Some(workflow_origin) = workflow_origin {
+            let routed = self.transcript.upsert_workflow_tool(
+                workflow_origin.clone(),
+                ToolCallState {
+                    id: id.clone(),
+                    name,
+                    arguments: None,
+                    result: None,
+                    details: None,
+                    status: ToolStatusKind::Running,
+                    exit_code: None,
+                },
+            );
+            if !self.handle_workflow_activity_result(workflow_origin, routed) {
+                self.streaming_tool_args.remove(&id);
+                self.completed_tool_result_ids.push(id);
+                return;
+            }
+        } else {
+            self.remember_tool_call(turn, &id, &name);
+            self.upsert_tool(&id, name, None, ToolStatusKind::Running);
+        }
         self.streaming_tool_args.remove(&id);
         let is_error = result.is_error;
         let details_for_check = result.details.clone();
@@ -776,13 +1005,15 @@ impl TranscriptPane {
             };
             tool.set_result(Some(content), details, is_error, exit_code)
         });
-        self.reconcile_delegate_tool_result(
-            turn,
-            &id,
-            &tool_name,
-            is_error,
-            details_for_check.as_ref(),
-        );
+        if workflow_origin.is_none() {
+            self.reconcile_delegate_tool_result(
+                turn,
+                &id,
+                &tool_name,
+                is_error,
+                details_for_check.as_ref(),
+            );
+        }
         self.completed_tool_result_ids.push(id);
         if changed {
             self.mark_dirty();
@@ -790,8 +1021,11 @@ impl TranscriptPane {
     }
 
     fn start_shell_command(&mut self, id: &str) {
-        self.upsert_tool(id, "Bash".to_owned(), None, ToolStatusKind::Running);
-        self.mark_dirty();
+        if self.transcript.mutate_tool(id, |tool| {
+            tool.update_call_state("Bash".to_owned(), None, ToolStatusKind::Running)
+        }) {
+            self.mark_dirty();
+        }
     }
 
     fn queue_user_shell_command(&mut self, id: &str, command: &str) {
@@ -828,9 +1062,11 @@ impl TranscriptPane {
         else {
             return;
         };
+        if !self.transcript.has_tool(id) {
+            return;
+        }
         let detail =
             shell_finished_detail(*exit_code, *signal, stdout, stderr, *truncated, outcome);
-        self.upsert_tool(id, "Bash".to_owned(), None, ToolStatusKind::Running);
         let changed = self.transcript.mutate_tool(id, |tool| {
             let is_error = *exit_code != Some(0)
                 || !matches!(

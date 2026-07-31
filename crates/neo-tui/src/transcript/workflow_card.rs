@@ -1,13 +1,21 @@
 use crate::primitive::theme::TuiTheme;
 use crate::primitive::{Color, Component, Finalization, Line, Span, Style};
 use crate::transcript::format_elapsed;
-use neo_agent_core::workflow::{WorkflowSnapshot, WorkflowState};
+use crate::transcript::{ToolCallComponent, ToolCallState};
+use neo_agent_core::multi_agent::{
+    AgentProgressSnapshot, AgentSnapshot, SwarmAggregate, SwarmChildProgress, SwarmSnapshot,
+    apply_agent_progress, apply_swarm_child_progress,
+};
+use neo_agent_core::workflow::{WorkflowExecutionOrigin, WorkflowSnapshot, WorkflowState};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct WorkflowCardComponent {
     snapshot: WorkflowSnapshot,
     max_projection_sequence: Option<u64>,
     now_ms: Option<u64>,
+    direct_tools: Vec<ToolCallComponent>,
+    delegates: Vec<AgentSnapshot>,
+    swarms: Vec<SwarmSnapshot>,
 }
 
 impl WorkflowCardComponent {
@@ -18,7 +26,165 @@ impl WorkflowCardComponent {
             snapshot,
             max_projection_sequence,
             now_ms: None,
+            direct_tools: Vec::new(),
+            delegates: Vec::new(),
+            swarms: Vec::new(),
         }
+    }
+
+    pub(crate) fn upsert_direct_tool(
+        &mut self,
+        state: ToolCallState,
+        workflow_origin: WorkflowExecutionOrigin,
+    ) -> Result<bool, ()> {
+        if let Some(tool) = self
+            .direct_tools
+            .iter_mut()
+            .find(|tool| tool.id() == state.id)
+        {
+            if !tool.accepts_workflow_origin(&workflow_origin) {
+                return Err(());
+            }
+            let attached = tool.attach_workflow_origin(workflow_origin);
+            return Ok(attached | tool.update_call_state(state.name, state.arguments, state.status));
+        }
+        let mut tool = ToolCallComponent::new(state);
+        tool.attach_workflow_origin(workflow_origin);
+        self.direct_tools.push(tool);
+        Ok(true)
+    }
+
+    pub(crate) fn mutate_direct_tool(
+        &mut self,
+        id: &str,
+        mutate: impl FnOnce(&mut ToolCallComponent) -> bool,
+    ) -> bool {
+        self.direct_tools
+            .iter_mut()
+            .find(|tool| tool.id() == id)
+            .is_some_and(mutate)
+    }
+
+    pub(crate) fn absorb_direct_tool(
+        &mut self,
+        workflow_origin: &WorkflowExecutionOrigin,
+    ) -> Result<bool, ()> {
+        self.validate_direct_tool_origin(workflow_origin)?;
+        let Some(invocation_id) = workflow_origin.invocation_id.as_deref() else {
+            return Ok(false);
+        };
+        let Some(index) = self
+            .direct_tools
+            .iter()
+            .position(|tool| tool.id() == invocation_id)
+        else {
+            return Ok(false);
+        };
+        self.direct_tools.remove(index);
+        Ok(true)
+    }
+
+    pub(crate) fn validate_direct_tool_origin(
+        &self,
+        workflow_origin: &WorkflowExecutionOrigin,
+    ) -> Result<(), ()> {
+        let Some(invocation_id) = workflow_origin.invocation_id.as_deref() else {
+            return Ok(());
+        };
+        let Some(tool) = self
+            .direct_tools
+            .iter()
+            .find(|tool| tool.id() == invocation_id)
+        else {
+            return Ok(());
+        };
+        tool.accepts_workflow_origin(workflow_origin)
+            .then_some(())
+            .ok_or(())
+    }
+
+    pub(crate) fn upsert_delegate(&mut self, snapshot: AgentSnapshot) -> bool {
+        if let Some(current) = self
+            .delegates
+            .iter_mut()
+            .find(|current| current.id == snapshot.id)
+        {
+            let merged = super::store::merge_delegate_snapshot(current, snapshot);
+            if *current == merged {
+                return false;
+            }
+            *current = merged;
+            return true;
+        }
+        self.delegates.push(snapshot);
+        true
+    }
+
+    pub(crate) fn upsert_delegate_progress(&mut self, progress: &AgentProgressSnapshot) -> bool {
+        let Some(snapshot) = self.delegates.iter_mut().find(|snapshot| {
+            snapshot.id == progress.agent_id && snapshot.run_count == progress.run_count
+        }) else {
+            return false;
+        };
+        if snapshot.state.is_terminal() && !progress.state.is_terminal() {
+            return false;
+        }
+        let previous = snapshot.clone();
+        apply_agent_progress(snapshot, progress) && *snapshot != previous
+    }
+
+    pub(crate) fn upsert_swarm(&mut self, snapshot: SwarmSnapshot) -> bool {
+        if let Some(current) = self
+            .swarms
+            .iter_mut()
+            .find(|current| current.swarm_id == snapshot.swarm_id)
+        {
+            let merged = super::store::merge_swarm_snapshot(current, snapshot);
+            if *current == merged {
+                return false;
+            }
+            *current = merged;
+            return true;
+        }
+        self.swarms.push(snapshot);
+        true
+    }
+
+    pub(crate) fn upsert_swarm_progress(
+        &mut self,
+        swarm_id: &str,
+        state: neo_agent_core::multi_agent::AgentLifecycleState,
+        aggregate: SwarmAggregate,
+        child_progress: &SwarmChildProgress,
+    ) -> bool {
+        let Some(snapshot) = self
+            .swarms
+            .iter_mut()
+            .find(|snapshot| snapshot.swarm_id == swarm_id)
+        else {
+            return false;
+        };
+        if super::store::swarm_snapshot_is_terminal(snapshot) {
+            return false;
+        }
+        let previous = snapshot.clone();
+        apply_swarm_child_progress(snapshot, child_progress, aggregate, state);
+        *snapshot != previous
+    }
+
+    #[must_use]
+    pub fn direct_tools(&self) -> &[ToolCallComponent] {
+        &self.direct_tools
+    }
+
+    #[must_use]
+    pub fn delegates(&self) -> &[AgentSnapshot] {
+        &self.delegates
+    }
+
+    #[must_use]
+    pub fn swarms(&self) -> &[SwarmSnapshot] {
+        &self.swarms
     }
 
     pub(crate) fn accepts_projection(&self, incoming: &WorkflowSnapshot) -> bool {

@@ -1,16 +1,16 @@
 {
   "schemaVersion": "aegis.schema.v0",
   "taskId": "2026-08-01-workflow-dynamic-transcript",
-  "currentTodo": "Task 2: make one workflow entry own typed activity",
+  "currentTodo": "Tasks 3-7 concurrent implementation followed by unified review",
   "completedTodos": [
-    "Task 1: carry live workflow provenance through Delegate-family and question events"
+    "Task 1: live workflow provenance",
+    "Task 2: one workflow entry owns typed activity"
   ],
-  "activeSlice": "Task 2 preparation",
+  "activeSlice": "Dispatch disjoint renderer, presentation-geometry, and decision-record implementation agents",
   "evidenceRefs": [
-    "task1-workflow-origin-tests",
-    "task1-two-stage-review"
+    "task2-typed-workflow-activity"
   ],
   "blockedOn": null,
-  "nextStep": "Commit Task 1, then dispatch a fresh Task 2 implementer with the approved slice boundary.",
+  "nextStep": "Commit Task 2, then dispatch Tasks 3-7 in parallel with disjoint file ownership and perform one unified spec review plus one unified quality review.",
   "updatedAt": "2026-08-01"
 }

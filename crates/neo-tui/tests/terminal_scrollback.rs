@@ -1358,14 +1358,15 @@ fn delegate_workflow_approval_live_content_stays_on_normal_screen_without_captur
         "delegate terminal status missing: {retained:#?}"
     );
 
-    // The workflow transition and terminal outcome each appear once.
+    // Non-terminal workflow states stay live; only the terminal group enters
+    // native scrollback.
     assert_eq!(
         retained
             .iter()
             .filter(|row| row.contains("delegate workflow") && row.contains("running"))
             .count(),
-        1,
-        "workflow transition must appear once: {retained:#?}"
+        0,
+        "non-terminal workflow state must not enter history: {retained:#?}"
     );
     assert_eq!(
         retained

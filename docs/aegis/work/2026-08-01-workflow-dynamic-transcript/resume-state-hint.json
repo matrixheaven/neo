@@ -2,9 +2,10 @@
   "schemaVersion": "aegis.schema.v0",
   "taskId": "2026-08-01-workflow-dynamic-transcript",
   "lastCheckpointRef": "docs/aegis/work/2026-08-01-workflow-dynamic-transcript/todo-checkpoint-draft.json",
-  "resumeInstruction": "Resume from Task 2 only after confirming the Task 1 commit and a clean worktree. Do not reopen Task 1 design.",
+  "resumeInstruction": "Resume from commit after Task 2. Do not repeat per-task reviews for Tasks 3-7; implement concurrently, then review once.",
   "knownPartialWork": [
-    "Task 1: carry live workflow provenance through Delegate-family and question events"
+    "Task 1: live workflow provenance",
+    "Task 2: one workflow entry owns typed activity"
   ],
   "mustReadBeforeContinuing": [
     "docs/aegis/work/2026-08-01-workflow-dynamic-transcript/10-intent.md",
@@ -12,6 +13,6 @@
     "docs/aegis/work/2026-08-01-workflow-dynamic-transcript/todo-checkpoint-draft.json"
   ],
   "unsafeToAssume": [
-    "The original three-file Task 1 map was complete; real AskUser and downstream test construction required additional mechanical files."
+    "Do not assume native Windows/Linux terminal verification or remote CI has run."
   ]
 }
