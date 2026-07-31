@@ -1,6 +1,6 @@
 # Workflow Dynamic Transcript Execution - Evidence
 
-No evidence has been recorded yet.
+Focused evidence is recorded below.
 
 ## EvidenceBundleDraft
 
