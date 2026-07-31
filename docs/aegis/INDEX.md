@@ -5,6 +5,7 @@ Entries are workspace records, not authoritative runtime decisions.
 
 | Date | Kind | Path | Title |
 | --- | --- | --- | --- |
+| 2026-08-01 | spec | docs/aegis/specs/2026-08-01-deepseek-cache-probe-design.md | DeepSeek Anthropic Cache Probe Design |
 | 2026-08-01 | plan | docs/aegis/plans/2026-08-01-workflow-dynamic-transcript.md | Neo Workflow Dynamic Transcript Implementation Plan |
 | 2026-08-01 | adr | docs/aegis/adr/ADR-0010-native-terminal-transcript-presentation.md | ADR-0010: Native Terminal Transcript Presentation |
 | 2026-08-01 | baseline | docs/aegis/baseline/2026-07-31-native-terminal-transcript.md | Native Terminal Transcript Presentation Landed Baseline |
