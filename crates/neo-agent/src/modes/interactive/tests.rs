@@ -5723,7 +5723,7 @@ async fn event_loop_submit_restores_transcript_follow_tail() {
 }
 
 #[tokio::test]
-async fn automatic_transcript_overflow_scrolls_without_blocking_prompt() {
+async fn tall_transcript_keeps_prompt_input_on_normal_screen() {
     let submitted = Arc::new(std::sync::atomic::AtomicBool::new(false));
     let observed = Arc::clone(&submitted);
     let mut controller = InteractiveController::new_for_test(
@@ -5763,7 +5763,8 @@ async fn automatic_transcript_overflow_scrolls_without_blocking_prompt() {
     controller.tui.acknowledge_history(&committed);
     assert!(controller.transcript().has_committed_expandable_entries());
 
-    // Living tool with a tall body latches automatic overflow.
+    // A tall live workload (running Bash with a long body) never enters an
+    // application viewport: the frame stays on the normal screen.
     controller
         .transcript_mut()
         .apply_agent_event(AgentEvent::ToolExecutionStarted {
@@ -5788,71 +5789,47 @@ async fn automatic_transcript_overflow_scrolls_without_blocking_prompt() {
         });
 
     let frame = controller.tui.render_terminal_frame(40, 8);
-    assert!(controller.tui.automatic_overflow_active());
-    assert!(frame.review_surface);
-    let before = frame
-        .live
-        .iter()
-        .map(|line| neo_tui::primitive::strip_ansi(line))
-        .collect::<Vec<_>>()
-        .join("\n");
-
-    controller
-        .handle_input_event(InputEvent::Action(KeybindingAction::EditorPageUp))
-        .await
-        .expect("pageup scrolls automatic overflow");
-    let scrolled = controller.tui.render_terminal_frame(40, 8);
-    let after = scrolled
-        .live
-        .iter()
-        .map(|line| neo_tui::primitive::strip_ansi(line))
-        .collect::<Vec<_>>()
-        .join("\n");
-    assert!(controller.tui.automatic_overflow_active());
-    assert_ne!(
-        before, after,
-        "pageup must move the automatic overflow viewport"
+    assert!(
+        !frame.review_surface,
+        "tall live transcript stays on the normal screen"
     );
+    assert!(!frame.mouse_capture, "no automatic mouse capture");
 
+    // The prompt stays editable and submittable on the normal screen.
     controller
         .handle_input_event(InputEvent::Insert('h'))
         .await
-        .expect("prompt remains editable during overflow");
+        .expect("prompt remains editable");
     controller
         .handle_input_event(InputEvent::Insert('i'))
         .await
-        .expect("prompt remains editable during overflow");
+        .expect("prompt remains editable");
     assert_eq!(controller.chrome().prompt().text, "hi");
-
     controller
         .handle_input_event(InputEvent::Action(KeybindingAction::InputSubmit))
         .await
-        .expect("submit works during overflow");
+        .expect("submit works");
     controller
         .wait_for_active_turn()
         .await
         .expect("submitted turn completes");
     assert!(submitted.load(std::sync::atomic::Ordering::SeqCst));
-    assert!(controller.tui.automatic_overflow_active());
 
-    // Manual Ctrl+O review takes logical precedence while the latch remains.
+    // Explicit Ctrl+O review still enters the alternate surface on demand.
     controller
         .handle_input_event(InputEvent::Key(KeyId::new("ctrl+o").expect("valid key")))
         .await
-        .expect("ctrl-o opens manual review during overflow");
+        .expect("ctrl-o opens manual review");
     assert!(controller.chrome().transcript_browser_state().is_some());
-    assert!(controller.tui.automatic_overflow_active());
     let manual = controller.tui.render_terminal_frame(40, 8);
     assert!(manual.review_surface);
+    assert!(manual.mouse_capture);
 
     controller
         .handle_input_event(InputEvent::Cancel)
         .await
         .expect("escape closes manual review");
     assert!(controller.chrome().transcript_browser_state().is_none());
-    assert!(controller.tui.automatic_overflow_active());
-    let restored = controller.tui.render_terminal_frame(40, 8);
-    assert!(restored.review_surface);
 }
 
 #[tokio::test]

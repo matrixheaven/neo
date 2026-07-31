@@ -60,8 +60,6 @@ pub struct TranscriptTerminalUpdate {
     pub history: Vec<FinalizedBlock>,
     pub live: Vec<String>,
     pub has_visible_animation: bool,
-    pub live_overflow: bool,
-    pub has_live_frontier: bool,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -142,7 +140,6 @@ impl LiveBlock {
 struct PresentationFrame {
     live_blocks: Vec<LiveBlock>,
     pending_history: Vec<FinalizedBlock>,
-    commit_blocked: bool,
     rendered_tail_owner: Option<TranscriptEntryId>,
 }
 
@@ -151,7 +148,6 @@ impl PresentationFrame {
         Self {
             live_blocks: Vec::new(),
             pending_history: Vec::new(),
-            commit_blocked: false,
             rendered_tail_owner,
         }
     }
@@ -160,10 +156,6 @@ impl PresentationFrame {
         let blocks = bound_live_blocks(self.live_blocks, live_budget);
         let (live, has_visible_animation) = compose_live_blocks(blocks);
         TranscriptTerminalUpdate {
-            // The bounded live result can never request automatic overflow;
-            // the field remains only until its Task 5 removal.
-            live_overflow: live.len() > live_budget,
-            has_live_frontier: self.commit_blocked,
             history: self.pending_history,
             live,
             has_visible_animation,
@@ -253,10 +245,6 @@ impl TranscriptPresentation {
         let mut frame = PresentationFrame::new(self.acknowledged_tail_owner);
         let attempt_start = transcript.live_model_attempt_start();
         let blocking_index = blocking_dialog_index(transcript);
-        // Canonical commit blocking exists only while a model attempt may be
-        // rolled back or while the earliest unresolved blocking dialog holds
-        // the focus. Ordinary mutable entries are bounded live, not barriers.
-        frame.commit_blocked = attempt_start.is_some() || blocking_index.is_some();
         let mut index = 0;
         while index < transcript.entries().len() {
             if blocking_index == Some(index) {
@@ -907,7 +895,6 @@ mod tests {
         assert_eq!(blocks.len(), 1, "no duplicate replay: {blocks:?}");
         assert!(blocks[0].contains("background task"));
         assert!(completed_update.live.is_empty());
-        assert!(!completed_update.has_live_frontier);
     }
 
     #[test]
@@ -1029,7 +1016,6 @@ mod tests {
             .join("\n");
         assert!(history.contains("later status"), "history:\n{history}");
         assert!(!history.contains("Delegate"));
-        assert!(!suppressed.has_live_frontier);
 
         pane.transcript_mut().unsuppress_tool_run("delegate-tool");
         let visible = pane.render_terminal_update(80, 12);
@@ -1072,7 +1058,6 @@ mod tests {
         assert!(history.contains("later status"));
         assert!(!history.contains("Delegate"));
         assert!(released.live.is_empty());
-        assert!(!released.has_live_frontier);
     }
 
     #[test]
@@ -1106,10 +1091,6 @@ mod tests {
         let running = pane.render_terminal_update(80, 12);
         assert!(running.history.is_empty());
         assert!(!running.live.is_empty());
-        assert!(
-            !running.has_live_frontier,
-            "running tool groups are bounded live, not commit barriers"
-        );
 
         pane.apply_agent_event(neo_agent_core::AgentEvent::ToolExecutionFinished {
             turn: 1,
@@ -1126,7 +1107,6 @@ mod tests {
             &finished.history[0].id,
             TranscriptBlockId::Entries(ids) if ids.len() == 2
         ));
-        assert!(!finished.has_live_frontier);
     }
 
     #[test]

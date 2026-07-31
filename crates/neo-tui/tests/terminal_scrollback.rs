@@ -674,7 +674,7 @@ fn committed_tool_review_does_not_duplicate_native_scrollback() {
 }
 
 #[test]
-fn automatic_overflow_preserves_primary_scrollback_and_appends_deferred_history_once() {
+fn native_scrollback_keeps_shell_and_progressive_history_exactly_once() {
     let height = 10u16;
     let width = 80u16;
     let mut screen = vt100::Parser::new(height, width, 512);
@@ -698,7 +698,8 @@ fn automatic_overflow_preserves_primary_scrollback_and_appends_deferred_history_
     render_and_process(&mut inline, &mut screen, &primary, &mut output);
     tui.acknowledge_history(&primary);
 
-    // Living tool establishes the commit frontier and overflows the body budget.
+    // A tall live workload stays on the normal screen while the shell launch
+    // line and committed history remain in native scrollback.
     tui.transcript_mut()
         .apply_agent_event(AgentEvent::ToolExecutionStarted {
             turn: 1,
@@ -721,29 +722,19 @@ fn automatic_overflow_preserves_primary_scrollback_and_appends_deferred_history_
 
             workflow_origin: None,
         });
-    // Finalized later status must wait behind the frontier and stay unacked
-    // while automatic overflow owns the alternate surface.
     tui.transcript_mut()
         .push_status("deferred-alpha-overflow-sentinel");
 
-    let overflow = tui.render_terminal_frame(usize::from(width), usize::from(height));
-    assert!(tui.automatic_overflow_active());
-    assert!(overflow.review_surface);
-    assert!(overflow.history.is_empty());
-    render_and_process(&mut inline, &mut screen, &overflow, &mut output);
-    tui.acknowledge_history(&overflow);
+    let tall = tui.render_terminal_frame(usize::from(width), usize::from(height));
+    assert!(
+        !tall.review_surface,
+        "tall live transcript must stay on the normal screen"
+    );
+    assert!(!tall.mouse_capture);
+    render_and_process(&mut inline, &mut screen, &tall, &mut output);
+    tui.acknowledge_history(&tall);
 
-    // Another deferred finalized entry while still latched.
-    tui.transcript_mut()
-        .push_status("deferred-beta-overflow-sentinel");
-    let still_overflow = tui.render_terminal_frame(usize::from(width), usize::from(height));
-    assert!(tui.automatic_overflow_active());
-    assert!(still_overflow.review_surface);
-    assert!(still_overflow.history.is_empty());
-    render_and_process(&mut inline, &mut screen, &still_overflow, &mut output);
-    tui.acknowledge_history(&still_overflow);
-
-    // Clear the frontier so the latch releases and deferred history appends once.
+    // The tool completes; its canonical card and the later status commit once.
     tui.transcript_mut()
         .apply_agent_event(AgentEvent::ToolExecutionFinished {
             turn: 1,
@@ -754,7 +745,6 @@ fn automatic_overflow_preserves_primary_scrollback_and_appends_deferred_history_
             workflow_origin: None,
         });
     let released = tui.render_terminal_frame(usize::from(width), usize::from(height));
-    assert!(!tui.automatic_overflow_active());
     assert!(!released.review_surface);
     render_and_process(&mut inline, &mut screen, &released, &mut output);
     tui.acknowledge_history(&released);
@@ -792,37 +782,35 @@ fn automatic_overflow_preserves_primary_scrollback_and_appends_deferred_history_
             .filter(|row| row.contains("deferred-alpha-overflow-sentinel"))
             .count(),
         1,
-        "deferred history must append exactly once: {retained:#?}"
+        "later stable history must append exactly once: {retained:#?}"
     );
     assert_eq!(
         retained
             .iter()
-            .filter(|row| row.contains("deferred-beta-overflow-sentinel"))
+            .filter(|row| row.contains("overflow-live-command"))
             .count(),
         1,
-        "second deferred history must append exactly once: {retained:#?}"
+        "the canonical tool card must commit exactly once: {retained:#?}"
     );
-    // Intermediate alternate-surface live body rows must not leak into primary
-    // scrollback as duplicates after release. Collapsed tool preview may omit
-    // most body lines entirely; any that remain may appear at most once.
+    // Live tool body rows must not leak into native scrollback as duplicates.
     for index in 0..30 {
         let needle = format!("overflow-live-sentinel-{index:02}");
         let count = retained.iter().filter(|row| row.contains(&needle)).count();
         assert!(
             count <= 1,
-            "live sentinel duplicated after release ({needle} x{count}): {retained:#?}"
+            "live sentinel duplicated after commit ({needle} x{count}): {retained:#?}"
         );
     }
 
-    let enter_count = output_text.matches("?1049h").count();
-    let leave_count = output_text.matches("?1049l").count();
     assert_eq!(
-        enter_count, 1,
-        "expected one alternate enter: {output_text}"
+        output_text.matches("?1049h").count(),
+        0,
+        "ordinary conversation must never enter the alternate screen: {output_text}"
     );
     assert_eq!(
-        leave_count, 1,
-        "expected one alternate leave: {output_text}"
+        output_text.matches("?1049l").count(),
+        0,
+        "ordinary conversation must never leave the alternate screen: {output_text}"
     );
     assert!(!output_text.contains("\x1b[2J") && !output_text.contains("\x1b[3J"));
 
@@ -834,12 +822,12 @@ fn automatic_overflow_preserves_primary_scrollback_and_appends_deferred_history_
         .iter()
         .position(|row| row.contains("deferred-alpha-overflow-sentinel"))
         .expect("deferred history present");
-    let second = retained
+    let tool = retained
         .iter()
-        .position(|row| row.contains("deferred-beta-overflow-sentinel"))
-        .expect("second deferred history present");
+        .position(|row| row.contains("overflow-live-command"))
+        .expect("tool card present");
     assert!(
-        pre < deferred && deferred < second,
+        pre < deferred && deferred < tool,
         "history order broken: {retained:#?}"
     );
 }

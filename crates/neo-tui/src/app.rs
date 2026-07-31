@@ -4,16 +4,13 @@ use std::time::{Duration, Instant};
 use crate::screen_output::{CursorPos, TerminalFrame};
 use crate::shell::{NeoChromeState, OverlayKind};
 use crate::transcript::{
-    CHROME_GUTTER, ChromeRender, TranscriptPane, TranscriptViewport, apply_gutter,
-    frame_content_width, render_chrome_lines_mut, render_footer_only_lines,
+    CHROME_GUTTER, ChromeRender, TranscriptPane, apply_gutter, frame_content_width,
+    render_chrome_lines_mut, render_footer_only_lines,
 };
 
 pub struct NeoTui {
     chrome: NeoChromeState,
     transcript: TranscriptPane,
-    /// Latched automatic overflow viewport. `None` means the primary surface;
-    /// `Some` keeps the alternate surface until the live commit frontier clears.
-    automatic_overflow: Option<TranscriptViewport>,
 }
 
 const ANIMATION_INTERVAL: Duration = Duration::from_millis(100);
@@ -21,11 +18,7 @@ const ANIMATION_INTERVAL: Duration = Duration::from_millis(100);
 impl NeoTui {
     #[must_use]
     pub fn new(chrome: NeoChromeState, transcript: TranscriptPane) -> Self {
-        Self {
-            chrome,
-            transcript,
-            automatic_overflow: None,
-        }
+        Self { chrome, transcript }
     }
 
     #[must_use]
@@ -47,29 +40,7 @@ impl NeoTui {
             version,
             None,
         );
-        Self {
-            chrome,
-            transcript,
-            automatic_overflow: None,
-        }
-    }
-
-    /// Whether automatic transcript overflow currently owns the alternate surface.
-    #[must_use]
-    pub const fn automatic_overflow_active(&self) -> bool {
-        self.automatic_overflow.is_some()
-    }
-
-    pub fn scroll_automatic_overflow_up(&mut self, rows: usize) {
-        if let Some(viewport) = self.automatic_overflow.as_mut() {
-            viewport.scroll_up(rows);
-        }
-    }
-
-    pub fn scroll_automatic_overflow_down(&mut self, rows: usize) {
-        if let Some(viewport) = self.automatic_overflow.as_mut() {
-            viewport.scroll_down(rows);
-        }
+        Self { chrome, transcript }
     }
 
     #[must_use]
@@ -178,15 +149,10 @@ impl NeoTui {
             .set_workspace_root(self.chrome.workspace_root());
         self.transcript.resize(width, height);
 
-        // Always obtain the complete presentation update so overflow/frontier
-        // signals stay accurate even while manual review owns the viewport.
+        // Always obtain the complete presentation update so the normal-screen
+        // history/live partition stays accurate even while manual review owns
+        // the viewport.
         let mut update = self.transcript.render_terminal_update(width, height);
-        if update.live_overflow && self.automatic_overflow.is_none() {
-            self.automatic_overflow = Some(TranscriptViewport::new());
-        }
-        if !update.has_live_frontier {
-            self.automatic_overflow = None;
-        }
 
         let next_animation_deadline = (self.chrome.working_label().is_some()
             || update.has_visible_animation
@@ -194,8 +160,8 @@ impl NeoTui {
             || self.transcript.has_live_entries())
         .then(|| now.checked_add(ANIMATION_INTERVAL).unwrap_or(now));
 
-        // Manual Ctrl+O review keeps logical precedence but shares the same
-        // physical alternate surface with latched automatic overflow.
+        // Manual Ctrl+O review is the only ordinary-conversation path into an
+        // application-owned alternate screen.
         if self.chrome.transcript_browser_state().is_some() {
             let mut lines = self
                 .render_transcript_browser_frame(
@@ -213,28 +179,6 @@ impl NeoTui {
             )
             // Alternate screens have no native scrollback. Keep capture enabled
             // so wheel events reach the transcript viewport instead of disappearing.
-            .with_mouse_capture(true);
-        }
-
-        if let Some(viewport) = self.automatic_overflow.as_mut() {
-            let body_height = height.saturating_sub(chrome_render.lines.len());
-            let mut lines = {
-                self.transcript
-                    .render_viewport_rows(viewport, width, body_height)
-            };
-            let cursor = append_chrome(&mut lines, chrome_render);
-            if lines.len() > height {
-                lines.truncate(height);
-            }
-            return TerminalFrame::with_surface(
-                Vec::new(),
-                lines,
-                cursor,
-                true,
-                next_animation_deadline,
-            )
-            // Automatic overflow uses the same alternate-screen viewport as review.
-            // Without capture, the terminal consumes the wheel but cannot scroll it.
             .with_mouse_capture(true);
         }
 

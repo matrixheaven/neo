@@ -513,7 +513,6 @@ fn every_live_entry_family_is_bounded_or_progressive() {
             update.live.len()
         );
         assert!(!update.live.is_empty(), "the mutable entry stays visible");
-        assert!(!update.live_overflow);
     }
 
     fn assert_one_canonical_commit(pane: &mut TranscriptPane, width: usize, height: usize) {

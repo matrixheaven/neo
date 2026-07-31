@@ -211,10 +211,6 @@ fn long_unstable_assistant_tail_stays_bounded_and_commits_once() {
         "live tail must be bounded by live_budget: {}",
         update.live.len()
     );
-    assert!(
-        !update.live_overflow,
-        "bounded live never requests overflow"
-    );
     assert!(live.contains("unfinished"), "live:\n{live}");
 
     // Completion commits the canonical assistant entry once.
