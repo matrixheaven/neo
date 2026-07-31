@@ -5,6 +5,8 @@ Entries are workspace records, not authoritative runtime decisions.
 
 | Date | Kind | Path | Title |
 | --- | --- | --- | --- |
+| 2026-07-31 | handoff | docs/aegis/handoffs/2026-07-31-native-scrollback-progressive-transcript.md | Implement Native Scrollback Progressive Transcript Handoff Prompt |
+| 2026-07-31 | plan | docs/aegis/plans/2026-07-31-native-scrollback-progressive-transcript.md | Neo Native Scrollback Progressive Transcript Implementation Plan |
 | 2026-07-30 | handoff | docs/aegis/handoffs/2026-07-30-dynamic-workflow-ai-reliability.md | Implement Dynamic Workflow AI Reliability Handoff Prompt |
 | 2026-07-30 | plan | docs/aegis/plans/2026-07-30-dynamic-workflow-ai-reliability.md | Neo Dynamic Workflow AI Reliability Implementation Plan |
 | 2026-07-30 | plan | docs/aegis/plans/2026-07-30-workflow-model-visible-results.md | Neo Workflow Model-Visible Results Implementation Plan |
