@@ -82,6 +82,25 @@ duplicate state without solving the presentation problem.
 No renderer may infer workflow origin, lifecycle, or child identity by parsing
 human-readable text. All routing uses typed event data.
 
+## Review Of The Native-Scrollback Implementation Chain
+
+The implementation commits beginning at `28efaf4f` were reviewed against the
+native-scrollback plan, its handoff, and the current source. The review changes
+the repair boundary below; it does not reopen the native-screen product choice.
+
+| Priority | Evidence | Finding | Required correction |
+| --- | --- | --- | --- |
+| P1 | `TranscriptStore::upsert_workflow` captured every accepted non-terminal snapshot; `progressive.rs` rendered it as `Workflow ... running`; the workflow regression required that history row | A mutable status projection was treated as immutable history. A queue, phase, and running snapshot therefore become repeated rows even though the runtime emitted each event only once. | Remove workflow transition facts from the progressive-history ledger. Keep one workflow group live until terminalization; commit one terminal group once. A running or phase update must never be acknowledged as history. |
+| P1 | `event_handler.rs` matched `workflow_origin: _` for start, queue, update, and finish | Typed provenance already exists upstream but is discarded at the transcript boundary. Direct tools consequently become top-level cards and child ownership cannot be selected reliably. | Carry provenance through every tool mutation. For queue-position events that have no origin field, look up the origin stored when the tool was first queued or started. Reject a conflicting late origin rather than reparenting a live row. |
+| P1 | `render_terminal_update` budgets content rows; composition adds `separator_before`; `render_terminal_frame_at` appends chrome and then truncates the whole live vector | The final frame can exceed the real budget and tail truncation removes the prompt, Todo, or footer. The workflow finishing only reduces pressure and makes the defect look transient. | Compute the final bottom-region cost before composing live rows, include separators and wrapped rows in the same budget, and remove tail truncation as a normal-path repair. The resulting frame must be valid before it reaches `LiveRenderer`. |
+| P2 | Existing workflow tests use direct snapshot upserts and assert one running row, but do not send origin-bearing tool events or combine multiple owners | The tests prove neither end-to-end routing nor the reported multi-owner height failure. A single running snapshot also cannot catch repeated phase rows. | Add negative assertions for zero non-terminal workflow history rows, origin-bearing direct-tool/Delegate/Swarm routing, later finalized rows staying visible, and composer/Todo/footer survival across every live update. |
+
+The first-principles conclusion is fixed: a status that may change belongs to
+the bounded live projection, while only a proven immutable fact may enter native
+scrollback. The smallest sufficient repair is therefore in transcript capture,
+typed origin carriage, and final frame budgeting; it does not require a second
+workflow runtime, a second transcript store, or changes to execution semantics.
+
 ## Selected Presentation
 
 ### Workflow Main Card
@@ -225,10 +244,22 @@ framework is added.
 
 ## Height Rules
 
-Frame composition reserves actual bottom-region rows before asking transcript
-presentation for its live budget. The calculation includes Todo, pending input,
-composer, footer, gutters, borders, and every separator that will be appended.
-The final frame must not rely on tail truncation to become valid.
+Frame composition reserves the actual bottom-region rows before asking
+transcript presentation for its live budget. The calculation includes Todo,
+pending input, composer, footer, gutters, borders, wrapped rows, and every
+separator that will be appended. The same effective width is used for this
+measurement and for rendering. In symbols:
+
+```text
+live_budget = terminal_height - final_bottom_region_rows
+live_cost(block) = visible_content_rows(block) + separator_before(block)
+sum(live_cost(block)) <= live_budget
+```
+
+The final frame must already be valid before it reaches `LiveRenderer`; a
+tail `truncate(height)` after appending chrome is forbidden as a normal-path
+repair. History rows written to native scrollback do not consume the current
+live budget.
 
 When height is insufficient, presentation degrades in this order:
 
@@ -241,9 +272,12 @@ When height is insufficient, presentation degrades in this order:
 7. retain composer and footer during ordinary progress.
 
 When a blocking dialog intentionally owns input, the existing rule hides the
-composer and reserves the dialog plus footer instead. At physically impossible
-terminal heights, the active blocking surface or composer wins; the renderer
-must still produce a width-valid and height-valid frame without panicking.
+composer and reserves the dialog plus footer instead. During ordinary progress
+the composer and footer are mandatory; Todo may first collapse to its existing
+compact summary. At physically impossible terminal heights, the active
+blocking surface or the minimum composer/footer wins, and the workflow group
+reduces to one status row. The renderer must still produce a width-valid and
+height-valid frame without panicking or deleting the bottom interaction owner.
 
 Example compact projection:
 
@@ -266,7 +300,20 @@ instead of imposing a fixed child count.
 ## Event Routing And Projection
 
 - Preserve `workflow_origin` from runtime tool events through transcript event
-  handling. Do not reconstruct it later.
+  handling. Do not reconstruct it from a title, tool name, turn, or rendered
+  row later.
+- The origin carrier is the typed tool entry keyed by tool-call identity. The
+  `Started`/`Queued` event stores it; `QueueUpdated` reads that stored value;
+  `Update` and `Finished` verify the same workflow run before mutating the
+  entry. A missing origin remains ordinary; a conflicting origin is a bounded
+  terminal routing error and is never silently reparented.
+- The routing matrix is exhaustive: direct `Read`, `Edit`, `Write`, `Bash`,
+  `Terminal`, and other tool events enter the main workflow card; `Delegate`
+  events enter the workflow Delegate summary; `DelegateSwarm` events enter the
+  workflow Swarm summary; approval/question events remain separate blocking
+  entries while retaining their typed workflow reference. Every start, queue,
+  update, finish, approval, and child-progress event is covered by a focused
+  regression.
 - Route workflow-origin ordinary tools into the main-card activity projection.
 - Route workflow-origin `Delegate` events into the Delegate summary.
 - Route workflow-origin `DelegateSwarm` events into the swarm summary.
@@ -280,8 +327,10 @@ instead of imposing a fixed child count.
   presentation uses the bounded summaries while explicit review projects the
   complete detail from the same stored activity.
 - Keep each non-terminal workflow group in the bounded live projection rather
-  than making its launch entry a permanent mutable history barrier. On
-  terminalization, acknowledge the group once at the terminal event position.
+  than making its launch entry a permanent mutable history barrier. Do not
+  capture queue, running, phase, log, or report snapshots as progressive
+  history facts. On terminalization, acknowledge the main card and its two
+  optional sibling summaries once at the terminal event position.
 - Keep presentation state bounded. Runtime and persisted JSONL remain the only
   sources used to restore current workflow truth.
 
@@ -298,6 +347,34 @@ It does not rewrite historical completed transcripts. Old persisted sessions
 remain readable as recorded; new and resumed live events use the single new
 projection path. No format migration, compatibility renderer, or dual card path
 is introduced.
+
+## Corrections To The Earlier Plan
+
+The earlier native-scrollback plan remains useful for terminal ownership and
+blocking-focus work, but its workflow slice must be replaced by these rules
+before implementation starts:
+
+1. The old Task 3 instruction to capture accepted workflow transitions as
+   progressive facts is retired. `projection_sequence` still rejects stale
+   snapshots, but it is a live-card watermark, not a history identity.
+2. The old workflow regression that expects a `running` or `phase` line in
+   `update.history` is invalid. The replacement asserts that those lines exist
+   only in `update.live` until one terminal group is committed.
+3. Workflow-origin routing is an end-to-end transcript task, not a renderer
+   label. The implementation must carry the typed origin into the ordinary
+   tool entry before deciding which workflow summary owns it.
+4. The height task must own final-frame geometry. It must account for
+   `separator_before`, chrome after its own fitting rules, and the cursor row;
+   it must delete the post-composition tail truncation instead of testing around
+   it.
+5. The terminal task must combine all three failure dimensions in one proof:
+   repeated workflow updates, origin-bearing direct/child tools, and a live
+   frame with Todo, composer, footer, and an active blocking entry. Passing a
+   no-alternate-screen assertion alone is insufficient.
+
+No implementation plan may reintroduce non-terminal workflow history facts,
+generic top-level workflow child cards, a second origin map with an independent
+lifecycle, or a second height owner.
 
 ## Options Considered
 
@@ -1074,6 +1151,19 @@ than removing the composer, footer, or blocking dialog:
 19. A long non-terminal workflow does not pin later finalized transcript rows;
     terminalization moves the same logical group from live projection to
     history exactly once.
+20. Replaying queued, running, and multiple phase snapshots produces zero
+    standalone non-terminal workflow history rows; stale or duplicate
+    `projection_sequence` values change neither history nor the live card.
+21. Every origin-bearing tool event keeps the same workflow run and invocation
+    identity from admission through completion; direct tools, Delegate, and
+    DelegateSwarm never become unowned top-level cards.
+22. At every live frame, the rendered row count including separators plus the
+    final bottom-region row count is no greater than terminal height. Todo,
+    composer, footer, and the active blocking surface follow the stated
+    priority and are never removed by a final tail cut.
+23. A regression test sends later workflow, Delegate, and direct-tool events
+    while an approval or question is pending, and proves both input ownership
+    and later history release after resolution.
 
 ## Verification Boundary
 
@@ -1083,6 +1173,8 @@ The implementation plan must use focused tests for:
 - workflow snapshot replacement and single terminalization;
 - exhaustive lifecycle projection including resource limits and recovery;
 - typed `workflow_origin` routing for ordinary tools, Delegate, and swarm;
+- origin preservation across `Started`/`Queued`, queue updates, partial
+  updates, approvals, child progress, and `Finished` events;
 - distinct shell admission, execution, approval, denial, and completion rows;
 - bounded main and sibling-card projections under large activity counts;
 - pause, boundary drain, resume, answer-required, and confirmed-stop flows;
@@ -1090,7 +1182,10 @@ The implementation plan must use focused tests for:
 - approval and question focus during later workflow activity;
 - exact frame-height accounting including separators, Todo, composer, footer,
   and blocking overlays;
+- a negative proof that post-composition tail truncation cannot remove the
+  composer or footer;
 - long-lived workflow live projections releasing later finalized rows;
+- zero non-terminal workflow history rows across repeated phase snapshots;
 - explicit-review and task-browser completeness after normal compaction;
 - unchanged non-workflow Delegate-family rendering.
 
