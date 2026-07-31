@@ -11,6 +11,9 @@ use super::{TranscriptEntry, TranscriptEntryId, TranscriptStore};
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum TranscriptBlockId {
     Entries(Vec<TranscriptEntryId>),
+    Workflow {
+        entry: TranscriptEntryId,
+    },
     AssistantSegment {
         entry: TranscriptEntryId,
         source_start: usize,
@@ -26,6 +29,7 @@ impl TranscriptBlockId {
     fn first_owner(&self) -> Option<TranscriptEntryId> {
         match self {
             Self::Entries(ids) => ids.first().copied(),
+            Self::Workflow { entry } => Some(*entry),
             Self::AssistantSegment { entry, .. } => Some(*entry),
             Self::Progressive { id } => Some(id.entry()),
         }
@@ -34,6 +38,7 @@ impl TranscriptBlockId {
     fn last_owner(&self) -> Option<TranscriptEntryId> {
         match self {
             Self::Entries(ids) => ids.last().copied(),
+            Self::Workflow { entry } => Some(*entry),
             Self::AssistantSegment { entry, .. } => Some(*entry),
             Self::Progressive { id } => Some(id.entry()),
         }
@@ -43,6 +48,10 @@ impl TranscriptBlockId {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum FinalizedBlockProof {
     EntryRevisions(Vec<u64>),
+    WorkflowTerminal {
+        entry: TranscriptEntryId,
+        revision: u64,
+    },
     AssistantSource(String),
     Progressive(ProgressiveFact),
 }
@@ -171,53 +180,72 @@ fn bound_live_blocks(blocks: Vec<LiveBlock>, live_budget: usize) -> Vec<LiveBloc
     if live_budget == 0 {
         return Vec::new();
     }
-    let total = blocks.iter().map(|block| block.lines.len()).sum::<usize>();
+    let blocks = blocks
+        .into_iter()
+        .filter(|block| !block.lines.is_empty())
+        .collect::<Vec<_>>();
+    let total = live_blocks_cost(&blocks);
     if total <= live_budget {
         return blocks;
     }
 
-    let mut kept = Vec::<LiveBlock>::new();
-    let mut used = 0usize;
-    for block in blocks.into_iter().rev() {
-        if block.lines.is_empty() {
-            continue;
+    let mut kept_start = blocks.len();
+    for candidate_start in (0..blocks.len()).rev() {
+        let candidate = &blocks[candidate_start..];
+        let summary_cost = usize::from(candidate_start > 0)
+            + usize::from(
+                candidate_start > 0
+                    && candidate
+                        .first()
+                        .is_some_and(|block| block.separator_before),
+            );
+        if live_blocks_cost(candidate).saturating_add(summary_cost) > live_budget {
+            break;
         }
-        // One row is reserved for the summary once a block was dropped.
-        let reserved = usize::from(!kept.is_empty());
-        if used + block.lines.len() + reserved <= live_budget {
-            used += block.lines.len();
-            kept.push(block);
-            continue;
-        }
-        if kept.is_empty() {
-            // The newest block alone exceeds the budget: keep its header and
-            // the newest rows that fit. No summary row is possible.
-            let mut lines = block.lines;
-            if lines.len() > live_budget {
-                let header = lines.remove(0);
-                let keep = live_budget.saturating_sub(1);
-                lines = lines.split_off(lines.len().saturating_sub(keep));
-                lines.insert(0, header);
-            }
-            used += lines.len();
-            kept.push(LiveBlock { lines, ..block });
-        }
-        break;
+        kept_start = candidate_start;
     }
-    kept.reverse();
 
-    let omitted = total.saturating_sub(used);
-    if omitted > 0 && used.saturating_add(1) <= live_budget {
-        kept.insert(
-            0,
-            LiveBlock {
-                lines: vec![format!("… {omitted} more rows")],
-                animated_line_indices: Vec::new(),
-                separator_before: false,
-            },
-        );
+    if kept_start == blocks.len() {
+        let mut newest = blocks.into_iter().next_back().expect("non-empty blocks");
+        if newest.lines.len() > live_budget {
+            let header = newest.lines.remove(0);
+            let keep = live_budget.saturating_sub(1);
+            newest.lines = newest
+                .lines
+                .split_off(newest.lines.len().saturating_sub(keep));
+            newest.lines.insert(0, header);
+        }
+        newest.separator_before = false;
+        return vec![newest];
     }
+
+    let omitted = total.saturating_sub(live_blocks_cost(&blocks[kept_start..]));
+    let mut kept = blocks.into_iter().skip(kept_start).collect::<Vec<_>>();
+    kept.insert(
+        0,
+        LiveBlock {
+            lines: vec![format!("… {omitted} more rows")],
+            animated_line_indices: Vec::new(),
+            separator_before: false,
+        },
+    );
     kept
+}
+
+fn live_blocks_cost(blocks: &[LiveBlock]) -> usize {
+    let mut has_preceding_visible = false;
+    blocks
+        .iter()
+        .map(|block| {
+            if block.lines.is_empty() {
+                return 0;
+            }
+            let cost =
+                block.lines.len() + usize::from(has_preceding_visible && block.separator_before);
+            has_preceding_visible = true;
+            cost
+        })
+        .sum()
 }
 
 #[derive(Debug, Clone, Default)]
@@ -299,6 +327,17 @@ impl TranscriptPresentation {
                     in_attempt,
                     options,
                     &mut frame,
+                );
+                index += 1;
+                continue;
+            }
+
+            if matches!(
+                transcript.entries().get(index),
+                Some(TranscriptEntry::Workflow { .. })
+            ) {
+                render_workflow_entry(
+                    transcript, index, id, revision, in_attempt, options, &mut frame,
                 );
                 index += 1;
                 continue;
@@ -488,6 +527,9 @@ impl TranscriptPresentation {
         let Some(TranscriptEntry::ToolRun { component }) = transcript.entries().get(index) else {
             return None;
         };
+        if component.workflow_origin().is_some() {
+            return Some(index + 1);
+        }
         if transcript.is_tool_run_suppressed(component.id()) {
             return Some(index + 1);
         }
@@ -541,6 +583,12 @@ impl TranscriptPresentation {
                 ) if ids.len() == revisions.len() => {
                     self.committed_entry_revisions
                         .extend(ids.iter().copied().zip(revisions.iter().copied()));
+                }
+                (
+                    TranscriptBlockId::Workflow { entry: block_entry },
+                    FinalizedBlockProof::WorkflowTerminal { entry, revision },
+                ) if block_entry == entry => {
+                    self.committed_entry_revisions.insert(*entry, *revision);
                 }
                 (
                     TranscriptBlockId::AssistantSegment {
@@ -714,6 +762,65 @@ fn render_entry(
     }
 }
 
+fn render_workflow_entry(
+    transcript: &TranscriptStore,
+    index: usize,
+    id: TranscriptEntryId,
+    revision: u64,
+    blocked: bool,
+    options: TranscriptRenderOptions<'_>,
+    frame: &mut PresentationFrame,
+) {
+    let Some(TranscriptEntry::Workflow { component }) = transcript.entries().get(index) else {
+        return;
+    };
+    let finalized = transcript.entry_finalization(index) == Some(Finalization::Finalized);
+    let separator_before = matches!(frame.rendered_tail_owner, Some(owner) if owner != id);
+    let available_rows = if finalized && !blocked {
+        usize::MAX
+    } else {
+        options
+            .live_budget
+            .saturating_sub(usize::from(separator_before))
+    };
+    let group = super::workflow_group::render_workflow_group(
+        component,
+        options.width,
+        available_rows,
+        options.theme,
+    );
+    let has_visible_animation = group.has_visible_animation;
+    let mut lines = group
+        .into_lines()
+        .into_iter()
+        .map(|line| line.to_ansi())
+        .collect::<Vec<_>>();
+    super::pane::trim_ansi_transcript_block(&mut lines);
+    let separator_before = advance_semantic_owner(
+        &mut frame.rendered_tail_owner,
+        Some(id),
+        Some(id),
+        !lines.is_empty(),
+    );
+    if finalized && !blocked {
+        frame.pending_history.push(FinalizedBlock {
+            id: TranscriptBlockId::Workflow { entry: id },
+            proof: FinalizedBlockProof::WorkflowTerminal {
+                entry: id,
+                revision,
+            },
+            lines,
+            separator_before,
+        });
+    } else {
+        frame.live_blocks.push(LiveBlock::with_header(
+            lines,
+            has_visible_animation,
+            separator_before,
+        ));
+    }
+}
+
 /// Terminal status rows for an entry whose stable facts were already emitted
 /// progressively: one summary line per family, never a duplicate full card.
 fn terminal_summary_lines(
@@ -730,7 +837,6 @@ fn terminal_summary_lines(
         Some(TranscriptEntry::DelegateSwarm { component }) => {
             component.terminal_summary(width, theme)
         }
-        Some(TranscriptEntry::Workflow { component }) => component.terminal_summary(width, theme),
         _ => Vec::new(),
     };
     lines
@@ -800,7 +906,7 @@ fn compose_live_blocks(blocks: Vec<LiveBlock>) -> (Vec<String>, bool) {
         if block.lines.is_empty() {
             continue;
         }
-        if block.separator_before {
+        if !lines.is_empty() && block.separator_before {
             lines.push(String::new());
         }
         let mut is_animated = vec![false; block.lines.len()];

@@ -68,3 +68,30 @@
 - task2-typed-workflow-activity
 - Blocked on: none
 - Next step: Commit Task 2, then dispatch Tasks 3-7 in parallel with disjoint file ownership and perform one unified spec review plus one unified quality review.
+
+## Checkpoint Update
+
+- Current todo: Commit the completed workflow dynamic transcript implementation.
+- Active slice: Unified review and final verification complete.
+- Completed todos:
+- Task 3: bounded workflow main card with direct-tool activity.
+- Task 4: workflow Delegate and DelegateSwarm sibling summaries.
+- Task 5: single terminal workflow-group commit and blocking-input ownership.
+- Task 6: final-frame row budgeting and removal of normal-path tail truncation.
+- Task 7: ADR and current-baseline amendment.
+- Unified review repairs: main-card context ordering and stable swarm item ordering.
+- Evidence refs:
+- task3-task7-unified-verification
+- unified-review-repairs
+- Blocked on: none for the implementation commit.
+- Next step: Stage the scoped files and create one conventional commit.
+
+## DriftCheckDraft
+
+- Scope status: Aligned with the approved design and implementation plan; task3-7 changes stay in workflow projection, transcript presentation, frame composition, focused tests, and the approved decision records.
+- Compatibility status: Non-workflow Delegate-family cards, workflow runtime and persistence, blocking input ownership, normal-screen behavior, and native scrollback ownership remain unchanged.
+- Retirement status: Workflow transition history, isolated workflow-origin cards, and post-chrome normal-path tail truncation remain removed with no aliases or fallback renderer.
+- New risk signals:
+- Windows and Linux native terminal behavior and remote CI remain unverified.
+- The Aegis workspace structure check is still blocked by pre-existing missing INDEX targets and legacy ADR format findings outside this task.
+- Advisory decision: continue to scoped commit.

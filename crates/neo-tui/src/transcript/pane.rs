@@ -7,7 +7,7 @@ use neo_agent_core::{AgentEvent, AgentMessage, Content, ImageRef, skills::SkillS
 use crate::dialogs::question_dialog::{QuestionDisplayData, QuestionStateMachine};
 use crate::primitive::theme::TuiTheme;
 use crate::primitive::{Finalization, Line, next_sequence};
-use crate::shell::ToolStatusKind;
+use crate::shell::{StreamUpdate, ToolStatusKind};
 use crate::terminal_image::{
     ImageRenderPolicy, ImageSource, InlineImage, TerminalImageCapabilities,
 };
@@ -837,6 +837,27 @@ impl TranscriptPane {
         id: &str,
         questions: Vec<QuestionDisplayData>,
     ) -> bool {
+        self.upsert_question_prompt_with_origin(id, questions, None)
+    }
+
+    pub fn apply_question_stream_update(&mut self, update: StreamUpdate) -> bool {
+        let StreamUpdate::QuestionRequested {
+            id,
+            questions,
+            workflow_origin,
+        } = update
+        else {
+            return false;
+        };
+        self.upsert_question_prompt_with_origin(&id, questions, workflow_origin)
+    }
+
+    fn upsert_question_prompt_with_origin(
+        &mut self,
+        id: &str,
+        questions: Vec<QuestionDisplayData>,
+        workflow_origin: Option<neo_agent_core::workflow::WorkflowExecutionOrigin>,
+    ) -> bool {
         let display = questions
             .first()
             .cloned()
@@ -856,11 +877,14 @@ impl TranscriptPane {
                     return false;
                 };
                 let machine = QuestionStateMachine::new(id, questions);
-                if !data.is_pending() || data.machine == machine {
+                if !data.is_pending()
+                    || (data.machine == machine && data.workflow_origin == workflow_origin)
+                {
                     return false;
                 }
                 data.machine = machine;
                 data.display = display;
+                data.workflow_origin = workflow_origin;
                 true
             });
             if changed {
@@ -871,6 +895,7 @@ impl TranscriptPane {
         self.push_transcript(TranscriptEntry::QuestionPrompt(QuestionPromptData {
             id: id.to_owned(),
             state: QuestionPromptState::Pending,
+            workflow_origin,
             display,
             machine: QuestionStateMachine::new(id, questions),
         }));

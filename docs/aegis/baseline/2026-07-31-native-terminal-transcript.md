@@ -14,9 +14,11 @@ presentation implemented by these commits, in task order:
   (Delegate/DelegateGroup/DelegateSwarm tool and terminal facts captured at
   store update time, one terminal status per completed card);
 - `943a3abd` — `fix(tui): preserve blocking transcript focus`
-  (workflow transition facts by projection sequence, transcript position for
-  every approval, typed `QuestionPrompt` entry as the single visible question
-  owner, earliest-blocking-entry input routing);
+  (the original implementation captured workflow transition facts by
+  projection sequence; that workflow-specific rule is superseded below.
+  Transcript position for every approval, typed `QuestionPrompt` entry as the
+  single visible question owner, and earliest-blocking-entry input routing
+  remain current);
 - `336e8d1f` — `fix(tui): bound mutable transcript entries`
   (every live-producing entry family covered by a progressive projector, a
   blocking projector, or the bounded finalization fallback);
@@ -27,6 +29,22 @@ presentation implemented by these commits, in task order:
   (virtual-terminal proof for tall Delegate/workflow/approval content on the
   normal screen without capture, facts exactly once).
 
+The workflow-specific presentation rule was amended by the approved
+`docs/aegis/specs/2026-08-01-workflow-dynamic-transcript-design.md`. The
+implementation branch evidence available at this baseline update is:
+
+- `29fa1cfc` — `fix(core): preserve live workflow child origin`
+  (live-only typed origin for workflow-hosted tools, Delegate-family activity,
+  and questions without changing persisted session JSON);
+- `39d6b40d` — `fix(tui): group typed workflow activity`
+  (one workflow transcript entry owns direct tools and child snapshots;
+  mutable workflow transition facts and isolated workflow-origin entries are
+  removed).
+
+These commits establish provenance and the single transcript state owner. This
+baseline update does not claim later presentation, terminal-frame, or focused
+test evidence that was not yet part of the branch at `39d6b40d`.
+
 ## Landed behavior
 
 - Ask, auto, and yolo conversation never enters the alternate screen
@@ -35,12 +53,24 @@ presentation implemented by these commits, in task order:
 - On the normal screen the terminal owns wheel, selection, and scrollback;
   the shell launch line stays reachable, and Todo/composer/footer scroll away
   with the viewport.
-- Stable facts (completed child tools, terminal agents and swarm items,
-  accepted workflow transitions, resolved blocking dialogs) enter native
-  scrollback exactly once with typed identity and typed finality.
+- Stable facts (completed non-workflow child tools, terminal non-workflow agents
+  and swarm items, and resolved blocking dialogs) enter native scrollback
+  exactly once with typed identity and typed finality. Accepted non-terminal
+  workflow transitions are no longer history facts.
+- One workflow run has one dynamic logical group: one main card plus a workflow
+  Delegate summary and workflow DelegateSwarm summary when those families are
+  present. Direct workflow-origin tools belong to the main card; each visible
+  child occupies one row in its sibling summary.
+- Queue, running, phase, log, report, paused, and waiting updates mutate that
+  group only in the live area. A terminal event submits the whole logical group
+  to history once, at the terminal event position.
 - The live area is actually bounded by `live_budget`; completion appends
   remaining unacknowledged facts plus one final status and never a duplicate
   complete card.
+- Final live cost is the true rendered row cost, including wrapping and every
+  separator, after reserving the fitted Todo, pending input, composer, footer,
+  borders, gutters, and cursor row. Tail truncation after `append_chrome` is
+  retired rather than used to delete the bottom interaction region.
 - The earliest unresolved approval/question owns input by transcript order;
   later events cannot displace it, and deferred rows commit once in canonical
   order after resolution.
@@ -48,11 +78,22 @@ presentation implemented by these commits, in task order:
   unchanged; assistant source proofs never rewind; failed model attempts stay
   out of terminal history until the attempt is canonical; tool and shell live
   output still reassemble split lines and control sequences.
-- Full Delegate, DelegateGroup, DelegateSwarm, workflow, tool, shell,
-  approval, and question card designs are unchanged; `Ctrl+O` review shows the
-  complete current state.
+- Non-workflow Delegate, DelegateGroup, and DelegateSwarm card layouts,
+  expansion, ordering, activity rows, and transcript placement are unchanged.
+  Approval and question entries remain independent input owners. Workflow
+  runtime, journal, result, recovery, and persistence remain unchanged;
+  `Ctrl+O` review still shows complete current state from the same transcript
+  data.
+- Ordinary conversation remains on the normal screen with native scrollback;
+  terminal wheel, selection, shell launch-line access, write ordering, and
+  acknowledgement rules are unchanged.
 
-## Focused verification
+## Original focused verification
+
+The commands below are the evidence recorded for the original native-scrollback
+implementation. The Task 3 workflow-transition assertion is historical
+evidence only; its accepted-transition rule is superseded by the single
+terminal-group rule above and is not current workflow acceptance evidence.
 
 Each plan task's exact commands passed (one package, one target selector, one
 exact test):
@@ -94,6 +135,23 @@ belongs to explicit `Ctrl+O` review or Task Browser. There is one visible
 question owner (the transcript card), one active blocking-focus decision, no
 complete-card replay after progressive facts, and no production `QueuedMessage`
 path.
+
+The workflow amendment retires these additional paths without aliases or
+fallbacks: `WorkflowTransition` history, `WorkflowTransitionFact`,
+`ProgressiveFactId::WorkflowTransition`, `capture_workflow_transition`,
+isolated top-level workflow-origin tool and Delegate-family cards,
+post-`append_chrome` tail truncation, any compatibility renderer, and any
+second workflow state owner.
+
+## Workflow amendment evidence boundary
+
+- This update records the current architecture rule and the landed task-one and
+  task-two commits listed above.
+- It does not claim task-three through task-six exact tests, their implementation
+  commits, remote pipeline results, or native terminal verification on Windows,
+  Linux, or macOS.
+- Documentation consistency and whitespace checks for this amendment are local
+  documentation evidence only; they do not prove the remaining Rust behavior.
 
 ## Evidence not run
 

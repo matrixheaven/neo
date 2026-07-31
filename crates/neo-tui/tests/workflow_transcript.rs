@@ -1,17 +1,22 @@
 use std::time::Duration;
 
 use neo_agent_core::multi_agent::{
-    AgentDisplayName, AgentId, AgentLifecycleState, AgentPath, AgentProgressSnapshot, AgentRole,
-    AgentRunMode, AgentSnapshot, DelegateContext, SwarmAggregate, SwarmChildProgress,
+    AgentActivityEntry, AgentActivityKind, AgentDisplayName, AgentId, AgentLifecycleState,
+    AgentPath, AgentProgressSnapshot, AgentRole, AgentRunMode, AgentSnapshot, AgentTerminalOutcome,
+    AgentToolActivityPhase, DelegateContext, SwarmAggregate, SwarmChildProgress,
     SwarmChildSnapshot, SwarmSnapshot,
 };
 use neo_agent_core::workflow::{
     WorkflowExecutionOrigin, WorkflowId, WorkflowSnapshot, WorkflowState,
 };
-use neo_agent_core::{AgentEvent, ShellCommandOrigin, ShellCommandOutcome, ToolResult};
-use neo_tui::primitive::{Component, Finalization, Line, strip_ansi};
-use neo_tui::shell::ToolStatusKind;
-use neo_tui::transcript::{TranscriptEntry, WorkflowCardComponent};
+use neo_agent_core::{
+    AgentEvent, ApprovalAction, ApprovalOption, ApprovalPresentation, ApprovalRequest,
+    ApprovalResolution, PermissionOperation, ShellCommandOrigin, ShellCommandOutcome, ToolResult,
+};
+use neo_tui::dialogs::{QuestionDisplayData, QuestionDisplayOption};
+use neo_tui::primitive::{Component, Finalization, Line, strip_ansi, visible_width};
+use neo_tui::shell::{StreamUpdate, ToolStatusKind};
+use neo_tui::transcript::{BlockingEntryKind, TranscriptEntry, WorkflowCardComponent};
 
 fn snapshot(state: WorkflowState) -> WorkflowSnapshot {
     WorkflowSnapshot {
@@ -147,6 +152,67 @@ fn tool_result(content: &str, is_error: bool) -> ToolResult {
     }
 }
 
+fn terminal_text(lines: &[String]) -> String {
+    lines
+        .iter()
+        .map(|line| strip_ansi(line))
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+fn workflow_tool_started(
+    pane: &mut neo_tui::transcript::TranscriptPane,
+    id: &str,
+    name: &str,
+    arguments: serde_json::Value,
+) -> WorkflowExecutionOrigin {
+    let tool_origin = origin("wf-test", id);
+    pane.apply_agent_event(AgentEvent::ToolExecutionStarted {
+        turn: 1,
+        id: id.to_owned(),
+        name: name.to_owned(),
+        arguments,
+        workflow_origin: Some(tool_origin.clone()),
+    });
+    tool_origin
+}
+
+fn workflow_delegate_started(
+    pane: &mut neo_tui::transcript::TranscriptPane,
+    invocation_id: &str,
+    agent: AgentSnapshot,
+) {
+    let tool_origin = workflow_tool_started(
+        pane,
+        invocation_id,
+        "Delegate",
+        serde_json::json!({"task": agent.task.clone()}),
+    );
+    pane.apply_agent_event(AgentEvent::DelegateStarted {
+        turn: 1,
+        agent,
+        workflow_origin: Some(tool_origin),
+    });
+}
+
+fn workflow_swarm_started(
+    pane: &mut neo_tui::transcript::TranscriptPane,
+    invocation_id: &str,
+    swarm: SwarmSnapshot,
+) {
+    let tool_origin = workflow_tool_started(
+        pane,
+        invocation_id,
+        "DelegateSwarm",
+        serde_json::json!({"description": swarm.description.clone()}),
+    );
+    pane.apply_agent_event(AgentEvent::DelegateSwarmStarted {
+        turn: 1,
+        swarm,
+        workflow_origin: Some(tool_origin),
+    });
+}
+
 #[test]
 fn workflow_card_projects_runtime_summary() {
     let rendered = text(&WorkflowCardComponent::new(snapshot(WorkflowState::Running)).render(120));
@@ -160,6 +226,10 @@ fn workflow_card_projects_runtime_summary() {
         "{rendered}"
     );
     assert!(rendered.contains("TaskPause · TaskStop"), "{rendered}");
+    assert!(
+        rendered.find("phase verify") < rendered.find("TaskPause · TaskStop"),
+        "workflow context must precede controls:\n{rendered}"
+    );
 }
 
 #[test]
@@ -194,6 +264,231 @@ fn workflow_card_renders_paused_resource_limited_and_terminal_states() {
     assert!(running.on_render_tick(10_000));
     assert!(text(&running.render(120)).contains("9s"));
 }
+
+#[test]
+fn workflow_main_card_bounds_direct_tools_and_long_content() {
+    let mut pane = neo_tui::transcript::TranscriptPane::new(48, 10);
+    let mut workflow = snapshot(WorkflowState::Running);
+    workflow.title = "宽字符工作流标题 with a deliberately long suffix".to_owned();
+    workflow.latest_report_summary =
+        Some("报告包含很长的路径 /tmp/a/very/long/path/that/must/not/overflow".to_owned());
+    pane.apply_agent_event(AgentEvent::WorkflowStarted { turn: 1, workflow });
+
+    workflow_tool_started(
+        &mut pane,
+        "running-bash",
+        "Bash",
+        serde_json::json!({
+            "command": "cargo test --package neo-tui --test workflow_transcript a_very_long_test_name -- --exact --nocapture"
+        }),
+    );
+    let failed_origin = workflow_tool_started(
+        &mut pane,
+        "failed-edit",
+        "Edit",
+        serde_json::json!({"path": "/tmp/a/very/long/path/failed.rs"}),
+    );
+    pane.apply_agent_event(AgentEvent::ToolExecutionFinished {
+        turn: 1,
+        id: "failed-edit".to_owned(),
+        name: "Edit".to_owned(),
+        result: tool_result("FULL_TOOL_OUTPUT must stay out of the normal card", true),
+        workflow_origin: Some(failed_origin),
+    });
+    for index in 0..6 {
+        let id = format!("completed-read-{index}");
+        let read_origin = workflow_tool_started(
+            &mut pane,
+            &id,
+            "Read",
+            serde_json::json!({
+                "path": format!("/tmp/a/very/long/path/{index}/宽字符-report.md")
+            }),
+        );
+        pane.apply_agent_event(AgentEvent::ToolExecutionFinished {
+            turn: 1,
+            id,
+            name: "Read".to_owned(),
+            result: tool_result("FULL_TOOL_OUTPUT must stay out of the normal card", false),
+            workflow_origin: Some(read_origin),
+        });
+    }
+
+    let update = pane.render_terminal_update(48, 10);
+    let live = terminal_text(&update.live);
+    assert!(update.live.len() <= 6, "live rows:\n{live}");
+    assert!(
+        update.live.iter().all(|line| visible_width(line) <= 48),
+        "live width:\n{live}"
+    );
+    assert!(live.contains("Bash"), "active tool missing:\n{live}");
+    assert!(live.contains("Report"), "latest report missing:\n{live}");
+    assert!(
+        live.contains("direct tools omitted"),
+        "omitted count:\n{live}"
+    );
+    assert!(live.contains('…'), "long content must be explicit:\n{live}");
+    assert!(
+        !live.contains("FULL_TOOL_OUTPUT"),
+        "raw output leaked:\n{live}"
+    );
+}
+
+#[test]
+fn workflow_child_summaries_use_two_sibling_cards_and_one_row_per_agent() {
+    let mut pane = neo_tui::transcript::TranscriptPane::new(120, 30);
+    pane.apply_agent_event(AgentEvent::WorkflowStarted {
+        turn: 1,
+        workflow: snapshot(WorkflowState::Running),
+    });
+
+    let mut euclid = agent_snapshot("delegate-euclid");
+    euclid.display_name = AgentDisplayName::new("Euclid");
+    euclid.role = AgentRole::Explorer;
+    euclid.elapsed = Duration::from_secs(4);
+    euclid.activity.push(AgentActivityEntry {
+        kind: AgentActivityKind::Tool {
+            id: "read-report".to_owned(),
+            name: "Read".to_owned(),
+            summary: Some("report.md".to_owned()),
+            phase: AgentToolActivityPhase::Ongoing,
+            output: None,
+            files: Vec::new(),
+        },
+    });
+    workflow_delegate_started(&mut pane, "delegate-euclid-call", euclid);
+
+    let mut hypatia = agent_snapshot("delegate-hypatia");
+    hypatia.display_name = AgentDisplayName::new("Hypatia");
+    hypatia.role = AgentRole::Reviewer;
+    hypatia.state = AgentLifecycleState::Completed;
+    hypatia.terminal_at_ms = Some(4_000);
+    hypatia.elapsed = Duration::from_secs(3);
+    hypatia.outcome = Some(AgentTerminalOutcome {
+        summary: "review completed".to_owned(),
+        is_error: false,
+    });
+    workflow_delegate_started(&mut pane, "delegate-hypatia-call", hypatia);
+
+    let mut alpha = agent_snapshot("swarm-alpha");
+    alpha.display_name = AgentDisplayName::new("Alpha");
+    alpha.role = AgentRole::Coder;
+    alpha.activity.push(AgentActivityEntry {
+        kind: AgentActivityKind::Tool {
+            id: "cargo-test".to_owned(),
+            name: "Bash".to_owned(),
+            summary: Some("cargo test --package neo-tui".to_owned()),
+            phase: AgentToolActivityPhase::Ongoing,
+            output: None,
+            files: Vec::new(),
+        },
+    });
+    let mut beta = agent_snapshot("swarm-beta");
+    beta.display_name = AgentDisplayName::new("Beta");
+    beta.role = AgentRole::Reviewer;
+    beta.state = AgentLifecycleState::Queued;
+    beta.started_at_ms = None;
+    let children = vec![
+        SwarmChildSnapshot {
+            item_index: 1,
+            item: "beta item".to_owned(),
+            agent: beta,
+        },
+        SwarmChildSnapshot {
+            item_index: 0,
+            item: "alpha item".to_owned(),
+            agent: alpha,
+        },
+    ];
+    let aggregate = SwarmAggregate::from_states(children.iter().map(|child| child.agent.state));
+    workflow_swarm_started(
+        &mut pane,
+        "swarm-call",
+        SwarmSnapshot {
+            swarm_id: "swarm-security-review".to_owned(),
+            description: "security review".to_owned(),
+            role: AgentRole::Reviewer,
+            mode: AgentRunMode::Foreground,
+            state: aggregate.status(),
+            max_concurrency: 2,
+            aggregate,
+            children,
+        },
+    );
+
+    let update = pane.render_terminal_update(120, 30);
+    let live = terminal_text(&update.live);
+    let main = live
+        .find("Workflow  Runtime audit and fix")
+        .expect("main card");
+    let delegates = live.find("Workflow Delegates").expect("delegate summary");
+    let swarms = live.find("Workflow Swarms").expect("swarm summary");
+    assert!(
+        main < delegates && delegates < swarms,
+        "sibling order:\n{live}"
+    );
+    for name in ["Euclid", "Hypatia", "Alpha", "Beta"] {
+        assert_eq!(live.matches(name).count(), 1, "one row for {name}:\n{live}");
+    }
+    assert!(
+        live.find("Alpha") < live.find("Beta"),
+        "swarm rows must stay in item order:\n{live}"
+    );
+    assert!(live.contains("[Explorer]"), "delegate role:\n{live}");
+    assert!(live.contains("[Reviewer]"), "reviewer role:\n{live}");
+    assert!(live.contains("security review"), "swarm label:\n{live}");
+    assert!(!pane.transcript().entries().iter().any(|entry| matches!(
+        entry,
+        TranscriptEntry::Delegate { .. }
+            | TranscriptEntry::DelegateGroup { .. }
+            | TranscriptEntry::DelegateSwarm { .. }
+    )));
+}
+
+#[test]
+fn non_workflow_delegate_family_cards_remain_unchanged() {
+    let mut pane = neo_tui::transcript::TranscriptPane::new(120, 30);
+    for (turn, id) in [
+        (1, "single-one"),
+        (2, "single-two"),
+        (3, "group-one"),
+        (3, "group-two"),
+    ] {
+        pane.apply_agent_event(AgentEvent::DelegateStarted {
+            turn,
+            agent: agent_snapshot(id),
+            workflow_origin: None,
+        });
+    }
+    pane.apply_agent_event(AgentEvent::DelegateSwarmStarted {
+        turn: 4,
+        swarm: swarm_snapshot("ordinary-swarm", agent_snapshot("ordinary-swarm-child")),
+        workflow_origin: None,
+    });
+
+    let entries = pane.transcript().entries();
+    assert!(
+        entries
+            .iter()
+            .any(|entry| matches!(entry, TranscriptEntry::Delegate { .. }))
+    );
+    assert!(
+        entries
+            .iter()
+            .any(|entry| matches!(entry, TranscriptEntry::DelegateGroup { .. }))
+    );
+    assert!(
+        entries
+            .iter()
+            .any(|entry| matches!(entry, TranscriptEntry::DelegateSwarm { .. }))
+    );
+    assert!(
+        !entries
+            .iter()
+            .any(|entry| matches!(entry, TranscriptEntry::Workflow { .. }))
+    );
+}
+
 #[test]
 fn workflow_updates_stay_in_one_live_entry_without_transition_history() {
     let mut pane = neo_tui::transcript::TranscriptPane::new(120, 24);
@@ -701,6 +996,165 @@ fn finalized_workflow_tool_rejects_late_updates() {
         waiting_ms: 50,
     });
     assert_finalized_workflow_tool(&pane, workflow_index, revision);
+}
+
+#[test]
+fn workflow_group_commits_once_at_terminal_event_position() {
+    let mut pane = neo_tui::transcript::TranscriptPane::new(120, 30);
+    let mut running = snapshot(WorkflowState::Running);
+    running.projection_sequence = Some(1);
+    pane.apply_agent_event(AgentEvent::WorkflowStarted {
+        turn: 1,
+        workflow: running,
+    });
+
+    let mut delegate = agent_snapshot("terminal-delegate");
+    delegate.display_name = AgentDisplayName::new("TerminalDelegate");
+    delegate.state = AgentLifecycleState::Completed;
+    delegate.terminal_at_ms = Some(3_000);
+    delegate.outcome = Some(AgentTerminalOutcome {
+        summary: "delegate done".to_owned(),
+        is_error: false,
+    });
+    workflow_delegate_started(&mut pane, "terminal-delegate-call", delegate);
+    let mut swarm_child = agent_snapshot("terminal-swarm-child");
+    swarm_child.display_name = AgentDisplayName::new("TerminalSwarmChild");
+    swarm_child.state = AgentLifecycleState::Completed;
+    swarm_child.terminal_at_ms = Some(3_000);
+    swarm_child.outcome = Some(AgentTerminalOutcome {
+        summary: "swarm child done".to_owned(),
+        is_error: false,
+    });
+    workflow_swarm_started(
+        &mut pane,
+        "terminal-swarm-call",
+        swarm_snapshot("terminal-swarm", swarm_child),
+    );
+
+    assert!(pane.render_terminal_update(120, 30).history.is_empty());
+    pane.push_status("unrelated finalized row");
+    let unrelated = pane.render_terminal_update(120, 30);
+    assert_eq!(unrelated.history.len(), 1);
+    assert!(terminal_text(&unrelated.history[0].lines).contains("unrelated finalized row"));
+    assert!(terminal_text(&unrelated.live).contains("Workflow"));
+    pane.acknowledge_history(&unrelated.history);
+
+    for (sequence, phase) in [(2, "build"), (3, "verify"), (4, "report")] {
+        let mut update = snapshot(WorkflowState::Running);
+        update.projection_sequence = Some(sequence);
+        update.current_phase = Some(phase.to_owned());
+        pane.transcript_mut().upsert_workflow(update);
+        let frame = pane.render_terminal_update(120, 30);
+        assert!(frame.history.is_empty(), "sequence {sequence}");
+        assert!(terminal_text(&frame.live).contains(phase));
+    }
+
+    let mut completed = snapshot(WorkflowState::Completed);
+    completed.projection_sequence = Some(5);
+    completed.updated_at_ms = Some(12_000);
+    pane.transcript_mut().upsert_workflow(completed);
+    let terminal = pane.render_terminal_update(120, 30);
+    assert_eq!(terminal.history.len(), 1, "one terminal group");
+    assert!(terminal.live.is_empty(), "no live duplicate");
+    assert!(
+        matches!(
+            &terminal.history[0].id,
+            neo_tui::transcript::TranscriptBlockId::Workflow { .. }
+        ),
+        "unexpected terminal block id: {:?}",
+        terminal.history[0].id
+    );
+    let group = terminal_text(&terminal.history[0].lines);
+    assert_eq!(
+        group.matches("Workflow  Runtime audit and fix").count(),
+        1,
+        "{group}"
+    );
+    assert_eq!(group.matches("Workflow Delegates").count(), 1, "{group}");
+    assert_eq!(group.matches("Workflow Swarms").count(), 1, "{group}");
+    pane.acknowledge_history(&terminal.history);
+    let acknowledged = pane.render_terminal_update(120, 30);
+    assert!(acknowledged.history.is_empty());
+    assert!(!terminal_text(&acknowledged.live).contains("Workflow"));
+}
+
+#[test]
+fn workflow_group_keeps_earliest_blocking_input_owner() {
+    let mut pane = neo_tui::transcript::TranscriptPane::new(120, 30);
+    pane.apply_agent_event(AgentEvent::WorkflowStarted {
+        turn: 1,
+        workflow: snapshot(WorkflowState::Running),
+    });
+    pane.apply_agent_event(AgentEvent::ApprovalRequested {
+        request: ApprovalRequest {
+            turn: 1,
+            id: "workflow-approval".to_owned(),
+            operation: PermissionOperation::Shell,
+            presentation: ApprovalPresentation::Tool {
+                title: "Allow workflow command?".to_owned(),
+                details: vec!["cargo test".to_owned()],
+            },
+            options: vec![ApprovalOption {
+                label: "Allow once".to_owned(),
+                description: None,
+                action: ApprovalAction::PermitOnce,
+            }],
+            workflow_origin: Some(origin("wf-test", "approval-call")),
+        },
+    });
+    pane.apply_question_stream_update(StreamUpdate::QuestionRequested {
+        id: "workflow-question".to_owned(),
+        questions: vec![QuestionDisplayData {
+            question: "Choose target?".to_owned(),
+            header: None,
+            body: None,
+            options: vec![QuestionDisplayOption {
+                label: "Local".to_owned(),
+                description: None,
+            }],
+            multi_select: false,
+        }],
+        workflow_origin: Some(origin("wf-test", "question-call")),
+    });
+
+    let mut later = snapshot(WorkflowState::AwaitingUser);
+    later.projection_sequence = Some(8);
+    later.current_phase = Some("choose_target".to_owned());
+    pane.transcript_mut().upsert_workflow(later);
+    let mut delegate = agent_snapshot("later-agent");
+    delegate.display_name = AgentDisplayName::new("LaterAgent");
+    workflow_delegate_started(&mut pane, "later-agent-call", delegate.clone());
+    delegate.latest_text = Some("later progress".to_owned());
+    pane.apply_agent_event(AgentEvent::DelegateProgressUpdated {
+        turn: 1,
+        progress: agent_progress(&delegate, AgentLifecycleState::Running),
+        workflow_origin: Some(origin("wf-test", "later-agent-call")),
+    });
+
+    assert_eq!(
+        pane.earliest_blocking_entry(),
+        Some(BlockingEntryKind::Approval("workflow-approval".to_owned()))
+    );
+    let blocked = pane.render_terminal_update(120, 30);
+    let live = terminal_text(&blocked.live);
+    assert!(live.contains("Allow workflow command?"), "{live}");
+    assert!(!live.contains("Choose target?"), "{live}");
+    assert!(live.contains("Workflow"), "{live}");
+
+    pane.resolve_approval(
+        "workflow-approval",
+        &ApprovalResolution::Selected {
+            action: ApprovalAction::PermitOnce,
+            label: "Allow once".to_owned(),
+            feedback: None,
+        },
+    );
+    assert_eq!(
+        pane.earliest_blocking_entry(),
+        Some(BlockingEntryKind::Question("workflow-question".to_owned()))
+    );
+    let promoted = terminal_text(&pane.render_terminal_update(120, 30).live);
+    assert!(promoted.contains("Choose target?"), "{promoted}");
 }
 
 fn assert_finalized_workflow_tool(

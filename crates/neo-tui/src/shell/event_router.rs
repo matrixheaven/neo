@@ -31,7 +31,11 @@ impl NeoChromeState {
             StreamUpdate::TodoUpdated { todos } => {
                 self.apply_todo_items(todos);
             }
-            StreamUpdate::QuestionRequested { id, questions } => {
+            StreamUpdate::QuestionRequested {
+                id,
+                questions,
+                workflow_origin: _,
+            } => {
                 self.push_question_overlay(id, questions);
             }
             StreamUpdate::ThinkingFinished => {}
@@ -99,8 +103,13 @@ impl NeoChromeState {
             AgentEvent::PlanModeExited { .. } => self.set_plan_mode(false),
             AgentEvent::PlanUpdated { enabled, .. } => self.set_plan_mode(enabled),
             AgentEvent::TodoUpdated { todos, .. } => self.apply_todos(&todos),
-            AgentEvent::QuestionRequested { id, questions, .. } => {
-                self.apply_questions(id, &questions);
+            AgentEvent::QuestionRequested {
+                id,
+                questions,
+                workflow_origin,
+                ..
+            } => {
+                self.apply_questions(id, &questions, workflow_origin);
             }
             _ => {}
         }
@@ -189,7 +198,12 @@ impl NeoChromeState {
         self.apply_todo_items(display);
     }
 
-    fn apply_questions(&mut self, id: String, questions: &[neo_agent_core::QuestionEventData]) {
+    fn apply_questions(
+        &mut self,
+        id: String,
+        questions: &[neo_agent_core::QuestionEventData],
+        workflow_origin: Option<neo_agent_core::workflow::WorkflowExecutionOrigin>,
+    ) {
         let display = questions
             .iter()
             .map(|question| QuestionDisplayData {
@@ -207,7 +221,11 @@ impl NeoChromeState {
                 multi_select: question.multi_select,
             })
             .collect();
-        self.push_question_overlay(id, display);
+        self.apply_stream_update(StreamUpdate::QuestionRequested {
+            id,
+            questions: display,
+            workflow_origin,
+        });
     }
 
     fn apply_todo_items(&mut self, todos: Vec<TodoDisplayItem>) {
