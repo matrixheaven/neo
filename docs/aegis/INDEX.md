@@ -315,3 +315,4 @@ Entries are workspace records, not authoritative runtime decisions.
 | 2026-07-30 | artifact | docs/aegis/work/2026-07-30-workflow-intent-slash/drift-check-draft.json | Workflow intent slash execution drift check draft |
 | 2026-07-30 | artifact | docs/aegis/work/2026-07-30-workflow-intent-slash/resume-state-hint.json | 2026-07-30-workflow-intent-slash resume state hint |
 | 2026-07-30 | spec | docs/aegis/specs/2026-07-30-workflow-model-visible-results-design.md | Workflow Model-Visible Results And Recoverable Failures Design |
+| 2026-08-01 | spec | docs/aegis/specs/2026-08-01-workflow-dynamic-transcript-design.md | Workflow Dynamic Transcript Presentation Design |
