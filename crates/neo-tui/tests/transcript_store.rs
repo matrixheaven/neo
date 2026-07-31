@@ -5,8 +5,9 @@ use neo_agent_core::instructions::{
     InstructionScopeKind,
 };
 use neo_agent_core::multi_agent::{
-    AgentDisplayName, AgentId, AgentLifecycleState, AgentPath, AgentRole, AgentRunMode,
-    AgentSnapshot, DelegateContext, SwarmAggregate, SwarmChildSnapshot, SwarmSnapshot,
+    AgentActivityEntry, AgentActivityKind, AgentDisplayName, AgentId, AgentLifecycleState,
+    AgentPath, AgentRole, AgentRunMode, AgentSnapshot, AgentToolActivityPhase, DelegateContext,
+    SwarmAggregate, SwarmChildSnapshot, SwarmSnapshot,
 };
 use neo_agent_core::workflow::{WorkflowId, WorkflowSnapshot, WorkflowState};
 use neo_agent_core::{
@@ -16,6 +17,24 @@ use neo_agent_core::{
 use neo_tui::primitive::theme::TuiTheme;
 use neo_tui::primitive::{Component, Finalization, strip_ansi};
 use neo_tui::transcript::{ShellRunComponent, TranscriptEntry, TranscriptPane, TranscriptStore};
+
+fn tool_activity(
+    id: &str,
+    name: &str,
+    summary: &str,
+    phase: AgentToolActivityPhase,
+) -> AgentActivityEntry {
+    AgentActivityEntry {
+        kind: AgentActivityKind::Tool {
+            id: id.to_owned(),
+            name: name.to_owned(),
+            summary: Some(summary.to_owned()),
+            phase,
+            output: None,
+            files: Vec::new(),
+        },
+    }
+}
 
 fn agent_snapshot(id: &str, state: AgentLifecycleState) -> AgentSnapshot {
     let display_name = AgentDisplayName::new(id);
@@ -886,4 +905,116 @@ fn instruction_epoch_replaces_deferred_placeholders_at_earliest_position() {
         Some(Finalization::Finalized),
         "the instruction card is a finalized semantic entry"
     );
+}
+
+#[test]
+fn delegate_family_captures_terminal_facts_before_activity_trimming() {
+    let mut pane = TranscriptPane::new(100, 24);
+    let mut running = agent_snapshot("delegate-a", AgentLifecycleState::Running);
+    running.activity = vec![
+        tool_activity("read-1", "Read", "one.rs", AgentToolActivityPhase::Done),
+        tool_activity("bash-1", "Bash", "make", AgentToolActivityPhase::Failed),
+        tool_activity("grep-1", "Grep", "pattern", AgentToolActivityPhase::Ongoing),
+    ];
+    running.tool_count = 2;
+    pane.transcript_mut().upsert_delegate(1, running);
+
+    let update = pane.render_terminal_update(100, 24);
+    let history = update
+        .history
+        .iter()
+        .flat_map(|block| block.lines.iter())
+        .map(|line| strip_ansi(line))
+        .collect::<Vec<_>>()
+        .join("\n");
+    let live = update
+        .live
+        .iter()
+        .map(|line| strip_ansi(line))
+        .collect::<Vec<_>>()
+        .join("\n");
+
+    // Only typed Done/Failed tools are stable facts; Ongoing stays live.
+    assert!(history.contains("Used Read"), "history:\n{history}");
+    assert!(history.contains("Failed Bash"), "history:\n{history}");
+    assert!(!history.contains("Grep"), "history:\n{history}");
+    assert!(live.contains("Grep"), "live:\n{live}");
+
+    // A later snapshot trims the completed tools away. The captured facts
+    // were taken at update time and must survive the trimming.
+    let mut trimmed = agent_snapshot("delegate-a", AgentLifecycleState::Running);
+    trimmed.activity = vec![tool_activity(
+        "grep-1",
+        "Grep",
+        "pattern",
+        AgentToolActivityPhase::Ongoing,
+    )];
+    pane.transcript_mut().upsert_delegate(1, trimmed);
+
+    let after_trim = pane.render_terminal_update(100, 24);
+    let history = after_trim
+        .history
+        .iter()
+        .flat_map(|block| block.lines.iter())
+        .map(|line| strip_ansi(line))
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(
+        history.contains("Used Read"),
+        "facts lost after trim:\n{history}"
+    );
+    assert!(
+        history.contains("Failed Bash"),
+        "facts lost after trim:\n{history}"
+    );
+}
+
+#[test]
+fn delegate_to_group_replacement_preserves_progressive_fact_identity() {
+    let mut pane = TranscriptPane::new(120, 24);
+    let mut first = agent_snapshot("first-agent", AgentLifecycleState::Running);
+    first.activity = vec![tool_activity(
+        "read-1",
+        "Read",
+        "one.rs",
+        AgentToolActivityPhase::Done,
+    )];
+    first.tool_count = 1;
+    pane.transcript_mut().upsert_delegate(7, first);
+
+    let update = pane.render_terminal_update(120, 24);
+    let history = update
+        .history
+        .iter()
+        .flat_map(|block| block.lines.iter())
+        .map(|line| strip_ansi(line))
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(history.contains("Used Read"), "history:\n{history}");
+    pane.acknowledge_history(&update.history);
+
+    // A second root delegate replaces the card with a DelegateGroup in place;
+    // the entry identity (and therefore the fact identity) is preserved.
+    pane.transcript_mut().upsert_delegate(
+        7,
+        agent_snapshot("second-agent", AgentLifecycleState::Running),
+    );
+    assert!(matches!(
+        pane.transcript().entries()[0],
+        TranscriptEntry::DelegateGroup { .. }
+    ));
+
+    let after = pane.render_terminal_update(120, 24);
+    assert!(
+        after.history.is_empty(),
+        "acknowledged fact must not replay after group replacement"
+    );
+    let live = after
+        .live
+        .iter()
+        .map(|line| strip_ansi(line))
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(live.contains("first-agent"), "live:\n{live}");
+    assert!(live.contains("second-agent"), "live:\n{live}");
 }

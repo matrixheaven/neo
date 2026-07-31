@@ -270,7 +270,9 @@ impl TranscriptPresentation {
                     index += 1;
                     continue;
                 };
-                render_entry(transcript, index, id, revision, true, options, &mut frame);
+                render_entry(
+                    transcript, index, id, revision, true, false, options, &mut frame,
+                );
                 break;
             }
             // Everything from the live model attempt start is rollback-able
@@ -321,12 +323,41 @@ impl TranscriptPresentation {
                 continue;
             }
 
+            // Once progressive fact rows were emitted for an entry, its
+            // completion appends one terminal status instead of a complete
+            // duplicate card.
+            let progressive = self.has_progressive_history(transcript, id);
             render_entry(
-                transcript, index, id, revision, in_attempt, options, &mut frame,
+                transcript,
+                index,
+                id,
+                revision,
+                in_attempt,
+                progressive,
+                options,
+                &mut frame,
             );
             index += 1;
         }
         frame.finish(options.live_budget)
+    }
+
+    /// Whether an entry ever emitted progressive fact rows (acknowledged or
+    /// still pending). Such an entry must never append a complete card after
+    /// its stable facts.
+    fn has_progressive_history(
+        &self,
+        transcript: &TranscriptStore,
+        entry_id: TranscriptEntryId,
+    ) -> bool {
+        transcript
+            .progressive_facts()
+            .iter()
+            .any(|fact| fact.id.entry() == entry_id)
+            || self
+                .acknowledged_facts
+                .iter()
+                .any(|id| id.entry() == entry_id)
     }
 
     /// Project unacknowledged stable facts for one entry into pending history
@@ -638,18 +669,26 @@ fn render_entry(
     id: TranscriptEntryId,
     revision: u64,
     blocked: bool,
+    progressive: bool,
     options: TranscriptRenderOptions<'_>,
     frame: &mut PresentationFrame,
 ) {
     let block_id = TranscriptBlockId::Entries(vec![id]);
-    let mut lines = transcript.render_entry_ansi_cached(
-        index,
-        options.width,
-        options.theme,
-        options.activity_frame,
-        options.image_render_policy,
-        options.image_capabilities,
-    );
+    let finalized = transcript.entry_finalization(index) == Some(Finalization::Finalized);
+    // The terminal summary replaces only the completed card; the live
+    // projection always stays the full card.
+    let mut lines = if progressive && finalized {
+        terminal_summary_lines(transcript, index, options.width, options.theme)
+    } else {
+        transcript.render_entry_ansi_cached(
+            index,
+            options.width,
+            options.theme,
+            options.activity_frame,
+            options.image_render_policy,
+            options.image_capabilities,
+        )
+    };
     super::pane::trim_ansi_transcript_block(&mut lines);
     match transcript.entry_finalization(index) {
         Some(Finalization::Finalized) if !blocked => {
@@ -666,7 +705,7 @@ fn render_entry(
                 separator_before,
             });
         }
-        Some(finalization) => {
+        Some(_) => {
             let separator_before = advance_semantic_owner(
                 &mut frame.rendered_tail_owner,
                 block_id.first_owner(),
@@ -684,6 +723,30 @@ fn render_entry(
         }
         None => {}
     }
+}
+
+/// Terminal status rows for an entry whose stable facts were already emitted
+/// progressively: one summary line per family, never a duplicate full card.
+fn terminal_summary_lines(
+    transcript: &TranscriptStore,
+    index: usize,
+    width: usize,
+    theme: &TuiTheme,
+) -> Vec<String> {
+    let lines = match transcript.entries().get(index) {
+        Some(TranscriptEntry::Delegate { component }) => component.terminal_summary(width, theme),
+        Some(TranscriptEntry::DelegateGroup { component }) => {
+            component.terminal_summary(width, theme)
+        }
+        Some(TranscriptEntry::DelegateSwarm { component }) => {
+            component.terminal_summary(width, theme)
+        }
+        _ => Vec::new(),
+    };
+    lines
+        .into_iter()
+        .map(|line| line.to_ansi())
+        .collect::<Vec<_>>()
 }
 
 fn tool_run_end(
@@ -873,7 +936,9 @@ mod tests {
                 files: Vec::new(),
             }),
         };
-        let ProgressiveFactPayload::ChildTool(tool) = &fact.payload;
+        let ProgressiveFactPayload::ChildTool(tool) = &fact.payload else {
+            unreachable!("test constructs a ChildTool fact");
+        };
         assert!(tool.is_terminal(), "Done phase is the typed finality proof");
         assert!(transcript.capture_progressive_fact(fact.clone()));
         assert!(

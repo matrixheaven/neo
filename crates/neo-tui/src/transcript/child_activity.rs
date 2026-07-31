@@ -692,6 +692,84 @@ pub fn render_child_final(
     .truncate_to_width(width)
 }
 
+/// Terminal history form of one completed child agent: one status line with
+/// the frozen outcome counts plus the final text. Tool rows are emitted as
+/// separate progressive facts, so they are not repeated here.
+#[must_use]
+pub fn render_child_agent_summary(
+    snapshot: &AgentSnapshot,
+    width: usize,
+    theme: &TuiTheme,
+) -> Vec<Line> {
+    let marker_color = match snapshot.state {
+        AgentLifecycleState::Completed => theme.status_ok,
+        AgentLifecycleState::Failed | AgentLifecycleState::TimedOut => theme.status_error,
+        AgentLifecycleState::Cancelled | AgentLifecycleState::Interrupted => theme.status_warn,
+        AgentLifecycleState::Queued | AgentLifecycleState::Running => theme.brand,
+    };
+    let marker = match snapshot.state {
+        AgentLifecycleState::Completed => "✓",
+        AgentLifecycleState::Failed | AgentLifecycleState::TimedOut => "✗",
+        AgentLifecycleState::Cancelled | AgentLifecycleState::Interrupted => "◌",
+        AgentLifecycleState::Queued | AgentLifecycleState::Running => "●",
+    };
+    let elapsed = snapshot.elapsed;
+    let mut parts = vec![
+        snapshot.display_title(),
+        agent_state_label(snapshot.state).to_owned(),
+        format!("{} tools", snapshot.tool_count),
+        format_elapsed(elapsed.as_secs()),
+        format!("{} tok", format_token_count(snapshot.token_count)),
+    ];
+    if let Some(cache) = format_cache_token_usage(snapshot) {
+        parts.push(cache);
+    }
+    let mut lines = vec![
+        Line::from_spans(vec![
+            Span::styled(marker, Style::default().fg(marker_color)),
+            Span::raw(" "),
+            Span::styled(
+                snapshot.display_name.as_str(),
+                Style::default().fg(marker_color),
+            ),
+            Span::raw("  "),
+            Span::styled(
+                format!("[{}]", role_label(snapshot.role)),
+                role_badge_style(snapshot.role, theme),
+            ),
+            Span::styled(
+                format!(" · {}", parts.join(" · ")),
+                Style::default().fg(theme.text_primary),
+            ),
+        ])
+        .truncate_to_width(width),
+    ];
+    if let Some(outcome) = &snapshot.outcome
+        && !outcome.summary.trim().is_empty()
+    {
+        lines.push(render_child_final(
+            &outcome.summary,
+            outcome.is_error,
+            width,
+            "  ",
+            theme,
+        ));
+    }
+    lines
+}
+
+fn agent_state_label(state: AgentLifecycleState) -> &'static str {
+    match state {
+        AgentLifecycleState::Queued => "queued",
+        AgentLifecycleState::Running => "running",
+        AgentLifecycleState::Completed => "done",
+        AgentLifecycleState::Failed => "failed",
+        AgentLifecycleState::Cancelled => "cancelled",
+        AgentLifecycleState::TimedOut => "timed out",
+        AgentLifecycleState::Interrupted => "interrupted",
+    }
+}
+
 #[must_use]
 pub fn one_line(text: &str) -> String {
     text.split_whitespace().collect::<Vec<_>>().join(" ")

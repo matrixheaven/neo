@@ -13,12 +13,12 @@
 //! [`TranscriptStore`]: super::store::TranscriptStore
 
 use neo_agent_core::multi_agent::{
-    AgentToolActivityPhase, AgentToolFileChange, AgentToolOutputPreview,
+    AgentSnapshot, AgentToolActivityPhase, AgentToolFileChange, AgentToolOutputPreview,
 };
 
 use crate::primitive::theme::TuiTheme;
 
-use super::child_activity::{ChildToolRow, render_child_tool_row};
+use super::child_activity::{ChildToolRow, render_child_agent_summary, render_child_tool_row};
 use super::store::TranscriptEntryId;
 
 /// Typed identity of one immutable progressive fact.
@@ -83,6 +83,10 @@ pub struct ProgressiveFact {
 pub(crate) enum ProgressiveFactPayload {
     /// A completed child tool activity row.
     ChildTool(ChildToolFact),
+    /// A terminal child agent run inside a Delegate / DelegateGroup card.
+    ChildAgent(ChildAgentFact),
+    /// A terminal swarm child item.
+    SwarmItem(SwarmItemFact),
 }
 
 /// Owned snapshot of one completed child tool activity row, frozen at
@@ -110,6 +114,27 @@ impl ChildToolFact {
     }
 }
 
+/// One terminal child agent run, frozen at `AgentLifecycleState::is_terminal()`
+/// before the source snapshot can trim its activity or be replaced.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct ChildAgentFact {
+    pub agent_id: String,
+    pub run_count: u32,
+    /// Frozen terminal snapshot: final summary, outcome, counts, usage, and
+    /// terminal reason are captured together with the typed terminal state.
+    pub snapshot: AgentSnapshot,
+}
+
+/// One terminal swarm child item, frozen at its typed terminal state.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct SwarmItemFact {
+    pub swarm_id: String,
+    pub item_index: usize,
+    pub agent_id: String,
+    pub run_count: u32,
+    pub snapshot: AgentSnapshot,
+}
+
 /// Render one captured fact into final ANSI rows, reusing the existing
 /// child-activity render helpers so progressive history matches the live card
 /// style. Recomputing rows at render time keeps history width-correct across
@@ -133,6 +158,18 @@ pub(crate) fn render_progressive_fact(
                 .into_iter()
                 .map(|line| line.to_ansi())
                 .collect::<Vec<_>>()
+        }
+        ProgressiveFactPayload::ChildAgent(fact) => {
+            render_child_agent_summary(&fact.snapshot, width, theme)
+                .into_iter()
+                .map(|line| line.to_ansi())
+                .collect()
+        }
+        ProgressiveFactPayload::SwarmItem(fact) => {
+            render_child_agent_summary(&fact.snapshot, width, theme)
+                .into_iter()
+                .map(|line| line.to_ansi())
+                .collect()
         }
     };
     super::pane::trim_ansi_transcript_block(&mut lines);

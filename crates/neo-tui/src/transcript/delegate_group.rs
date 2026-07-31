@@ -90,6 +90,13 @@ impl DelegateGroupComponent {
         lines
     }
 
+    /// One terminal status for native history once progressive fact rows were
+    /// emitted. The full card remains available through explicit review.
+    #[must_use]
+    pub fn terminal_summary(&self, width: usize, theme: &TuiTheme) -> Vec<Line> {
+        vec![self.header(width, theme)]
+    }
+
     fn header(&self, width: usize, theme: &TuiTheme) -> Line {
         let all_terminal = self.agents.iter().all(|agent| agent.state.is_terminal());
         let marker = if all_terminal { "•" } else { "●" };

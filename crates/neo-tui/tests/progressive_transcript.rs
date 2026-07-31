@@ -153,3 +153,95 @@ fn stable_facts_after_ordinary_live_entry_keep_canonical_order() {
     assert_eq!(finished.history.len(), 3, "statuses then the tool card");
     assert!(finished.live.is_empty());
 }
+
+/// A Delegate entry whose stable tool facts were already emitted must finish
+/// with exactly one terminal status — never a complete duplicate card.
+#[test]
+fn delegate_family_completion_appends_one_terminal_status_without_complete_card_duplicate() {
+    use neo_agent_core::multi_agent::{
+        AgentActivityEntry, AgentActivityKind, AgentDisplayName, AgentId, AgentLifecycleState,
+        AgentPath, AgentRole, AgentRunMode, AgentSnapshot, AgentToolActivityPhase, DelegateContext,
+    };
+
+    let mut pane = TranscriptPane::new(120, 24);
+    let mut running = AgentSnapshot {
+        id: AgentId::from_suffix_for_test("agent-a"),
+        display_name: AgentDisplayName::new("agent-a"),
+        path: AgentPath::root_child(&AgentDisplayName::new("agent-a")),
+        role: AgentRole::Coder,
+        mode: AgentRunMode::Foreground,
+        context: DelegateContext::Inherit,
+        state: AgentLifecycleState::Running,
+        task: "implement feature".to_owned(),
+        task_title: "implement feature".to_owned(),
+        created_at_ms: 1,
+        updated_at_ms: 2,
+        started_at_ms: Some(1),
+        terminal_at_ms: None,
+        detached_from_foreground: false,
+        terminal_reason: None,
+        run_count: 1,
+        live_messages_received: 0,
+        previous_status: None,
+        terminal_status_history: Vec::new(),
+        resumed_from: None,
+        tool_count: 1,
+        token_count: 0,
+        cache_read_token_count: 0,
+        cache_write_token_count: 0,
+        elapsed: std::time::Duration::ZERO,
+        latest_text: None,
+        activity: vec![AgentActivityEntry {
+            kind: AgentActivityKind::Tool {
+                id: "read-1".to_owned(),
+                name: "Read".to_owned(),
+                summary: Some("one.rs".to_owned()),
+                phase: AgentToolActivityPhase::Done,
+                output: None,
+                files: Vec::new(),
+            },
+        }],
+        prior_messages: Vec::new(),
+        outcome: None,
+    };
+    pane.transcript_mut().upsert_delegate(1, running.clone());
+
+    // The stable tool row enters history while the card is live.
+    let update = pane.render_terminal_update(120, 24);
+    let history = update
+        .history
+        .iter()
+        .flat_map(|block| block.lines.iter())
+        .map(|line| strip_ansi(line))
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(history.contains("Used Read"), "history:\n{history}");
+    pane.acknowledge_history(&update.history);
+
+    // Completion: remaining facts (none) plus ONE terminal status; the full
+    // card (with its tool row) must not be appended again.
+    running.state = AgentLifecycleState::Completed;
+    running.terminal_at_ms = Some(3);
+    running.updated_at_ms = 3;
+    running.outcome = Some(neo_agent_core::multi_agent::AgentTerminalOutcome {
+        summary: "feature implemented".to_owned(),
+        is_error: false,
+    });
+    pane.transcript_mut().upsert_delegate(1, running);
+
+    let finished = pane.render_terminal_update(120, 24);
+    assert_eq!(finished.history.len(), 1, "one terminal status");
+    let summary = finished.history[0]
+        .lines
+        .iter()
+        .map(|line| strip_ansi(line))
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(summary.contains("agent-a"), "summary:\n{summary}");
+    assert!(summary.contains("done"), "summary:\n{summary}");
+    assert!(
+        !summary.contains("Used Read"),
+        "complete card must not be replayed after progressive facts:\n{summary}"
+    );
+    assert!(finished.live.is_empty());
+}

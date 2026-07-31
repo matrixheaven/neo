@@ -12,14 +12,18 @@ use crate::transcript::{
 use super::entry::{
     ApprovalPromptData, RetryPhase, RetryStatusData, ThinkingPhase, TranscriptEntry,
 };
-use super::progressive::ProgressiveFact;
+use super::progressive::{
+    ChildAgentFact, ChildToolFact, ProgressiveFact, ProgressiveFactId, ProgressiveFactPayload,
+    SwarmItemFact,
+};
 use neo_agent_core::instructions::{
     IgnoredInstructionBundle, InstructionBundleMetadata, InstructionEpochData,
     InstructionEpochOutcome, InstructionFailure, InstructionReplacement, InstructionScopeData,
 };
 use neo_agent_core::multi_agent::{
-    AgentLifecycleState, AgentProgressSnapshot, AgentSnapshot, SwarmAggregate, SwarmChildProgress,
-    SwarmChildSnapshot, SwarmSnapshot, apply_agent_progress, apply_swarm_child_progress,
+    AgentActivityKind, AgentLifecycleState, AgentProgressSnapshot, AgentSnapshot, SwarmAggregate,
+    SwarmChildProgress, SwarmChildSnapshot, SwarmSnapshot, apply_agent_progress,
+    apply_swarm_child_progress,
 };
 use neo_agent_core::workflow::WorkflowSnapshot;
 
@@ -227,6 +231,110 @@ impl TranscriptStore {
     /// Drop acknowledged fact payloads while keeping unacknowledged ones.
     pub(crate) fn retain_progressive_facts(&mut self, keep: impl FnMut(&ProgressiveFact) -> bool) {
         self.progressive_facts.retain(keep);
+    }
+
+    /// Capture the typed-stable facts of one delegate snapshot: completed
+    /// (`Done`/`Failed`) child tool rows always; the per-agent terminal fact
+    /// only in group context, where the card stays live after the agent
+    /// finishes and the entry-level terminal status cannot cover it.
+    fn capture_delegate_snapshot_facts(
+        &mut self,
+        entry: TranscriptEntryId,
+        snapshot: &AgentSnapshot,
+        capture_agent_terminal: bool,
+    ) {
+        let agent_id = snapshot.id.as_str().to_owned();
+        let run_count = run_count_u32(snapshot.run_count);
+        if capture_agent_terminal && snapshot.state.is_terminal() {
+            self.capture_progressive_fact(ProgressiveFact {
+                id: ProgressiveFactId::ChildAgent {
+                    entry,
+                    agent_id: agent_id.clone(),
+                    run_count,
+                },
+                payload: ProgressiveFactPayload::ChildAgent(ChildAgentFact {
+                    agent_id: agent_id.clone(),
+                    run_count,
+                    snapshot: snapshot.clone(),
+                }),
+            });
+        }
+        self.capture_terminal_tool_facts(entry, &agent_id, run_count, snapshot);
+    }
+
+    /// Capture the typed-stable facts of a swarm snapshot: terminal child
+    /// items plus their completed tool rows.
+    fn capture_swarm_snapshot_facts(&mut self, entry: TranscriptEntryId, snapshot: &SwarmSnapshot) {
+        for child in &snapshot.children {
+            let agent_id = child.agent.id.as_str().to_owned();
+            let run_count = run_count_u32(child.agent.run_count);
+            if child.agent.state.is_terminal() {
+                self.capture_progressive_fact(ProgressiveFact {
+                    id: ProgressiveFactId::SwarmItem {
+                        entry,
+                        swarm_id: snapshot.swarm_id.clone(),
+                        item_index: child.item_index,
+                        agent_id: agent_id.clone(),
+                        run_count,
+                    },
+                    payload: ProgressiveFactPayload::SwarmItem(SwarmItemFact {
+                        swarm_id: snapshot.swarm_id.clone(),
+                        item_index: child.item_index,
+                        agent_id: agent_id.clone(),
+                        run_count,
+                        snapshot: child.agent.clone(),
+                    }),
+                });
+            }
+            self.capture_terminal_tool_facts(entry, &agent_id, run_count, &child.agent);
+        }
+    }
+
+    /// Capture every completed child tool row of one agent snapshot. Only the
+    /// typed `Done`/`Failed` phases are stable; queued/ongoing tools stay in
+    /// the live projection.
+    fn capture_terminal_tool_facts(
+        &mut self,
+        entry: TranscriptEntryId,
+        agent_id: &str,
+        run_count: u32,
+        snapshot: &AgentSnapshot,
+    ) {
+        for activity in &snapshot.activity {
+            let AgentActivityKind::Tool {
+                id,
+                name,
+                summary,
+                phase,
+                output,
+                files,
+            } = &activity.kind
+            else {
+                continue;
+            };
+            let fact = ChildToolFact {
+                agent_id: agent_id.to_owned(),
+                run_count,
+                tool_id: id.clone(),
+                name: name.clone(),
+                summary: summary.clone(),
+                phase: *phase,
+                output: output.clone(),
+                files: files.clone(),
+            };
+            if !fact.is_terminal() {
+                continue;
+            }
+            self.capture_progressive_fact(ProgressiveFact {
+                id: ProgressiveFactId::ChildTool {
+                    entry,
+                    agent_id: agent_id.to_owned(),
+                    run_count,
+                    tool_id: id.clone(),
+                },
+                payload: ProgressiveFactPayload::ChildTool(fact),
+            });
+        }
     }
 
     pub(crate) fn begin_live_model_attempt(&mut self, turn: u32) {
@@ -734,6 +842,14 @@ impl TranscriptStore {
                 };
                 component.upsert(snapshot)
             });
+            // Capture after the merge so terminal precedence (Cancelled over
+            // late Completed) is respected, and from the effective snapshot.
+            if let Some(effective) = match &self.entries[index] {
+                TranscriptEntry::DelegateGroup { component } => component.snapshot(&id).cloned(),
+                _ => None,
+            } {
+                self.capture_delegate_snapshot_facts(self.entry_ids[index], &effective, true);
+            }
             return;
         }
         if let Some(index) = self.entries.iter().rposition(|entry| {
@@ -756,8 +872,9 @@ impl TranscriptStore {
                 let TranscriptEntry::Delegate { component } = entry else {
                     return false;
                 };
-                component.update(merged)
+                component.update(merged.clone())
             });
+            self.capture_delegate_snapshot_facts(self.entry_ids[index], &merged, false);
             return;
         }
         if is_root_delegate(&snapshot)
@@ -786,6 +903,12 @@ impl TranscriptStore {
                 };
                 component.upsert(snapshot)
             });
+            if let Some(effective) = match &self.entries[index] {
+                TranscriptEntry::DelegateGroup { component } => component.snapshot(&id).cloned(),
+                _ => None,
+            } {
+                self.capture_delegate_snapshot_facts(self.entry_ids[index], &effective, true);
+            }
             return;
         }
         if is_root_delegate(&snapshot)
@@ -803,6 +926,10 @@ impl TranscriptStore {
                 TranscriptEntry::Delegate { component } => component.snapshot().clone(),
                 _ => return,
             };
+            // The entry identity survives the Delegate-to-Group replacement;
+            // capture both snapshots against the same entry id.
+            self.capture_delegate_snapshot_facts(self.entry_ids[index], &existing, true);
+            self.capture_delegate_snapshot_facts(self.entry_ids[index], &snapshot, true);
             self.mutate_entry(index, |entry| {
                 *entry = TranscriptEntry::DelegateGroup {
                     component: DelegateGroupComponent::new(turn, vec![existing, snapshot]),
@@ -812,8 +939,13 @@ impl TranscriptStore {
             return;
         }
         self.push(TranscriptEntry::Delegate {
-            component: DelegateCardComponent::with_turn(turn, snapshot),
+            component: DelegateCardComponent::with_turn(turn, snapshot.clone()),
         });
+        self.capture_delegate_snapshot_facts(
+            self.entry_ids[self.entries.len() - 1],
+            &snapshot,
+            false,
+        );
     }
 
     pub fn upsert_delegate_progress(&mut self, turn: u32, progress: &AgentProgressSnapshot) {
@@ -839,8 +971,9 @@ impl TranscriptStore {
                 let TranscriptEntry::DelegateGroup { component } = entry else {
                     return false;
                 };
-                component.upsert(snapshot)
+                component.upsert(snapshot.clone())
             });
+            self.capture_delegate_snapshot_facts(self.entry_ids[index], &snapshot, true);
             return;
         }
         if let Some(index) = self.entries.iter().rposition(|entry| {
@@ -862,8 +995,9 @@ impl TranscriptStore {
                 let TranscriptEntry::Delegate { component } = entry else {
                     return false;
                 };
-                component.update(snapshot)
+                component.update(snapshot.clone())
             });
+            self.capture_delegate_snapshot_facts(self.entry_ids[index], &snapshot, false);
             return;
         }
         let _ = turn;
@@ -892,13 +1026,15 @@ impl TranscriptStore {
                 let TranscriptEntry::DelegateSwarm { component } = entry else {
                     return false;
                 };
-                component.update(merged)
+                component.update(merged.clone())
             });
+            self.capture_swarm_snapshot_facts(self.entry_ids[index], &merged);
             return;
         }
         self.push(TranscriptEntry::DelegateSwarm {
-            component: SwarmCardComponent::new(snapshot),
+            component: SwarmCardComponent::new(snapshot.clone()),
         });
+        self.capture_swarm_snapshot_facts(self.entry_ids[self.entries.len() - 1], &snapshot);
     }
 
     pub fn upsert_delegate_swarm_progress(
@@ -928,8 +1064,9 @@ impl TranscriptStore {
                 let TranscriptEntry::DelegateSwarm { component } = entry else {
                     return false;
                 };
-                component.update(snapshot)
+                component.update(snapshot.clone())
             });
+            self.capture_swarm_snapshot_facts(self.entry_ids[index], &snapshot);
         }
     }
 
@@ -1431,6 +1568,10 @@ fn instruction_epoch_fingerprint(epoch: &InstructionEpochData) -> String {
 
 fn is_root_delegate(snapshot: &AgentSnapshot) -> bool {
     snapshot.path.is_root_child()
+}
+
+fn run_count_u32(run_count: usize) -> u32 {
+    u32::try_from(run_count).unwrap_or(u32::MAX)
 }
 
 /// Merge an incoming delegate snapshot with the current one, respecting
