@@ -130,9 +130,9 @@ Neo 默认以流式方式渲染模型输出：助手文本边生成边打印到 
 
 侧边问运行时主 turn 不受影响；同时只能有一个 `/btw` 在跑。
 
-## 队列与转向（Queue & Steer）
+## 队列与引导（Queue & Steer）
 
-Neo 支持在 Agent 正忙时排队后续指令，或在下一个断点注入一条转向消息。
+Neo 支持在 Agent 正忙时排队后续指令，或在下一个断点注入一条引导消息。
 
 ### 排队 follow-up
 
@@ -147,7 +147,7 @@ Neo 支持在 Agent 正忙时排队后续指令，或在下一个断点注入一
 
 ### Steer 注入
 
-`Ctrl+S`（`PromptSteer`）会把当前 prompt 作为**转向指令**注入正在运行的 turn，在下一个工具调用断点被 Agent 看到，用于纠正方向而不必等 turn 结束。若无运行中的 turn，则等价于排队一条 follow-up。
+`Ctrl+S`（`PromptSteer`）会把当前 prompt 作为**引导指令**注入正在运行的 turn，在下一个工具调用断点被 Agent 看到，用于纠正方向而不必等 turn 结束。若无运行中的 turn，则等价于排队一条 follow-up 信息。
 
 ## 退出
 

@@ -231,6 +231,8 @@ swarm_concurrency = 4
 | `max_rounds` | usize | `5` | 单次压缩最大轮数 |
 | `max_retry_attempts` | u32 | `5` | 空/截断摘要的最大重试次数 |
 
+> Tips: micro compaction 将会破坏缓存命中，建议仅用于本地实验环境
+
 ## `[tui]` 表
 
 | 字段 | 类型 | 默认值 | 说明 |

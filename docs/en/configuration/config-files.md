@@ -231,6 +231,8 @@ Context compaction is enabled by default. Fresh config writes include this table
 | `max_rounds` | usize | `5` | Maximum rounds in a single compaction |
 | `max_retry_attempts` | u32 | `5` | Maximum retry attempts for empty/truncated summaries |
 
+> Tips: micro compaction will break the cache hitting rate, only use it in local experience environment 
+
 ## `[tui]` Table
 
 | Field | Type | Default | Description |
