@@ -189,6 +189,7 @@ fn replayed_delegate_snapshot_can_be_resumed_after_session_restore() {
     let events = [AgentEvent::DelegateFinished {
         turn: 3,
         agent: snapshot,
+        workflow_origin: None,
     }];
 
     let restored = MultiAgentRuntime::new();
@@ -223,6 +224,7 @@ fn delegate_events_do_not_serialize_prior_messages() {
     let event = AgentEvent::DelegateUpdated {
         turn: 7,
         agent: snapshot,
+        workflow_origin: None,
     };
     let serialized = serde_json::to_value(&event).expect("serialize delegate event");
 
@@ -263,7 +265,11 @@ fn delegate_swarm_events_do_not_serialize_child_prior_messages() {
         }],
     };
 
-    let event = AgentEvent::DelegateSwarmUpdated { turn: 8, swarm };
+    let event = AgentEvent::DelegateSwarmUpdated {
+        turn: 8,
+        swarm,
+        workflow_origin: None,
+    };
     let serialized = serde_json::to_value(&event).expect("serialize swarm event");
 
     assert_eq!(
@@ -283,6 +289,7 @@ fn replayed_running_delegate_is_marked_lost_and_can_be_resumed() {
     let events = [AgentEvent::DelegateStarted {
         turn: 3,
         agent: snapshot,
+        workflow_origin: None,
     }];
 
     let restored = MultiAgentRuntime::new();
@@ -345,8 +352,13 @@ fn compact_delegate_progress_restores_and_resumes() {
             agent: runtime
                 .agent_snapshot(&agent_id)
                 .expect("started agent snapshot"),
+            workflow_origin: None,
         },
-        AgentEvent::DelegateProgressUpdated { turn: 4, progress },
+        AgentEvent::DelegateProgressUpdated {
+            turn: 4,
+            progress,
+            workflow_origin: None,
+        },
     ];
 
     let restored = MultiAgentRuntime::new();
@@ -393,8 +405,13 @@ fn compact_running_delegate_progress_restores_as_interrupted() {
         AgentEvent::DelegateStarted {
             turn: 5,
             agent: snapshot,
+            workflow_origin: None,
         },
-        AgentEvent::DelegateProgressUpdated { turn: 5, progress },
+        AgentEvent::DelegateProgressUpdated {
+            turn: 5,
+            progress,
+            workflow_origin: None,
+        },
     ];
 
     let restored = MultiAgentRuntime::new();
@@ -445,6 +462,7 @@ fn compact_swarm_child_progress_refreshes_aggregate_and_ordering() {
         AgentEvent::DelegateSwarmStarted {
             turn: 6,
             swarm: started,
+            workflow_origin: None,
         },
         AgentEvent::DelegateSwarmProgressUpdated {
             turn: 6,
@@ -455,6 +473,7 @@ fn compact_swarm_child_progress_refreshes_aggregate_and_ordering() {
                 item_index: 0,
                 progress: completed.progress_snapshot(),
             },
+            workflow_origin: None,
         },
     ];
 
@@ -638,6 +657,7 @@ async fn resumed_child_turn_replays_prior_messages_from_agent_wire() {
     let events = [AgentEvent::DelegateFinished {
         turn: 1,
         agent: replayed_snapshot,
+        workflow_origin: None,
     }];
     restored.restore_from_replay(events.iter());
 
@@ -993,6 +1013,7 @@ fn replayed_swarm_marks_running_children_lost_and_refreshes_aggregate() {
     let events = [AgentEvent::DelegateSwarmStarted {
         turn: 4,
         swarm: snapshot,
+        workflow_origin: None,
     }];
 
     let restored = MultiAgentRuntime::new();
@@ -1501,7 +1522,7 @@ async fn foreground_delegate_runs_child_model_turn_and_reports_child_summary() {
     let finished_agent = events
         .iter()
         .find_map(|event| match event {
-            AgentEvent::DelegateFinished { turn, agent } => Some((*turn, agent)),
+            AgentEvent::DelegateFinished { turn, agent, .. } => Some((*turn, agent)),
             _ => None,
         })
         .expect("delegate finished event");
@@ -2317,7 +2338,7 @@ fn assert_named_swarm_lifecycle(events: &[AgentEvent], harness: &FakeHarness) {
     let finished_swarm = events
         .iter()
         .find_map(|event| match event {
-            AgentEvent::DelegateSwarmFinished { turn, swarm } => Some((*turn, swarm)),
+            AgentEvent::DelegateSwarmFinished { turn, swarm, .. } => Some((*turn, swarm)),
             _ => None,
         })
         .expect("swarm finished event");

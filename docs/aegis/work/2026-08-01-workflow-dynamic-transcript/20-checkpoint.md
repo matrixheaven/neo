@@ -26,3 +26,24 @@
 - New risk signals:
 - none
 - Advisory decision: continue
+
+## Checkpoint Update
+
+- Current todo: Task 2: make one workflow entry own typed activity
+- Active slice: Task 2 preparation
+- Completed todos:
+- Task 1: carry live workflow provenance through Delegate-family and question events
+- Evidence refs:
+- task1-workflow-origin-tests
+- task1-two-stage-review
+- Blocked on: none
+- Next step: Commit Task 1, then dispatch a fresh Task 2 implementer with the approved slice boundary.
+
+## DriftCheckDraft
+
+- Scope status: Task 1 remains aligned: one live-only typed origin, no inference, no session migration. File scope expanded only to existing carriers, consumers, and test constructors required by the enum change.
+- Compatibility status: Session JSON remains unchanged; non-workflow events use None; non-workflow Delegate-family presentation behavior is unchanged.
+- Retirement status: No fallback, alias, queue correlation, or duplicate provenance owner was added.
+- New risk signals:
+- Representative JSON test covers one variant; all nine fields carry identical serde and schemars skip attributes, leaving low residual schema-regression risk.
+- Advisory decision: continue

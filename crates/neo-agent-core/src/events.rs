@@ -396,30 +396,51 @@ pub enum AgentEvent {
         turn: u32,
         id: String,
         questions: Vec<QuestionEventData>,
+        #[serde(skip)]
+        #[schemars(skip)]
+        workflow_origin: Option<crate::workflow::WorkflowExecutionOrigin>,
     },
     DelegateStarted {
         turn: u32,
         agent: AgentSnapshot,
+        #[serde(skip)]
+        #[schemars(skip)]
+        workflow_origin: Option<crate::workflow::WorkflowExecutionOrigin>,
     },
     DelegateUpdated {
         turn: u32,
         agent: AgentSnapshot,
+        #[serde(skip)]
+        #[schemars(skip)]
+        workflow_origin: Option<crate::workflow::WorkflowExecutionOrigin>,
     },
     DelegateProgressUpdated {
         turn: u32,
         progress: AgentProgressSnapshot,
+        #[serde(skip)]
+        #[schemars(skip)]
+        workflow_origin: Option<crate::workflow::WorkflowExecutionOrigin>,
     },
     DelegateFinished {
         turn: u32,
         agent: AgentSnapshot,
+        #[serde(skip)]
+        #[schemars(skip)]
+        workflow_origin: Option<crate::workflow::WorkflowExecutionOrigin>,
     },
     DelegateSwarmStarted {
         turn: u32,
         swarm: SwarmSnapshot,
+        #[serde(skip)]
+        #[schemars(skip)]
+        workflow_origin: Option<crate::workflow::WorkflowExecutionOrigin>,
     },
     DelegateSwarmUpdated {
         turn: u32,
         swarm: SwarmSnapshot,
+        #[serde(skip)]
+        #[schemars(skip)]
+        workflow_origin: Option<crate::workflow::WorkflowExecutionOrigin>,
     },
     DelegateSwarmProgressUpdated {
         turn: u32,
@@ -427,10 +448,16 @@ pub enum AgentEvent {
         state: AgentLifecycleState,
         aggregate: SwarmAggregate,
         child_progress: SwarmChildProgress,
+        #[serde(skip)]
+        #[schemars(skip)]
+        workflow_origin: Option<crate::workflow::WorkflowExecutionOrigin>,
     },
     DelegateSwarmFinished {
         turn: u32,
         swarm: SwarmSnapshot,
+        #[serde(skip)]
+        #[schemars(skip)]
+        workflow_origin: Option<crate::workflow::WorkflowExecutionOrigin>,
     },
     WorkflowStarted {
         turn: u32,
@@ -677,12 +704,43 @@ mod tests {
                 ],
                 multi_select: false,
             }],
+            workflow_origin: None,
         };
         let json = serde_json::to_string(&event).expect("serialize");
         assert!(json.contains("\"QuestionRequested\""));
         assert!(json.contains("\"q-123\""));
         let back: AgentEvent = serde_json::from_str(&json).expect("deserialize");
         assert_eq!(event, back);
+    }
+
+    #[test]
+    fn delegate_workflow_origin_is_live_only() {
+        let origin = crate::workflow::WorkflowExecutionOrigin {
+            run_id: crate::workflow::WorkflowId("workflow-run".into()),
+            human_handle: None,
+            definition_name: "workflow".into(),
+            definition_revision: None,
+            phase_id: Some("phase".into()),
+            invocation_id: Some("invocation".into()),
+            swarm_item_id: None,
+        };
+        let runtime = crate::multi_agent::MultiAgentRuntime::new();
+        let agent = runtime.start_foreground_delegate_for_test("task");
+        let event = AgentEvent::DelegateStarted {
+            turn: 1,
+            agent,
+            workflow_origin: Some(origin),
+        };
+        let json = serde_json::to_string(&event).expect("serialize");
+        assert!(!json.contains("workflow_origin"));
+        let restored: AgentEvent = serde_json::from_str(&json).expect("deserialize");
+        assert!(matches!(
+            restored,
+            AgentEvent::DelegateStarted {
+                workflow_origin: None,
+                ..
+            }
+        ));
     }
 
     #[test]

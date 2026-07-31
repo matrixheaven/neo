@@ -80,6 +80,8 @@ pub struct PendingQuestion {
     pub id: String,
     /// The questions to present to the user.
     pub questions: Vec<QuestionEventData>,
+    /// Live workflow invocation that requested the question, when any.
+    pub workflow_origin: Option<crate::workflow::WorkflowExecutionOrigin>,
     /// Channel to receive the user's answers.
     pub response_tx: oneshot::Sender<QuestionResponse>,
 }
@@ -235,6 +237,7 @@ impl Tool for AskUserTool {
                     .send(PendingQuestion {
                         id,
                         questions,
+                        workflow_origin: ctx.workflow_origin.clone(),
                         response_tx,
                     })
                     .map_err(|_| super::ToolError::InvalidInput {
@@ -254,6 +257,7 @@ impl Tool for AskUserTool {
                 .send(PendingQuestion {
                     id: id.clone(),
                     questions,
+                    workflow_origin: ctx.workflow_origin.clone(),
                     response_tx,
                 })
                 .map_err(|_| super::ToolError::InvalidInput {
@@ -346,7 +350,16 @@ mod tests {
     async fn ask_user_receives_response() {
         let (tx, mut rx) = mpsc::unbounded_channel::<PendingQuestion>();
         let tool = AskUserTool::new(tx);
-        let ctx = make_ctx();
+        let origin = crate::workflow::WorkflowExecutionOrigin {
+            run_id: crate::workflow::WorkflowId("workflow-run".into()),
+            human_handle: None,
+            definition_name: "workflow".into(),
+            definition_revision: None,
+            phase_id: Some("phase".into()),
+            invocation_id: Some("invocation".into()),
+            swarm_item_id: None,
+        };
+        let ctx = make_ctx().with_workflow_origin(Some(origin.clone()));
 
         let input = json!({
             "questions": [{
@@ -366,6 +379,7 @@ mod tests {
             assert_eq!(pending.questions.len(), 1);
             assert_eq!(pending.questions[0].question, "Which framework?");
             assert_eq!(pending.questions[0].options.len(), 2);
+            assert_eq!(pending.workflow_origin.as_ref(), Some(&origin));
             let _ = pending.response_tx.send(QuestionResponse {
                 answers: vec!["React".to_owned()],
             });

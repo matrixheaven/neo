@@ -385,6 +385,7 @@ fn compact_delegate_progress_events_deserialize_and_do_not_replay_messages() {
     let event = AgentEvent::DelegateProgressUpdated {
         turn: 9,
         progress: progress.clone(),
+        workflow_origin: None,
     };
     let json = serde_json::to_string(&event).expect("serialize compact event");
 
@@ -451,6 +452,7 @@ fn compact_swarm_progress_events_deserialize_and_do_not_replay_messages() {
                 outcome: None,
             },
         },
+        workflow_origin: None,
     };
     let json = serde_json::to_string(&event).expect("serialize compact swarm event");
 
@@ -1432,6 +1434,7 @@ fn delegate_persistence_strips_live_shell_queue_metadata() {
     let finished = AgentEvent::DelegateFinished {
         turn: 1,
         agent: agent.clone(),
+        workflow_origin: None,
     };
     let persisted = persistence.persisted_events(&finished);
     assert_eq!(persisted.len(), 1);
@@ -1458,6 +1461,7 @@ fn delegate_persistence_strips_live_shell_queue_metadata() {
     let swarm_finished = AgentEvent::DelegateSwarmFinished {
         turn: 1,
         swarm: swarm.clone(),
+        workflow_origin: None,
     };
     let mut swarm_persistence = SessionEventPersistence::default();
     let persisted_swarm = swarm_persistence.persisted_events(&swarm_finished);
@@ -1470,6 +1474,7 @@ fn delegate_persistence_strips_live_shell_queue_metadata() {
     let updated = AgentEvent::DelegateUpdated {
         turn: 2,
         agent: agent.clone(),
+        workflow_origin: None,
     };
     let progress_events = progress_persistence.persisted_events(&updated);
     assert_eq!(progress_events.len(), 1);
@@ -1484,7 +1489,11 @@ fn delegate_persistence_strips_live_shell_queue_metadata() {
     agent.updated_at_ms = 5_000;
     assert!(
         progress_persistence
-            .persisted_events(&AgentEvent::DelegateUpdated { turn: 3, agent })
+            .persisted_events(&AgentEvent::DelegateUpdated {
+                turn: 3,
+                agent,
+                workflow_origin: None,
+            })
             .is_empty()
     );
 
@@ -1498,6 +1507,7 @@ fn delegate_persistence_strips_live_shell_queue_metadata() {
             item_index: 0,
             progress: direct_progress.clone(),
         },
+        workflow_origin: None,
     };
     let mut direct_persistence = SessionEventPersistence::default();
     let direct_events = direct_persistence.persisted_events(&direct);
@@ -1523,6 +1533,7 @@ fn delegate_persistence_strips_live_shell_queue_metadata() {
                     item_index: 0,
                     progress: direct_progress,
                 },
+                workflow_origin: None,
             })
             .is_empty()
     );

@@ -41,16 +41,16 @@ impl SessionEventPersistence {
             AgentEvent::DelegateStarted { .. } | AgentEvent::DelegateFinished { .. } => {
                 self.process_delegate_boundary(event)
             }
-            AgentEvent::DelegateUpdated { turn, agent } => {
+            AgentEvent::DelegateUpdated { turn, agent, .. } => {
                 self.persist_delegate_progress(*turn, agent.progress_snapshot())
             }
-            AgentEvent::DelegateProgressUpdated { turn, progress } => {
+            AgentEvent::DelegateProgressUpdated { turn, progress, .. } => {
                 self.persist_delegate_progress(*turn, progress.clone())
             }
             AgentEvent::DelegateSwarmStarted { .. } | AgentEvent::DelegateSwarmFinished { .. } => {
                 self.process_swarm_boundary(event)
             }
-            AgentEvent::DelegateSwarmUpdated { turn, swarm } => {
+            AgentEvent::DelegateSwarmUpdated { turn, swarm, .. } => {
                 for child in &swarm.children {
                     let persisted = self.persist_swarm_progress(
                         *turn,
@@ -74,6 +74,7 @@ impl SessionEventPersistence {
                 state,
                 aggregate,
                 child_progress,
+                ..
             } => self.persist_swarm_progress(
                 *turn,
                 swarm_id.clone(),
@@ -150,6 +151,7 @@ impl SessionEventPersistence {
         vec![AgentEvent::DelegateProgressUpdated {
             turn,
             progress: gate.last_progress.clone().expect("progress recorded"),
+            workflow_origin: None,
         }]
     }
 
@@ -178,6 +180,7 @@ impl SessionEventPersistence {
             state,
             aggregate,
             child_progress,
+            workflow_origin: None,
         }]
     }
 }

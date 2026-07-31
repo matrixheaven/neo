@@ -214,9 +214,9 @@ impl TranscriptPane {
 
     fn apply_delegate_event(&mut self, event: &AgentEvent) -> bool {
         match event {
-            AgentEvent::DelegateStarted { turn, agent }
-            | AgentEvent::DelegateUpdated { turn, agent }
-            | AgentEvent::DelegateFinished { turn, agent } => {
+            AgentEvent::DelegateStarted { turn, agent, .. }
+            | AgentEvent::DelegateUpdated { turn, agent, .. }
+            | AgentEvent::DelegateFinished { turn, agent, .. } => {
                 self.transcript.upsert_delegate(*turn, agent.clone());
                 self.record_delegate_absorption_target(
                     *turn,
@@ -226,7 +226,7 @@ impl TranscriptPane {
                 self.mark_dirty();
                 true
             }
-            AgentEvent::DelegateProgressUpdated { turn, progress } => {
+            AgentEvent::DelegateProgressUpdated { turn, progress, .. } => {
                 self.transcript.upsert_delegate_progress(*turn, progress);
                 self.record_delegate_absorption_target(
                     *turn,
@@ -236,9 +236,9 @@ impl TranscriptPane {
                 self.mark_dirty();
                 true
             }
-            AgentEvent::DelegateSwarmStarted { turn, swarm }
-            | AgentEvent::DelegateSwarmUpdated { turn, swarm }
-            | AgentEvent::DelegateSwarmFinished { turn, swarm } => {
+            AgentEvent::DelegateSwarmStarted { turn, swarm, .. }
+            | AgentEvent::DelegateSwarmUpdated { turn, swarm, .. }
+            | AgentEvent::DelegateSwarmFinished { turn, swarm, .. } => {
                 self.transcript.upsert_delegate_swarm(swarm.clone());
                 self.apply_expand_state_to_delegate_swarm(&swarm.swarm_id);
                 self.record_delegate_absorption_target(
@@ -255,6 +255,7 @@ impl TranscriptPane {
                 state,
                 aggregate,
                 child_progress,
+                ..
             } => {
                 self.transcript.upsert_delegate_swarm_progress(
                     swarm_id,

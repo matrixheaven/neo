@@ -1250,6 +1250,33 @@ fn stamp_workflow_origin(
         }
         | crate::AgentEvent::ToolExecutionUpdate {
             workflow_origin, ..
+        }
+        | crate::AgentEvent::QuestionRequested {
+            workflow_origin, ..
+        }
+        | crate::AgentEvent::DelegateStarted {
+            workflow_origin, ..
+        }
+        | crate::AgentEvent::DelegateUpdated {
+            workflow_origin, ..
+        }
+        | crate::AgentEvent::DelegateProgressUpdated {
+            workflow_origin, ..
+        }
+        | crate::AgentEvent::DelegateFinished {
+            workflow_origin, ..
+        }
+        | crate::AgentEvent::DelegateSwarmStarted {
+            workflow_origin, ..
+        }
+        | crate::AgentEvent::DelegateSwarmUpdated {
+            workflow_origin, ..
+        }
+        | crate::AgentEvent::DelegateSwarmProgressUpdated {
+            workflow_origin, ..
+        }
+        | crate::AgentEvent::DelegateSwarmFinished {
+            workflow_origin, ..
         } => {
             if workflow_origin.is_none() {
                 *workflow_origin = Some(origin.clone());
@@ -1949,6 +1976,7 @@ fn default_tool_context(seed: ToolContextSeed<'_>) -> Result<ToolContext, AgentR
                 .with_shell_runtime(config.shell_runtime.clone())
                 .with_workflow_runtime(config.workflow_runtime.clone())
                 .with_workflow_definitions(config.workflow_definitions.clone())
+                .with_workflow_origin(config.workflow_execution_origin.clone())
                 .with_multi_agent(multi_agent)
                 .with_child_runtime(config.clone(), model, registry, turn)
                 .with_parent_instruction_state(parent_instruction_state);
@@ -1998,7 +2026,7 @@ mod tests {
     use super::{
         EventEmitter, PreparedExecution, ToolExecutionDeps, execute_tool_calls, prepare_edit_calls,
         prepare_tool_calls_for_execution, prepare_write_calls, run_tool_with_cancel,
-        skill_batch_isolation_violation,
+        skill_batch_isolation_violation, stamp_workflow_origin,
     };
     use crate::harness::fake_model;
     use crate::runtime::config::{AgentConfig, ToolExecutionMode};
@@ -2010,6 +2038,140 @@ mod tests {
         AgentContext, AgentEvent, AgentMessage, AgentToolCall, ApprovalAction, ApprovalResponse,
         PermissionMode, ProcessSupervisor,
     };
+
+    fn workflow_origin(run_id: &str) -> crate::workflow::WorkflowExecutionOrigin {
+        crate::workflow::WorkflowExecutionOrigin {
+            run_id: crate::workflow::WorkflowId(run_id.into()),
+            human_handle: None,
+            definition_name: "workflow".into(),
+            definition_revision: None,
+            phase_id: Some("phase".into()),
+            invocation_id: Some("invocation".into()),
+            swarm_item_id: None,
+        }
+    }
+
+    fn delegate_family_events() -> Vec<AgentEvent> {
+        let runtime = crate::multi_agent::MultiAgentRuntime::new();
+        let agent = runtime.start_foreground_delegate_for_test("task");
+        let progress = agent.progress_snapshot();
+        let swarm = crate::multi_agent::SwarmSnapshot {
+            swarm_id: "swarm".into(),
+            description: "task".into(),
+            role: crate::multi_agent::AgentRole::Coder,
+            mode: crate::multi_agent::AgentRunMode::Foreground,
+            state: crate::multi_agent::AgentLifecycleState::Running,
+            max_concurrency: 1,
+            aggregate: crate::multi_agent::SwarmAggregate::default(),
+            children: Vec::new(),
+        };
+        vec![
+            AgentEvent::QuestionRequested {
+                turn: 1,
+                id: "question".into(),
+                questions: Vec::new(),
+                workflow_origin: None,
+            },
+            AgentEvent::DelegateStarted {
+                turn: 1,
+                agent: agent.clone(),
+                workflow_origin: None,
+            },
+            AgentEvent::DelegateUpdated {
+                turn: 1,
+                agent: agent.clone(),
+                workflow_origin: None,
+            },
+            AgentEvent::DelegateProgressUpdated {
+                turn: 1,
+                progress: progress.clone(),
+                workflow_origin: None,
+            },
+            AgentEvent::DelegateFinished {
+                turn: 1,
+                agent,
+                workflow_origin: None,
+            },
+            AgentEvent::DelegateSwarmStarted {
+                turn: 1,
+                swarm: swarm.clone(),
+                workflow_origin: None,
+            },
+            AgentEvent::DelegateSwarmUpdated {
+                turn: 1,
+                swarm: swarm.clone(),
+                workflow_origin: None,
+            },
+            AgentEvent::DelegateSwarmProgressUpdated {
+                turn: 1,
+                swarm_id: "swarm".into(),
+                state: crate::multi_agent::AgentLifecycleState::Running,
+                aggregate: crate::multi_agent::SwarmAggregate::default(),
+                child_progress: crate::multi_agent::SwarmChildProgress {
+                    item_index: 0,
+                    progress,
+                },
+                workflow_origin: None,
+            },
+            AgentEvent::DelegateSwarmFinished {
+                turn: 1,
+                swarm,
+                workflow_origin: None,
+            },
+        ]
+    }
+
+    fn workflow_origin_of(event: &AgentEvent) -> Option<&crate::workflow::WorkflowExecutionOrigin> {
+        match event {
+            AgentEvent::QuestionRequested {
+                workflow_origin, ..
+            }
+            | AgentEvent::DelegateStarted {
+                workflow_origin, ..
+            }
+            | AgentEvent::DelegateUpdated {
+                workflow_origin, ..
+            }
+            | AgentEvent::DelegateProgressUpdated {
+                workflow_origin, ..
+            }
+            | AgentEvent::DelegateFinished {
+                workflow_origin, ..
+            }
+            | AgentEvent::DelegateSwarmStarted {
+                workflow_origin, ..
+            }
+            | AgentEvent::DelegateSwarmUpdated {
+                workflow_origin, ..
+            }
+            | AgentEvent::DelegateSwarmProgressUpdated {
+                workflow_origin, ..
+            }
+            | AgentEvent::DelegateSwarmFinished {
+                workflow_origin, ..
+            } => workflow_origin.as_ref(),
+            _ => None,
+        }
+    }
+
+    #[test]
+    fn stamp_workflow_origin_covers_delegate_families() {
+        let origin = workflow_origin("workflow-run");
+        for event in delegate_family_events() {
+            let stamped = stamp_workflow_origin(event, Some(&origin));
+            assert_eq!(workflow_origin_of(&stamped), Some(&origin));
+        }
+
+        let existing = workflow_origin("existing-run");
+        let event = AgentEvent::DelegateStarted {
+            turn: 1,
+            agent: crate::multi_agent::MultiAgentRuntime::new()
+                .start_foreground_delegate_for_test("task"),
+            workflow_origin: Some(existing.clone()),
+        };
+        let stamped = stamp_workflow_origin(event, Some(&origin));
+        assert_eq!(workflow_origin_of(&stamped), Some(&existing));
+    }
 
     struct CancellationSettlingTerminal {
         entered: Arc<Notify>,

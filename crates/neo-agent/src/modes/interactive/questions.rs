@@ -28,6 +28,7 @@ impl InteractiveController {
                 turn: 0,
                 id: id.clone(),
                 questions: questions.clone(),
+                workflow_origin: pending.workflow_origin.clone(),
             });
         let display = questions
             .iter()

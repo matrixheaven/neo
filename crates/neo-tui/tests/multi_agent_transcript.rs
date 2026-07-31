@@ -313,10 +313,12 @@ fn option_b_delegate_group_keeps_agent_names_visible() {
     pane.apply_agent_event(AgentEvent::DelegateStarted {
         turn: 7,
         agent: nova,
+        workflow_origin: None,
     });
     pane.apply_agent_event(AgentEvent::DelegateStarted {
         turn: 7,
         agent: vega,
+        workflow_origin: None,
     });
     let _ = pane.render_frame(160, 30);
 
@@ -358,6 +360,7 @@ fn later_same_turn_root_delegate_remains_visible_after_prior_group_commit() {
         pane.apply_agent_event(AgentEvent::DelegateFinished {
             turn: 7,
             agent: delegate,
+            workflow_origin: None,
         });
     }
     let committed = pane.render_terminal_update(160, 30);
@@ -373,6 +376,7 @@ fn later_same_turn_root_delegate_remains_visible_after_prior_group_commit() {
             AgentLifecycleState::Running,
             "review committed output",
         ),
+        workflow_origin: None,
     });
     let update = pane.render_terminal_update(160, 30);
     let live = update
@@ -398,6 +402,7 @@ fn compact_delegate_progress_replays_as_delegate_card() {
     pane.apply_agent_event(AgentEvent::DelegateStarted {
         turn: 11,
         agent: started.clone(),
+        workflow_origin: None,
     });
 
     started.latest_text = Some("persisted compact progress".to_owned());
@@ -415,6 +420,7 @@ fn compact_delegate_progress_replays_as_delegate_card() {
     pane.apply_agent_event(AgentEvent::DelegateProgressUpdated {
         turn: 11,
         progress: started.progress_snapshot(),
+        workflow_origin: None,
     });
     let _ = pane.render_frame(160, 30);
 
@@ -441,10 +447,12 @@ fn in_place_card_updates_preserve_active_thinking() {
     pane.apply_agent_event(AgentEvent::DelegateStarted {
         turn: 1,
         agent: delegate.clone(),
+        workflow_origin: None,
     });
     pane.apply_agent_event(AgentEvent::DelegateSwarmStarted {
         turn: 1,
         swarm: swarm.clone(),
+        workflow_origin: None,
     });
     pane.apply_agent_event(AgentEvent::ThinkingStarted {
         turn: 2,
@@ -460,6 +468,7 @@ fn in_place_card_updates_preserve_active_thinking() {
     pane.apply_agent_event(AgentEvent::DelegateUpdated {
         turn: 1,
         agent: delegate.clone(),
+        workflow_origin: None,
     });
     pane.apply_agent_event(AgentEvent::ThinkingDelta {
         turn: 2,
@@ -471,6 +480,7 @@ fn in_place_card_updates_preserve_active_thinking() {
     pane.apply_agent_event(AgentEvent::DelegateProgressUpdated {
         turn: 1,
         progress: AgentProgressSnapshot::from_agent(&delegate),
+        workflow_origin: None,
     });
     pane.apply_agent_event(AgentEvent::ThinkingDelta {
         turn: 2,
@@ -482,7 +492,11 @@ fn in_place_card_updates_preserve_active_thinking() {
     swarm.children[0].agent.latest_text = Some("swarm update".to_owned());
     swarm.aggregate = SwarmAggregate::from_states([AgentLifecycleState::Running]);
     swarm.state = swarm.aggregate.status();
-    pane.apply_agent_event(AgentEvent::DelegateSwarmUpdated { turn: 1, swarm });
+    pane.apply_agent_event(AgentEvent::DelegateSwarmUpdated {
+        turn: 1,
+        swarm,
+        workflow_origin: None,
+    });
     pane.apply_agent_event(AgentEvent::ThinkingDelta {
         turn: 2,
         text: "e".to_owned(),
@@ -502,6 +516,7 @@ fn in_place_card_updates_preserve_active_thinking() {
             item_index: swarm_child.item_index,
             progress: AgentProgressSnapshot::from_agent(&updated_child),
         },
+        workflow_origin: None,
     });
     pane.apply_agent_event(AgentEvent::ThinkingDelta {
         turn: 2,
@@ -1410,6 +1425,7 @@ fn transcript_pane_upserts_delegate_card_from_events() {
     pane.apply_agent_event(AgentEvent::DelegateStarted {
         turn: 1,
         agent: running_delegate(),
+        workflow_origin: None,
     });
 
     // Force a render so last_frame is populated.
@@ -1439,6 +1455,7 @@ fn option_b_delegate_transcript_absorbs_matching_tool_header() {
     pane.apply_agent_event(AgentEvent::DelegateStarted {
         turn: 11,
         agent: running_delegate(),
+        workflow_origin: None,
     });
 
     let _ = pane.render_frame(140, 30);
@@ -1461,6 +1478,7 @@ fn option_b_delegate_transcript_absorbs_late_tool_header_after_snapshot() {
     pane.apply_agent_event(AgentEvent::DelegateStarted {
         turn: 16,
         agent: running_delegate(),
+        workflow_origin: None,
     });
     pane.apply_agent_event(AgentEvent::ToolExecutionStarted {
         turn: 16,
@@ -1497,6 +1515,7 @@ fn option_b_delegate_absorption_suppresses_matching_tool_result_details() {
     pane.apply_agent_event(AgentEvent::DelegateStarted {
         turn: 20,
         agent: running_delegate(),
+        workflow_origin: None,
     });
     pane.apply_agent_event(AgentEvent::ToolExecutionFinished {
         turn: 20,
@@ -1540,6 +1559,7 @@ fn option_b_delegate_absorption_restores_failed_tool_result() {
     pane.apply_agent_event(AgentEvent::DelegateStarted {
         turn: 14,
         agent: running_delegate(),
+        workflow_origin: None,
     });
     pane.apply_agent_event(AgentEvent::ToolExecutionFinished {
         turn: 14,
@@ -1579,10 +1599,12 @@ fn option_b_delegate_absorption_distinguishes_completed_agent_from_failed_schema
     pane.apply_agent_event(AgentEvent::DelegateStarted {
         turn: 18,
         agent: running_delegate(),
+        workflow_origin: None,
     });
     pane.apply_agent_event(AgentEvent::DelegateFinished {
         turn: 18,
         agent: completed_delegate(),
+        workflow_origin: None,
     });
     pane.apply_agent_event(AgentEvent::ToolExecutionFinished {
         turn: 18,
@@ -1637,6 +1659,7 @@ fn option_b_delegate_absorption_restores_mismatched_tool_result_details() {
     pane.apply_agent_event(AgentEvent::DelegateStarted {
         turn: 15,
         agent: running_delegate(),
+        workflow_origin: None,
     });
     pane.apply_agent_event(AgentEvent::ToolExecutionFinished {
         turn: 15,
@@ -1692,6 +1715,7 @@ fn option_b_delegate_absorption_keeps_completed_mismatched_tool_when_snapshot_ar
     pane.apply_agent_event(AgentEvent::DelegateStarted {
         turn: 17,
         agent: running_delegate(),
+        workflow_origin: None,
     });
 
     let _ = pane.render_frame(140, 30);
@@ -1735,6 +1759,7 @@ fn option_b_delegate_group_keeps_unmatched_running_tool_header() {
     pane.apply_agent_event(AgentEvent::DelegateStarted {
         turn: 22,
         agent: first,
+        workflow_origin: None,
     });
 
     let _ = pane.render_frame(160, 40);
@@ -1777,6 +1802,7 @@ fn option_b_delegate_group_suppresses_matching_finished_tool_and_keeps_failed_on
     pane.apply_agent_event(AgentEvent::DelegateStarted {
         turn: 23,
         agent: first,
+        workflow_origin: None,
     });
     pane.apply_agent_event(AgentEvent::ToolExecutionFinished {
         turn: 23,
@@ -1856,10 +1882,12 @@ fn option_b_delegate_group_absorbs_matching_tool_headers() {
     pane.apply_agent_event(AgentEvent::DelegateStarted {
         turn: 12,
         agent: first,
+        workflow_origin: None,
     });
     pane.apply_agent_event(AgentEvent::DelegateStarted {
         turn: 12,
         agent: second,
+        workflow_origin: None,
     });
 
     let _ = pane.render_frame(160, 40);
@@ -1899,6 +1927,7 @@ fn option_b_swarm_transcript_absorbs_matching_tool_header() {
     pane.apply_agent_event(AgentEvent::DelegateSwarmStarted {
         turn: 13,
         swarm: snapshot,
+        workflow_origin: None,
     });
 
     let _ = pane.render_frame(160, 30);
@@ -1938,6 +1967,7 @@ fn option_b_swarm_absorption_suppresses_matching_tool_result_details() {
     pane.apply_agent_event(AgentEvent::DelegateSwarmStarted {
         turn: 21,
         swarm: snapshot,
+        workflow_origin: None,
     });
     pane.apply_agent_event(AgentEvent::ToolExecutionFinished {
         turn: 21,
@@ -1989,6 +2019,7 @@ fn option_b_swarm_absorption_restores_failed_tool_result() {
     pane.apply_agent_event(AgentEvent::DelegateSwarmStarted {
         turn: 18,
         swarm: snapshot,
+        workflow_origin: None,
     });
     pane.apply_agent_event(AgentEvent::ToolExecutionFinished {
         turn: 18,
@@ -2047,6 +2078,7 @@ fn option_b_swarm_absorption_keeps_completed_mismatched_tool_when_snapshot_arriv
     pane.apply_agent_event(AgentEvent::DelegateSwarmStarted {
         turn: 19,
         swarm: snapshot,
+        workflow_origin: None,
     });
 
     let _ = pane.render_frame(160, 30);
@@ -2157,14 +2189,17 @@ fn transcript_pane_merges_out_of_order_swarm_updates_without_regressing_children
     pane.apply_agent_event(AgentEvent::DelegateSwarmStarted {
         turn: 1,
         swarm: started,
+        workflow_origin: None,
     });
     pane.apply_agent_event(AgentEvent::DelegateSwarmUpdated {
         turn: 1,
         swarm: newer,
+        workflow_origin: None,
     });
     pane.apply_agent_event(AgentEvent::DelegateSwarmUpdated {
         turn: 1,
         swarm: stale,
+        workflow_origin: None,
     });
 
     let _ = pane.render_frame(160, 30);
@@ -2768,6 +2803,7 @@ fn swarm_progress_applies_text_delta() {
     pane.apply_agent_event(AgentEvent::DelegateSwarmStarted {
         turn: 1,
         swarm: started,
+        workflow_origin: None,
     });
     pane.apply_agent_event(AgentEvent::DelegateSwarmProgressUpdated {
         turn: 1,
@@ -2778,6 +2814,7 @@ fn swarm_progress_applies_text_delta() {
             item_index: child.item_index,
             progress: AgentProgressSnapshot::from_agent(&updated),
         },
+        workflow_origin: None,
     });
 
     let _ = pane.render_frame(160, 30);
@@ -3067,6 +3104,7 @@ fn explicit_animation_tick_marks_transcript_dirty_for_live_delegate_elapsed() {
     pane.apply_agent_event(AgentEvent::DelegateStarted {
         turn: 7,
         agent: snapshot,
+        workflow_origin: None,
     });
 
     let _ = pane.render_frame(120, 30);
@@ -3101,6 +3139,7 @@ fn swarm_progress_preserves_started_time_for_live_elapsed_ticks() {
     pane.apply_agent_event(AgentEvent::DelegateSwarmStarted {
         turn: 7,
         swarm: queued,
+        workflow_origin: None,
     });
     pane.apply_agent_event(AgentEvent::DelegateSwarmProgressUpdated {
         turn: 7,
@@ -3111,6 +3150,7 @@ fn swarm_progress_preserves_started_time_for_live_elapsed_ticks() {
             item_index: 1,
             progress: AgentProgressSnapshot::from_agent(&running),
         },
+        workflow_origin: None,
     });
 
     let _ = pane.render_frame(160, 30);
@@ -3187,10 +3227,12 @@ fn same_turn_root_delegates_render_as_one_live_group() {
     pane.apply_agent_event(AgentEvent::DelegateStarted {
         turn: 9,
         agent: first,
+        workflow_origin: None,
     });
     pane.apply_agent_event(AgentEvent::DelegateStarted {
         turn: 9,
         agent: second,
+        workflow_origin: None,
     });
 
     let _ = pane.render_frame(140, 40);
@@ -3228,10 +3270,12 @@ fn same_turn_delegate_updates_do_not_duplicate_the_same_agent_in_a_group() {
     pane.apply_agent_event(AgentEvent::DelegateStarted {
         turn: 10,
         agent: started,
+        workflow_origin: None,
     });
     pane.apply_agent_event(AgentEvent::DelegateUpdated {
         turn: 10,
         agent: updated,
+        workflow_origin: None,
     });
 
     let _ = pane.render_frame(140, 40);
@@ -3399,11 +3443,13 @@ fn delegate_card_does_not_regress_cancelled_to_done() {
     pane.apply_agent_event(AgentEvent::DelegateStarted {
         turn: 1,
         agent: cancelled,
+        workflow_origin: None,
     });
     // Then apply the stale completed snapshot.
     pane.apply_agent_event(AgentEvent::DelegateFinished {
         turn: 1,
         agent: stale_completed,
+        workflow_origin: None,
     });
 
     let _ = pane.render_frame(120, 20);
@@ -3460,10 +3506,12 @@ fn swarm_card_does_not_regress_cancelled_child_to_done() {
     pane.apply_agent_event(AgentEvent::DelegateSwarmStarted {
         turn: 1,
         swarm: cancelled,
+        workflow_origin: None,
     });
     pane.apply_agent_event(AgentEvent::DelegateSwarmFinished {
         turn: 1,
         swarm: stale_completed,
+        workflow_origin: None,
     });
 
     let _ = pane.render_frame(120, 20);

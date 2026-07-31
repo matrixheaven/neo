@@ -51,6 +51,7 @@ async fn publish_swarm_progress(
             state,
             aggregate,
             child_progress: child_progress.clone(),
+            workflow_origin: None,
         });
     }
     if let Some((manager, task_id)) = background {
@@ -195,6 +196,7 @@ async fn execute_delegate(
     ctx.emit_event(AgentEvent::DelegateStarted {
         turn,
         agent: snapshot.clone(),
+        workflow_origin: None,
     });
     let output = ctx
         .multi_agent
@@ -204,7 +206,11 @@ async fn execute_delegate(
             request.context,
             request.output_schema.as_ref(),
             |agent| {
-                ctx.emit_event(AgentEvent::DelegateUpdated { turn, agent });
+                ctx.emit_event(AgentEvent::DelegateUpdated {
+                    turn,
+                    agent,
+                    workflow_origin: None,
+                });
             },
         )
         .await;
@@ -215,6 +221,7 @@ async fn execute_delegate(
     ctx.emit_event(AgentEvent::DelegateFinished {
         turn,
         agent: completed.clone(),
+        workflow_origin: None,
     });
     let mut details = agent_details(
         "delegate",
@@ -251,6 +258,7 @@ async fn start_background_delegate(
     ctx.emit_event(AgentEvent::DelegateStarted {
         turn,
         agent: snapshot.clone(),
+        workflow_origin: None,
     });
     let task_id = ctx.background_tasks.start_delegate(snapshot.clone()).await;
     let runtime = ctx.multi_agent.clone();
@@ -274,7 +282,11 @@ async fn start_background_delegate(
                     request_for_worker.output_schema.as_ref(),
                     move |agent| {
                         if let Some(callback) = &callback {
-                            callback(AgentEvent::DelegateUpdated { turn, agent });
+                            callback(AgentEvent::DelegateUpdated {
+                                turn,
+                                agent,
+                                workflow_origin: None,
+                            });
                         }
                     },
                 )
@@ -298,6 +310,7 @@ async fn start_background_delegate(
             callback(AgentEvent::DelegateFinished {
                 turn,
                 agent: finished.clone(),
+                workflow_origin: None,
             });
         }
         background_tasks
@@ -379,6 +392,7 @@ async fn execute_delegate_swarm(
         ctx.emit_event(AgentEvent::DelegateSwarmStarted {
             turn,
             swarm: initial_snapshot.clone(),
+            workflow_origin: None,
         });
         let task_id = ctx
             .background_tasks
@@ -445,6 +459,7 @@ async fn execute_delegate_swarm(
     ctx.emit_event(AgentEvent::DelegateSwarmStarted {
         turn,
         swarm: initial_snapshot.clone(),
+        workflow_origin: None,
     });
 
     let output = run_swarm_children(
@@ -462,6 +477,7 @@ async fn execute_delegate_swarm(
     ctx.emit_event(AgentEvent::DelegateSwarmFinished {
         turn,
         swarm: final_snapshot.clone(),
+        workflow_origin: None,
     });
     Ok(swarm_run_result(final_snapshot, output.actual_usage))
 }
@@ -592,6 +608,7 @@ async fn run_swarm_children(
             callback(AgentEvent::DelegateSwarmUpdated {
                 turn,
                 swarm: snapshot.clone(),
+                workflow_origin: None,
             });
         }
         if let Some((manager, task_id)) = &background {
