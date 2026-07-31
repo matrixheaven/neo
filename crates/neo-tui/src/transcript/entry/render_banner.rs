@@ -232,23 +232,6 @@ fn render_user_image(
         .collect()
 }
 
-/// Render a queued/steered message. Steer uses `↳` (brand color) to signal an
-/// immediate mid-turn injection; follow-up uses `↪` (muted) to signal a queued
-/// turn that runs after the current one.
-pub(super) fn render_queued_message(
-    text: &str,
-    is_steer: bool,
-    width: usize,
-    theme: &TuiTheme,
-) -> Vec<Line> {
-    let (prefix, style) = if is_steer {
-        ("↳ ", Style::default().fg(theme.brand).italic())
-    } else {
-        ("↪ ", Style::default().fg(theme.text_muted))
-    };
-    bulleted_wrap(text, width, prefix, style)
-}
-
 pub(super) fn render_assistant_message(content: &str, width: usize, theme: &TuiTheme) -> Vec<Line> {
     if content.is_empty() {
         Vec::new()

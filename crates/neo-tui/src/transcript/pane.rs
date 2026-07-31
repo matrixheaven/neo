@@ -256,39 +256,6 @@ impl TranscriptPane {
         self.push_transcript(TranscriptEntry::user_message_with_images(content, images));
     }
 
-    /// Push a queued (Enter while busy) or steered (Ctrl+S) message preview
-    /// into the transcript. Rendered with a distinct prefix so the user sees
-    /// visual feedback that their input was captured mid-turn.
-    pub fn push_queued_message(&mut self, content: impl Into<String>, is_steer: bool) {
-        self.push_transcript(TranscriptEntry::queued_message(content, is_steer));
-    }
-
-    /// Pop the oldest queued follow-up entry from the transcript. Used
-    /// when the user presses Ctrl+S with an empty composer to promote the
-    /// oldest queued follow-up to a steer. Returns the text if found.
-    pub fn pop_pending_follow_up(&mut self) -> Option<String> {
-        let index = self
-            .transcript
-            .entries()
-            .iter()
-            .enumerate()
-            .rev()
-            .find_map(|(i, entry)| match entry {
-                TranscriptEntry::QueuedMessage {
-                    is_steer: false, ..
-                } => Some(i),
-                _ => None,
-            })?;
-        let entry = self.transcript.remove(index)?;
-        match entry {
-            TranscriptEntry::QueuedMessage { text, .. } => {
-                self.mark_dirty();
-                Some(text)
-            }
-            _ => None,
-        }
-    }
-
     pub fn push_assistant_message(&mut self, content: impl Into<String>) {
         self.push_transcript(TranscriptEntry::assistant_message(content));
     }
@@ -858,6 +825,8 @@ impl TranscriptPane {
 
     pub fn acknowledge_history(&mut self, blocks: &[FinalizedBlock]) {
         self.presentation.acknowledge(blocks);
+        self.presentation
+            .prune_acknowledged_facts(&mut self.transcript);
     }
 
     pub fn finalize_cancelled_live_model_attempt(&mut self) {

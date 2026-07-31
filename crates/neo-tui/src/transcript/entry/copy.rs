@@ -55,8 +55,9 @@ fn card_copy_parts(entry: &TranscriptEntry) -> (&'static str, String) {
         | TranscriptEntry::Image { .. }
         | TranscriptEntry::Status { .. }
         | TranscriptEntry::RetryStatus { .. }
-        | TranscriptEntry::McpStartupStatus { .. }
-        | TranscriptEntry::QueuedMessage { .. } => unreachable!("simple copy parts handled above"),
+        | TranscriptEntry::McpStartupStatus { .. } => {
+            unreachable!("simple copy parts handled above")
+        }
         TranscriptEntry::Banner(_)
         | TranscriptEntry::ToolRun { .. }
         | TranscriptEntry::ShellRun { .. }
@@ -80,10 +81,6 @@ fn text_copy_parts(entry: &TranscriptEntry) -> Option<(&'static str, String)> {
         TranscriptEntry::UserMessage { content, .. } => Some(("You", content.clone())),
         TranscriptEntry::AssistantMessage { content } => Some(("Assistant", content.clone())),
         TranscriptEntry::ThinkingBlock { content, .. } => Some(("Thinking", content.clone())),
-        TranscriptEntry::QueuedMessage { text, is_steer } => {
-            let label = if *is_steer { "Steer" } else { "Queued" };
-            Some((label, text.clone()))
-        }
         _ => None,
     }
 }

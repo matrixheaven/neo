@@ -14,6 +14,7 @@ pub mod pane;
 pub mod partial_json;
 pub mod plan_box;
 mod presentation;
+mod progressive;
 pub mod shell_run;
 mod shell_tool_presentation;
 pub mod store;
@@ -50,6 +51,7 @@ pub use plan_box::PlanBoxComponent;
 pub use presentation::{
     FinalizedBlock, FinalizedBlockProof, TranscriptBlockId, TranscriptTerminalUpdate,
 };
+pub use progressive::{ProgressiveFact, ProgressiveFactId};
 pub use shell_run::{ShellRunComponent, ShellRunState};
 pub use store::{TranscriptEntryId, TranscriptSelection, TranscriptStore, TranscriptViewport};
 pub use swarm_card::SwarmCardComponent;

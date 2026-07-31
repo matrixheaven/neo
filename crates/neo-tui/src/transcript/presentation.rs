@@ -1,9 +1,10 @@
-use std::collections::{BTreeMap, VecDeque};
+use std::collections::{BTreeMap, BTreeSet, VecDeque};
 
 use crate::primitive::Finalization;
 use crate::primitive::theme::TuiTheme;
 use crate::terminal_image::{ImageRenderPolicy, TerminalImageCapabilities};
 
+use super::progressive::{ProgressiveFact, ProgressiveFactId, render_progressive_fact};
 use super::streaming_prefix::stable_prefix_len;
 use super::{TranscriptEntry, TranscriptEntryId, TranscriptStore};
 
@@ -15,6 +16,10 @@ pub enum TranscriptBlockId {
         source_start: usize,
         source_end: usize,
     },
+    /// One immutable progressive fact projected from a mutable entry.
+    Progressive {
+        id: ProgressiveFactId,
+    },
 }
 
 impl TranscriptBlockId {
@@ -22,6 +27,7 @@ impl TranscriptBlockId {
         match self {
             Self::Entries(ids) => ids.first().copied(),
             Self::AssistantSegment { entry, .. } => Some(*entry),
+            Self::Progressive { id } => Some(id.entry()),
         }
     }
 
@@ -29,6 +35,7 @@ impl TranscriptBlockId {
         match self {
             Self::Entries(ids) => ids.last().copied(),
             Self::AssistantSegment { entry, .. } => Some(*entry),
+            Self::Progressive { id } => Some(id.entry()),
         }
     }
 }
@@ -37,6 +44,7 @@ impl TranscriptBlockId {
 pub enum FinalizedBlockProof {
     EntryRevisions(Vec<u64>),
     AssistantSource(String),
+    Progressive(ProgressiveFact),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -149,8 +157,11 @@ impl PresentationFrame {
     }
 
     fn finish(self, live_budget: usize) -> TranscriptTerminalUpdate {
-        let (live, has_visible_animation) = compose_live_blocks(self.live_blocks);
+        let blocks = bound_live_blocks(self.live_blocks, live_budget);
+        let (live, has_visible_animation) = compose_live_blocks(blocks);
         TranscriptTerminalUpdate {
+            // The bounded live result can never request automatic overflow;
+            // the field remains only until its Task 5 removal.
             live_overflow: live.len() > live_budget,
             has_live_frontier: self.commit_blocked,
             history: self.pending_history,
@@ -160,11 +171,71 @@ impl PresentationFrame {
     }
 }
 
+/// Bound the mutable live area to `live_budget` rows. Stable history is never
+/// omitted: the most recent whole blocks win and omitted mutable rows are
+/// summarized by one count line. A single block taller than the budget keeps
+/// its first (header) row plus the newest rows that fit.
+fn bound_live_blocks(blocks: Vec<LiveBlock>, live_budget: usize) -> Vec<LiveBlock> {
+    if live_budget == 0 {
+        return Vec::new();
+    }
+    let total = blocks.iter().map(|block| block.lines.len()).sum::<usize>();
+    if total <= live_budget {
+        return blocks;
+    }
+
+    let mut kept = Vec::<LiveBlock>::new();
+    let mut used = 0usize;
+    for block in blocks.into_iter().rev() {
+        if block.lines.is_empty() {
+            continue;
+        }
+        // One row is reserved for the summary once a block was dropped.
+        let reserved = usize::from(!kept.is_empty());
+        if used + block.lines.len() + reserved <= live_budget {
+            used += block.lines.len();
+            kept.push(block);
+            continue;
+        }
+        if kept.is_empty() {
+            // The newest block alone exceeds the budget: keep its header and
+            // the newest rows that fit. No summary row is possible.
+            let mut lines = block.lines;
+            if lines.len() > live_budget {
+                let header = lines.remove(0);
+                let keep = live_budget.saturating_sub(1);
+                lines = lines.split_off(lines.len().saturating_sub(keep));
+                lines.insert(0, header);
+            }
+            used += lines.len();
+            kept.push(LiveBlock { lines, ..block });
+        }
+        break;
+    }
+    kept.reverse();
+
+    let omitted = total.saturating_sub(used);
+    if omitted > 0 && used.saturating_add(1) <= live_budget {
+        kept.insert(
+            0,
+            LiveBlock {
+                lines: vec![format!("… {omitted} more rows")],
+                animated_line_indices: Vec::new(),
+                separator_before: false,
+            },
+        );
+    }
+    kept
+}
+
 #[derive(Debug, Clone, Default)]
 pub(super) struct TranscriptPresentation {
     committed_entry_revisions: BTreeMap<TranscriptEntryId, u64>,
     assistant_offsets: BTreeMap<TranscriptEntryId, usize>,
     assistant_sources: BTreeMap<TranscriptEntryId, String>,
+    /// Typed identities of progressive facts whose terminal write succeeded.
+    /// Acknowledged facts are never rendered again.
+    acknowledged_facts: BTreeSet<ProgressiveFactId>,
     acknowledged_tail_owner: Option<TranscriptEntryId>,
     diagnostics: VecDeque<String>,
 }
@@ -180,10 +251,31 @@ impl TranscriptPresentation {
         options: TranscriptRenderOptions<'_>,
     ) -> TranscriptTerminalUpdate {
         let mut frame = PresentationFrame::new(self.acknowledged_tail_owner);
-        let live_model_attempt_start = transcript.live_model_attempt_start();
+        let attempt_start = transcript.live_model_attempt_start();
+        let blocking_index = blocking_dialog_index(transcript);
+        // Canonical commit blocking exists only while a model attempt may be
+        // rolled back or while the earliest unresolved blocking dialog holds
+        // the focus. Ordinary mutable entries are bounded live, not barriers.
+        frame.commit_blocked = attempt_start.is_some() || blocking_index.is_some();
         let mut index = 0;
         while index < transcript.entries().len() {
-            frame.commit_blocked |= live_model_attempt_start == Some(index);
+            if blocking_index == Some(index) {
+                // The earliest unresolved approval owns the live focus; every
+                // later row stays deferred until it resolves.
+                let Some(id) = transcript.entry_ids().get(index).copied() else {
+                    index += 1;
+                    continue;
+                };
+                let Some(revision) = transcript.entry_revisions().get(index).copied() else {
+                    index += 1;
+                    continue;
+                };
+                render_entry(transcript, index, id, revision, true, options, &mut frame);
+                break;
+            }
+            // Everything from the live model attempt start is rollback-able
+            // attempt content: it renders bounded live, never as history.
+            let in_attempt = attempt_start.is_some_and(|start| index >= start);
             let Some(id) = transcript.entry_ids().get(index).copied() else {
                 index += 1;
                 continue;
@@ -192,14 +284,9 @@ impl TranscriptPresentation {
                 index += 1;
                 continue;
             };
-            if let Some(TranscriptEntry::AssistantMessage { content }) =
-                transcript.entries().get(index)
-            {
-                let finalization = transcript.entry_finalization(index);
-                self.render_assistant_entry(id, content, finalization, options, &mut frame);
-                index += 1;
-                continue;
-            }
+            // Emit unacknowledged stable facts for this entry before its own
+            // content, preserving canonical order.
+            self.emit_progressive_facts(transcript, id, !in_attempt, options, &mut frame);
 
             if let Some(expected_revision) = self.committed_entry_revisions.get(&id).copied() {
                 if expected_revision != revision {
@@ -211,15 +298,74 @@ impl TranscriptPresentation {
                 continue;
             }
 
-            if let Some(next_index) = self.render_tool_run(transcript, index, options, &mut frame) {
+            if let Some(TranscriptEntry::AssistantMessage { content }) =
+                transcript.entries().get(index)
+            {
+                let finalization = transcript.entry_finalization(index);
+                self.render_assistant_entry(
+                    id,
+                    content,
+                    finalization,
+                    in_attempt,
+                    options,
+                    &mut frame,
+                );
+                index += 1;
+                continue;
+            }
+
+            if let Some(next_index) =
+                self.render_tool_run(transcript, index, in_attempt, options, &mut frame)
+            {
                 index = next_index;
                 continue;
             }
 
-            render_entry(transcript, index, id, revision, options, &mut frame);
+            render_entry(
+                transcript, index, id, revision, in_attempt, options, &mut frame,
+            );
             index += 1;
         }
         frame.finish(options.live_budget)
+    }
+
+    /// Project unacknowledged stable facts for one entry into pending history
+    /// in canonical arrival order. Facts of rollback-able attempt content are
+    /// held until the attempt is canonical.
+    fn emit_progressive_facts(
+        &self,
+        transcript: &TranscriptStore,
+        entry_id: TranscriptEntryId,
+        allowed: bool,
+        options: TranscriptRenderOptions<'_>,
+        frame: &mut PresentationFrame,
+    ) {
+        if !allowed {
+            return;
+        }
+        for fact in transcript.progressive_facts() {
+            if fact.id.entry() != entry_id {
+                continue;
+            }
+            if self.acknowledged_facts.contains(&fact.id) {
+                continue;
+            }
+            let lines = render_progressive_fact(fact, options.width, options.theme);
+            let separator_before = advance_semantic_owner(
+                &mut frame.rendered_tail_owner,
+                Some(entry_id),
+                Some(entry_id),
+                !lines.is_empty(),
+            );
+            frame.pending_history.push(FinalizedBlock {
+                id: TranscriptBlockId::Progressive {
+                    id: fact.id.clone(),
+                },
+                proof: FinalizedBlockProof::Progressive(fact.clone()),
+                lines,
+                separator_before,
+            });
+        }
     }
 
     fn render_assistant_entry(
@@ -227,6 +373,7 @@ impl TranscriptPresentation {
         id: TranscriptEntryId,
         content: &str,
         finalization: Option<Finalization>,
+        blocked: bool,
         options: TranscriptRenderOptions<'_>,
         frame: &mut PresentationFrame,
     ) {
@@ -252,7 +399,7 @@ impl TranscriptPresentation {
                 .max(source_start)
                 .min(content.len())
         };
-        if frame.commit_blocked {
+        if blocked {
             if source_start < content.len() {
                 let lines = render_assistant_segment(
                     &content[source_start..],
@@ -292,10 +439,7 @@ impl TranscriptPresentation {
                 separator_before,
             });
         }
-        if !frame.commit_blocked
-            && finalization == Some(Finalization::Live)
-            && source_end < content.len()
-        {
+        if !blocked && finalization == Some(Finalization::Live) && source_end < content.len() {
             let lines = render_assistant_segment(
                 &content[source_end..],
                 options.width,
@@ -312,13 +456,13 @@ impl TranscriptPresentation {
                 .live_blocks
                 .push(LiveBlock::without_header(lines, false, separator_before));
         }
-        frame.commit_blocked |= finalization == Some(Finalization::Live);
     }
 
     fn render_tool_run(
         &self,
         transcript: &TranscriptStore,
         index: usize,
+        blocked: bool,
         options: TranscriptRenderOptions<'_>,
         frame: &mut PresentationFrame,
     ) -> Option<usize> {
@@ -326,8 +470,6 @@ impl TranscriptPresentation {
             return None;
         };
         if transcript.is_tool_run_suppressed(component.id()) {
-            frame.commit_blocked |=
-                transcript.entry_finalization(index) == Some(Finalization::Live);
             return Some(index + 1);
         }
 
@@ -359,7 +501,7 @@ impl TranscriptPresentation {
             lines,
             separator_before,
         };
-        if all_finalized && !frame.commit_blocked {
+        if all_finalized && !blocked {
             frame.pending_history.push(block);
         } else {
             frame.live_blocks.push(LiveBlock::with_detected_headers(
@@ -368,7 +510,6 @@ impl TranscriptPresentation {
                 block.separator_before,
             ));
         }
-        frame.commit_blocked |= !all_finalized;
         Some(end)
     }
 
@@ -411,6 +552,9 @@ impl TranscriptPresentation {
                         .and_modify(|offset| *offset = (*offset).max(*source_end))
                         .or_insert(*source_end);
                 }
+                (TranscriptBlockId::Progressive { id }, FinalizedBlockProof::Progressive(_)) => {
+                    self.acknowledged_facts.insert(id.clone());
+                }
                 _ => self.record_diagnostic(format!(
                     "presentation proof does not match block identity: {:?}",
                     block.id
@@ -437,6 +581,21 @@ impl TranscriptPresentation {
         }
         self.diagnostics.push_back(diagnostic);
     }
+
+    /// Drop acknowledged fact payloads from the store while retaining their
+    /// typed identities in the acknowledgement ledger so they never replay.
+    pub(super) fn prune_acknowledged_facts(&self, transcript: &mut TranscriptStore) {
+        transcript.retain_progressive_facts(|fact| !self.acknowledged_facts.contains(&fact.id));
+    }
+}
+
+/// Index of the earliest unresolved approval prompt, if any. That entry is the
+/// interactive focus: later history and later facts stay deferred until it
+/// resolves so canonical transcript order is preserved.
+fn blocking_dialog_index(transcript: &TranscriptStore) -> Option<usize> {
+    transcript.entries().iter().position(
+        |entry| matches!(entry, TranscriptEntry::ApprovalPrompt(data) if data.is_pending()),
+    )
 }
 
 fn advance_semantic_owner(
@@ -478,6 +637,7 @@ fn render_entry(
     index: usize,
     id: TranscriptEntryId,
     revision: u64,
+    blocked: bool,
     options: TranscriptRenderOptions<'_>,
     frame: &mut PresentationFrame,
 ) {
@@ -492,7 +652,7 @@ fn render_entry(
     );
     super::pane::trim_ansi_transcript_block(&mut lines);
     match transcript.entry_finalization(index) {
-        Some(Finalization::Finalized) if !frame.commit_blocked => {
+        Some(Finalization::Finalized) if !blocked => {
             let separator_before = advance_semantic_owner(
                 &mut frame.rendered_tail_owner,
                 block_id.first_owner(),
@@ -521,7 +681,6 @@ fn render_entry(
                     .is_some_and(TranscriptEntry::has_visible_animation),
                 separator_before,
             ));
-            frame.commit_blocked |= finalization == Finalization::Live;
         }
         None => {}
     }
@@ -640,7 +799,7 @@ mod tests {
     }
 
     #[test]
-    fn living_card_holds_later_blocks_in_canonical_order_until_it_finishes() {
+    fn ordinary_living_card_does_not_block_later_stable_history() {
         let runtime = MultiAgentRuntime::new();
         let running = runtime.start_foreground_delegate_for_test("background task");
         let id = running.id.clone();
@@ -648,22 +807,31 @@ mod tests {
         pane.transcript_mut().upsert_delegate(1, running);
         pane.push_status("later status");
 
+        // Ordinary mutable entries are bounded live, not commit barriers: the
+        // unrelated stable fact commits while the delegate card stays live.
         let running_update = pane.render_terminal_update(80, 12);
-        assert!(
-            running_update.history.is_empty(),
-            "later blocks must wait behind the earliest living card"
-        );
+        let history = running_update
+            .history
+            .iter()
+            .flat_map(|block| block.lines.iter())
+            .cloned()
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(history.contains("later status"), "history:\n{history}");
+        assert!(!history.contains("background task"));
         let running_live = running_update.live.join("\n");
-        let delegate = running_live.find("background task").expect("delegate card");
-        let status = running_live.find("later status").expect("later status");
         assert!(
-            delegate < status,
-            "live suffix must stay in canonical order"
+            running_live.contains("background task"),
+            "live:\n{running_live}"
         );
 
+        // Acknowledge the stable fact, then complete the delegate.
+        pane.acknowledge_history(&running_update.history);
         pane.transcript_mut()
             .upsert_delegate(1, runtime.complete_delegate_for_test(&id, "done"));
 
+        // Completion commits the canonical delegate card once, without a
+        // duplicate of the already-committed later status.
         let completed_update = pane.render_terminal_update(80, 12);
         let blocks = completed_update
             .history
@@ -671,44 +839,85 @@ mod tests {
             .map(|block| block.lines.join("\n"))
             .collect::<Vec<_>>();
 
-        assert_eq!(blocks.len(), 2);
+        assert_eq!(blocks.len(), 1, "no duplicate replay: {blocks:?}");
         assert!(blocks[0].contains("background task"));
-        assert!(blocks[1].contains("later status"));
         assert!(completed_update.live.is_empty());
         assert!(!completed_update.has_live_frontier);
     }
 
     #[test]
-    fn live_overflow_preserves_complete_rows() {
-        let runtime = MultiAgentRuntime::new();
-        let running = runtime.start_foreground_delegate_for_test("overflow living card");
-        let mut pane = TranscriptPane::new(80, 12);
-        pane.set_live_chrome_height(0);
-        pane.transcript_mut().upsert_delegate(1, running);
-        for index in 0..12 {
-            pane.push_status(format!("deferred status {index}"));
-        }
+    fn progressive_facts_retry_until_ack_then_never_replay() {
+        use crate::transcript::progressive::{
+            ChildToolFact, ProgressiveFact, ProgressiveFactId, ProgressiveFactPayload,
+        };
+        use neo_agent_core::multi_agent::AgentToolActivityPhase;
 
-        let update = pane.render_terminal_update(80, 4);
-        let live = update.live.join("\n");
+        let mut transcript = TranscriptStore::new();
+        transcript.push(TranscriptEntry::status("anchor"));
+        let entry = transcript.entry_ids()[0];
+        let fact = ProgressiveFact {
+            id: ProgressiveFactId::ChildTool {
+                entry,
+                agent_id: "agent-a".to_owned(),
+                run_count: 1,
+                tool_id: "read-1".to_owned(),
+            },
+            payload: ProgressiveFactPayload::ChildTool(ChildToolFact {
+                agent_id: "agent-a".to_owned(),
+                run_count: 1,
+                tool_id: "read-1".to_owned(),
+                name: "Read".to_owned(),
+                summary: Some("one.rs".to_owned()),
+                phase: AgentToolActivityPhase::Done,
+                output: None,
+                files: Vec::new(),
+            }),
+        };
+        let ProgressiveFactPayload::ChildTool(tool) = &fact.payload;
+        assert!(tool.is_terminal(), "Done phase is the typed finality proof");
+        assert!(transcript.capture_progressive_fact(fact.clone()));
+        assert!(
+            !transcript.capture_progressive_fact(fact.clone()),
+            "a duplicate typed identity must never be captured twice"
+        );
 
-        assert!(update.live_overflow);
-        assert!(update.has_live_frontier);
-        assert!(live.contains("overflow living card"), "live:\n{live}");
-        for index in 0..12 {
-            assert!(
-                live.contains(&format!("deferred status {index}")),
-                "missing deferred status {index} in complete live source:\n{live}"
-            );
-        }
-        let omission_marker = format!("{} {}", "earlier rows", "omitted");
-        assert!(!live.contains(&omission_marker), "live:\n{live}");
-        let living = live.find("overflow living card").expect("living card");
-        let first_deferred = live.find("deferred status 0").expect("first deferred");
-        let last_deferred = live.find("deferred status 11").expect("last deferred");
-        assert!(living < first_deferred);
-        assert!(first_deferred < last_deferred);
-        assert!(update.live.len() > 4);
+        let mut presentation = TranscriptPresentation::default();
+        let theme = TuiTheme::default();
+        let options = TranscriptRenderOptions::new(
+            80,
+            &theme,
+            0,
+            ImageRenderPolicy::default(),
+            TerminalImageCapabilities::default(),
+            8,
+        );
+        let first = presentation.render(&mut transcript, options);
+        let fact_blocks = first
+            .history
+            .iter()
+            .filter(|block| matches!(block.id, TranscriptBlockId::Progressive { .. }))
+            .collect::<Vec<_>>();
+        assert_eq!(fact_blocks.len(), 1, "one progressive fact block");
+        assert!(
+            fact_blocks[0]
+                .lines
+                .iter()
+                .any(|line| line.contains("Read") && line.contains("one.rs")),
+            "fact rows: {:?}",
+            fact_blocks[0].lines
+        );
+
+        // Unacknowledged facts retry on the next frame.
+        let retry = presentation.render(&mut transcript, options);
+        assert_eq!(retry.history, first.history, "unacked facts must retry");
+
+        // Acknowledgement advances the typed ledger; the fact never replays
+        // and its payload is released while identity is retained.
+        presentation.acknowledge(&first.history);
+        presentation.prune_acknowledged_facts(&mut transcript);
+        assert!(transcript.progressive_facts().is_empty());
+        let after = presentation.render(&mut transcript, options);
+        assert!(after.history.is_empty(), "acked facts must never replay");
     }
 
     #[test]
@@ -736,7 +945,7 @@ mod tests {
     }
 
     #[test]
-    fn suppressed_living_tool_blocks_later_history_until_visibility_is_resolved() {
+    fn suppressed_living_tool_stays_bounded_while_later_history_commits() {
         let mut pane = TranscriptPane::new(80, 12);
         pane.transcript_mut()
             .push_tool_run("delegate-tool", "Delegate", Some("{}".to_owned()));
@@ -744,31 +953,39 @@ mod tests {
         pane.push_status("later status");
 
         let suppressed = pane.render_terminal_update(80, 12);
-        assert!(
-            suppressed.history.is_empty(),
-            "a transiently suppressed live entry must still block later commits"
-        );
-        assert!(suppressed.has_live_frontier);
+        let history = suppressed
+            .history
+            .iter()
+            .flat_map(|block| block.lines.iter())
+            .cloned()
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(history.contains("later status"), "history:\n{history}");
+        assert!(!history.contains("Delegate"));
+        assert!(!suppressed.has_live_frontier);
 
         pane.transcript_mut().unsuppress_tool_run("delegate-tool");
         let visible = pane.render_terminal_update(80, 12);
         let live = visible.live.join("\n");
-        let tool = live.find("Delegate").expect("restored tool card");
-        let status = live.find("later status").expect("later status");
-        assert!(
-            tool < status,
-            "restored visibility must preserve canonical order"
-        );
+        assert!(live.contains("Delegate"), "restored tool card: {live}");
+        let visible_history = visible
+            .history
+            .iter()
+            .flat_map(|block| block.lines.iter())
+            .cloned()
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(visible_history.contains("later status"));
+        assert!(!visible_history.contains("Delegate"));
     }
 
     #[test]
-    fn finalized_suppressed_tool_releases_later_history() {
+    fn finalized_suppressed_tool_stays_out_of_history() {
         let mut pane = TranscriptPane::new(80, 12);
         pane.transcript_mut()
             .push_tool_run("delegate-tool", "Delegate", Some("{}".to_owned()));
         pane.transcript_mut().suppress_tool_run("delegate-tool");
         pane.push_status("later status");
-        assert!(pane.render_terminal_update(80, 12).history.is_empty());
 
         assert!(pane.transcript_mut().mutate_tool("delegate-tool", |tool| {
             tool.set_terminal_status(
@@ -822,7 +1039,10 @@ mod tests {
         let running = pane.render_terminal_update(80, 12);
         assert!(running.history.is_empty());
         assert!(!running.live.is_empty());
-        assert!(running.has_live_frontier);
+        assert!(
+            !running.has_live_frontier,
+            "running tool groups are bounded live, not commit barriers"
+        );
 
         pane.apply_agent_event(neo_agent_core::AgentEvent::ToolExecutionFinished {
             turn: 1,

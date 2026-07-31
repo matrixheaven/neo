@@ -192,7 +192,7 @@ fn streaming_assistant_commits_stable_prefix_and_bounds_live_tail() {
 }
 
 #[test]
-fn long_unstable_assistant_tail_reports_overflow_without_omission() {
+fn long_unstable_assistant_tail_stays_bounded_and_commits_once() {
     let mut pane = TranscriptPane::new(30, 8);
     pane.start_assistant_message();
     pane.append_assistant_delta(&"unfinished ".repeat(80));
@@ -206,15 +206,34 @@ fn long_unstable_assistant_tail_reports_overflow_without_omission() {
         .join("\n");
 
     assert!(update.history.is_empty());
-    assert!(update.live_overflow);
-    assert!(update.has_live_frontier);
-    assert!(update.live.len() > 4, "complete live source exceeds budget");
-    assert!(!live.contains("earlier rows omitted"), "live:\n{live}");
+    assert!(
+        update.live.len() <= 4,
+        "live tail must be bounded by live_budget: {}",
+        update.live.len()
+    );
+    assert!(
+        !update.live_overflow,
+        "bounded live never requests overflow"
+    );
     assert!(live.contains("unfinished"), "live:\n{live}");
+
+    // Completion commits the canonical assistant entry once.
+    pane.finish_assistant_message();
+    let finished = pane.render_terminal_update(30, 8);
+    assert_eq!(finished.history.len(), 1, "one canonical commit");
+    assert!(
+        finished.history[0]
+            .lines
+            .iter()
+            .any(|line| strip_ansi(line).contains("unfinished"))
+    );
+    assert!(finished.live.is_empty());
+    pane.acknowledge_history(&finished.history);
+    assert!(pane.render_terminal_update(30, 8).history.is_empty());
 }
 
 #[test]
-fn consecutive_streaming_tool_cards_keep_each_header_when_live_budget_truncates() {
+fn live_budget_truncation_keeps_recent_whole_blocks() {
     let mut pane = TranscriptPane::new(80, 8);
     for (id, path) in [("read-1", "one.rs"), ("read-2", "two.rs")] {
         pane.apply_agent_event(neo_agent_core::AgentEvent::ToolExecutionStarted {
@@ -245,9 +264,15 @@ fn consecutive_streaming_tool_cards_keep_each_header_when_live_budget_truncates(
         .collect::<Vec<_>>()
         .join("\n");
 
-    assert_eq!(live.matches("Using Read").count(), 2, "live:\n{live}");
-    assert!(live.contains("one.rs"), "live:\n{live}");
-    assert!(live.contains("two.rs"), "live:\n{live}");
+    assert!(
+        update.live.len() <= 4,
+        "live must be bounded by live_budget: {}",
+        update.live.len()
+    );
+    // The adjacent tool cards render as one grouped live block; when that
+    // block exceeds the budget, its header and the newest rows survive
+    // instead of a mid-card row slice.
+    assert_eq!(live.matches("Using Read").count(), 1, "live:\n{live}");
     assert!(live.contains("latest-output"), "live:\n{live}");
     assert!(!live.contains("earlier rows omitted"), "live:\n{live}");
 }
@@ -1745,67 +1770,6 @@ fn replayed_messages_render_through_same_transcript_pane_path() {
     );
     assert!(frame.iter().any(|l| l.contains("●")));
     assert!(frame.iter().any(|l| l.contains("previous answer")));
-}
-
-#[test]
-fn queued_follow_up_message_renders_with_distinct_prefix() {
-    let mut transcript_pane = TranscriptPane::new(80, 12);
-    transcript_pane.push_transcript(TranscriptEntry::user_message("original"));
-    transcript_pane.push_queued_message("follow up text", false);
-
-    let frame = plain_frame(&mut transcript_pane, 80, 12);
-    let queued_line = frame
-        .iter()
-        .find(|l| l.contains("follow up text"))
-        .expect("queued follow-up text should render");
-    assert!(
-        queued_line.starts_with("↪"),
-        "queued follow-up should use the ↪ prefix, got: {queued_line:?}"
-    );
-    // Normal user message keeps its own prefix.
-    assert!(
-        frame
-            .iter()
-            .any(|l| l.contains("✨") && l.contains("original"))
-    );
-}
-
-#[test]
-fn steered_message_renders_with_distinct_prefix() {
-    let mut transcript_pane = TranscriptPane::new(80, 12);
-    transcript_pane.push_queued_message("steer text", true);
-
-    let frame = plain_frame(&mut transcript_pane, 80, 12);
-    let steer_line = frame
-        .iter()
-        .find(|l| l.contains("steer text"))
-        .expect("steered text should render");
-    assert!(
-        steer_line.starts_with("↳"),
-        "steered message should use the ↳ prefix, got: {steer_line:?}"
-    );
-}
-
-#[test]
-fn pop_pending_follow_up_removes_oldest_queued_entry() {
-    let mut transcript_pane = TranscriptPane::new(80, 12);
-    transcript_pane.push_queued_message("first follow", false);
-    transcript_pane.push_queued_message("steer", true);
-    transcript_pane.push_queued_message("second follow", false);
-
-    let popped = transcript_pane
-        .pop_pending_follow_up()
-        .expect("should pop a follow-up");
-    // The most recently queued follow-up is popped first (reverse search).
-    assert_eq!(popped, "second follow");
-    // Remaining entries still render.
-    let frame = plain_frame(&mut transcript_pane, 80, 12);
-    assert!(frame.iter().any(|l| l.contains("first follow")));
-    assert!(frame.iter().any(|l| l.contains("steer")));
-    assert!(
-        !frame.iter().any(|l| l.contains("second follow")),
-        "popped entry should be removed from transcript"
-    );
 }
 
 #[test]

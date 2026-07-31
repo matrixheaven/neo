@@ -175,14 +175,6 @@ pub enum TranscriptEntry {
     McpStartupStatus {
         data: McpStartupStatusData,
     },
-    /// A user message that was queued (Enter while busy) or steered (Ctrl+S)
-    /// into a running turn. Rendered with a distinct prefix so the user can tell
-    /// it apart from a normal delivered user message. `is_steer` selects the
-    /// steer styling (↳) vs the follow-up styling (↪).
-    QueuedMessage {
-        text: String,
-        is_steer: bool,
-    },
     GoalCard {
         kind: GoalCardKind,
         objective: String,
@@ -444,14 +436,6 @@ impl TranscriptEntry {
     }
 
     #[must_use]
-    pub fn queued_message(content: impl Into<String>, is_steer: bool) -> Self {
-        Self::QueuedMessage {
-            text: content.into(),
-            is_steer,
-        }
-    }
-
-    #[must_use]
     pub fn skill_invocation(
         names: Vec<String>,
         source: SkillInvocationSource,
@@ -607,7 +591,6 @@ impl TranscriptEntry {
                     Finalization::Finalized
                 }
             }
-            Self::QueuedMessage { .. } => Finalization::Live,
             Self::Delegate { component } => component.finalization(),
             Self::DelegateGroup { component } => component.finalization(),
             Self::DelegateSwarm { component } => component.finalization(),
@@ -659,11 +642,6 @@ impl TranscriptEntry {
             }
             Self::McpStartupStatus { data } => {
                 data.phase = McpStartupPhase::Cancelled;
-                true
-            }
-            Self::QueuedMessage { text, .. } => {
-                let text = text.clone();
-                *self = Self::status(format!("Queued message not sent before exit: {text}"));
                 true
             }
             Self::Delegate { component } => component.interrupt(),
@@ -775,9 +753,6 @@ impl TranscriptEntry {
                 theme,
                 activity_frame,
             ),
-            Self::QueuedMessage { text, is_steer } => {
-                render_banner::render_queued_message(text, *is_steer, inner_width, theme)
-            }
             Self::AssistantMessage { content } => {
                 render_banner::render_assistant_message(content, inner_width, theme)
             }
@@ -859,8 +834,7 @@ impl TranscriptEntry {
             | Self::RetryStatus { .. }
             | Self::McpStartupStatus { .. }
             | Self::AssistantMessage { .. }
-            | Self::ThinkingBlock { .. }
-            | Self::QueuedMessage { .. } => unreachable!("message entries handled above"),
+            | Self::ThinkingBlock { .. } => unreachable!("message entries handled above"),
         }
     }
 
@@ -944,7 +918,7 @@ impl TranscriptEntry {
             | Self::Compaction { .. }
             | Self::ToolRun { .. } => false,
             // All other entries (Banner, text-only UserMessage, AssistantMessage, Status,
-            // QueuedMessage, ShellRun, ApprovalPrompt, GoalCard,
+            // ShellRun, ApprovalPrompt, GoalCard,
             // SkillActivation, Workflow) are static.
             _ => true,
         }

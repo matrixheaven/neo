@@ -12,6 +12,7 @@ use crate::transcript::{
 use super::entry::{
     ApprovalPromptData, RetryPhase, RetryStatusData, ThinkingPhase, TranscriptEntry,
 };
+use super::progressive::ProgressiveFact;
 use neo_agent_core::instructions::{
     IgnoredInstructionBundle, InstructionBundleMetadata, InstructionEpochData,
     InstructionEpochOutcome, InstructionFailure, InstructionReplacement, InstructionScopeData,
@@ -182,6 +183,10 @@ pub struct TranscriptStore {
     /// needs re-rendering (new, mutated, or width changed).
     render_cache: Vec<Option<CachedRender>>,
     first_dirty_entry: Option<usize>,
+    /// Captured immutable progressive facts in canonical arrival order. They
+    /// are retained until their terminal write is acknowledged so source
+    /// snapshot trimming or replacement can never remove them first.
+    progressive_facts: Vec<ProgressiveFact>,
 }
 
 impl TranscriptStore {
@@ -197,6 +202,31 @@ impl TranscriptStore {
             self.mark_visible_boundary();
         }
         self.append_entry(entry);
+    }
+
+    /// Capture one immutable progressive fact in canonical arrival order.
+    /// Duplicate identities are ignored so a fact is never captured twice.
+    pub(crate) fn capture_progressive_fact(&mut self, fact: ProgressiveFact) -> bool {
+        if self
+            .progressive_facts
+            .iter()
+            .any(|existing| existing.id == fact.id)
+        {
+            return false;
+        }
+        self.progressive_facts.push(fact);
+        true
+    }
+
+    /// All captured progressive facts in canonical arrival order.
+    #[must_use]
+    pub(crate) fn progressive_facts(&self) -> &[ProgressiveFact] {
+        &self.progressive_facts
+    }
+
+    /// Drop acknowledged fact payloads while keeping unacknowledged ones.
+    pub(crate) fn retain_progressive_facts(&mut self, keep: impl FnMut(&ProgressiveFact) -> bool) {
+        self.progressive_facts.retain(keep);
     }
 
     pub(crate) fn begin_live_model_attempt(&mut self, turn: u32) {

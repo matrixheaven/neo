@@ -583,17 +583,6 @@ fn resolved_approval_ignores_repeated_request() {
 }
 
 #[test]
-fn queued_message_stays_live_until_removed() {
-    let mut store = TranscriptStore::new();
-    store.push(TranscriptEntry::queued_message("follow up", false));
-
-    assert_eq!(store.entry_finalization(0), Some(Finalization::Live));
-
-    assert!(store.remove(0).is_some());
-    assert_eq!(store.entry_finalization(0), None);
-}
-
-#[test]
 fn terminal_exit_finalizes_every_live_entry_variant() {
     let mut pane = TranscriptPane::new(80, 24);
     {
@@ -624,7 +613,6 @@ fn terminal_exit_finalizes_every_live_entry_variant() {
             tokens_before: 100,
             tokens_after: 0,
         });
-        store.push(TranscriptEntry::queued_message("follow up", false));
         store.upsert_delegate(1, agent_snapshot("delegate", AgentLifecycleState::Running));
         store.upsert_delegate(2, agent_snapshot("group-a", AgentLifecycleState::Running));
         store.upsert_delegate(2, agent_snapshot("group-b", AgentLifecycleState::Queued));
