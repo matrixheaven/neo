@@ -6,7 +6,7 @@ use crate::input::{InputEvent, KeybindingAction};
 use crate::primitive::Color;
 use crate::primitive::InputResult;
 use crate::primitive::theme::TuiTheme;
-use crate::primitive::visible_width;
+use crate::primitive::{truncate_width, visible_width};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ChoiceItem {
@@ -114,11 +114,11 @@ impl ChoicePickerState {
 
     #[must_use]
     pub fn render_lines(&self, width: usize) -> Vec<String> {
-        let inner_w = width.saturating_sub(2).max(1);
+        let inner_w = width.saturating_sub(2);
         let mut lines = Vec::new();
 
         // Top border with title
-        let title_str = format!(" {} ", self.title);
+        let title_str = truncate_width(&format!(" {} ", self.title), inner_w, "", false);
         let title_len = visible_width(&title_str);
         let remaining = inner_w.saturating_sub(title_len);
         lines.push(format!(
@@ -151,9 +151,11 @@ impl ChoicePickerState {
                 .as_ref()
                 .map(|d| format!(" — {d}"))
                 .unwrap_or_default();
+            let content =
+                truncate_width(&format!(" {marker} {label}{desc_str}"), width, "…", false);
 
             lines.push(format!(
-                "\x1b[{};{}m {marker} {label}{desc_str}\x1b[0m",
+                "\x1b[{};{}m{content}\x1b[0m",
                 dialog_sgr_fg(fg),
                 dialog_sgr_bg(bg)
             ));
@@ -169,8 +171,9 @@ impl ChoicePickerState {
                 self.total_pages()
             );
         }
+        let hint = truncate_width(&format!(" {hint}"), width, "…", false);
         lines.push(format!(
-            "\x1b[38;2;{}m {hint}\x1b[0m",
+            "\x1b[38;2;{}m{hint}\x1b[0m",
             dialog_rgb(self.theme.text_muted)
         ));
 
@@ -368,6 +371,29 @@ mod tests {
         assert!(combined.contains("Choose"));
         assert!(combined.contains("Option A"));
         assert!(combined.contains("Option B"));
+    }
+
+    #[test]
+    fn rendered_lines_fit_terminal_width() {
+        let width = 120;
+        let state = ChoicePickerState::new(ChoicePickerOptions {
+            title: "Select permission mode".into(),
+            items: vec![ChoiceItem::new("permission:yolo", "YOLO").with_description(
+                "Automatically approve ordinary tool actions. PlanMode and GoalMode reviews are still shown (same as Ask). The agent can still ask you explicit questions when your input is needed.",
+            )],
+            initial_id: Some("permission:yolo".into()),
+            page_size: 3,
+            current_id: Some("permission:yolo".into()),
+            theme: theme(),
+        });
+
+        for line in state.render_lines(width) {
+            assert!(
+                visible_width(&line) <= width,
+                "rendered line width {} exceeds terminal width {width}",
+                visible_width(&line)
+            );
+        }
     }
 
     #[test]
