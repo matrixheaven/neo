@@ -143,8 +143,10 @@ fixed order:
 2. workflow Delegate summary, when present;
 3. workflow swarm summary, when present.
 
-They are siblings, not nested cards. Unrelated transcript entries retain their
-canonical event order around the group.
+They are siblings, not nested cards. In the live area their order is the
+workflow launch order. Once terminal, the group is committed at the terminal
+event position; unrelated finalized transcript entries retain their canonical
+event order.
 
 ## Interaction States
 
@@ -254,7 +256,7 @@ Example compact projection:
 │ … 3 agents
 Todo · 4 pending
 >
-[yolo] deepseek-v4-flash · working
+[yolo] provider/model · working
 ```
 
 When space permits, every subagent is shown. When it does not, full current
@@ -277,6 +279,9 @@ instead of imposing a fixed child count.
 - Retain full typed tool and child activity once in `TranscriptStore`; normal
   presentation uses the bounded summaries while explicit review projects the
   complete detail from the same stored activity.
+- Keep each non-terminal workflow group in the bounded live projection rather
+  than making its launch entry a permanent mutable history barrier. On
+  terminalization, acknowledge the group once at the terminal event position.
 - Keep presentation state bounded. Runtime and persisted JSONL remain the only
   sources used to restore current workflow truth.
 
@@ -311,6 +316,719 @@ expansion semantics, and recreate the exact frame-pressure failure being fixed.
 Selected. It keeps origin visible, bounds normal-screen state, preserves
 existing non-workflow cards, and reuses current runtime and transcript owners.
 
+## Complete UI Coverage
+
+This section fixes the visible shape for every workflow lifecycle and the
+surrounding interaction surface. These are projections of existing typed state,
+not new lifecycle variants.
+
+### Visual Grammar
+
+```text
+· queued       › running       ◆ input required
+… pausing      Ⅱ paused        ↻ recovering
+✓ completed    ✕ failed        ■ cancelled       ! resource limited
+```
+
+Queued and cancelled use neutral styling; running uses the active accent;
+input-required and pausing use warning styling; completion uses success;
+failure and resource limits use error styling. Only the active marker and
+elapsed time animate. Status color never carries information without its text
+marker.
+
+### Frame Anatomy
+
+The normal terminal keeps one stable vertical order. While non-terminal, a
+workflow group is projected into the existing bounded live area above Todo and
+the composer. Active groups are ordered by launch time, but they do not pin
+later finalized assistant or tool rows behind a long-lived mutable transcript
+entry:
+
+```text
+history already committed above
+
+● Workflow  003-lifecycle-test · running · 18s
+│ phase greet · 12 calls · 0 failed
+│ ● Bash  $ sleep 0.3 · 1s
+● Workflow Delegates · 2 running · 1 done
+├─ ✓ Euclid     [explorer] completed · 4s
+├─ ● Archimedes [coder]    Bash cargo test · 12s
+└─ ◌ Ptolemy    [reviewer] queued
+● Workflow Swarms · schema review · 2/3 done
+├─ ✓ Alpha  [reviewer] completed · 8s
+├─ ● Beta   [coder]    Bash cargo test · 11s
+└─ ◌ Gamma  [explorer] queued
+
+Todo · 2 pending
+> view the failing test
+[yolo] provider/model · working
+```
+
+The composer remains usable while a background workflow runs. Only the
+earliest unresolved approval or question can replace the composer as input
+owner. When the workflow terminalizes, the same logical group leaves the live
+area and is committed to history exactly once at the terminal event position.
+The live and final forms are never visible simultaneously, and no separate
+start row is printed.
+
+### Launch And Preflight
+
+The workflow picker remains the existing searchable surface:
+
+```text
+╭─ Run a workflow ───────────────────────────────────────────╮
+│ Search  lifecycle█                                         │
+├─────────────────────────────────────────────────────────────┤
+│ ▸ 003-lifecycle-test                                       │
+│   Run lifecycle checks in three phases                      │
+│   inputs: workspace, strict                                │
+│                                                             │
+│   004-provider-smoke                                       │
+│   Verify provider availability                              │
+├─────────────────────────────────────────────────────────────┤
+│ ↑↓ navigate · Enter choose · Esc cancel                     │
+╰─────────────────────────────────────────────────────────────╯
+```
+
+Once admission succeeds, the ordinary `Used Workflow` tool row is replaced by
+the workflow main card; it is never followed by a second status card. A
+preflight or definition failure that prevents admission still uses one compact
+terminal workflow row:
+
+```text
+✕ Workflow  003-lifecycle-test · not started
+│ invalid definition · phase `verify` is missing
+```
+
+No run identifier means no dynamic updates are possible, but the failed launch
+still has the workflow identity and does not create a generic orphaned tool
+card.
+
+If the workflow picker has no definitions or no search result, the existing
+picker remains the owner:
+
+```text
+╭─ Run a workflow ─────────────────────╮
+│ Search  nightly█                     │
+│                                     │
+│ No matching workflows.              │
+│                                     │
+│ ↑↓ · Enter choose · Esc cancel      │
+╰─────────────────────────────────────╯
+```
+
+### Permission Picker Width Gallery
+
+The permission picker follows the same frame width rule. Its title, selected
+label, description, page hint, borders, and ANSI styling all fit inside the
+effective content width:
+
+```text
+╭ Select permission mode ───────────────────────────────────────────────╮
+│ ▸ ask  ← current · Ask before ordinary tool actions                   │
+│   auto          Approve safe actions; ask for risky actions            │
+│   yolo          Approve ordinary actions automatically; questions…    │
+│ ↑↓ navigate · Enter select · Esc cancel                               │
+╰────────────────────────────────────────────────────────────────────────╯
+```
+
+At a narrow width, descriptions visibly shorten instead of producing an
+invalid live row:
+
+```text
+╭ Select permission mode ─────────╮
+│ ▸ ask  ← current · Ask before… │
+│   auto · Approve safe actions… │
+│   yolo · Approve ordinary…     │
+│ ↑↓ · Enter select · Esc cancel │
+╰─────────────────────────────────╯
+```
+
+The ellipsis is deliberate display truncation, never an unreported width
+overflow. Permission behavior itself is unchanged by the width repair.
+
+### Lifecycle State Gallery
+
+The main card uses one visual row for each real `WorkflowState` and does not
+invent a second runtime state for display. Labels such as `resuming` and
+`not started` describe a transition or preflight result; they are not new
+runtime states.
+
+```text
+· Workflow  003-lifecycle-test · queued
+│ waiting for a worker permit · 0 calls
+```
+
+```text
+› Workflow  003-lifecycle-test · running · 18s
+│ phase greet · 12 calls · 0 failed
+```
+
+```text
+◆ Workflow  003-lifecycle-test · awaiting answer
+│ phase choose_target · request 4f2a
+│ question is shown in the separate blocking card below
+```
+
+```text
+… Workflow  003-lifecycle-test · pausing
+│ current Bash continues · no new child starts
+```
+
+```text
+Ⅱ Workflow  003-lifecycle-test · paused
+│ paused at invocation boundary · 12 calls
+│ resume is available from the task controls
+```
+
+```text
+› Workflow  003-lifecycle-test · resuming
+│ restoring phase greet · 12 calls already retained
+```
+
+```text
+✓ Workflow  003-lifecycle-test · completed · 22s
+│ 3 phases · 12 calls · 0 failed
+│ Report  lifecycle checks passed
+```
+
+```text
+✕ Workflow  003-lifecycle-test · failed · 22s
+│ phase verify · failed Bash cargo test
+│ exit 101 · 2 tests failed
+```
+
+```text
+■ Workflow  003-lifecycle-test · cancelled
+│ stopped by user · current child was drained or cancelled
+```
+
+```text
+! Workflow  003-lifecycle-test · resource limited
+│ execution stopped at the configured machine-safety limit
+│ 40 calls · 2 children still pending
+```
+
+The task browser may show a short-lived recovery projection while a persisted
+run is rehydrated:
+
+```text
+↻ Workflow  003-lifecycle-test · recovering
+│ replaying journal · 8/12 invocation records
+```
+
+`recovering` is a view state only. If rehydration cannot safely continue, the
+projection converges to one failed terminal card:
+
+```text
+✕ Workflow  003-lifecycle-test · recovery failed
+│ persisted run stopped before replay completed
+│ Reason  external effect status is unknown
+```
+
+### Direct Tool Gallery
+
+Direct tools use one-line activity rows inside the main card. Their existing
+typed detail remains available to the explicit review surface.
+
+```text
+› Workflow  003-lifecycle-test · running
+│ ✓ Read      crates/neo-agent-core/src/workflow/state.rs
+│ ✓ Edit      crates/neo-tui/src/transcript/presentation.rs +12 -4
+│ ✓ Write     docs/report.md · 184 bytes
+│ ● Bash      cargo test --lib … --nocapture · 3s
+│ … 16 completed
+```
+
+Admission waiting is visibly different from process execution:
+
+```text
+› Workflow  003-lifecycle-test · running
+│ ◌ Bash      waiting for admission · cargo test --workspace
+│ ◌ Terminal  waiting for admission · cargo nextest run
+```
+
+After admission, live output stays attached to the same row:
+
+```text
+› Workflow  003-lifecycle-test · running
+│ ● Terminal  cargo nextest run --workspace … · 02:41
+│   running 142/450 tests · latest: workflow_user_input
+```
+
+Permission and input failures are also attached, without pretending that the
+tool is still running:
+
+```text
+◆ Workflow  003-lifecycle-test · awaiting approval
+│ ◆ Bash  approval requested · cargo test --workspace
+```
+
+```text
+› Workflow  003-lifecycle-test · running
+│ ✕ Bash  denied · permission mode rejected the command
+│ workflow continues because the script handled the failed outcome
+```
+
+```text
+✕ Workflow  003-lifecycle-test · failed
+│ ✕ Edit  invalid input · expected exactly one replacement
+│ terminal reason · required edit could not continue
+```
+
+Commands that do not fit are marked with an explicit ellipsis. They are never
+silently shortened, especially in Delegate or DelegateSwarm child activity:
+
+```text
+│ ● Bash  cargo test --package neo-agent-core … --nocapture
+```
+
+### Parallel Direct Tools
+
+Parallel work is shown as multiple active rows only while the available height
+allows it. The header reports observed counts, not a display-imposed limit:
+
+```text
+› Workflow  004-provider-smoke · running · 3 active
+│ ● Read      provider.rs · 0.4s
+│ ● Bash      cargo test --lib … · 1.2s
+│ ● Terminal  cargo check … · 1.0s
+│ … 9 completed · 0 failed
+```
+
+On a narrow frame the active set collapses deterministically, retaining the
+most actionable row and real counts:
+
+```text
+› Workflow  004-provider-smoke
+│ 3 active · 9 completed · 0 failed
+│ ● Bash  cargo test …
+```
+
+### Delegate Summary Gallery
+
+The dedicated Delegate summary covers child admission, current activity,
+approval waiting, answer waiting, success, failure, cancellation, and a child
+that finished while another remains active:
+
+```text
+● Workflow Delegates · 1 running · 1 waiting · 2 done
+├─ ✓ Euclid       [explorer] completed · 4s
+├─ ◆ Archimedes   [coder]    approval needed · Bash cargo test
+├─ ● Hypatia      [reviewer] Read report.md · 12s
+└─ ✓ Ptolemy      [reviewer] completed · 19s
+```
+
+```text
+✕ Workflow Delegates · 1 failed · 2 done
+├─ ✕ Archimedes   [coder]    failed · provider rejected response format
+├─ ✓ Euclid       [explorer] completed · 8s
+└─ ✓ Ptolemy      [reviewer] completed · 9s
+```
+
+```text
+■ Workflow Delegates · cancelled · 1 stopped
+├─ ■ Archimedes   [coder]    cancelled · stopped by user
+├─ ✓ Euclid       [explorer] completed · 8s
+└─ ◌ Ptolemy      [reviewer] never started
+```
+
+### Swarm Summary Gallery
+
+The swarm card keeps the group label and one row per child without embedding
+the full expanded swarm card:
+
+```text
+● Workflow Swarms · security review · 2/4 done
+├─ ✓ Alpha   [reviewer] completed · 8s
+├─ ● Beta    [coder]    Bash cargo test … · 11s
+├─ ◆ Gamma   [explorer] waiting for answer
+└─ ◌ Delta   [reviewer] queued
+```
+
+```text
+✕ Workflow Swarms · security review · 3/4 done
+├─ ✓ Alpha   [reviewer] completed · 8s
+├─ ✕ Beta    [coder]    failed · exit 101
+├─ ✓ Gamma   [explorer] completed · 10s
+└─ ✓ Delta   [reviewer] completed · 12s
+│ reason · required child result unavailable
+```
+
+When multiple swarm groups exist, the card header identifies the selected group
+and every child row keeps its group label:
+
+```text
+● Workflow Swarms · 2 groups · 5/7 done
+├─ schema review / Alpha   ✓ [reviewer] completed
+├─ schema review / Beta    ● [coder]    Bash cargo test …
+├─ provider review / Gamma ✓ [explorer] completed
+├─ provider review / Delta ◆ [reviewer] waiting for answer
+└─ … 2 more child rows
+```
+
+### Phase, Log, Report, Artifact, And Repair Rows
+
+Workflow-native semantic activity stays in the main card and does not pretend
+to be an ordinary tool call:
+
+```text
+› Workflow  003-lifecycle-test · running
+│ Phase     verify · entered after prepare
+│ Log       checking provider compatibility
+│ Report    18 checks passed · 2 warnings
+│ Artifact  lifecycle-report.json · 48 KiB
+│ … 12 direct tools completed
+```
+
+Structured child-result repair remains visible on the owning child row:
+
+```text
+● Workflow Delegates · 1 repairing · 2 done
+├─ ● Archimedes [coder] repairing structured result · attempt 1
+├─ ✓ Euclid     [explorer] completed · 8s
+└─ ✓ Ptolemy    [reviewer] completed · 9s
+```
+
+If repair fails, the child and main card converge without claiming a successful
+requested result:
+
+```text
+✕ Workflow  003-lifecycle-test · failed
+│ child Archimedes completed work but returned an invalid result
+✕ Workflow Delegates · 1 failed · 2 done
+├─ ✕ Archimedes [coder] schema repair failed · expected object
+├─ ✓ Euclid     [explorer] completed · 8s
+└─ ✓ Ptolemy    [reviewer] completed · 9s
+```
+
+### Final Workflow Group With Children
+
+When a workflow with children completes, the three sibling cards terminalize
+together. The main card does not absorb or duplicate child rows:
+
+```text
+✓ Workflow  003-lifecycle-test · completed · 31s
+│ 4 phases · 24 calls · 0 failed
+│ Report  lifecycle checks passed
+✓ Workflow Delegates · 3/3 done
+├─ ✓ Euclid       [explorer] completed · 8s
+├─ ✓ Archimedes   [coder]    completed · 21s
+└─ ✓ Ptolemy      [reviewer] completed · 12s
+✓ Workflow Swarms · security review · 4/4 done
+├─ ✓ Alpha  [reviewer] completed · 8s
+├─ ✓ Beta   [coder]    completed · 14s
+├─ ✓ Gamma  [explorer] completed · 10s
+└─ ✓ Delta  [reviewer] completed · 12s
+```
+
+If every terminal child row cannot fit, the normal terminal keeps failed rows,
+then the most recent completed rows, plus exact omitted counts. Explicit review
+retains every child identity.
+
+### Blocking Approval
+
+The main and sibling cards announce the block, but the approval card remains
+the only input surface:
+
+```text
+◆ Workflow  003-lifecycle-test · awaiting approval
+│ phase verify · Delegate Archimedes requested Bash
+│ Bash  cargo test --workspace
+
+Approval  Archimedes · Bash
+│ command: cargo test --workspace
+│ cwd: /Users/chenyuanhao/Workspace/neo
+▸ Allow once
+  Allow for this session
+  Reject
+```
+
+After rejection, the approval card terminalizes once and the workflow card
+shows the typed outcome:
+
+```text
+› Workflow  003-lifecycle-test · running
+│ ✕ Archimedes · Bash rejected · script handled failure
+```
+
+If the rejection is required for progress, the main card converges instead to:
+
+```text
+✕ Workflow  003-lifecycle-test · failed
+│ required approval rejected · phase verify did not continue
+```
+
+### Blocking Question And Answer
+
+`AwaitingUser` is a separate question owner. The workflow card never embeds a
+JSON editor:
+
+```text
+◆ Workflow  003-lifecycle-test · awaiting answer
+│ phase choose_target · 4 calls · 1 pending question
+
+Question  Choose deployment target
+│ Select the environment for the verification run.
+│
+│ target: [staging________________________]
+│ strict: [✓]
+│
+▸ Submit
+  Cancel
+```
+
+Structured-answer validation stays inside the question surface:
+
+```text
+Question  Choose deployment target
+│ target: []
+│ Error: target is required
+│
+▸ Submit
+  Cancel
+```
+
+After a valid answer, the question card becomes a single resolved row and the
+workflow returns to `queued` or `running` according to the existing transition:
+
+```text
+✓ Answered  Choose deployment target · staging
+› Workflow  003-lifecycle-test · running
+│ phase verify · resumed after answer
+```
+
+Ordinary resume cannot bypass an unanswered request. The task controls show the
+reason instead of silently changing workflow state:
+
+```text
+◆ Workflow  003-lifecycle-test · answer required
+│ resume is unavailable until request 4f2a is answered
+```
+
+### Pause, Resume, And Stop
+
+Pause is a request, not an immediate claim that all work stopped:
+
+```text
+… Workflow  003-lifecycle-test · pausing
+│ current invocation may finish · no new invocation will start
+│ [pause requested]
+```
+
+After children drain, the same card becomes:
+
+```text
+Ⅱ Workflow  003-lifecycle-test · paused
+│ safe boundary reached · 12 calls · 2 children retained
+```
+
+Resume keeps the card identity and returns through `queued` before `running`:
+
+```text
+› Workflow  003-lifecycle-test · resuming
+│ restoring phase verify · pending child state retained
+```
+
+Stop uses one explicit confirmation surface in task controls, then converges:
+
+```text
+Stop workflow?
+│ 003-lifecycle-test · 1 active child · 2 queued children
+▸ Stop
+  Cancel
+```
+
+```text
+■ Workflow  003-lifecycle-test · cancelled
+│ stopped by user · 12 calls · 1 child cancelled · 2 never started
+```
+
+### Multiple Workflows And Background Updates
+
+Independent workflows never merge their state or children:
+
+```text
+› Workflow  003-lifecycle-test · running · 18s
+│ phase verify · 1 active tool
+
+Ⅱ Workflow  004-provider-smoke · paused
+│ safe boundary reached · 7 calls
+
+· Workflow  005-nightly-check · queued
+│ waiting for a worker permit
+```
+
+If the terminal cannot show all groups, the oldest and currently-blocking group
+remain visible, while other groups collapse to real counts:
+
+```text
+› Workflow  003-lifecycle-test · running
+│ … 3 other workflows · 2 paused · 1 queued
+Todo · 2 pending
+>
+```
+
+No background update may move a later workflow ahead of an earlier blocking
+dialog or change the focused input owner.
+
+### Task Browser Overview
+
+The task browser is the explicit complete-review surface, not a second live
+transcript. Its list uses the existing workflow row states:
+
+```text
+Tasks  ·  All
+────────────────────────────────────────────────────────────
+› 003-lifecycle-test     running    phase verify       18s
+Ⅱ 004-provider-smoke     paused     safe boundary       7 calls
+✓ 002-lifecycle-test     completed  3 phases           22s
+✕ 001-provider-smoke     failed     exit 101            9s
+↻ 006-recovery-check     recovering replaying journal
+────────────────────────────────────────────────────────────
+Workflow detail · Enter open · S stop · Esc close
+```
+
+The workflow detail page exposes complete state without changing the normal
+card layout:
+
+```text
+Workflow  003-lifecycle-test · running
+────────────────────────────────────────────────────────────
+Overview   phase verify · 12/20 calls · 0 failed · 18s
+Steps      ✓ greet   ✓ prepare   › verify   · report
+Children   2 delegates · 1 swarm · 2 active
+Reports    lifecycle checks passed
+Output     result · journal · artifacts
+────────────────────────────────────────────────────────────
+Selected step: verify
+  Bash cargo test --workspace
+  Read crates/neo-tui/src/transcript/presentation.rs
+```
+
+Selecting a child opens complete child detail rather than nesting it in the
+normal transcript:
+
+```text
+Workflow 003-lifecycle-test / Archimedes
+────────────────────────────────────────────────────────────
+Role      coder
+State     running · 12s
+Activity  Bash cargo test --workspace
+Tools     Read 3 · Edit 1 · Bash 2
+Result    pending
+────────────────────────────────────────────────────────────
+```
+
+The explicit transcript review can expand the same workflow group without
+altering normal scrollback:
+
+```text
+Transcript Review / Workflow 003-lifecycle-test
+────────────────────────────────────────────────────────────
+Main       running · phase verify · 12 calls · 0 failed
+Direct     Read 4 · Edit 2 · Bash 3 · Terminal 1
+  Bash     cargo test --workspace --all-features
+  cwd      /Users/chenyuanhao/Workspace/neo
+  output   running 142/450 tests
+Delegates  2 active · 1 done
+Swarms     security review · 2/4 done
+Reports    lifecycle checks passed
+────────────────────────────────────────────────────────────
+```
+
+Review may scroll and show complete commands and child activity. Closing it
+returns to the unchanged normal screen and does not acknowledge new history.
+
+The workflow result, journal, artifacts, and artifact content views keep their
+existing paging and byte limits. A large result is shown as an artifact
+reference plus a range-readable content view, never dumped into the dynamic
+card.
+
+### Task Browser Answer And Save Surfaces
+
+Pending workflow answers can be completed from the task browser when the main
+transcript is no longer at the bottom:
+
+```text
+Workflow 003-lifecycle-test · answer required
+────────────────────────────────────────────────────────────
+Prompt    Choose deployment target
+Schema    {"target":"string","strict":"boolean"}
+Value     {"target":"staging","strict":true}
+────────────────────────────────────────────────────────────
+▸ Submit answer
+  Dismiss
+```
+
+Workflow save and replace remain explicit controls and do not masquerade as a
+running card:
+
+```text
+Save workflow
+────────────────────────────────────────────────────────────
+Name      003-lifecycle-test
+Scope     project
+Replace   existing definition 003-lifecycle-test
+Target    .neo/workflows/003-lifecycle-test.workflow.toml
+────────────────────────────────────────────────────────────
+▸ Save replacement
+  Cancel
+```
+
+### Narrow Width Gallery
+
+At 80 columns the card keeps identity and action while dropping secondary
+metadata:
+
+```text
+› Workflow 003-lifecycle-test · running
+│ verify · 12 calls · 0 failed
+│ ● Bash cargo test …
+● Delegates · 2 active · 1 done
+├─ ● Archimedes Bash test …
+└─ ✓ Euclid done
+Todo · 2 pending
+>
+```
+
+At 40 columns the workflow group collapses but remains identifiable:
+
+```text
+› Workflow 003-lifecycle-test
+│ verify · 12 calls
+│ ● Bash  cargo …
+● Delegates · 2 active
+│ … 1 done
+Todo · 2 pending
+>
+```
+
+At a physically impossible height, the renderer keeps the input owner and
+valid frame geometry; the workflow group is reduced to one status row rather
+than removing the composer, footer, or blocking dialog:
+
+```text
+› Workflow 003-lifecycle-test · running
+>
+[yolo] working
+```
+
+### Animation, Ordering, And Scrollback
+
+- Only elapsed time and the currently active row animate. Animation never
+  appends a new transcript line.
+- `projection_sequence` rejects stale snapshots; a late child event cannot
+  rewind a completed or newer workflow card.
+- Normal-screen scrollback contains finalized workflow groups exactly once.
+  Automatic alternate-screen entry and automatic mouse capture never occur.
+- `Ctrl+O` remains the explicit complete-review surface; it may capture the
+  mouse and render full child detail without changing the normal history ledger.
+- Approval and question cards retain their canonical transcript position even
+  when background workflow events arrive.
+- A workflow-origin event without a valid typed parent identity fails closed as
+  one bounded terminal error row; it does not become an unowned mutable card.
+
 ## Acceptance Criteria
 
 1. A workflow moving through queued, running, multiple phases, waiting, and
@@ -337,6 +1055,25 @@ existing non-workflow cards, and reuses current runtime and transcript owners.
 11. Focused virtual-terminal evidence covers Windows-style and Unix-style
     command text; native Windows, Linux, and macOS smoke evidence is reported
     separately and is not inferred from Rust tests.
+12. Queued, running, awaiting-user, pausing, paused, completed, failed,
+    cancelled, and resource-limited snapshots each render their distinct state
+    without creating a second lifecycle model.
+13. Pause remains visibly pending until the invocation boundary, resume cannot
+    bypass awaiting-user, and confirmed stop converges to one cancelled card.
+14. Recovery is a view projection only; successful replay returns to canonical
+    state and recovery failure produces one actionable terminal card.
+15. Shell admission waiting, running, output progress, approval waiting,
+    rejection, and terminal failure never share a misleading status marker.
+16. Multiple workflows retain independent groups, stable order, and the
+    earliest blocking input owner under continuous background updates.
+17. The permission picker fits wide and narrow frames without changing
+    permission behavior or producing an over-width live row.
+18. Task-browser overview, workflow detail, child detail, answer, stop, save,
+    result, journal, and artifact views expose complete information that the
+    bounded normal card omits.
+19. A long non-terminal workflow does not pin later finalized transcript rows;
+    terminalization moves the same logical group from live projection to
+    history exactly once.
 
 ## Verification Boundary
 
@@ -344,12 +1081,17 @@ The implementation plan must use focused tests for:
 
 - choice-picker and shared visible-width containment;
 - workflow snapshot replacement and single terminalization;
+- exhaustive lifecycle projection including resource limits and recovery;
 - typed `workflow_origin` routing for ordinary tools, Delegate, and swarm;
+- distinct shell admission, execution, approval, denial, and completion rows;
 - bounded main and sibling-card projections under large activity counts;
+- pause, boundary drain, resume, answer-required, and confirmed-stop flows;
+- multiple concurrent workflow groups under background updates;
 - approval and question focus during later workflow activity;
 - exact frame-height accounting including separators, Todo, composer, footer,
   and blocking overlays;
-- explicit-review completeness after normal-surface compaction;
+- long-lived workflow live projections releasing later finalized rows;
+- explicit-review and task-browser completeness after normal compaction;
 - unchanged non-workflow Delegate-family rendering.
 
 The plan must name one package, one target selector, and a narrow test filter for
