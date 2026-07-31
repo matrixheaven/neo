@@ -5,6 +5,8 @@ Entries are workspace records, not authoritative runtime decisions.
 
 | Date | Kind | Path | Title |
 | --- | --- | --- | --- |
+| 2026-08-01 | adr | docs/aegis/adr/ADR-0010-native-terminal-transcript-presentation.md | ADR-0010: Native Terminal Transcript Presentation |
+| 2026-08-01 | baseline | docs/aegis/baseline/2026-07-31-native-terminal-transcript.md | Native Terminal Transcript Presentation Landed Baseline |
 | 2026-07-31 | handoff | docs/aegis/handoffs/2026-07-31-native-scrollback-progressive-transcript.md | Implement Native Scrollback Progressive Transcript Handoff Prompt |
 | 2026-07-31 | plan | docs/aegis/plans/2026-07-31-native-scrollback-progressive-transcript.md | Neo Native Scrollback Progressive Transcript Implementation Plan |
 | 2026-07-30 | handoff | docs/aegis/handoffs/2026-07-30-dynamic-workflow-ai-reliability.md | Implement Dynamic Workflow AI Reliability Handoff Prompt |
