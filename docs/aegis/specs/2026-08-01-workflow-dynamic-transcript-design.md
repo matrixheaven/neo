@@ -2,9 +2,8 @@
 
 ## Status
 
-ASCII direction approved by the user on 2026-08-01. This written design is
-ready for user review. Workflow presentation implementation must not begin
-until the written design is approved.
+Approved by the user on 2026-08-01. Implementation is governed by
+`docs/aegis/plans/2026-08-01-workflow-dynamic-transcript.md`.
 
 The permission-picker width containment described here already landed in
 commit `253e711f`. It is recorded as a prerequisite and shared presentation
