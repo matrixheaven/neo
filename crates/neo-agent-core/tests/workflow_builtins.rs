@@ -132,6 +132,42 @@ async fn required_child_failure_aborts_builtin_without_placeholder_result() {
     }
 }
 
+#[tokio::test]
+async fn large_refactor_rejects_semantic_slice_failure() {
+    let fixture = parse_fixture(
+        &json!({
+            "args": {"spec": "workflow failure handling"},
+            "delegate_outcomes": [{
+                "ok": true,
+                "summary": "slice returned a structured failure",
+                "details": {
+                    "kind": "delegate",
+                    "status": "completed",
+                    "mode": "foreground",
+                    "agent_id": "fixture_slice_a",
+                    "structured_output": {
+                        "ok": false,
+                        "slice_id": "slice_a",
+                        "summary": "implementation failed",
+                        "commits": [],
+                        "verification": "tests failed"
+                    }
+                }
+            }],
+            "expected_result": {"ok": true}
+        })
+        .to_string(),
+    )
+    .expect("semantic failure fixture");
+
+    let report = run_builtin_fixture("large-refactor", &fixture, WorkflowLimits::default())
+        .await
+        .expect("run semantic failure fixture");
+
+    assert_eq!(report.state, "failed", "{:?}", report.diagnostics);
+    assert!(report.final_result.is_none());
+}
+
 /// Deep research exercises plan → heterogeneous children → verify → structured report.
 #[tokio::test]
 async fn deep_research_builtin_fixture() {

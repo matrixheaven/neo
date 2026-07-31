@@ -137,6 +137,7 @@ local challenge = neo.delegate({
 if not challenge.ok then
   neo.fail(challenge.summary)
 end
+append_findings(challenge)
 
 neo.report({
   kind = "review_findings",

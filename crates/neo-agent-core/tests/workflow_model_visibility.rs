@@ -81,6 +81,10 @@ fn inline_workflow_input() -> Value {
         "description": "Return ordinary host failures as data",
         "phases": [{"id": "run", "description": "Run the checks"}],
         "script": SCRIPT,
+        "input_schema": {
+            "type": "object",
+            "additionalProperties": false
+        },
         "output_schema": output_schema(),
     })
 }

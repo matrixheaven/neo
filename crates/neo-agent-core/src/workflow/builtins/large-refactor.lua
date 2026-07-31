@@ -49,6 +49,10 @@ local slice_a = neo.delegate({
 if not slice_a.ok then
   neo.fail(slice_a.summary)
 end
+local slice_a_output = type(slice_a.details) == "table" and slice_a.details.structured_output or nil
+if type(slice_a_output) ~= "table" or slice_a_output.ok ~= true then
+  neo.fail("slice_a reported ok=false")
+end
 
 local slice_b = neo.delegate({
   title = "slice_b",
@@ -59,6 +63,10 @@ local slice_b = neo.delegate({
 })
 if not slice_b.ok then
   neo.fail(slice_b.summary)
+end
+local slice_b_output = type(slice_b.details) == "table" and slice_b.details.structured_output or nil
+if type(slice_b_output) ~= "table" or slice_b_output.ok ~= true then
+  neo.fail("slice_b reported ok=false")
 end
 
 local review = neo.delegate({
@@ -80,6 +88,10 @@ local review = neo.delegate({
 })
 if not review.ok then
   neo.fail(review.summary)
+end
+local review_output = type(review.details) == "table" and review.details.structured_output or nil
+if type(review_output) ~= "table" or review_output.ok ~= true then
+  neo.fail("slice review reported ok=false")
 end
 
 neo.report({
@@ -126,10 +138,9 @@ if decision.retire_worktrees ~= true then
   unresolved[#unresolved + 1] = "worktree retirement not approved; no auto-delete"
 end
 
-local structured = type(review.details) == "table" and review.details.structured_output or nil
-if type(structured) == "table" and type(structured.risks) == "table" then
+if type(review_output.risks) == "table" then
   for i = 1, 32 do
-    local risk = structured.risks[i]
+    local risk = review_output.risks[i]
     if risk == nil then
       break
     end
