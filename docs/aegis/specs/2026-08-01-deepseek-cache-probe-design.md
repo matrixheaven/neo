@@ -2,7 +2,7 @@
 
 Date: `2026-08-01`
 
-Status: `approved direction, awaiting written-spec review`
+Status: `approved design`
 
 ## 1. Purpose
 
@@ -182,7 +182,14 @@ entire `messages` array is an exact prefix of the current `messages` array.
 When more than one candidate matches, choose the candidate with the longest
 messages array, then the most recent candidate.
 
-If no exact predecessor exists:
+If no exact predecessor exists, use the first message as a conservative
+sequence anchor. A historical-mutation comparison is allowed only when exactly
+one established sequence under the same candidate identity has the same first
+message. Compare against that sequence's latest request and report the changed
+historical paths. The first message itself is never treated as a safe mutation
+anchor.
+
+If there is no unique anchored sequence:
 
 - mark the request as `new_sequence`;
 - do not claim that the prefix is stable;
@@ -190,8 +197,9 @@ If no exact predecessor exists:
 - never compare it to the immediately preceding global request by default.
 
 This prevents child-agent traffic from creating false cache-break reports. A
-real historical-message rewrite that prevents safe matching remains visible as
-an unmatched sequence rather than being incorrectly reported as stable.
+historical-message rewrite is reported as changed only when the conservative
+anchor identifies one sequence; otherwise it remains visible as an unmatched
+sequence rather than being incorrectly reported as stable.
 
 ## 9. Prefix Comparison
 
@@ -433,6 +441,8 @@ formatting. All analyzed values come from `report.json`.
   thinking setting is reported as changed with the first differing path.
 - Interleaved independent request sequences are matched to their own
   predecessors when an exact predecessor exists.
+- A non-anchor historical-message mutation is reported as changed when the
+  first-message anchor identifies exactly one established sequence.
 - A request with no safe predecessor is reported as unknown, never stable.
 
 ### Usage and attribution
