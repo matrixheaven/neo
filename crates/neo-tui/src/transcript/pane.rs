@@ -1,9 +1,10 @@
-use std::collections::{BTreeMap, BTreeSet, VecDeque};
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 
 use neo_agent_core::instructions::InstructionEpochData;
 use neo_agent_core::{AgentEvent, AgentMessage, Content, ImageRef, skills::SkillStore};
 
+use crate::dialogs::question_dialog::{QuestionDisplayData, QuestionStateMachine};
 use crate::primitive::theme::TuiTheme;
 use crate::primitive::{Finalization, Line, next_sequence};
 use crate::shell::ToolStatusKind;
@@ -11,8 +12,9 @@ use crate::terminal_image::{
     ImageRenderPolicy, ImageSource, InlineImage, TerminalImageCapabilities,
 };
 use crate::transcript::{
-    ApprovalPromptData, McpStartupStatusData, ShellRunComponent, ToolCallComponent, ToolCallState,
-    TranscriptBrowserState, TranscriptEntry, TranscriptEntryId, TranscriptStore,
+    McpStartupStatusData, QuestionPromptData, QuestionPromptState, ShellRunComponent,
+    ToolCallComponent, ToolCallState, TranscriptBrowserState, TranscriptEntry, TranscriptEntryId,
+    TranscriptStore,
 };
 
 use super::entry::RetryStatusData;
@@ -39,6 +41,14 @@ fn is_live_compaction_entry(entry: &TranscriptEntry) -> bool {
 pub(super) enum AbsorbedToolKind {
     Delegate,
     DelegateSwarm,
+}
+
+/// The earliest unresolved blocking transcript entry: the interactive focus
+/// that owns input until it resolves.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum BlockingEntryKind {
+    Approval(String),
+    Question(String),
 }
 
 impl AbsorbedToolKind {
@@ -107,7 +117,6 @@ pub struct TranscriptPane {
     /// provider-valid deferred results replay through the normal finish
     /// path but must never un-suppress the placeholders.
     instruction_deferred_tool_ids: BTreeSet<String>,
-    pub(super) queued_approvals: VecDeque<ApprovalPromptData>,
     pub(super) completed_tool_result_ids: Vec<String>,
     next_image_id: u64,
     activity_frame: usize,
@@ -145,7 +154,6 @@ impl TranscriptPane {
             tool_call_metadata: BTreeMap::new(),
             delegate_absorption_targets: BTreeMap::new(),
             instruction_deferred_tool_ids: BTreeSet::new(),
-            queued_approvals: VecDeque::new(),
             completed_tool_result_ids: Vec::new(),
             next_image_id: 0,
             activity_frame: 0,
@@ -829,6 +837,141 @@ impl TranscriptPane {
             .prune_acknowledged_facts(&mut self.transcript);
     }
 
+    /// The earliest unresolved blocking entry (approval or question) in
+    /// transcript order, if any. That entry owns interactive input until it
+    /// resolves; later entries can never displace it.
+    #[must_use]
+    pub fn earliest_blocking_entry(&self) -> Option<BlockingEntryKind> {
+        self.transcript
+            .entries()
+            .iter()
+            .find_map(|entry| match entry {
+                TranscriptEntry::ApprovalPrompt(data) if data.is_pending() => {
+                    Some(BlockingEntryKind::Approval(data.id().to_owned()))
+                }
+                TranscriptEntry::QuestionPrompt(data) if data.is_pending() => {
+                    Some(BlockingEntryKind::Question(data.id.clone()))
+                }
+                _ => None,
+            })
+    }
+
+    /// Upsert one question prompt entry on arrival. The runtime chrome
+    /// [`QuestionStateMachine`] stays the input/selection owner; this entry
+    /// is its single visible display, synced after every input.
+    pub fn upsert_question_prompt(
+        &mut self,
+        id: &str,
+        questions: Vec<QuestionDisplayData>,
+    ) -> bool {
+        let display = questions
+            .first()
+            .cloned()
+            .unwrap_or_else(|| QuestionDisplayData {
+                question: String::new(),
+                header: None,
+                body: None,
+                options: Vec::new(),
+                multi_select: false,
+            });
+        let existing_index = self.transcript.entries().iter().position(
+            |entry| matches!(entry, TranscriptEntry::QuestionPrompt(data) if data.id == id),
+        );
+        if let Some(index) = existing_index {
+            let changed = self.transcript.mutate_entry(index, |entry| {
+                let TranscriptEntry::QuestionPrompt(data) = entry else {
+                    return false;
+                };
+                let machine = QuestionStateMachine::new(id, questions);
+                if !data.is_pending() || data.machine == machine {
+                    return false;
+                }
+                data.machine = machine;
+                data.display = display;
+                true
+            });
+            if changed {
+                self.mark_dirty();
+            }
+            return changed;
+        }
+        self.push_transcript(TranscriptEntry::QuestionPrompt(QuestionPromptData {
+            id: id.to_owned(),
+            state: QuestionPromptState::Pending,
+            display,
+            machine: QuestionStateMachine::new(id, questions),
+        }));
+        true
+    }
+
+    /// Refresh the pending question entry's display clone from the runtime
+    /// state machine so the live card shows the current selection.
+    pub fn sync_question_prompt(&mut self, machine: &QuestionStateMachine) -> bool {
+        let Some(index) = self.transcript.entries().iter().position(|entry| {
+            matches!(entry, TranscriptEntry::QuestionPrompt(data)
+                if data.id == machine.id && data.is_pending())
+        }) else {
+            return false;
+        };
+        let changed = self.transcript.mutate_entry(index, |entry| {
+            let TranscriptEntry::QuestionPrompt(data) = entry else {
+                return false;
+            };
+            if data.machine == *machine {
+                return false;
+            }
+            data.machine = machine.clone();
+            true
+        });
+        if changed {
+            self.mark_dirty();
+        }
+        changed
+    }
+
+    /// Mark one question prompt answered in place; it commits as one terminal
+    /// transcript fact.
+    pub fn resolve_question_prompt(&mut self, id: &str, answers: Vec<String>) -> bool {
+        let Some(index) = self.transcript.entries().iter().position(|entry| {
+            matches!(entry, TranscriptEntry::QuestionPrompt(data)
+                if data.id == id && data.is_pending())
+        }) else {
+            return false;
+        };
+        let changed = self.transcript.mutate_entry(index, |entry| {
+            let TranscriptEntry::QuestionPrompt(data) = entry else {
+                return false;
+            };
+            data.state = QuestionPromptState::Answered { answers };
+            true
+        });
+        if changed {
+            self.mark_dirty();
+        }
+        changed
+    }
+
+    /// Mark one question prompt cancelled in place.
+    pub fn cancel_question_prompt(&mut self, id: &str) -> bool {
+        let Some(index) = self.transcript.entries().iter().position(|entry| {
+            matches!(entry, TranscriptEntry::QuestionPrompt(data)
+                if data.id == id && data.is_pending())
+        }) else {
+            return false;
+        };
+        let changed = self.transcript.mutate_entry(index, |entry| {
+            let TranscriptEntry::QuestionPrompt(data) = entry else {
+                return false;
+            };
+            data.state = QuestionPromptState::Cancelled;
+            true
+        });
+        if changed {
+            self.mark_dirty();
+        }
+        changed
+    }
+
     pub fn finalize_cancelled_live_model_attempt(&mut self) {
         let Some(turn) = self.transcript.live_model_attempt_turn() else {
             return;
@@ -840,25 +983,7 @@ impl TranscriptPane {
     }
 
     pub fn finalize_interrupted_live_entries(&mut self) -> bool {
-        let mut changed = false;
-        while let Some(mut queued) = self.queued_approvals.pop_front() {
-            queued.queued_count = 0;
-            self.transcript.insert_approval_after_tool_or_push(queued);
-            changed = true;
-        }
-        for index in 0..self.transcript.entries().len() {
-            changed |= self.transcript.mutate_entry(index, |entry| {
-                let TranscriptEntry::ApprovalPrompt(data) = entry else {
-                    return false;
-                };
-                if data.queued_count == 0 {
-                    return false;
-                }
-                data.queued_count = 0;
-                true
-            });
-        }
-        changed |= self.transcript.finalize_interrupted_live_entries();
+        let changed = self.transcript.finalize_interrupted_live_entries();
         if changed {
             self.mark_dirty();
         }

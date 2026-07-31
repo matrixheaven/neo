@@ -24,7 +24,7 @@ use neo_tui::{
     input::{InputEvent, KeyId, KeybindingAction},
     screen_output::InlineTerminal,
     shell::{ChromeMode, CommandPaletteState, CommandSpec, Overlay, OverlayKind},
-    transcript::{ApprovalDisplayState, TranscriptEntry, TranscriptPane},
+    transcript::{ApprovalDisplayState, QuestionPromptState, TranscriptEntry, TranscriptPane},
 };
 use tokio::sync::oneshot;
 use tracing_subscriber::prelude::*;
@@ -978,7 +978,7 @@ fn transcript_pane_exposes_live_rows_for_neo_tui_draw() {
 }
 
 #[tokio::test]
-async fn resolving_question_records_collected_answers_in_transcript() {
+async fn resolving_question_records_answered_terminal_fact_in_transcript() {
     let mut controller = InteractiveController::new_for_test(
         "neo",
         "session",
@@ -1020,9 +1020,24 @@ async fn resolving_question_records_collected_answers_in_transcript() {
             .answers,
         vec!["Left"]
     );
-    assert!(transcript_has_status(&controller, "Collected your answers"));
-    assert!(transcript_has_status(&controller, "Pick a side?"));
-    assert!(transcript_has_status(&controller, "Left"));
+    // The answered question updates its transcript card in place as one
+    // terminal fact instead of appending a separate status entry.
+    assert!(transcript_entries(&controller).iter().any(|entry| matches!(
+        entry,
+        TranscriptEntry::QuestionPrompt(data)
+            if data.id == "question-1"
+                && matches!(
+                    &data.state,
+                    QuestionPromptState::Answered { answers } if answers == &vec!["Left".to_owned()]
+                )
+    )));
+    assert!(
+        !transcript_entries(&controller)
+            .iter()
+            .any(|entry| matches!(entry, TranscriptEntry::Status { .. })),
+        "the answered question must not append a duplicate status"
+    );
+    assert!(controller.render_snapshot().contains("question: answered"));
 }
 
 #[tokio::test]
@@ -6815,10 +6830,13 @@ async fn event_loop_shows_and_resolves_pending_question_from_running_turn() {
     controller
         .run_terminal_loop(
             move |app| {
-                captured_frames
-                    .lock()
-                    .expect("frames lock")
-                    .push(render_overlay_snapshot(app, 80).join("\n"));
+                captured_frames.lock().expect("frames lock").push(
+                    if app.question_dialog_is_focused() {
+                        "question-focused".to_owned()
+                    } else {
+                        "no-question".to_owned()
+                    },
+                );
                 Ok(())
             },
             OptionalScriptedEvents {
@@ -6843,16 +6861,16 @@ async fn event_loop_shows_and_resolves_pending_question_from_running_turn() {
             .lock()
             .expect("frames lock")
             .iter()
-            .any(|frame| frame.contains("1 + 1 = ?") && frame.contains("[1] 2")),
-        "pending question should be visible before it is answered"
+            .any(|frame| frame == "question-focused"),
+        "the pending question must own the live focus while the turn runs"
     );
     assert!(controller.chrome().focused_overlay().is_none());
+    let snapshot = controller.render_snapshot();
     assert!(
-        controller
-            .render_snapshot()
-            .contains("Collected your answers")
+        snapshot.contains("question: answered"),
+        "the answered question commits as one terminal transcript fact:\n{snapshot}"
     );
-    assert!(controller.render_snapshot().contains("answered"));
+    assert!(snapshot.contains("answered"));
 }
 
 #[tokio::test]
@@ -7371,7 +7389,7 @@ async fn approval_requests_are_handled_one_at_a_time() {
 }
 
 #[tokio::test]
-async fn approval_transcript_only_shows_active_request() {
+async fn approval_transcript_holds_every_request_and_focuses_earliest() {
     let mut controller = InteractiveController::new_for_test(
         "neo",
         "test-session",
@@ -7390,10 +7408,26 @@ async fn approval_transcript_only_shows_active_request() {
     controller.register_pending_approval(first);
     controller.register_pending_approval(second);
 
+    // Every request has its transcript position on arrival; complete state
+    // stays available while the earliest unresolved request owns the focus.
     let snapshot = controller.render_snapshot();
     assert!(snapshot.contains("printf one"));
-    assert!(!snapshot.contains("printf two"));
-    assert!(snapshot.contains("queued: 1 approval waiting"));
+    assert!(snapshot.contains("printf two"));
+    assert!(!snapshot.contains("queued:"));
+
+    let update = controller
+        .tui
+        .transcript_mut()
+        .render_terminal_update(80, 24);
+    let live = update.live.join("\n");
+    assert!(live.contains("printf one"), "live:\n{live}");
+    assert!(!live.contains("printf two"), "live:\n{live}");
+    assert_eq!(
+        controller.tui.transcript().earliest_blocking_entry(),
+        Some(neo_tui::transcript::BlockingEntryKind::Approval(
+            "tool-1".to_owned()
+        ))
+    );
 }
 
 #[tokio::test]
@@ -18771,5 +18805,185 @@ async fn ctrl_n_forks_current_session_and_enters_child() {
             &format!("switch to fork session {SESSION_CHILD}")
         ),
         "transcript shows switch-to notice"
+    );
+}
+
+#[tokio::test]
+#[ignore = "controller regression: pending approval keeps input while later delegate events arrive"]
+async fn pending_approval_keeps_input_while_later_delegate_events_arrive() {
+    let mut controller = InteractiveController::new_for_test(
+        "neo",
+        "test-session",
+        "openai/gpt-4.1",
+        test_workspace_root(),
+        |_request| async move { Ok(Vec::<AgentEvent>::new()) },
+    );
+    let (pending, response_rx) = make_pending_approval(ordinary_shell_request(
+        "tool-1",
+        "printf one",
+        Some(shell_session_scope(&["printf", "one"])),
+        None,
+    ));
+    controller.register_pending_approval(pending);
+
+    // Later Delegate events arrive while the approval is pending.
+    let config = test_config(
+        &test_workspace_root(),
+        test_workspace_root().join("sessions"),
+    );
+    let running = config
+        .multi_agent
+        .start_foreground_delegate_for_test("later delegate work");
+    controller
+        .transcript_mut()
+        .apply_agent_event(AgentEvent::DelegateStarted {
+            turn: 1,
+            agent: running,
+        });
+
+    // The earliest blocking entry is still the approval: selection keys
+    // target its option list, and the delegate card cannot displace it.
+    assert_eq!(
+        controller.tui.transcript().earliest_blocking_entry(),
+        Some(neo_tui::transcript::BlockingEntryKind::Approval(
+            "tool-1".to_owned()
+        ))
+    );
+    controller
+        .handle_input_event(InputEvent::Action(KeybindingAction::SelectDown))
+        .await
+        .expect("select moves within the approval");
+    assert_eq!(
+        controller
+            .chrome()
+            .approval_selection()
+            .map(|(id, _, _, _)| id),
+        Some("tool-1")
+    );
+    controller
+        .handle_input_event(InputEvent::Action(KeybindingAction::SelectConfirm))
+        .await
+        .expect("confirm resolves the approval");
+    assert!(matches!(
+        response_rx.await.expect("approval response"),
+        ApprovalResponse::Selected { .. }
+    ));
+    // The later delegate card remains and the deferred history releases once.
+    assert!(
+        controller.render_snapshot().contains("later delegate work"),
+        "delegate card must remain in the transcript"
+    );
+    // The deferred delegate card becomes visible again after resolution.
+    let update = controller
+        .tui
+        .transcript_mut()
+        .render_terminal_update(80, 24);
+    assert!(
+        update
+            .live
+            .iter()
+            .any(|line| neo_tui::primitive::strip_ansi(line).contains("later delegate work")),
+        "deferred delegate card must return to the live area after resolution"
+    );
+}
+
+#[tokio::test]
+#[ignore = "controller regression: pending question keeps input while later workflow events arrive"]
+async fn pending_question_keeps_input_while_later_workflow_events_arrive() {
+    use neo_agent_core::workflow::{WorkflowId, WorkflowSnapshot, WorkflowState};
+
+    let mut controller = InteractiveController::new_for_test(
+        "neo",
+        "test-session",
+        "openai/gpt-4.1",
+        test_workspace_root(),
+        |_request| async move { Ok(Vec::<AgentEvent>::new()) },
+    );
+    let (response_tx, response_rx) = oneshot::channel();
+    controller.register_pending_question(PendingQuestion {
+        id: "question-1".to_owned(),
+        questions: vec![neo_agent_core::QuestionEventData {
+            question: "Which option?".to_owned(),
+            header: Some("Choice".into()),
+            body: None,
+            options: vec![
+                neo_agent_core::QuestionOptionData {
+                    label: "Yes".to_owned(),
+                    description: None,
+                },
+                neo_agent_core::QuestionOptionData {
+                    label: "No".to_owned(),
+                    description: None,
+                },
+            ],
+            multi_select: false,
+        }],
+        response_tx,
+    });
+
+    // Later workflow events arrive while the question is pending.
+    controller
+        .transcript_mut()
+        .apply_agent_event(AgentEvent::WorkflowStarted {
+            turn: 1,
+            workflow: WorkflowSnapshot {
+                id: WorkflowId("wf-later".to_owned()),
+                title: "later workflow".to_owned(),
+                state: WorkflowState::Running,
+                current_phase: Some("work".to_owned()),
+                projection_sequence: Some(1),
+                recovery_failure: false,
+                started_at_ms: Some(1_000),
+                updated_at_ms: Some(2_000),
+                invocation_count: 1,
+                failure_count: 0,
+                actual_usage: None,
+                latest_log_summary: None,
+                latest_report_summary: None,
+                terminal_reason: None,
+                display_name: "later workflow".to_owned(),
+                purpose: "later".to_owned(),
+            },
+        });
+
+    // The earliest blocking entry is still the question: keys reach its
+    // state machine, and the workflow card cannot displace it.
+    assert_eq!(
+        controller.tui.transcript().earliest_blocking_entry(),
+        Some(neo_tui::transcript::BlockingEntryKind::Question(
+            "question-1".to_owned()
+        ))
+    );
+    controller
+        .handle_input_event(InputEvent::Action(KeybindingAction::SelectDown))
+        .await
+        .expect("select moves within the question");
+    assert_eq!(
+        controller
+            .chrome()
+            .question_dialog_state()
+            .map(|state| state.cursor),
+        Some(1)
+    );
+    controller
+        .handle_input_event(InputEvent::Action(KeybindingAction::SelectConfirm))
+        .await
+        .expect("select answer");
+    controller
+        .handle_input_event(InputEvent::Action(KeybindingAction::InputTab))
+        .await
+        .expect("move to submit tab");
+    controller
+        .handle_input_event(InputEvent::Action(KeybindingAction::SelectConfirm))
+        .await
+        .expect("submit question");
+    assert_eq!(
+        response_rx.await.expect("question response").answers,
+        vec!["No".to_owned()]
+    );
+    // The later workflow card remains and commits once afterwards.
+    assert!(
+        controller.render_snapshot().contains("later workflow"),
+        "workflow card must remain in the transcript"
     );
 }

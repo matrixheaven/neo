@@ -334,9 +334,6 @@ pub fn render_chrome_lines(app: &NeoChromeState, width: usize, height: usize) ->
                 .render(content_width),
         );
     }
-    if let Some(question) = app.question_dialog_state() {
-        lines.extend(question.render_lines(content_width));
-    }
     if let Some(btw_state) = app.btw_panel_state() {
         let terminal_rows = u16::try_from(height).unwrap_or(u16::MAX);
         let mut btw_state = btw_state.clone();
@@ -394,9 +391,6 @@ pub fn render_chrome_lines_mut(
                 .expanded(app.todo_panel_expanded())
                 .render(content_width),
         );
-    }
-    if let Some(question) = app.question_dialog_state() {
-        lines.extend(question.render_lines(content_width));
     }
     let terminal_rows = u16::try_from(height).unwrap_or(u16::MAX);
     let theme = app.theme();

@@ -620,13 +620,14 @@ impl TranscriptPresentation {
     }
 }
 
-/// Index of the earliest unresolved approval prompt, if any. That entry is the
-/// interactive focus: later history and later facts stay deferred until it
-/// resolves so canonical transcript order is preserved.
+/// Index of the earliest unresolved blocking dialog (approval or question),
+/// if any. That entry is the interactive focus: later history and later facts
+/// stay deferred until it resolves so canonical transcript order is preserved.
 fn blocking_dialog_index(transcript: &TranscriptStore) -> Option<usize> {
-    transcript.entries().iter().position(
-        |entry| matches!(entry, TranscriptEntry::ApprovalPrompt(data) if data.is_pending()),
-    )
+    transcript.entries().iter().position(|entry| {
+        matches!(entry, TranscriptEntry::ApprovalPrompt(data) if data.is_pending())
+            || matches!(entry, TranscriptEntry::QuestionPrompt(data) if data.is_pending())
+    })
 }
 
 fn advance_semantic_owner(
@@ -741,6 +742,7 @@ fn terminal_summary_lines(
         Some(TranscriptEntry::DelegateSwarm { component }) => {
             component.terminal_summary(width, theme)
         }
+        Some(TranscriptEntry::Workflow { component }) => component.terminal_summary(width, theme),
         _ => Vec::new(),
     };
     lines

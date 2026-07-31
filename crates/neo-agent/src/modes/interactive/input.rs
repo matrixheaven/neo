@@ -30,7 +30,7 @@ impl ExitConfirmation {
 impl InteractiveController {
     pub(super) async fn handle_input_event(&mut self, event: InputEvent) -> Result<bool> {
         self.drain_deferred_approval_response().await;
-        if self.handle_pending_approval_event(&event).await? {
+        if self.handle_blocking_entry_event(&event).await? {
             return Ok(false);
         }
         if self.handle_task_browser_event(event.clone()).await? {
@@ -276,8 +276,84 @@ impl InteractiveController {
         Ok(true)
     }
 
+    /// Route keys to the earliest unresolved approval/question by transcript
+    /// order. A later question never displaces an earlier approval and a
+    /// later approval never displaces an earlier question.
+    pub(super) async fn handle_blocking_entry_event(&mut self, event: &InputEvent) -> Result<bool> {
+        let Some(kind) = self.tui.transcript().earliest_blocking_entry() else {
+            return Ok(false);
+        };
+        match kind {
+            neo_tui::transcript::BlockingEntryKind::Approval(_) => {
+                self.handle_pending_approval_event(event).await
+            }
+            neo_tui::transcript::BlockingEntryKind::Question(_) => {
+                self.handle_pending_question_event(event).await
+            }
+        }
+    }
+
+    /// Question input path: the earliest unresolved question owns the keys
+    /// until it is answered or cancelled.
+    pub(super) async fn handle_pending_question_event(
+        &mut self,
+        event: &InputEvent,
+    ) -> Result<bool> {
+        if !self.tui.chrome().question_dialog_is_focused() {
+            return Ok(false);
+        }
+        // The wheel owns transcript navigation while a blocking dialog is focused.
+        if matches!(event, InputEvent::ScrollUp(_) | InputEvent::ScrollDown(_)) {
+            return Ok(false);
+        }
+        if matches!(event, InputEvent::Interrupt) {
+            let cancelled = self
+                .tui
+                .chrome()
+                .question_dialog_state()
+                .map(|state| state.id.clone());
+            if let Some(id) = cancelled {
+                self.pending_questions.remove(&id);
+                self.pending_question_prompts.remove(&id);
+                self.tui.transcript_mut().cancel_question_prompt(&id);
+            }
+            if self.active_turn.is_some() {
+                self.cancel_active_turn().await?;
+                self.show_notice("Interrupted");
+            }
+            return Ok(true);
+        }
+        let cancelled_question = self
+            .tui
+            .chrome()
+            .question_dialog_state()
+            .map(|state| state.id.clone());
+        let event = self.dialog_input_event(event.clone());
+        let result = self.tui.chrome_mut().handle_focused_dialog_input(event);
+        if result == InputResult::Cancelled
+            && let Some(id) = cancelled_question
+        {
+            self.pending_questions.remove(&id);
+            self.pending_question_prompts.remove(&id);
+            self.tui.transcript_mut().cancel_question_prompt(&id);
+        }
+        // Refresh the transcript card from the runtime state machine after
+        // every input so the visible selection stays current.
+        let machine = self.tui.chrome().question_dialog_state().cloned();
+        if let Some(machine) = machine {
+            self.tui.transcript_mut().sync_question_prompt(&machine);
+        }
+        self.process_rich_dialog_result(result).await?;
+        Ok(true)
+    }
+
     pub(super) async fn handle_rich_dialog_event(&mut self, event: InputEvent) -> Result<bool> {
-        if !self.tui.chrome_mut().focused_overlay_is_rich_dialog() {
+        // Questions are blocking transcript entries and own input through
+        // [`Self::handle_pending_question_event`], never through the generic
+        // rich-dialog path.
+        if self.tui.chrome().question_dialog_is_focused()
+            || !self.tui.chrome_mut().focused_overlay_is_rich_dialog()
+        {
             return Ok(false);
         }
         let cancelled_question = self
@@ -1301,21 +1377,25 @@ impl InteractiveController {
     }
 
     pub(super) fn keybinding_priority(&self) -> &'static [KeybindingAction] {
-        if self.tui.chrome().question_dialog_is_focused() {
-            QUESTION_ACTION_PRIORITY
-        } else if self
-            .tui
-            .chrome()
-            .focused_overlay()
-            .is_some_and(|overlay| matches!(overlay.kind, OverlayKind::PromptCompletion(_)))
-        {
-            PROMPT_COMPLETION_ACTION_PRIORITY
-        } else if self.tui.chrome().approval_is_pending()
-            || self.tui.chrome().focused_overlay_id().is_some()
-        {
-            OVERLAY_ACTION_PRIORITY
-        } else {
-            EDITING_ACTION_PRIORITY
+        match self.tui.transcript().earliest_blocking_entry() {
+            Some(neo_tui::transcript::BlockingEntryKind::Question(_)) => QUESTION_ACTION_PRIORITY,
+            Some(neo_tui::transcript::BlockingEntryKind::Approval(_)) => OVERLAY_ACTION_PRIORITY,
+            None => {
+                if self
+                    .tui
+                    .chrome()
+                    .focused_overlay()
+                    .is_some_and(|overlay| matches!(overlay.kind, OverlayKind::PromptCompletion(_)))
+                {
+                    PROMPT_COMPLETION_ACTION_PRIORITY
+                } else if self.tui.chrome().approval_is_pending()
+                    || self.tui.chrome().focused_overlay_id().is_some()
+                {
+                    OVERLAY_ACTION_PRIORITY
+                } else {
+                    EDITING_ACTION_PRIORITY
+                }
+            }
         }
     }
 

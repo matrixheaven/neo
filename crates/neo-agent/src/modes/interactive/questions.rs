@@ -3,9 +3,8 @@
 
 use anyhow::Result;
 
-use neo_agent_core::{
-    AgentEvent, Content, MessageOrigin, PendingQuestion, QuestionResponse, format_collected_answers,
-};
+use neo_agent_core::{AgentEvent, Content, MessageOrigin, PendingQuestion, QuestionResponse};
+use neo_tui::dialogs::{QuestionDisplayData, QuestionDisplayOption};
 
 use super::InteractiveController;
 
@@ -30,20 +29,40 @@ impl InteractiveController {
                 id: id.clone(),
                 questions: questions.clone(),
             });
+        let display = questions
+            .iter()
+            .map(|question| QuestionDisplayData {
+                question: question.question.clone(),
+                header: question.header.clone(),
+                body: question.body.clone(),
+                options: question
+                    .options
+                    .iter()
+                    .map(|option| QuestionDisplayOption {
+                        label: option.label.clone(),
+                        description: option.description.clone(),
+                    })
+                    .collect(),
+                multi_select: question.multi_select,
+            })
+            .collect();
+        // The transcript card is the single visible owner of the question;
+        // the chrome overlay keeps the runtime selection state.
+        self.tui
+            .transcript_mut()
+            .upsert_question_prompt(&id, display);
         self.pending_questions
             .insert(id.clone(), pending.response_tx);
         self.pending_question_prompts.insert(id, questions);
     }
 
     /// Resolve a pending question by sending the user's answers through the
-    /// stored oneshot channel.
+    /// stored oneshot channel and updating the transcript card in place.
     pub(super) async fn resolve_question(&mut self, id: &str, answers: Vec<String>) -> Result<()> {
-        if let Some(questions) = self.pending_question_prompts.remove(id) {
-            self.transcript_mut()
-                .push_transcript(neo_tui::transcript::TranscriptEntry::status(
-                    format_collected_answers(&questions, &answers),
-                ));
-        }
+        self.pending_question_prompts.remove(id);
+        self.tui
+            .transcript_mut()
+            .resolve_question_prompt(id, answers.clone());
         if let Some(tx) = self.pending_questions.remove(id) {
             let _ = tx.send(QuestionResponse { answers });
         }

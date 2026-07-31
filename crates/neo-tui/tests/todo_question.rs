@@ -72,10 +72,13 @@ fn app_pushes_question_overlay() {
 }
 
 #[test]
-fn question_overlay_renders_in_live_tui_frame() {
+fn question_prompt_renders_in_live_tui_frame() {
     let mut app = NeoChromeState::new("neo", "s1", "m1", "/tmp/ws");
     app.push_question_overlay("q-123", make_single_question());
-    let transcript = TranscriptPane::new(80, 24);
+    let mut transcript = TranscriptPane::new(80, 24);
+    // The transcript card is the single visible owner of the question; the
+    // chrome overlay keeps the runtime selection state.
+    transcript.upsert_question_prompt("q-123", make_single_question());
     let mut tui = neo_tui::NeoTui::new(app, transcript);
 
     let (lines, _) = tui.render_frame(80, 24);
@@ -94,7 +97,7 @@ fn question_overlay_renders_in_live_tui_frame() {
 }
 
 #[test]
-fn question_overlay_lines_fit_terminal_width() {
+fn question_prompt_lines_fit_terminal_width() {
     let mut app = NeoChromeState::new("neo", "s1", "m1", "/tmp/ws");
     app.push_question_overlay(
         "q-123",
@@ -117,7 +120,28 @@ fn question_overlay_lines_fit_terminal_width() {
             multi_select: false,
         }],
     );
-    let transcript = TranscriptPane::new(40, 24);
+    let mut transcript = TranscriptPane::new(40, 24);
+    transcript.upsert_question_prompt(
+        "q-123",
+        vec![QuestionDisplayData {
+            question: "This is a deliberately long question that needs wrapping".into(),
+            header: Some("Extremely long header text that must not overflow".into()),
+            body: None,
+            options: vec![
+                QuestionDisplayOption {
+                    label: "A long option label that also needs wrapping".into(),
+                    description: Some(
+                        "A description with enough words to wrap in a narrow terminal".into(),
+                    ),
+                },
+                QuestionDisplayOption {
+                    label: "Second option".into(),
+                    description: None,
+                },
+            ],
+            multi_select: false,
+        }],
+    );
     let mut tui = neo_tui::NeoTui::new(app, transcript);
 
     let (lines, _) = tui.render_frame(40, 24);
@@ -380,4 +404,91 @@ fn select_visible_prioritises_in_progress_and_latest_done() {
     assert!(visible.indices.contains(&2));
     assert!(visible.indices.contains(&5));
     assert_eq!(visible.indices, vec![0, 1, 2, 3, 5]);
+}
+
+// ---------------------------------------------------------------------------
+// Earliest blocking entry focus
+// ---------------------------------------------------------------------------
+
+/// The earliest unresolved approval/question owns the focus in transcript
+/// order; later requests stay present but inactive until it resolves.
+#[test]
+fn earliest_blocking_entry_keeps_focus_across_later_requests() {
+    use neo_agent_core::{
+        ApprovalAction, ApprovalOption, ApprovalPresentation, ApprovalRequest, ApprovalResolution,
+        PermissionOperation,
+    };
+    use neo_tui::transcript::BlockingEntryKind;
+
+    fn shell_approval(id: &str) -> ApprovalRequest {
+        ApprovalRequest {
+            turn: 1,
+            id: id.to_owned(),
+            operation: PermissionOperation::Shell,
+            presentation: ApprovalPresentation::Tool {
+                title: format!("Run {id}?"),
+                details: vec!["cargo test".to_owned()],
+            },
+            options: vec![ApprovalOption {
+                action: ApprovalAction::PermitOnce,
+                label: "Allow once".to_owned(),
+                description: None,
+            }],
+            workflow_origin: None,
+        }
+    }
+
+    let mut pane = TranscriptPane::new(120, 24);
+    pane.apply_agent_event(neo_agent_core::AgentEvent::ApprovalRequested {
+        request: shell_approval("approval-1"),
+    });
+    // A later question must never displace the earlier approval.
+    pane.upsert_question_prompt("question-1", make_single_question());
+    pane.apply_agent_event(neo_agent_core::AgentEvent::ApprovalRequested {
+        request: shell_approval("approval-2"),
+    });
+
+    assert_eq!(
+        pane.earliest_blocking_entry(),
+        Some(BlockingEntryKind::Approval("approval-1".to_owned()))
+    );
+    let update = pane.render_terminal_update(120, 24);
+    let live = update
+        .live
+        .iter()
+        .map(|line| neo_tui::primitive::strip_ansi(line))
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(live.contains("Run approval-1?"), "live:\n{live}");
+    assert!(!live.contains("Which option?"), "live:\n{live}");
+
+    // Resolving the approval promotes the question to the focus.
+    pane.resolve_approval(
+        "approval-1",
+        &ApprovalResolution::Selected {
+            action: ApprovalAction::PermitOnce,
+            label: "Allow once".to_owned(),
+            feedback: None,
+        },
+    );
+    assert_eq!(
+        pane.earliest_blocking_entry(),
+        Some(BlockingEntryKind::Question("question-1".to_owned()))
+    );
+    let update = pane.render_terminal_update(120, 24);
+    let live = update
+        .live
+        .iter()
+        .map(|line| neo_tui::primitive::strip_ansi(line))
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(live.contains("Which option?"), "live:\n{live}");
+    assert!(!live.contains("Run approval-2?"), "live:\n{live}");
+
+    // Answering the question promotes the later approval.
+    pane.resolve_question_prompt("question-1", vec!["Yes".to_owned()]);
+    assert_eq!(
+        pane.earliest_blocking_entry(),
+        Some(BlockingEntryKind::Approval("approval-2".to_owned()))
+    );
 }

@@ -35,11 +35,10 @@ impl TranscriptPane {
                 ApprovalDisplayState::Resolved(existing) if existing == resolution
             );
             let feedback_cleared = !approval.feedback_active && approval.feedback_input.is_empty();
-            if already_resolved && approval.queued_count == 0 && feedback_cleared {
+            if already_resolved && feedback_cleared {
                 return false;
             }
             approval.state = ApprovalDisplayState::Resolved(resolution.clone());
-            approval.queued_count = 0;
             // Interactive feedback is live-only; historical cards keep the
             // canonical resolution label/action without editor state.
             approval.feedback_active = false;
@@ -47,7 +46,6 @@ impl TranscriptPane {
             true
         });
         if changed {
-            self.advance_queued_approval();
             self.mark_dirty();
         }
     }
@@ -67,13 +65,8 @@ impl TranscriptPane {
                     return false;
                 };
                 data.state = ApprovalDisplayState::Resolved(resolution.clone());
-                data.queued_count = 0;
                 true
             });
-        }
-        if !self.queued_approvals.is_empty() {
-            self.queued_approvals.clear();
-            changed = true;
         }
         if changed {
             self.mark_dirty();
@@ -82,6 +75,10 @@ impl TranscriptPane {
 
     /// Upsert a canonical approval request exactly as provided. Never appends
     /// session/prefix options or reconstructs labels from raw tool JSON.
+    ///
+    /// Every approval gets its transcript position on arrival; the
+    /// presentation selects the earliest unresolved blocking entry as the
+    /// active focus while later entries remain present but deferred.
     pub(super) fn upsert_approval(&mut self, request: ApprovalRequest) {
         let id = request.id.clone();
         if self
@@ -92,14 +89,11 @@ impl TranscriptPane {
             return;
         }
         if self.transcript.approval(&id).is_some() {
-            let queued_count = self.queued_approvals.len();
             self.transcript.mutate_approval(&id, |approval| {
-                let changed = approval.request != request || approval.queued_count != queued_count;
-                if !changed {
+                if approval.request == request {
                     return false;
                 }
                 approval.request = request;
-                approval.queued_count = queued_count;
                 true
             });
             return;
@@ -112,52 +106,8 @@ impl TranscriptPane {
             feedback_active: false,
             expanded: self.tool_output_expanded(),
             state: ApprovalDisplayState::Pending,
-            queued_count: 0,
         };
-        if self.active_approval_index().is_some() {
-            self.queued_approvals.push_back(data);
-            self.update_active_approval_queue_count();
-            return;
-        }
-
         self.finish_active_text_blocks();
         self.transcript.insert_approval_after_tool_or_push(data);
-    }
-
-    fn active_approval_index(&self) -> Option<usize> {
-        self.transcript.entries().iter().rposition(|entry| {
-            matches!(
-                entry,
-                TranscriptEntry::ApprovalPrompt(data) if data.is_pending()
-            )
-        })
-    }
-
-    fn update_active_approval_queue_count(&mut self) {
-        let queued_count = self.queued_approvals.len();
-        let Some(index) = self.active_approval_index() else {
-            return;
-        };
-        if self.transcript.mutate_entry(index, |entry| {
-            let TranscriptEntry::ApprovalPrompt(approval) = entry else {
-                return false;
-            };
-            if approval.queued_count == queued_count {
-                return false;
-            }
-            approval.queued_count = queued_count;
-            true
-        }) {
-            self.mark_dirty();
-        }
-    }
-
-    fn advance_queued_approval(&mut self) {
-        let Some(mut next) = self.queued_approvals.pop_front() else {
-            return;
-        };
-        next.queued_count = self.queued_approvals.len();
-        next.expanded = self.tool_output_expanded();
-        self.transcript.insert_approval_after_tool_or_push(next);
     }
 }

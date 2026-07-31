@@ -245,3 +245,126 @@ fn delegate_family_completion_appends_one_terminal_status_without_complete_card_
     );
     assert!(finished.live.is_empty());
 }
+
+/// A pending approval defers every later stable fact; resolution releases
+/// them once in canonical transcript order.
+#[test]
+fn pending_approval_defers_later_facts_in_canonical_order() {
+    use neo_agent_core::multi_agent::{
+        AgentActivityEntry, AgentActivityKind, AgentDisplayName, AgentId, AgentLifecycleState,
+        AgentPath, AgentRole, AgentRunMode, AgentSnapshot, AgentToolActivityPhase, DelegateContext,
+    };
+    use neo_agent_core::{
+        ApprovalAction, ApprovalOption, ApprovalPresentation, ApprovalRequest, ApprovalResolution,
+        PermissionOperation,
+    };
+
+    let mut pane = TranscriptPane::new(120, 24);
+    pane.apply_agent_event(neo_agent_core::AgentEvent::ApprovalRequested {
+        request: ApprovalRequest {
+            turn: 1,
+            id: "approval-1".to_owned(),
+            operation: PermissionOperation::Shell,
+            presentation: ApprovalPresentation::Tool {
+                title: "Run tests?".to_owned(),
+                details: vec!["cargo test".to_owned()],
+            },
+            options: vec![ApprovalOption {
+                action: ApprovalAction::PermitOnce,
+                label: "Allow once".to_owned(),
+                description: None,
+            }],
+            workflow_origin: None,
+        },
+    });
+
+    // A later delegate completes a tool while the approval stays pending.
+    let mut running = AgentSnapshot {
+        id: AgentId::from_suffix_for_test("agent-a"),
+        display_name: AgentDisplayName::new("agent-a"),
+        path: AgentPath::root_child(&AgentDisplayName::new("agent-a")),
+        role: AgentRole::Coder,
+        mode: AgentRunMode::Foreground,
+        context: DelegateContext::Inherit,
+        state: AgentLifecycleState::Running,
+        task: "implement feature".to_owned(),
+        task_title: "implement feature".to_owned(),
+        created_at_ms: 1,
+        updated_at_ms: 2,
+        started_at_ms: Some(1),
+        terminal_at_ms: None,
+        detached_from_foreground: false,
+        terminal_reason: None,
+        run_count: 1,
+        live_messages_received: 0,
+        previous_status: None,
+        terminal_status_history: Vec::new(),
+        resumed_from: None,
+        tool_count: 1,
+        token_count: 0,
+        cache_read_token_count: 0,
+        cache_write_token_count: 0,
+        elapsed: std::time::Duration::ZERO,
+        latest_text: None,
+        activity: vec![AgentActivityEntry {
+            kind: AgentActivityKind::Tool {
+                id: "read-1".to_owned(),
+                name: "Read".to_owned(),
+                summary: Some("one.rs".to_owned()),
+                phase: AgentToolActivityPhase::Done,
+                output: None,
+                files: Vec::new(),
+            },
+        }],
+        prior_messages: Vec::new(),
+        outcome: None,
+    };
+    pane.transcript_mut().upsert_delegate(1, running.clone());
+
+    // The earliest unresolved approval owns the live focus; the later stable
+    // fact stays deferred.
+    let update = pane.render_terminal_update(120, 24);
+    let live = update
+        .live
+        .iter()
+        .map(|line| strip_ansi(line))
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(update.history.is_empty(), "no later fact may commit");
+    assert!(live.contains("Run tests?"), "live:\n{live}");
+    assert!(!live.contains("Used Read"), "live:\n{live}");
+    assert_eq!(
+        pane.earliest_blocking_entry(),
+        Some(neo_tui::transcript::BlockingEntryKind::Approval(
+            "approval-1".to_owned()
+        ))
+    );
+
+    // Resolution releases the deferred facts once in canonical order: the
+    // resolved approval first, then the later stable fact.
+    pane.resolve_approval(
+        "approval-1",
+        &ApprovalResolution::Selected {
+            action: ApprovalAction::PermitOnce,
+            label: "Allow once".to_owned(),
+            feedback: None,
+        },
+    );
+    let update = pane.render_terminal_update(120, 24);
+    let history = update
+        .history
+        .iter()
+        .flat_map(|block| block.lines.iter())
+        .map(|line| strip_ansi(line))
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(
+        history.contains("approval: Allow once"),
+        "history:\n{history}"
+    );
+    assert!(history.contains("Used Read"), "history:\n{history}");
+    assert!(
+        history.find("approval: Allow once").unwrap() < history.find("Used Read").unwrap(),
+        "canonical order violated:\n{history}"
+    );
+}

@@ -52,6 +52,7 @@ fn card_copy_parts(entry: &TranscriptEntry) -> (&'static str, String) {
         | TranscriptEntry::AssistantMessage { .. }
         | TranscriptEntry::ThinkingBlock { .. }
         | TranscriptEntry::ApprovalPrompt(_)
+        | TranscriptEntry::QuestionPrompt(_)
         | TranscriptEntry::Image { .. }
         | TranscriptEntry::Status { .. }
         | TranscriptEntry::RetryStatus { .. }
@@ -91,6 +92,18 @@ fn status_copy_parts(entry: &TranscriptEntry) -> Option<(&'static str, String)> 
         TranscriptEntry::RetryStatus { data } => Some(("Retry", data.message.clone())),
         TranscriptEntry::McpStartupStatus { data } => Some(("MCP", data.message())),
         TranscriptEntry::ApprovalPrompt(data) => Some(("Approval", data.title().to_owned())),
+        TranscriptEntry::QuestionPrompt(data) => match &data.state {
+            super::QuestionPromptState::Pending => {
+                Some(("Question", data.display.question.clone()))
+            }
+            super::QuestionPromptState::Answered { answers } => Some((
+                "Question",
+                format!("{}: {}", data.display.question, answers.join(", ")),
+            )),
+            super::QuestionPromptState::Cancelled => {
+                Some(("Question", format!("{}: cancelled", data.display.question)))
+            }
+        },
         _ => None,
     }
 }

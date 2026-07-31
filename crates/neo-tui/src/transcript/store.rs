@@ -14,7 +14,7 @@ use super::entry::{
 };
 use super::progressive::{
     ChildAgentFact, ChildToolFact, ProgressiveFact, ProgressiveFactId, ProgressiveFactPayload,
-    SwarmItemFact,
+    SwarmItemFact, WorkflowTransitionFact,
 };
 use neo_agent_core::instructions::{
     IgnoredInstructionBundle, InstructionBundleMetadata, InstructionEpochData,
@@ -1089,12 +1089,75 @@ impl TranscriptStore {
                 let TranscriptEntry::Workflow { component } = entry else {
                     return false;
                 };
-                component.update(snapshot)
+                component.update(snapshot.clone())
             });
+            // Capture the accepted transition before the newest snapshot
+            // overwrites the prior one.
+            self.capture_workflow_transition(self.entry_ids[index], &snapshot);
             return;
         }
         self.push(TranscriptEntry::Workflow {
-            component: WorkflowCardComponent::new(snapshot),
+            component: WorkflowCardComponent::new(snapshot.clone()),
+        });
+        self.capture_workflow_transition(self.entry_ids[self.entries.len() - 1], &snapshot);
+    }
+
+    /// Capture one accepted workflow snapshot transition keyed by typed
+    /// projection sequence. Duplicate or older sequences are ignored, and a
+    /// transition with unchanged state/phase/reason adds no duplicate row.
+    /// The terminal outcome is not captured here: it projects once as the
+    /// entry's final status so history never repeats the same state line.
+    fn capture_workflow_transition(
+        &mut self,
+        entry: TranscriptEntryId,
+        snapshot: &WorkflowSnapshot,
+    ) {
+        let Some(projection_sequence) = snapshot.projection_sequence else {
+            return;
+        };
+        if snapshot.state.is_terminal() {
+            return;
+        }
+        let identity = ProgressiveFactId::WorkflowTransition {
+            entry,
+            projection_sequence,
+        };
+        if self
+            .progressive_facts
+            .iter()
+            .any(|fact| fact.id == identity)
+        {
+            return;
+        }
+        if let Some(previous) =
+            self.progressive_facts
+                .iter()
+                .rev()
+                .find_map(|fact| match (&fact.id, &fact.payload) {
+                    (
+                        ProgressiveFactId::WorkflowTransition {
+                            entry: previous_entry,
+                            ..
+                        },
+                        ProgressiveFactPayload::WorkflowTransition(previous),
+                    ) if *previous_entry == entry => Some(previous),
+                    _ => None,
+                })
+            && previous.state == snapshot.state
+            && previous.current_phase == snapshot.current_phase
+            && previous.terminal_reason == snapshot.terminal_reason
+        {
+            return;
+        }
+        self.capture_progressive_fact(ProgressiveFact {
+            id: identity,
+            payload: ProgressiveFactPayload::WorkflowTransition(WorkflowTransitionFact {
+                projection_sequence,
+                title: snapshot.title.clone(),
+                state: snapshot.state,
+                current_phase: snapshot.current_phase.clone(),
+                terminal_reason: snapshot.terminal_reason.clone(),
+            }),
         });
     }
 

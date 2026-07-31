@@ -563,7 +563,7 @@ fn transcript_pane_renders_inline_bash_approval_prompt() {
 }
 
 #[test]
-fn transcript_pane_only_renders_active_approval_and_queued_count() {
+fn transcript_pane_renders_only_earliest_pending_approval() {
     let mut transcript_pane = TranscriptPane::new(100, 24);
 
     for number in 1..=3 {
@@ -573,16 +573,26 @@ fn transcript_pane_only_renders_active_approval_and_queued_count() {
         });
     }
 
-    let frame = plain_frame(&mut transcript_pane, 100, 24);
-    assert!(frame.iter().any(|line| line.contains("$ printf 1")));
-    assert!(!frame.iter().any(|line| line.contains("$ printf 2")));
-    assert!(!frame.iter().any(|line| line.contains("$ printf 3")));
-    assert!(
-        frame
-            .iter()
-            .any(|line| line.contains("queued: 2 approvals waiting")),
-        "frame: {frame:?}"
-    );
+    // Every approval has its transcript position on arrival; the earliest
+    // unresolved one is the visible live focus and later ones stay deferred.
+    let update = transcript_pane.render_terminal_update(100, 24);
+    let live = update
+        .live
+        .iter()
+        .map(|line| plain(line))
+        .collect::<Vec<_>>();
+    assert!(live.iter().any(|line| line.contains("$ printf 1")));
+    assert!(!live.iter().any(|line| line.contains("$ printf 2")));
+    assert!(!live.iter().any(|line| line.contains("$ printf 3")));
+    assert!(!live.iter().any(|line| line.contains("queued:")));
+    assert!(update.history.is_empty(), "later rows stay deferred");
+
+    // Resolving the earliest approval releases the next one in canonical order.
+    transcript_pane.resolve_approval("bash-1", &approved_resolution());
+    let next = transcript_pane.render_terminal_update(100, 24);
+    let live = next.live.iter().map(|line| plain(line)).collect::<Vec<_>>();
+    assert!(live.iter().any(|line| line.contains("$ printf 2")));
+    assert!(!live.iter().any(|line| line.contains("$ printf 3")));
 }
 
 #[test]

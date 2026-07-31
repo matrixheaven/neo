@@ -59,9 +59,12 @@ impl WorkflowCardComponent {
     }
 
     pub fn interrupt(&mut self) -> bool {
-        if self.snapshot.state != WorkflowState::Running {
+        if self.snapshot.state.is_terminal() {
             return false;
         }
+        // Every non-terminal workflow state (running, queued, pausing,
+        // awaiting user, paused) converges to one terminal presentation on
+        // interrupt or exit.
         self.snapshot.state = WorkflowState::Failed;
         self.snapshot.terminal_reason = Some("interrupted when terminal exited".to_owned());
         true
@@ -97,17 +100,7 @@ impl WorkflowCardComponent {
         let muted = Style::default().fg(theme.text_muted);
         let mut lines = Vec::new();
 
-        let status_label = match self.snapshot.state {
-            WorkflowState::Running => "running",
-            WorkflowState::Queued => "queued",
-            WorkflowState::Pausing => "finishing work",
-            WorkflowState::AwaitingUser => "awaiting user",
-            WorkflowState::Completed => "completed",
-            WorkflowState::Failed => "failed",
-            WorkflowState::Paused => "paused",
-            WorkflowState::Cancelled => "cancelled",
-            WorkflowState::ResourceLimited => "resource limited",
-        };
+        let status_label = workflow_state_label(self.snapshot.state);
 
         lines.push(
             Line::from_spans(vec![
@@ -181,6 +174,47 @@ impl WorkflowCardComponent {
         }
 
         lines
+    }
+
+    /// One terminal status for native history once progressive transition
+    /// facts were emitted. The full card remains available through explicit
+    /// review.
+    #[must_use]
+    pub fn terminal_summary(&self, width: usize, theme: &TuiTheme) -> Vec<Line> {
+        let brand = Style::default().fg(theme.brand);
+        let primary = Style::default().fg(theme.text_primary);
+        let muted = Style::default().fg(theme.text_muted);
+        let mut lines = vec![
+            Line::from_spans(vec![
+                Span::styled("\u{25b8} Workflow  ", brand),
+                Span::styled(self.snapshot.title.as_str(), primary),
+                Span::raw("  "),
+                Span::styled(
+                    workflow_state_label(self.snapshot.state),
+                    workflow_state_style(self.snapshot.state, theme),
+                ),
+            ])
+            .truncate_to_width(width),
+        ];
+        if let Some(reason) = self.snapshot.terminal_reason.as_deref() {
+            lines.push(Line::styled(format!("  Reason  {reason}"), muted).truncate_to_width(width));
+        }
+        lines
+    }
+}
+
+#[must_use]
+pub(super) fn workflow_state_label(state: WorkflowState) -> &'static str {
+    match state {
+        WorkflowState::Running => "running",
+        WorkflowState::Queued => "queued",
+        WorkflowState::Pausing => "finishing work",
+        WorkflowState::AwaitingUser => "awaiting user",
+        WorkflowState::Completed => "completed",
+        WorkflowState::Failed => "failed",
+        WorkflowState::Paused => "paused",
+        WorkflowState::Cancelled => "cancelled",
+        WorkflowState::ResourceLimited => "resource limited",
     }
 }
 

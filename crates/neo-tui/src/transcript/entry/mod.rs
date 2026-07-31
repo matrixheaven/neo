@@ -1,3 +1,4 @@
+use crate::dialogs::question_dialog::{QuestionDisplayData, QuestionStateMachine};
 use crate::primitive::theme::TuiTheme;
 use crate::primitive::wrap_width;
 use crate::primitive::{Color, Component, Expandable, Finalization, Style, visible_width};
@@ -38,6 +39,37 @@ pub struct BannerData {
     pub mcp: Option<String>,
 }
 
+/// Transcript display lifecycle for one question prompt.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum QuestionPromptState {
+    Pending,
+    Answered { answers: Vec<String> },
+    Cancelled,
+}
+
+/// Transcript entry for one canonical question prompt.
+///
+/// The entry is the single visible owner of the question. It holds a display
+/// clone of the runtime [`QuestionStateMachine`]; selection and key behavior
+/// stay in the chrome-owned machine, and the clone is synced after each input
+/// so the live card always shows the current selection.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct QuestionPromptData {
+    pub id: String,
+    pub state: QuestionPromptState,
+    /// Static question text and options borrowed from the runtime machine.
+    pub display: QuestionDisplayData,
+    /// Synced display clone of the runtime [`QuestionStateMachine`].
+    pub machine: QuestionStateMachine,
+}
+
+impl QuestionPromptData {
+    #[must_use]
+    pub fn is_pending(&self) -> bool {
+        matches!(self.state, QuestionPromptState::Pending)
+    }
+}
+
 /// Transcript display lifecycle for one approval request.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
@@ -61,10 +93,6 @@ pub struct ApprovalPromptData {
     #[serde(default)]
     pub expanded: bool,
     pub state: ApprovalDisplayState,
-    /// UI-only queue badge for additional pending approvals waiting behind this
-    /// active prompt. Not part of the protocol request/response.
-    #[serde(default)]
-    pub queued_count: usize,
 }
 
 impl ApprovalPromptData {
@@ -146,6 +174,7 @@ pub enum TranscriptEntry {
         component: ShellRunComponent,
     },
     ApprovalPrompt(ApprovalPromptData),
+    QuestionPrompt(QuestionPromptData),
     Image {
         id: String,
         mime_type: String,
@@ -570,6 +599,13 @@ impl TranscriptEntry {
                     Finalization::Finalized
                 }
             }
+            Self::QuestionPrompt(data) => {
+                if data.is_pending() {
+                    Finalization::Live
+                } else {
+                    Finalization::Finalized
+                }
+            }
             Self::Compaction { phase, percent, .. } => {
                 if *phase == Some(neo_agent_core::CompactionPhase::Applying) && *percent >= 100 {
                     Finalization::Finalized
@@ -623,6 +659,14 @@ impl TranscriptEntry {
             Self::ApprovalPrompt(data) => {
                 if data.is_pending() {
                     data.state = ApprovalDisplayState::Abandoned;
+                    true
+                } else {
+                    false
+                }
+            }
+            Self::QuestionPrompt(data) => {
+                if data.is_pending() {
+                    data.state = QuestionPromptState::Cancelled;
                     true
                 } else {
                     false
@@ -785,6 +829,7 @@ impl TranscriptEntry {
             Self::ToolRun { component } => render_tool_run(component, inner_width, theme),
             Self::ShellRun { component } => component.render(inner_width, theme),
             Self::ApprovalPrompt(data) => render_approval_prompt(data, inner_width, theme),
+            Self::QuestionPrompt(data) => render_question_prompt(data, inner_width, theme),
             Self::Image { .. } => render_image_entry(
                 self,
                 inner_width,
@@ -991,21 +1036,6 @@ fn render_approval_prompt(data: &ApprovalPromptData, width: usize, theme: &TuiTh
     render_approval_body(data, width, theme, body, &mut rows);
     if data.is_pending() {
         render_approval_options(data, width, body, muted, selected, &mut rows);
-        if data.queued_count > 0 {
-            let suffix = if data.queued_count == 1 {
-                "approval"
-            } else {
-                "approvals"
-            };
-            rows.extend(styled_wrap_with_indent(
-                &format!("queued: {} {suffix} waiting", data.queued_count),
-                width,
-                2,
-                2,
-                muted,
-            ));
-            rows.push(Line::raw(""));
-        }
         rows.extend(styled_wrap_with_indent(
             "  ↑/↓ select · number keys choose · ↵ confirm",
             width,
@@ -1016,6 +1046,29 @@ fn render_approval_prompt(data: &ApprovalPromptData, width: usize, theme: &TuiTh
     }
     rows.push(Line::styled(line, border));
     rows
+}
+
+fn render_question_prompt(data: &QuestionPromptData, width: usize, theme: &TuiTheme) -> Vec<Line> {
+    let muted = Style::default().fg(theme.text_muted);
+    match &data.state {
+        QuestionPromptState::Pending => data
+            .machine
+            .render_lines(width)
+            .into_iter()
+            .map(Line::raw)
+            .collect(),
+        QuestionPromptState::Answered { answers } => {
+            let text = if answers.is_empty() {
+                "question: answered".to_owned()
+            } else {
+                format!("question: answered · {}", answers.join(", "))
+            };
+            vec![Line::styled(text, muted)]
+        }
+        QuestionPromptState::Cancelled => {
+            vec![Line::styled("question: cancelled", muted)]
+        }
+    }
 }
 
 fn render_approval_body(
@@ -1712,7 +1765,6 @@ amigo",
             feedback_active,
             expanded: false,
             state: ApprovalDisplayState::Pending,
-            queued_count: 0,
         }
     }
 
@@ -1813,7 +1865,6 @@ amigo",
             feedback_active: false,
             expanded: false,
             state: ApprovalDisplayState::Pending,
-            queued_count: 0,
         });
 
         assert!(entry.is_expandable());
