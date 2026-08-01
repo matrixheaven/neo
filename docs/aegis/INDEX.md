@@ -5,6 +5,7 @@ Entries are workspace records, not authoritative runtime decisions.
 
 | Date | Kind | Path | Title |
 | --- | --- | --- | --- |
+| 2026-08-01 | handoff | docs/aegis/handoffs/2026-08-01-deepseek-cache-probe.md | Implement DeepSeek Anthropic Cache Probe Handoff Prompt |
 | 2026-08-01 | plan | docs/aegis/plans/2026-08-01-deepseek-cache-probe.md | DeepSeek Anthropic Cache Probe Implementation Plan |
 | 2026-08-01 | spec | docs/aegis/specs/2026-08-01-deepseek-cache-probe-design.md | DeepSeek Anthropic Cache Probe Design |
 | 2026-08-01 | plan | docs/aegis/plans/2026-08-01-workflow-dynamic-transcript.md | Neo Workflow Dynamic Transcript Implementation Plan |
