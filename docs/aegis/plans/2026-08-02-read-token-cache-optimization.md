@@ -232,7 +232,7 @@ use super::{Tool, ToolContext, ToolError, ToolFuture, ToolResult, SnipHint, pars
 **Files:** `crates/neo-agent-core/src/runtime/config.rs`（修改）
 **Why:** `request_projection_plan`（Task B4）需要读 snip 开关/门槛/保护带。
 **Change Necessity:** 代码变更；最小边界 = 结构体 + `new()`。
-**Impact/Compatibility:** `CompactionSettings` 为 struct-literal 构造（无 `Default`），其余字面量由 Task C3 补齐；`new()` 默认 `snip_enabled=true`。
+**Impact/Compatibility:** `CompactionSettings` 为 struct-literal 构造（无 `Default`），其余字面量由 Task C3 补齐；`new()` 默认 `snip_enabled=false`（修订 2026-08-02：前缀改写破坏 provider 缓存，付费模型默认关）。
 **Verification:**
 ```bash
 cargo nextest run -p neo-agent-core --lib runtime::config::tests::compaction_settings_new_enables_snip --exact
@@ -253,16 +253,16 @@ cargo nextest run -p neo-agent-core --lib runtime::config::tests::compaction_set
 ```
 2. `CompactionSettings::new`（line 690）在 `micro_keep_recent: 20,` 之后新增：
 ```rust
-            snip_enabled: true,
+            snip_enabled: false,  # 修订 2026-08-02: 前缀改写会破坏 provider 缓存, 付费模型默认关
             snip_min_tokens: 1_000,
             snip_keep_recent: 16,
 ```
 3. `config.rs` 测试模块新增：
 ```rust
     #[test]
-    fn compaction_settings_new_enables_snip() {
+    fn compaction_settings_new_disables_snip_by_default() {
         let settings = CompactionSettings::new(100_000, 4);
-        assert!(settings.snip_enabled);
+        assert!(!settings.snip_enabled);
         assert_eq!(settings.snip_min_tokens, 1_000);
         assert_eq!(settings.snip_keep_recent, 16);
     }
@@ -300,7 +300,7 @@ fn default_snip_keep_recent() -> usize { 16 }
 ```
 3. `impl Default for RuntimeCompactionConfig`（line 240）在 `micro_keep_recent: 20,` 之后新增：
 ```rust
-            snip_enabled: true,
+            snip_enabled: false,  # 修订 2026-08-02: 前缀改写会破坏 provider 缓存, 付费模型默认关
             snip_min_tokens: 1_000,
             snip_keep_recent: 16,
 ```
@@ -329,7 +329,7 @@ cargo nextest run -p neo-agent --bin neo modes::run::tests::agent_config_for_app
 ```
 2. `crates/neo-agent/src/modes/run/mod.rs` 中 `RuntimeCompactionConfig` 与 `CompactionSettings` 的全字段字面量（测试约 line 1256/1312/1655/1694/1701/1742/1781 及 `agent_config_for_app_scales_default_compaction_to_model_context_window` 相关字面量）各补三行：
 ```rust
-                    snip_enabled: true,
+                    snip_enabled: false,  # 修订 2026-08-02
                     snip_min_tokens: 1_000,
                     snip_keep_recent: 16,
 ```
