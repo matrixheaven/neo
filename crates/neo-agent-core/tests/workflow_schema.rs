@@ -199,6 +199,74 @@ async fn invalid_final_lua_result_fails_without_hidden_model_repair() {
     );
 }
 
+/// Final-result schema failures must identify the failing instance path and a
+/// bounded, Unicode-safe preview of the actual node — never the complete root.
+#[test]
+fn final_lua_schema_error_includes_path_and_bounded_actual() {
+    let schema_doc = json!({
+        "type": "object",
+        "properties": {
+            "name": { "type": "string", "minLength": 3, "maxLength": 3 }
+        },
+        "required": ["name"],
+        "additionalProperties": false
+    });
+    let schema = CompiledSchema::compile(&schema_doc).expect("compile schema");
+
+    // Nested path plus the exact short value preview.
+    let short = json!({ "name": "a" });
+    let short_err = validate_final_lua_result(&schema, &short).expect_err("short name");
+    assert_eq!(short_err.code, SchemaErrorCode::SchemaInvalid);
+    assert!(
+        short_err
+            .message
+            .contains("schema_invalid_final_result at /name"),
+        "{}",
+        short_err.message
+    );
+    assert!(
+        short_err.message.contains("actual=\"a\""),
+        "{}",
+        short_err.message
+    );
+
+    // Long Unicode value: the preview is cut safely at 160 characters and ends
+    // with the Neo ellipsis; the complete long root object never leaks.
+    let long_name = "汉".repeat(200);
+    let long = json!({
+        "name": long_name,
+        "marker": "SECRET_ROOT_MARKER",
+    });
+    let long_err = validate_final_lua_result(&schema, &long).expect_err("long name");
+    assert_eq!(long_err.code, SchemaErrorCode::SchemaInvalid);
+    assert!(
+        long_err
+            .message
+            .contains("schema_invalid_final_result at /name"),
+        "{}",
+        long_err.message
+    );
+    let actual = long_err
+        .message
+        .split_once("actual=")
+        .map(|(_, tail)| tail)
+        .expect("preview must be present");
+    assert_eq!(actual.chars().count(), 160, "{}", actual);
+    assert!(
+        actual.ends_with('…'),
+        "preview must end with the Neo ellipsis: {actual}"
+    );
+    assert!(
+        actual.chars().filter(|c| *c == '汉').count() < 160,
+        "preview must actually be cut: {actual}"
+    );
+    assert!(
+        !long_err.message.contains("SECRET_ROOT_MARKER"),
+        "complete long root object must not leak into the error: {}",
+        long_err.message
+    );
+}
+
 fn child_schema_doc() -> serde_json::Value {
     json!({
         "type": "object",

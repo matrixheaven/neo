@@ -177,10 +177,35 @@ pub fn validate_final_lua_result(
 ) -> Result<(), SchemaValidationError> {
     schema.validate_instance(value).map_err(|mut err| {
         if err.code == SchemaErrorCode::SchemaInvalid {
-            err.message = format!("schema_invalid_final_result: {}", err.message);
+            let path = if err.instance_path.is_empty() {
+                "<root>".to_owned()
+            } else {
+                err.instance_path.clone()
+            };
+            let failing = value.pointer(&err.instance_path).unwrap_or(value);
+            err.message = format!(
+                "schema_invalid_final_result at {path}: {}; actual={}",
+                err.message,
+                bounded_actual_preview(failing),
+            );
         }
         err
     })
+}
+
+/// Unicode-safe 160-character preview of a failing node. On truncation the
+/// first 159 characters are kept and the single Neo ellipsis `…` is appended,
+/// so the result is exactly 160 characters and never splits a UTF-8 scalar.
+fn bounded_actual_preview(value: &Value) -> String {
+    const MAX_CHARS: usize = 160;
+    let serialized = serde_json::to_string(value).unwrap_or_else(|_| value.to_string());
+    let mut characters = serialized.chars();
+    let first: String = characters.by_ref().take(MAX_CHARS - 1).collect();
+    if characters.next().is_some() {
+        format!("{first}…")
+    } else {
+        first
+    }
 }
 
 /// Child-call composition seam: attach a provider-neutral response-format hint.
