@@ -2070,11 +2070,37 @@ impl WorkflowRuntime {
             .as_ref()
             .is_some_and(|s| s.children.iter().all(|c| c.agent.state.is_terminal()));
         let any_failed = item_outcomes.iter().any(|(_, o)| !o.ok);
+        let failed_count = item_outcomes
+            .iter()
+            .filter(|(_, outcome)| !outcome.ok)
+            .count();
+        let first_failure = item_outcomes
+            .iter()
+            .find_map(|(_, outcome)| (!outcome.ok).then(|| bounded_summary(&outcome.summary)));
         let actual_usage = item_outcomes.iter().fold(None, |total, (_, outcome)| {
             outcome
                 .actual_usage
                 .map_or(total, |usage| Some(add_usage(total, usage)))
         });
+        let summary = if any_failed {
+            format!(
+                "swarm {swarm_id} failed {failed_count}/{}: {}",
+                plans.len(),
+                first_failure.unwrap_or_else(|| "unknown child failure".to_owned()),
+            )
+        } else if !all_terminal {
+            format!(
+                "swarm {swarm_id} items={} finished={} interrupted",
+                plans.len(),
+                item_outcomes.len(),
+            )
+        } else {
+            format!(
+                "swarm {swarm_id} items={} finished={}",
+                plans.len(),
+                item_outcomes.len()
+            )
+        };
         Ok(WorkflowInvocationOutcome {
             ok: all_terminal && !any_failed,
             status: if all_terminal && !any_failed {
@@ -2084,12 +2110,7 @@ impl WorkflowRuntime {
             } else {
                 WorkflowOutcomeStatus::Interrupted
             },
-            summary: format!(
-                "swarm {} items={} finished={}",
-                swarm_id,
-                plans.len(),
-                item_outcomes.len()
-            ),
+            summary,
             details: serde_json::json!({
                 "kind": "delegate_swarm",
                 "swarm_id": swarm_id,

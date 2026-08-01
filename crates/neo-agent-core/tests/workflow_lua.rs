@@ -867,3 +867,167 @@ async fn workflow_host_denies_model_supplied_limits() {
         4
     );
 }
+
+/// A failed swarm summary must expose the failure count and the first bounded
+/// child error while ordered item details keep both full child outcomes.
+#[tokio::test]
+async fn workflow_swarm_failure_summary_includes_first_bounded_error() {
+    use neo_agent_core::multi_agent::{
+        AgentRole, ChildPlan, ChildRuntimeDeps, ChildWorktreePolicy, DelegateContext,
+        MultiAgentRuntime,
+    };
+    use neo_agent_core::workflow::{SwarmBatchRequest, WorkflowOutcomeStatus};
+    use neo_ai::AiError;
+
+    let dir = tempfile::tempdir().unwrap();
+    let session_dir = dir.path();
+    let runtime = WorkflowRuntime::new(WorkflowLimits::default());
+    let handle = runtime
+        .create_run(
+            session_dir,
+            neo_agent_core::workflow::WorkflowLaunchRequest {
+                name: "swarm-failure-summary".to_owned(),
+                description: "swarm failure summary".to_owned(),
+                phases: Vec::new(),
+                script: String::new(),
+                args: serde_json::json!({}),
+                launch_source: "test".to_owned(),
+                output_schema: None,
+                display_name: None,
+                input_schema: None,
+                definition_origin: None,
+                inline_unsaved: false,
+            },
+        )
+        .await
+        .expect("create run");
+    handle
+        .enter_running_for_direct_execution()
+        .await
+        .expect("enter running");
+
+    let harness = FakeHarness::from_result_turns([
+        vec![Err(AiError::Protocol {
+            message: "first child protocol failure".to_owned(),
+        })],
+        vec![Err(AiError::Protocol {
+            message: "second child protocol failure".to_owned(),
+        })],
+    ]);
+    let mut config = neo_agent_core::AgentConfig::for_model(harness.model());
+    config.max_retries = 0;
+    let multi = MultiAgentRuntime::new().with_session_directory(session_dir.to_path_buf());
+    let deps = ChildRuntimeDeps::new(
+        config
+            .with_workspace_root(session_dir.to_path_buf())
+            .expect("workspace"),
+        harness.client(),
+        Arc::new(ToolRegistry::new()),
+    );
+    let schema_doc = serde_json::json!({
+        "type": "object",
+        "properties": {"ok": {"type": "boolean"}},
+        "required": ["ok"],
+        "additionalProperties": false
+    });
+    let plans = vec![
+        ChildPlan {
+            item_id: "item-a".to_owned(),
+            item_label: "a".to_owned(),
+            task: "return structured ok a".to_owned(),
+            title: None,
+            resume: None,
+            role: None,
+            model: None,
+            provider: None,
+            context: DelegateContext::None,
+            worktree: ChildWorktreePolicy::Shared,
+            tool_allow: None,
+            output_schema: Some(schema_doc.clone()),
+        },
+        ChildPlan {
+            item_id: "item-b".to_owned(),
+            item_label: "b".to_owned(),
+            task: "return structured ok b".to_owned(),
+            title: None,
+            resume: None,
+            role: None,
+            model: None,
+            provider: None,
+            context: DelegateContext::None,
+            worktree: ChildWorktreePolicy::Shared,
+            tool_allow: None,
+            output_schema: Some(schema_doc.clone()),
+        },
+    ];
+    let request = SwarmBatchRequest {
+        call_index: 0,
+        canonical_input: serde_json::json!({
+            "description": "two failing children",
+            "items": [
+                {"task": "return structured ok a", "output_schema": schema_doc},
+                {"task": "return structured ok b", "output_schema": schema_doc},
+            ],
+        }),
+        description: "two failing children".to_owned(),
+        role: AgentRole::Coder,
+        max_concurrency: 1,
+        plans,
+    };
+    let outcome = handle
+        .invoke_swarm_batch(request, multi, deps)
+        .await
+        .expect("swarm batch");
+
+    assert!(!outcome.ok, "{outcome:?}");
+    assert_eq!(outcome.status, WorkflowOutcomeStatus::Failed, "{outcome:?}");
+    assert!(
+        outcome.summary.contains("failed 2/2"),
+        "summary must expose failure count: {}",
+        outcome.summary
+    );
+    assert!(
+        outcome.summary.contains("first child protocol failure"),
+        "summary must expose the first bounded child error: {}",
+        outcome.summary
+    );
+    let error_part = outcome
+        .summary
+        .split_once("failed 2/2:")
+        .map(|(_, tail)| tail)
+        .unwrap_or(&outcome.summary);
+    assert!(
+        error_part.chars().count() <= 160,
+        "summary error part must stay within the 160-character bound: {}",
+        error_part
+    );
+
+    let items = outcome
+        .details
+        .get("items")
+        .and_then(serde_json::Value::as_array)
+        .expect("ordered item details");
+    assert_eq!(items.len(), 2, "{items:?}");
+    assert_eq!(items[0]["item_id"], serde_json::json!("item-a"));
+    assert_eq!(items[1]["item_id"], serde_json::json!("item-b"));
+    assert_eq!(items[0]["ok"], serde_json::json!(false));
+    assert_eq!(items[1]["ok"], serde_json::json!(false));
+    assert!(
+        items[0]["summary"]
+            .as_str()
+            .is_some_and(|s| s.contains("first child protocol failure")),
+        "{items:?}"
+    );
+    assert!(
+        items[1]["summary"]
+            .as_str()
+            .is_some_and(|s| s.contains("second child protocol failure")),
+        "{items:?}"
+    );
+    assert_eq!(
+        harness.requests().len(),
+        2,
+        "each failing child sends exactly one request: {:?}",
+        harness.requests()
+    );
+}
