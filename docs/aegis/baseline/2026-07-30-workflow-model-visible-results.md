@@ -79,7 +79,7 @@ still reports a trailing space in the unrelated user edit
 ## 2026-08-01 update: provider-safe child output
 
 The Workflow AI usability repair landed (design
-`docs/aegis/specs/2026-08-01-workflow-ai-usability-repair.md`; commits
+`docs/aegis/specs/2026-08-01-workflow-ai-usability-repair-design.md`; commits
 `c4051804`, `3ade380c`, `b6dfb8bc`, `9ef9a7b`, `ea7d7b8`, and this docs
 commit `docs(workflow): record provider-safe child output`). It corrects the
 earlier assumption that the `openai` compatible wire could serialize a native
@@ -95,9 +95,12 @@ Landed behavior added by the repair:
   Delegate and direct workflow swarm consumers; the original error and
   observed usage survive, and no schema-repair journal event is written.
 - A failed swarm summary exposes `failed <failed>/<total>` plus the first
-  bounded child error while ordered item details stay complete.
+  failed child in input order while ordered item details stay complete; the
+  entire summary is bounded to 160 characters. Paused and cancelled items
+  remain interruptions and are not counted as failures.
 - Final-result schema failures include the instance path (`<root>` when empty)
-  and a 160-character Unicode-safe preview of the failing node.
+  and a Unicode-safe preview of the failing node: values up to 160 characters
+  remain intact, while longer values become 159 characters plus `…`.
 - The built-in `create-workflow` skill and both language guides teach every
   preserved strict behavior (explicit inline schemas, `{name,input}` tool
   shape, marked tables, terminal `neo.fail`, raw `await_user` answer,
@@ -113,7 +116,9 @@ Exact focused verification (each names one package, one target, one filter):
 - `cargo nextest run -p neo-agent-core --test workflow_schema workflow_delegate_protocol_failure_skips_schema_repair_and_preserves_error` — passed
 - `cargo nextest run -p neo-agent-core --test workflow_schema workflow_swarm_protocol_failure_skips_schema_repair_and_preserves_error` — passed
 - `cargo nextest run -p neo-agent-core --test workflow_schema child_schema_invalid_output_gets_exactly_one_tools_disabled_repair` — passed
+- `cargo nextest run -p neo-agent-core --test workflow_schema workflow_swarm_invalid_output_gets_exactly_one_tools_disabled_repair` — passed
 - `cargo nextest run -p neo-agent-core --test workflow_lua workflow_swarm_failure_summary_includes_first_bounded_error` — passed
+- `cargo nextest run -p neo-agent-core --test workflow_lua workflow_swarm_pause_and_cancellation_are_not_reported_as_failure` — passed
 - `cargo nextest run -p neo-agent-core --test workflow_schema final_lua_schema_error_includes_path_and_bounded_actual` — passed
 - `cargo nextest run -p neo-agent-core --lib create_workflow_builtin_teaches_authoring_without_mandatory_choreography` — passed
 - `rustfmt --check --edition 2024` on every touched Rust file — passed
@@ -126,15 +131,12 @@ mutated:
 
 | Provider | Resolved type | Reached model | Repair count | Valid result | Blocker |
 | --- | --- | --- | --- | --- | --- |
-| custom | openai | no | 0 | — | provider 503 `model_not_found`: no available channel for gpt-5.6 under group Codex-Plus |
-| zhipuai-coding-plan | openai | no | 0 | — | provider 401 `身份验证失败` (key rejected) |
 | kimi-for-coding | anthropic | yes (8245 in / 53 out) | 0 | `{"child_ok":true,"ok":true}` | — |
-| opencode-go | openai | no | 0 | — | transport error connecting to `https://opencode.ai/zen/go/v1/chat/completions` |
 | deepseek (real API, extra) | openai | yes (9000 in / 5 out) | 0 | `{"child_ok":true,"ok":true}` | — |
 
 Shipped `code-review` ran on the deepseek compatible endpoint over
 `crates/neo-agent-core/src/workflow/schema.rs`: completed, 4 delegate
-children, 66153 input / 3265 output tokens, exactly one content-repair turn
+children, 452052 input / 17747 output tokens, exactly one content-repair turn
 per child, structured findings returned. Every live run recorded zero
 schema-repair events for failed children, and no run produced the old
 `response_format` HTTP 400. Provider-specific success proves only that
