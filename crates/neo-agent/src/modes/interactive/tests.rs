@@ -13087,22 +13087,42 @@ async fn running_turn_controller() -> InteractiveController {
 }
 
 #[tokio::test]
-async fn slash_auto_updates_permission_mode_while_turn_is_running() {
+async fn permission_switch_does_not_split_streaming_thinking() {
     let mut controller = running_turn_controller().await;
+    controller.apply_turn_event(AgentEvent::ThinkingStarted {
+        turn: 1,
+        id: "thinking-one".to_owned(),
+    });
+    controller.apply_turn_event(AgentEvent::ThinkingDelta {
+        turn: 1,
+        text: "The ".to_owned(),
+    });
 
     controller.type_text("/auto");
     controller
         .handle_input_event(InputEvent::Submit)
         .await
         .expect("slash handled");
+    controller.apply_turn_event(AgentEvent::ThinkingDelta {
+        turn: 1,
+        text: "CompactionSettings".to_owned(),
+    });
 
     assert!(controller.active_turn.is_some(), "turn should keep running");
     assert_eq!(controller.chrome().permission_mode(), PermissionMode::Auto);
-    assert!(transcript_has_status(&controller, "Permission Mode: auto"));
+    assert!(!transcript_has_status(&controller, "Permission Mode: auto"));
     assert!(
         !transcript_has_status(&controller, "A turn is already running"),
         "live slash must not be blocked by the active-turn guard"
     );
+    let thinking = transcript_entries(&controller)
+        .iter()
+        .filter_map(|entry| match entry {
+            TranscriptEntry::ThinkingBlock { content, .. } => Some(content.as_str()),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(thinking, ["The CompactionSettings"]);
 
     controller.cancel_active_turn().await.expect("cancel turn");
 }
@@ -13125,7 +13145,7 @@ async fn slash_ask_updates_permission_mode_while_turn_is_running() {
 
     assert!(controller.active_turn.is_some(), "turn should keep running");
     assert_eq!(controller.chrome().permission_mode(), PermissionMode::Ask);
-    assert!(transcript_has_status(&controller, "Permission Mode: ask"));
+    assert!(!transcript_has_status(&controller, "Permission Mode: ask"));
 
     controller.cancel_active_turn().await.expect("cancel turn");
 }
@@ -13142,7 +13162,7 @@ async fn slash_yolo_updates_permission_mode_while_turn_is_running() {
 
     assert!(controller.active_turn.is_some(), "turn should keep running");
     assert_eq!(controller.chrome().permission_mode(), PermissionMode::Yolo);
-    assert!(transcript_has_status(&controller, "Permission Mode: yolo"));
+    assert!(!transcript_has_status(&controller, "Permission Mode: yolo"));
 
     controller.cancel_active_turn().await.expect("cancel turn");
 }

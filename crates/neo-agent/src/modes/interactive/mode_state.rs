@@ -41,8 +41,9 @@ impl InteractiveController {
         self.tui.chrome_mut().set_permission_mode(mode);
         if self.active_turn.is_some() {
             self.tui.chrome_mut().restore_streaming_mode();
+        } else {
+            self.push_status(format!("Permission Mode: {}", mode.label()));
         }
-        self.push_status(format!("Permission Mode: {}", mode.label()));
     }
 
     pub(super) fn open_permission_picker(&mut self) {
