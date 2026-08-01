@@ -78,6 +78,40 @@ def now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
+def redact_upstream_base(upstream_base: Optional[str]) -> Optional[str]:
+    """Return a report-safe upstream URL without credentials or query data."""
+    if upstream_base is None:
+        return None
+    parsed = urlsplit(upstream_base)
+    host = parsed.hostname or ""
+    netloc = f"[{host}]" if ":" in host else host
+    if parsed.port is not None:
+        netloc += f":{parsed.port}"
+    return parsed._replace(netloc=netloc, query="", fragment="").geturl()
+
+
+def upstream_request_path(upstream_base: str, request_path: str) -> str:
+    """Join the configured upstream base path with the local request path."""
+    base_path = urlsplit(upstream_base).path.rstrip("/")
+    return f"{base_path}/{request_path.lstrip('/')}"
+
+
+def upstream_base_error(upstream_base: str) -> Optional[str]:
+    """Return why an upstream base is unsafe or unusable, if anything."""
+    upstream = urlsplit(upstream_base)
+    if upstream.scheme.lower() not in ("http", "https") or not upstream.hostname:
+        return "must be an absolute http(s) URL"
+    try:
+        upstream.port
+    except ValueError:
+        return "contains an invalid port"
+    if upstream.username is not None or upstream.password is not None:
+        return "must not contain credentials"
+    if upstream.query or upstream.fragment:
+        return "must not contain a query or fragment"
+    return None
+
+
 def canonical_bytes(value: object) -> bytes:
     return json.dumps(
         value,
@@ -142,7 +176,12 @@ def select_predecessor(
     None.
     """
     key = identity_key(body, route)
-    same_identity = [c for c in candidates if identity_key(c["body"], route) == key]
+    same_identity = [
+        c
+        for c in candidates
+        if c.get("status") == "finished"
+        and identity_key(c["body"], route) == key
+    ]
 
     messages = body.get("messages")
     if not isinstance(messages, list):
@@ -545,7 +584,7 @@ class RunStore:
         self.requests_dir = self.run_dir / "requests"
         self.events_path = self.run_dir / "events.jsonl"
         self.report_path = self.run_dir / "report.json"
-        self.upstream_base = upstream_base
+        self.upstream_base = redact_upstream_base(upstream_base)
         self.started_at = now_iso()
         self.requests: dict[int, dict[str, object]] = {}
         self.sequences: dict[str, dict[str, object]] = {}
@@ -577,8 +616,8 @@ class RunStore:
     ) -> dict[str, object]:
         with self._lock:
             request_id = len(self.requests) + 1
-            # Every already-begun request is a lineage candidate; analysis is
-            # decided at begin time and usage is completed later.
+            # Only completed requests can establish lineage. An in-flight
+            # request may belong to an independent concurrent sequence.
             candidates = list(self.requests.values())
             predecessor, kind = select_predecessor(candidates, body, route)
 
@@ -674,35 +713,7 @@ class RunStore:
             )
             record["status"] = "finished"
 
-            sequence = self.sequences[str(record["sequence_id"])]
-            prior_samples: list[float] = []
-            for rid in sequence["request_ids"]:
-                if int(rid) == request_id:
-                    break
-                earlier = self.requests[int(rid)]
-                earlier_derived = earlier.get("derived")
-                if isinstance(earlier_derived, dict):
-                    value = earlier_derived.get("non_hit_tokens")
-                    if value is not None:
-                        prior_samples.append(float(value))
-
-            current_derived = record["derived"]
-            current_non_hit: Optional[float] = None
-            if isinstance(current_derived, dict):
-                value = current_derived.get("non_hit_tokens")
-                if value is not None:
-                    current_non_hit = float(value)
-
-            samples_including_current = prior_samples[:]
-            if current_non_hit is not None:
-                samples_including_current.append(current_non_hit)
-
-            record["stats"] = population_stats(samples_including_current)
-            record["spike"] = (
-                detect_spike(current_non_hit, prior_samples)
-                if current_non_hit is not None
-                else False
-            )
+            self._recompute_sequence_stats(str(record["sequence_id"]))
 
             self.append_event(
                 {
@@ -715,6 +726,25 @@ class RunStore:
                 }
             )
             self.write_report()
+
+    def _recompute_sequence_stats(self, sequence_id: str) -> None:
+        """Recompute completed samples in request order after out-of-order finishes."""
+        prior_samples: list[float] = []
+        for rid in self.sequences[sequence_id]["request_ids"]:
+            record = self.requests[int(rid)]
+            if record["status"] != "finished":
+                continue
+            derived = record.get("derived")
+            current: Optional[float] = None
+            if isinstance(derived, dict) and derived.get("non_hit_tokens") is not None:
+                current = float(derived["non_hit_tokens"])
+            samples = prior_samples + ([current] if current is not None else [])
+            record["stats"] = population_stats(samples)
+            record["spike"] = (
+                detect_spike(current, prior_samples) if current is not None else False
+            )
+            if current is not None:
+                prior_samples.append(current)
 
     def add_warning(self, message: str, request_id: Optional[int] = None) -> None:
         with self._lock:
@@ -856,12 +886,24 @@ class RunStore:
         with self._lock:
             snapshot = self.report_snapshot()
             temporary = self.report_path.with_suffix(".json.tmp")
-            with open(temporary, "w", encoding="utf-8") as handle:
-                json.dump(snapshot, handle, ensure_ascii=False, indent=2)
-                handle.write("\n")
-                handle.flush()
-                os.fsync(handle.fileno())
-            os.replace(temporary, self.report_path)
+            try:
+                with open(temporary, "w", encoding="utf-8") as handle:
+                    json.dump(snapshot, handle, ensure_ascii=False, indent=2)
+                    handle.write("\n")
+                    handle.flush()
+                    os.fsync(handle.fileno())
+                os.replace(temporary, self.report_path)
+            except OSError as exc:
+                self.warnings.append(
+                    {
+                        "message": f"report write failed: {exc}",
+                        "time": now_iso(),
+                    }
+                )
+                try:
+                    temporary.unlink(missing_ok=True)
+                except OSError:
+                    pass
 
 
 # ---------------------------------------------------------------------------
@@ -895,6 +937,15 @@ class StreamEventParser:
             line = self._buffer[:index]
             self._buffer = self._buffer[index + 1:]
             self._handle_line(line.rstrip(b"\r"))
+
+    def finish(self) -> None:
+        """Dispatch the final SSE event even when the stream has no blank line."""
+        if self._buffer:
+            line = self._buffer
+            self._buffer = b""
+            self._handle_line(line.rstrip(b"\r"))
+        if self._event_name is not None and self._data_lines:
+            self._dispatch()
 
     def _handle_line(self, line: bytes) -> None:
         if line == b"":
@@ -1051,7 +1102,12 @@ class ProbeHandler(BaseHTTPRequestHandler):
         )
         connection = connection_class(host, port)
         try:
-            connection.request("POST", self.path, body=body_bytes, headers=headers)
+            connection.request(
+                "POST",
+                upstream_request_path(self.server.upstream_base, path),
+                body=body_bytes,
+                headers=headers,
+            )
         except OSError as exc:
             store.finish_request(
                 request_id,
@@ -1127,6 +1183,8 @@ class ProbeHandler(BaseHTTPRequestHandler):
         finally:
             connection.close()
             self.close_connection = True
+
+        parser.finish()
 
         forward = {
             "status": response.status,
@@ -1252,7 +1310,13 @@ def _analysis_self_test() -> None:
         ],
         "metadata": {"user_id": "u1"},
     }
-    candidates = [{"request_id": 1, "sequence_id": "seq-1", "body": base, "hash": json_hash(base)}]
+    candidates = [{
+        "request_id": 1,
+        "sequence_id": "seq-1",
+        "body": base,
+        "hash": json_hash(base),
+        "status": "finished",
+    }]
     pred, kind = select_predecessor(candidates, appended, "/messages")
     _check(pred is not None and kind == "exact", "append must match exactly")
     analysis = analyze_request(appended, "/messages", pred, kind, "seq-1", 1)
@@ -1329,8 +1393,10 @@ def _analysis_self_test() -> None:
         "metadata": {"user_id": "u1"},
     }
     interleaved = [
-        {"request_id": 1, "sequence_id": "seq-1", "body": base, "hash": json_hash(base)},
-        {"request_id": 2, "sequence_id": "seq-2", "body": other, "hash": json_hash(other)},
+        {"request_id": 1, "sequence_id": "seq-1", "body": base,
+         "hash": json_hash(base), "status": "finished"},
+        {"request_id": 2, "sequence_id": "seq-2", "body": other,
+         "hash": json_hash(other), "status": "finished"},
     ]
     pred, kind = select_predecessor(interleaved, base_next, "/messages")
     _check(pred is not None and int(pred["request_id"]) == 1, "base_next matches seq-1")
@@ -1365,11 +1431,35 @@ def _analysis_self_test() -> None:
         "metadata": {"user_id": "u1"},
     }
     two_anchors = [
-        {"request_id": 1, "sequence_id": "seq-1", "body": seq_a, "hash": json_hash(seq_a)},
-        {"request_id": 2, "sequence_id": "seq-2", "body": seq_b, "hash": json_hash(seq_b)},
+        {"request_id": 1, "sequence_id": "seq-1", "body": seq_a,
+         "hash": json_hash(seq_a), "status": "finished"},
+        {"request_id": 2, "sequence_id": "seq-2", "body": seq_b,
+         "hash": json_hash(seq_b), "status": "finished"},
     ]
     pred, kind = select_predecessor(two_anchors, ambiguous, "/messages")
     _check(pred is None and kind is None, "two identical anchors must stay unknown")
+
+    print("self-test: in-flight requests cannot establish lineage")
+    inflight = dict(candidates[0], status="started")
+    pred, kind = select_predecessor([inflight], appended, "/messages")
+    _check(pred is None and kind is None, "in-flight predecessor must stay unknown")
+
+    print("self-test: upstream URL safety and path joining")
+    _check(
+        upstream_request_path("https://api.deepseek.com/anthropic", "/messages")
+        == "/anthropic/messages",
+        "upstream base path is preserved",
+    )
+    _check(
+        upstream_base_error("https://user:secret@example.test/anthropic")
+        == "must not contain credentials",
+        "credential-bearing upstream rejected",
+    )
+    _check(
+        upstream_base_error("https://example.test/anthropic?api_key=secret")
+        == "must not contain a query or fragment",
+        "query-bearing upstream rejected",
+    )
 
     print("self-test: tool resolution")
     tool_messages = [
@@ -1455,12 +1545,68 @@ def _analysis_self_test() -> None:
         "temporary report file replaced",
     )
 
+    print("self-test: out-of-order completions recompute sequence statistics")
+    ordering_store = _fresh_store(root, "ordering-test")
+    anchor = ordering_store.begin_request("/messages", base)
+    ordering_store.finish_request(anchor["request_id"], {
+        "input_tokens": 10,
+        "cache_creation_input_tokens": 0,
+    }, {"status": 200})
+    second = ordering_store.begin_request("/messages", appended)
+    third_body = dict(appended)
+    third_body["messages"] = appended["messages"] + [
+        {"role": "assistant", "content": [{"type": "text", "text": "done"}]}
+    ]
+    third = ordering_store.begin_request("/messages", third_body)
+    ordering_store.finish_request(third["request_id"], {
+        "input_tokens": 30,
+        "cache_creation_input_tokens": 0,
+    }, {"status": 200})
+    ordering_store.finish_request(second["request_id"], {
+        "input_tokens": 20,
+        "cache_creation_input_tokens": 0,
+    }, {"status": 200})
+    _check(
+        ordering_store.requests[int(third["request_id"])]["stats"]["n"] == 3,
+        "later request statistics include a predecessor that finished later",
+    )
+
+    print("self-test: report failures do not interrupt request completion")
+    failing_store = _fresh_store(root, "report-failure-test")
+    failing = failing_store.begin_request("/messages", base)
+    original_replace = os.replace
+    os.replace = lambda source, target: (_ for _ in ()).throw(OSError("fixture failure"))
+    try:
+        failing_store.finish_request(failing["request_id"], usage, {"status": 200})
+    finally:
+        os.replace = original_replace
+    _check(
+        failing_store.requests[int(failing["request_id"])]["status"] == "finished",
+        "request remains finished after report failure",
+    )
+    _check(
+        any("report write failed" in str(w["message"]) for w in failing_store.warnings),
+        "report failure retained as an in-memory warning",
+    )
+
+    print("self-test: stored upstream URL is redacted")
+    redacted_store = _fresh_store(
+        root,
+        "redaction-test",
+        upstream_base="https://user:secret@example.test/anthropic?api_key=hidden",
+    )
+    redacted_store.write_report()
+    redacted_report = redacted_store.report_path.read_text(encoding="utf-8")
+    _check("secret" not in redacted_report and "hidden" not in redacted_report,
+           "upstream credentials absent from report")
+
 
 class FixtureHandler(BaseHTTPRequestHandler):
     """Deterministic in-process upstream for the self-test."""
 
     protocol_version = "HTTP/1.1"
     received_auth: Optional[str] = None
+    received_path: Optional[str] = None
     first_sent = threading.Event()
     release = threading.Event()
     fail_requests = 0
@@ -1477,7 +1623,7 @@ class FixtureHandler(BaseHTTPRequestHandler):
         b'data: {"type":"content_block_delta","delta":'
         b'{"type":"text_delta","text":"hi"}}\n\n'
         b"event: message_delta\n"
-        b'data: {"type":"message_delta","usage":{"output_tokens":7}}\n\n'
+        b'data: {"type":"message_delta","usage":{"output_tokens":7}}\n'
     )
 
     def do_POST(self) -> None:
@@ -1485,6 +1631,7 @@ class FixtureHandler(BaseHTTPRequestHandler):
         body_bytes = self.rfile.read(length)
         body = json.loads(body_bytes.decode("utf-8"))
         FixtureHandler.received_auth = self.headers.get("x-api-key")
+        FixtureHandler.received_path = self.path
         if isinstance(body, dict) and body.get("fail"):
             FixtureHandler.fail_requests += 1
             self.send_response(503)
@@ -1516,14 +1663,13 @@ def _proxy_self_test() -> None:
     fixture_thread.start()
 
     root = Path("target/cache-probe/self-test")
+    upstream_base = f"http://127.0.0.1:{fixture.server_address[1]}/anthropic"
     store = _fresh_store(
         root,
         "proxy-test",
-        upstream_base=f"http://127.0.0.1:{fixture.server_address[1]}",
+        upstream_base=upstream_base,
     )
-    probe = ProbeServer(
-        ("127.0.0.1", 0), store, f"http://127.0.0.1:{fixture.server_address[1]}"
-    )
+    probe = ProbeServer(("127.0.0.1", 0), store, upstream_base)
     probe.daemon_threads = True
     probe_thread = threading.Thread(target=probe.serve_forever, daemon=True)
     probe_thread.start()
@@ -1608,6 +1754,10 @@ def _proxy_self_test() -> None:
     _check(
         FixtureHandler.received_auth == auth_header,
         "fixture received the authentication value",
+    )
+    _check(
+        FixtureHandler.received_path == "/anthropic/messages",
+        "upstream base path preserved",
     )
 
     print("self-test: split usage merged and derived")
@@ -1970,9 +2120,9 @@ def main(argv: Optional[list[str]] = None) -> int:
     if not args.upstream_base:
         parser.error("--upstream-base is required in runtime mode")
 
-    upstream = urlsplit(args.upstream_base)
-    if upstream.scheme.lower() not in ("http", "https") or not upstream.hostname:
-        parser.error("--upstream-base must be an absolute http(s) URL")
+    validation_error = upstream_base_error(args.upstream_base)
+    if validation_error is not None:
+        parser.error(f"--upstream-base {validation_error}")
 
     print(
         "WARNING: request bodies are stored locally under the output "
