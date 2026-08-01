@@ -18,6 +18,50 @@ struct RunnerFixture {
     handle: WorkflowHandle,
 }
 
+#[derive(Clone)]
+struct InterruptWorkflowOnRequestClient {
+    handle: WorkflowHandle,
+    pause: bool,
+}
+
+impl neo_ai::ModelClient for InterruptWorkflowOnRequestClient {
+    fn stream_chat(
+        &self,
+        _request: neo_ai::ChatRequest,
+    ) -> futures::stream::BoxStream<'static, Result<neo_ai::AiStreamEvent, neo_ai::AiError>> {
+        use futures::StreamExt;
+
+        let handle = self.handle.clone();
+        let pause = self.pause;
+        futures::stream::once(async move {
+            if pause {
+                handle
+                    .pause(WorkflowActor::Runtime)
+                    .await
+                    .expect("pause active workflow");
+            } else {
+                handle
+                    .stop(WorkflowActor::Runtime)
+                    .await
+                    .expect("stop active workflow");
+            }
+            Ok::<_, neo_ai::AiError>(neo_ai::AiStreamEvent::MessageStart {
+                id: "interrupt-on-request".to_owned(),
+            })
+        })
+        .chain(futures::stream::iter([
+            Ok(neo_ai::AiStreamEvent::TextDelta {
+                text: r#"{"ok":true}"#.to_owned(),
+            }),
+            Ok(neo_ai::AiStreamEvent::MessageEnd {
+                stop_reason: neo_ai::StopReason::EndTurn,
+                usage: None,
+            }),
+        ]))
+        .boxed()
+    }
+}
+
 async fn make_runner() -> RunnerFixture {
     make_runner_with(WorkflowLimits::default(), Vec::new()).await
 }
@@ -906,14 +950,9 @@ async fn workflow_swarm_failure_summary_includes_first_bounded_error() {
         .await
         .expect("enter running");
 
-    let harness = FakeHarness::from_result_turns([
-        vec![Err(AiError::Protocol {
-            message: "first child protocol failure".to_owned(),
-        })],
-        vec![Err(AiError::Protocol {
-            message: "second child protocol failure".to_owned(),
-        })],
-    ]);
+    let harness = FakeHarness::from_result_turns([vec![Err(AiError::Protocol {
+        message: format!("first child protocol failure {}", "x".repeat(300)),
+    })]]);
     let mut config = neo_agent_core::AgentConfig::for_model(harness.model());
     config.max_retries = 0;
     let multi = MultiAgentRuntime::new().with_session_directory(session_dir.to_path_buf());
@@ -955,7 +994,9 @@ async fn workflow_swarm_failure_summary_includes_first_bounded_error() {
             model: None,
             provider: None,
             context: DelegateContext::None,
-            worktree: ChildWorktreePolicy::Shared,
+            // This fails synchronously before item-a's provider future is
+            // collected, proving that summary selection follows input order.
+            worktree: ChildWorktreePolicy::Isolated,
             tool_allow: None,
             output_schema: Some(schema_doc.clone()),
         },
@@ -971,7 +1012,7 @@ async fn workflow_swarm_failure_summary_includes_first_bounded_error() {
         }),
         description: "two failing children".to_owned(),
         role: AgentRole::Coder,
-        max_concurrency: 1,
+        max_concurrency: 2,
         plans,
     };
     let outcome = handle
@@ -991,15 +1032,10 @@ async fn workflow_swarm_failure_summary_includes_first_bounded_error() {
         "summary must expose the first bounded child error: {}",
         outcome.summary
     );
-    let error_part = outcome
-        .summary
-        .split_once("failed 2/2:")
-        .map(|(_, tail)| tail)
-        .unwrap_or(&outcome.summary);
     assert!(
-        error_part.chars().count() <= 160,
-        "summary error part must stay within the 160-character bound: {}",
-        error_part
+        outcome.summary.chars().count() <= 160,
+        "complete summary must stay within the 160-character bound: {}",
+        outcome.summary
     );
 
     let items = outcome
@@ -1018,16 +1054,84 @@ async fn workflow_swarm_failure_summary_includes_first_bounded_error() {
             .is_some_and(|s| s.contains("first child protocol failure")),
         "{items:?}"
     );
-    assert!(
-        items[1]["summary"]
-            .as_str()
-            .is_some_and(|s| s.contains("second child protocol failure")),
-        "{items:?}"
-    );
     assert_eq!(
         harness.requests().len(),
-        2,
-        "each failing child sends exactly one request: {:?}",
+        1,
+        "the isolated child must fail before a provider request: {:?}",
         harness.requests()
     );
+}
+
+/// Pausing or stopping a swarm preserves the interruption kind; neither is
+/// counted or summarized as a child failure.
+#[tokio::test]
+async fn workflow_swarm_pause_and_cancellation_are_not_reported_as_failure() {
+    use neo_agent_core::multi_agent::{
+        AgentRole, ChildPlan, ChildRuntimeDeps, ChildWorktreePolicy, DelegateContext,
+        MultiAgentRuntime,
+    };
+    use neo_agent_core::workflow::{SwarmBatchRequest, WorkflowOutcomeStatus};
+
+    for (pause, expected_status, expected_summary) in [
+        (true, WorkflowOutcomeStatus::Interrupted, "interrupted"),
+        (false, WorkflowOutcomeStatus::Cancelled, "cancelled"),
+    ] {
+        let fixture = make_runner().await;
+        let session_dir = fixture.session_dir.path();
+        let model = FakeHarness::from_turns([]).model();
+        let mut config = neo_agent_core::AgentConfig::for_model(model);
+        config.max_retries = 0;
+        let multi = MultiAgentRuntime::new().with_session_directory(session_dir.to_path_buf());
+        let deps = ChildRuntimeDeps::new(
+            config
+                .with_workspace_root(session_dir.to_path_buf())
+                .expect("workspace"),
+            Arc::new(InterruptWorkflowOnRequestClient {
+                handle: fixture.handle.clone(),
+                pause,
+            }),
+            Arc::new(ToolRegistry::new()),
+        );
+        let plans = ["item-a", "item-b"]
+            .into_iter()
+            .map(|item_id| ChildPlan {
+                item_id: item_id.to_owned(),
+                item_label: item_id.to_owned(),
+                task: "return ok".to_owned(),
+                title: None,
+                resume: None,
+                role: None,
+                model: None,
+                provider: None,
+                context: DelegateContext::None,
+                worktree: ChildWorktreePolicy::Shared,
+                tool_allow: None,
+                output_schema: None,
+            })
+            .collect();
+        let outcome = fixture
+            .handle
+            .invoke_swarm_batch(
+                SwarmBatchRequest {
+                    call_index: 0,
+                    canonical_input: serde_json::json!({
+                        "description": "interrupt after first child",
+                        "items": [{"task": "return ok"}, {"task": "return ok"}],
+                    }),
+                    description: "interrupt after first child".to_owned(),
+                    role: AgentRole::Coder,
+                    max_concurrency: 1,
+                    plans,
+                },
+                multi,
+                deps,
+            )
+            .await
+            .expect("swarm batch");
+
+        assert!(!outcome.ok, "{outcome:?}");
+        assert_eq!(outcome.status, expected_status, "{outcome:?}");
+        assert!(outcome.summary.contains(expected_summary), "{outcome:?}");
+        assert!(!outcome.summary.contains("failed"), "{outcome:?}");
+    }
 }

@@ -2036,8 +2036,22 @@ impl WorkflowRuntime {
 
         // Preserve input order in the aggregate result.
         let mut ordered = Vec::with_capacity(plans.len());
+        let mut failed_count = 0usize;
+        let mut first_failure = None;
+        let mut any_cancelled = false;
         for plan in &plans {
             if let Some((_, outcome)) = item_outcomes.iter().find(|(id, _)| id == &plan.item_id) {
+                match outcome.status {
+                    WorkflowOutcomeStatus::Failed
+                    | WorkflowOutcomeStatus::Denied
+                    | WorkflowOutcomeStatus::ResourceLimited => {
+                        failed_count += 1;
+                        first_failure.get_or_insert_with(|| bounded_summary(&outcome.summary));
+                    }
+                    WorkflowOutcomeStatus::Cancelled => any_cancelled = true,
+                    WorkflowOutcomeStatus::Interrupted => {}
+                    WorkflowOutcomeStatus::Completed => {}
+                }
                 let mut item = serde_json::json!({
                     "item_id": plan.item_id,
                     "ok": outcome.ok,
@@ -2069,26 +2083,34 @@ impl WorkflowRuntime {
         let all_terminal = final_snapshot
             .as_ref()
             .is_some_and(|s| s.children.iter().all(|c| c.agent.state.is_terminal()));
-        let any_failed = item_outcomes.iter().any(|(_, o)| !o.ok);
-        let failed_count = item_outcomes
-            .iter()
-            .filter(|(_, outcome)| !outcome.ok)
-            .count();
-        let first_failure = item_outcomes
-            .iter()
-            .find_map(|(_, outcome)| (!outcome.ok).then(|| bounded_summary(&outcome.summary)));
         let actual_usage = item_outcomes.iter().fold(None, |total, (_, outcome)| {
             outcome
                 .actual_usage
                 .map_or(total, |usage| Some(add_usage(total, usage)))
         });
-        let summary = if any_failed {
+        let all_succeeded = all_terminal && item_outcomes.iter().all(|(_, outcome)| outcome.ok);
+        let status = if all_succeeded {
+            WorkflowOutcomeStatus::Completed
+        } else if failed_count > 0 {
+            WorkflowOutcomeStatus::Failed
+        } else if any_cancelled {
+            WorkflowOutcomeStatus::Cancelled
+        } else {
+            WorkflowOutcomeStatus::Interrupted
+        };
+        let summary = if status == WorkflowOutcomeStatus::Failed {
             format!(
                 "swarm {swarm_id} failed {failed_count}/{}: {}",
                 plans.len(),
                 first_failure.unwrap_or_else(|| "unknown child failure".to_owned()),
             )
-        } else if !all_terminal {
+        } else if status == WorkflowOutcomeStatus::Cancelled {
+            format!(
+                "swarm {swarm_id} items={} finished={} cancelled",
+                plans.len(),
+                item_outcomes.len(),
+            )
+        } else if status == WorkflowOutcomeStatus::Interrupted {
             format!(
                 "swarm {swarm_id} items={} finished={} interrupted",
                 plans.len(),
@@ -2102,15 +2124,9 @@ impl WorkflowRuntime {
             )
         };
         Ok(WorkflowInvocationOutcome {
-            ok: all_terminal && !any_failed,
-            status: if all_terminal && !any_failed {
-                WorkflowOutcomeStatus::Completed
-            } else if any_failed {
-                WorkflowOutcomeStatus::Failed
-            } else {
-                WorkflowOutcomeStatus::Interrupted
-            },
-            summary,
+            ok: all_succeeded,
+            status,
+            summary: bounded_summary(&summary),
             details: serde_json::json!({
                 "kind": "delegate_swarm",
                 "swarm_id": swarm_id,
