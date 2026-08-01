@@ -2843,9 +2843,20 @@ fn summarize_child_events(events: &[AgentEvent], elapsed: Duration) -> AgentRunU
 }
 
 fn child_events_have_error(events: &[AgentEvent]) -> bool {
-    events
-        .iter()
-        .any(|event| matches!(event, AgentEvent::Error { .. }))
+    events.iter().any(|event| {
+        matches!(
+            event,
+            AgentEvent::Error { .. }
+                | AgentEvent::TurnFinished {
+                    stop_reason: StopReason::Error,
+                    ..
+                }
+                | AgentEvent::RunFinished {
+                    stop_reason: StopReason::Error,
+                    ..
+                }
+        )
+    })
 }
 
 fn child_events_were_cancelled(events: &[AgentEvent]) -> bool {

@@ -344,32 +344,28 @@ fn tool_attempt_turn() -> Vec<neo_ai::AiStreamEvent> {
     ]
 }
 
-fn todo_turn_with_usage(
+fn error_turn_with_usage(
+    message: &str,
     input_tokens: u32,
     output_tokens: u32,
-) -> Vec<Result<neo_ai::AiStreamEvent, neo_ai::AiError>> {
+) -> Vec<neo_ai::AiStreamEvent> {
     use neo_ai::{AiStreamEvent, StopReason, TokenUsage};
     vec![
-        Ok(AiStreamEvent::MessageStart {
+        AiStreamEvent::MessageStart {
             id: "usage_before_failure".to_owned(),
-        }),
-        Ok(AiStreamEvent::ToolCallStart {
-            id: "todo_before_failure".to_owned(),
-            name: "TodoList".to_owned(),
-        }),
-        Ok(AiStreamEvent::ToolCallEnd {
-            id: "todo_before_failure".to_owned(),
-            raw_arguments: "{}".to_owned(),
-        }),
-        Ok(AiStreamEvent::MessageEnd {
-            stop_reason: StopReason::ToolUse,
+        },
+        AiStreamEvent::TextDelta {
+            text: message.to_owned(),
+        },
+        AiStreamEvent::MessageEnd {
+            stop_reason: StopReason::Error,
             usage: Some(TokenUsage {
                 input_tokens,
                 output_tokens,
                 input_cache_read_tokens: 0,
                 input_cache_write_tokens: 0,
             }),
-        }),
+        },
     ]
 }
 
@@ -874,16 +870,14 @@ async fn crash_during_repair_never_repeats_model_effect() {
     assert_eq!(harness.requests().len(), 1);
 }
 
-/// A child turn that fails at the provider level after an earlier tool round
-/// keeps observed usage and its child reference, but never starts schema repair.
+/// A provider-reported error stop keeps observed usage and its child reference,
+/// but never starts schema repair.
 #[tokio::test]
-async fn workflow_delegate_protocol_failure_skips_schema_repair_and_preserves_error() {
+async fn workflow_delegate_failure_skips_schema_repair_and_preserves_error() {
     use neo_agent_core::workflow::journal::{JournalPayload, collect_journal};
     use neo_agent_core::workflow::{
         WorkflowInvocationKind, WorkflowLaunchRequest, WorkflowOutcomeStatus,
     };
-    use neo_ai::AiError;
-
     let dir = tempfile::tempdir().unwrap();
     let session_dir = dir.path();
     let runtime = WorkflowRuntime::new(WorkflowLimits::default());
@@ -911,12 +905,11 @@ async fn workflow_delegate_protocol_failure_skips_schema_repair_and_preserves_er
         .await
         .expect("enter running");
 
-    let harness = FakeHarness::from_result_turns([
-        todo_turn_with_usage(11, 13),
-        vec![Err(AiError::Protocol {
-            message: "response_format unsupported on compatible endpoint".to_owned(),
-        })],
-    ]);
+    let harness = FakeHarness::from_turns([error_turn_with_usage(
+        "response_format unsupported on compatible endpoint",
+        11,
+        13,
+    )]);
     let mut config = neo_agent_core::AgentConfig::for_model(harness.model());
     config.max_retries = 0;
     config = config
@@ -955,22 +948,14 @@ async fn workflow_delegate_protocol_failure_skips_schema_repair_and_preserves_er
     assert_eq!(outcome.status, WorkflowOutcomeStatus::Failed, "{outcome:?}");
     assert!(
         outcome.summary.contains("response_format unsupported"),
-        "original protocol error must survive in summary: {}",
+        "original provider error must survive in summary: {}",
         outcome.summary
     );
-    let requests = harness.requests();
     assert_eq!(
-        requests.len(),
-        2,
-        "failed child must stop after its tool continuation without a repair request: {:?}",
-        requests
-    );
-    assert!(
-        requests[1]
-            .messages
-            .iter()
-            .any(|message| matches!(message, neo_ai::ChatMessage::ToolResult { .. })),
-        "second request must be the original child continuation: {requests:?}"
+        harness.requests().len(),
+        1,
+        "failed child must not trigger a repair request: {:?}",
+        harness.requests()
     );
     let usage = outcome.actual_usage.expect("usage before provider failure");
     assert_eq!(usage.input_tokens, 11);
@@ -1011,28 +996,25 @@ async fn workflow_delegate_protocol_failure_skips_schema_repair_and_preserves_er
     );
 }
 
-/// A direct workflow swarm child that fails after an earlier tool round keeps
+/// A direct workflow swarm child with a provider-reported error stop keeps
 /// observed usage and skips schema repair through the real swarm consumer.
 #[tokio::test]
-async fn workflow_swarm_protocol_failure_skips_schema_repair_and_preserves_error() {
+async fn workflow_swarm_failure_skips_schema_repair_and_preserves_error() {
     use neo_agent_core::multi_agent::{
         AgentRole, ChildPlan, ChildRuntimeDeps, ChildWorktreePolicy, DelegateContext,
         MultiAgentRuntime,
     };
     use neo_agent_core::workflow::journal::{JournalPayload, collect_journal};
     use neo_agent_core::workflow::{SwarmBatchRequest, WorkflowOutcomeStatus};
-    use neo_ai::AiError;
-
     let dir = tempfile::tempdir().unwrap();
     let session_dir = dir.path();
     let handle = running_workflow_handle(session_dir).await;
 
-    let harness = FakeHarness::from_result_turns([
-        todo_turn_with_usage(17, 19),
-        vec![Err(AiError::Protocol {
-            message: "response_format unsupported on compatible endpoint".to_owned(),
-        })],
-    ]);
+    let harness = FakeHarness::from_turns([error_turn_with_usage(
+        "response_format unsupported on compatible endpoint",
+        17,
+        19,
+    )]);
     let mut config = neo_agent_core::AgentConfig::for_model(harness.model());
     config.max_retries = 0;
     config = config.with_permission_mode(neo_agent_core::PermissionMode::Yolo);
@@ -1080,19 +1062,11 @@ async fn workflow_swarm_protocol_failure_skips_schema_repair_and_preserves_error
 
     assert!(!outcome.ok, "{outcome:?}");
     assert_eq!(outcome.status, WorkflowOutcomeStatus::Failed, "{outcome:?}");
-    let requests = harness.requests();
     assert_eq!(
-        requests.len(),
-        2,
-        "failed swarm child must stop after its tool continuation without repair: {:?}",
-        requests
-    );
-    assert!(
-        requests[1]
-            .messages
-            .iter()
-            .any(|message| matches!(message, neo_ai::ChatMessage::ToolResult { .. })),
-        "second request must be the original child continuation: {requests:?}"
+        harness.requests().len(),
+        1,
+        "failed swarm child must not trigger a repair request: {:?}",
+        harness.requests()
     );
     let usage = outcome.actual_usage.expect("usage before provider failure");
     assert_eq!(usage.input_tokens, 17);
@@ -1110,7 +1084,7 @@ async fn workflow_swarm_protocol_failure_skips_schema_repair_and_preserves_error
         first["summary"]
             .as_str()
             .is_some_and(|s| s.contains("response_format unsupported")),
-        "original protocol error must survive in item details: {first}"
+        "original provider error must survive in item details: {first}"
     );
     let serialized = outcome.details.to_string();
     assert!(

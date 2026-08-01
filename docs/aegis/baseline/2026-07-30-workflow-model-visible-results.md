@@ -113,8 +113,8 @@ Exact focused verification (each names one package, one target, one filter):
 
 - `cargo nextest run -p neo-ai --lib response_format_is_omitted_for_compatible_chat_endpoints` — passed
 - `cargo nextest run -p neo-ai --lib response_format_maps_json_schema_for_responses_api` — passed
-- `cargo nextest run -p neo-agent-core --test workflow_schema workflow_delegate_protocol_failure_skips_schema_repair_and_preserves_error` — passed
-- `cargo nextest run -p neo-agent-core --test workflow_schema workflow_swarm_protocol_failure_skips_schema_repair_and_preserves_error` — passed
+- `cargo nextest run -p neo-agent-core --test workflow_schema workflow_delegate_failure_skips_schema_repair_and_preserves_error` — passed
+- `cargo nextest run -p neo-agent-core --test workflow_schema workflow_swarm_failure_skips_schema_repair_and_preserves_error` — passed
 - `cargo nextest run -p neo-agent-core --test workflow_schema child_schema_invalid_output_gets_exactly_one_tools_disabled_repair` — passed
 - `cargo nextest run -p neo-agent-core --test workflow_schema workflow_swarm_invalid_output_gets_exactly_one_tools_disabled_repair` — passed
 - `cargo nextest run -p neo-agent-core --test workflow_lua workflow_swarm_failure_summary_includes_first_bounded_error` — passed
