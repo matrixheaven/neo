@@ -1005,9 +1005,11 @@ class ProbeServer(ThreadingHTTPServer):
         server_address: tuple[str, int],
         store: "RunStore",
         upstream_base: str,
+        api_key: Optional[str] = None,
     ) -> None:
         self.store = store
         self.upstream_base = upstream_base
+        self.api_key = api_key
         super().__init__(server_address, ProbeHandler)
 
 
@@ -1095,7 +1097,14 @@ class ProbeHandler(BaseHTTPRequestHandler):
             lowered = name.lower()
             if lowered in HOP_BY_HOP_HEADERS or lowered in ("host", "content-length"):
                 continue
+            if self.server.api_key is not None and lowered in (
+                "x-api-key",
+                "authorization",
+            ):
+                continue
             headers[name] = value
+        if self.server.api_key is not None:
+            headers["x-api-key"] = self.server.api_key
 
         connection_class = (
             http.client.HTTPSConnection if scheme == "https" else http.client.HTTPConnection
@@ -1606,6 +1615,7 @@ class FixtureHandler(BaseHTTPRequestHandler):
 
     protocol_version = "HTTP/1.1"
     received_auth: Optional[str] = None
+    received_authorization: Optional[str] = None
     received_path: Optional[str] = None
     first_sent = threading.Event()
     release = threading.Event()
@@ -1631,6 +1641,7 @@ class FixtureHandler(BaseHTTPRequestHandler):
         body_bytes = self.rfile.read(length)
         body = json.loads(body_bytes.decode("utf-8"))
         FixtureHandler.received_auth = self.headers.get("x-api-key")
+        FixtureHandler.received_authorization = self.headers.get("authorization")
         FixtureHandler.received_path = self.path
         if isinstance(body, dict) and body.get("fail"):
             FixtureHandler.fail_requests += 1
@@ -1669,7 +1680,10 @@ def _proxy_self_test() -> None:
         "proxy-test",
         upstream_base=upstream_base,
     )
-    probe = ProbeServer(("127.0.0.1", 0), store, upstream_base)
+    injected_auth = "self-test-injected-secret"
+    probe = ProbeServer(
+        ("127.0.0.1", 0), store, upstream_base, injected_auth
+    )
     probe.daemon_threads = True
     probe_thread = threading.Thread(target=probe.serve_forever, daemon=True)
     probe_thread.start()
@@ -1705,6 +1719,7 @@ def _proxy_self_test() -> None:
             headers={
                 "Content-Type": "application/json",
                 "x-api-key": auth_header,
+                "Authorization": "Bearer self-test-bearer-secret",
             },
         )
         response = connection.getresponse()
@@ -1752,8 +1767,12 @@ def _proxy_self_test() -> None:
 
     print("self-test: authentication forwarded in memory only")
     _check(
-        FixtureHandler.received_auth == auth_header,
-        "fixture received the authentication value",
+        FixtureHandler.received_auth == injected_auth,
+        "command-line authentication overrides the client header",
+    )
+    _check(
+        FixtureHandler.received_authorization is None,
+        "command-line authentication removes the client authorization header",
     )
     _check(
         FixtureHandler.received_path == "/anthropic/messages",
@@ -1784,6 +1803,7 @@ def _proxy_self_test() -> None:
         )
 
     print("self-test: upstream failure recorded without retry")
+    probe.api_key = None
     fail_connection = http.client.HTTPConnection("127.0.0.1", probe_port)
     fail_connection.request(
         "POST",
@@ -1799,6 +1819,10 @@ def _proxy_self_test() -> None:
         FixtureHandler.fail_requests == 1,
         "no retry: fixture saw exactly one failing request",
     )
+    _check(
+        FixtureHandler.received_auth == auth_header,
+        "client authentication is forwarded when no override is configured",
+    )
     with store._lock:
         second_record = store.requests[2]
         _check(
@@ -1807,7 +1831,11 @@ def _proxy_self_test() -> None:
         )
 
     print("self-test: credential redaction")
-    secret = auth_header.encode("utf-8")
+    secrets = (
+        auth_header.encode("utf-8"),
+        injected_auth.encode("utf-8"),
+        b"self-test-bearer-secret",
+    )
     header_names = (b"x-api-key", b"authorization")
     for path in sorted(root.rglob("*")):
         if not path.is_file():
@@ -1815,10 +1843,11 @@ def _proxy_self_test() -> None:
         if path.name == "proxy-test.json.tmp":
             continue
         content = path.read_bytes()
-        _check(
-            secret not in content,
-            f"authentication value absent from {path.relative_to(root)}",
-        )
+        for secret in secrets:
+            _check(
+                secret not in content,
+                f"authentication value absent from {path.relative_to(root)}",
+            )
         for name in header_names:
             _check(
                 name not in content,
@@ -2090,6 +2119,14 @@ def main(argv: Optional[list[str]] = None) -> int:
         help="local listen port (default 8787)",
     )
     parser.add_argument(
+        "--api-key",
+        metavar="API_KEY",
+        help=(
+            "override the upstream x-api-key header in memory; the value may "
+            "be visible in shell history and process listings"
+        ),
+    )
+    parser.add_argument(
         "--output-root",
         type=Path,
         default=Path("target/cache-probe"),
@@ -2123,6 +2160,8 @@ def main(argv: Optional[list[str]] = None) -> int:
     validation_error = upstream_base_error(args.upstream_base)
     if validation_error is not None:
         parser.error(f"--upstream-base {validation_error}")
+    if args.api_key == "":
+        parser.error("--api-key must not be empty")
 
     print(
         "WARNING: request bodies are stored locally under the output "
@@ -2132,7 +2171,7 @@ def main(argv: Optional[list[str]] = None) -> int:
     )
     store = RunStore(args.output_root, upstream_base=args.upstream_base)
     server = ProbeServer(
-        ("127.0.0.1", args.port), store, args.upstream_base
+        ("127.0.0.1", args.port), store, args.upstream_base, args.api_key
     )
     host, port = server.server_address[:2]
     print(f"Local proxy: http://127.0.0.1:{port}", flush=True)
