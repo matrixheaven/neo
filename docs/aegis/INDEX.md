@@ -5,6 +5,8 @@ Entries are workspace records, not authoritative runtime decisions.
 
 | Date | Kind | Path | Title |
 | --- | --- | --- | --- |
+| 2026-08-02 | spec | docs/aegis/specs/2026-08-02-read-token-cache-optimization-design.md | Read 工具 Token 缓存优化 Design |
+| 2026-08-02 | plan | docs/aegis/plans/2026-08-02-read-token-cache-optimization.md | Read 工具 Token 缓存优化 Implementation Plan |
 | 2026-08-02 | spec | docs/aegis/specs/2026-08-02-session-title-generation-fix-design.md | Session Title Generation Fix Design |
 | 2026-08-02 | plan | docs/aegis/plans/2026-08-02-session-title-generation-fix.md | Session Title Generation Fix Implementation Plan |
 | 2026-08-01 | handoff | docs/aegis/handoffs/2026-08-01-workflow-ai-usability-repair.md | Implement Workflow AI Usability Repair Handoff Prompt |
