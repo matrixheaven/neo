@@ -121,10 +121,6 @@ fn request_body(request: &ChatRequest) -> Result<Value, ProviderError> {
             body["prompt_cache_retention"] = json!("24h");
         }
     }
-    if let Some(response_format) = &request.options.response_format {
-        body["response_format"] = response_format.to_openai_chat_response_format();
-    }
-
     Ok(body)
 }
 
@@ -788,7 +784,7 @@ mod tests {
     }
 
     #[test]
-    fn response_format_maps_json_schema_for_chat_completions() {
+    fn response_format_is_omitted_for_compatible_chat_endpoints() {
         use crate::{ApiKind, ModelCapabilities, ModelSpec, ProviderId, ResponseFormat};
 
         let format = ResponseFormat {
@@ -815,10 +811,8 @@ mod tests {
             },
         };
         let body = request_body(&request).expect("body");
-        assert_eq!(
-            body["response_format"],
-            format.to_openai_chat_response_format()
-        );
+        assert!(body.get("response_format").is_none());
+        assert!(body.pointer("/text/format").is_none());
     }
 
     #[test]
