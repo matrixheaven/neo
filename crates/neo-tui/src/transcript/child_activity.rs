@@ -692,9 +692,6 @@ pub fn render_child_final(
     .truncate_to_width(width)
 }
 
-/// Terminal history form of one completed child agent: one status line with
-/// the frozen outcome counts plus the final text. Tool rows are emitted as
-/// separate progressive facts, so they are not repeated here.
 #[must_use]
 pub fn render_child_agent_summary(
     snapshot: &AgentSnapshot,
@@ -713,12 +710,11 @@ pub fn render_child_agent_summary(
         AgentLifecycleState::Cancelled | AgentLifecycleState::Interrupted => "◌",
         AgentLifecycleState::Queued | AgentLifecycleState::Running => "●",
     };
-    let elapsed = snapshot.elapsed;
     let mut parts = vec![
         snapshot.display_title(),
         agent_state_label(snapshot.state).to_owned(),
         format!("{} tools", snapshot.tool_count),
-        format_elapsed(elapsed.as_secs()),
+        format_elapsed(snapshot.elapsed.as_secs()),
         format!("{} tok", format_token_count(snapshot.token_count)),
     ];
     if let Some(cache) = format_cache_token_usage(snapshot) {

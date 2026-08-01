@@ -54,11 +54,14 @@ duplicate state without solving the presentation problem.
 
 ## Non-Goals
 
-- Changing workflow execution, scheduling, persistence, journal, result, or
-  recovery behavior.
+- Changing workflow execution, scheduling, journal, result, or recovery
+  behavior. Existing event source metadata is persisted only so transcript
+  grouping survives resume.
 - Changing tool schemas or model-visible workflow results.
 - Redesigning non-workflow `Delegate`, `DelegateGroup`, or `DelegateSwarm`
-  cards, their expansion behavior, ordering, activity rows, or placement.
+  card content, expansion behavior, or activity rows. Their outer presentation
+  commits each complete card once instead of splitting child rows into earlier
+  history.
 - Embedding approval choices, question forms, complete tool output, complete
   child transcripts, or an internal scroll area inside workflow cards.
 - Adding a feature flag, compatibility renderer, second transcript store,
@@ -325,6 +328,10 @@ instead of imposing a fixed child count.
 - Retain full typed tool and child activity once in `TranscriptStore`; normal
   presentation uses the bounded summaries while explicit review projects the
   complete detail from the same stored activity.
+- For ordinary Delegate-family entries, capture typed terminal child facts
+  before upstream snapshots trim them, keep those facts out of history while
+  the parent is live, and submit them with the parent header and terminal
+  result as one final block.
 - Keep each non-terminal workflow group in the bounded live projection rather
   than making its launch entry a permanent mutable history barrier. Do not
   capture queue, running, phase, log, or report snapshots as progressive
@@ -343,9 +350,9 @@ Implementation retires the following normal-path behavior without a fallback:
 - frame-tail truncation as the mechanism that protects terminal height.
 
 It does not rewrite historical completed transcripts. Old persisted sessions
-remain readable as recorded; new and resumed live events use the single new
-projection path. No format migration, compatibility renderer, or dual card path
-is introduced.
+remain readable because missing optional source metadata defaults to absent;
+new events retain that metadata so transcript grouping survives resume. No
+format migration, compatibility renderer, or dual card path is introduced.
 
 ## Corrections To The Earlier Plan
 
@@ -1229,7 +1236,8 @@ or cross-platform acceptance.
   blocking focus, explicit review completeness, and unchanged non-workflow
   Delegate-family cards.
 - Compatibility: persisted formats and historical transcript text remain
-  readable; no compatibility branch is added to the live path.
+  readable; optional source metadata is additive and no compatibility branch
+  is added to the live path.
 - Architecture review signal: yes. Completion should record the selected
   workflow projection and synchronize the landed terminal baseline after the
   implementation is verified.

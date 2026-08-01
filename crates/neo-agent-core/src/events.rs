@@ -396,50 +396,43 @@ pub enum AgentEvent {
         turn: u32,
         id: String,
         questions: Vec<QuestionEventData>,
-        #[serde(skip)]
-        #[schemars(skip)]
+        #[serde(default, skip_serializing_if = "Option::is_none")]
         workflow_origin: Option<crate::workflow::WorkflowExecutionOrigin>,
     },
     DelegateStarted {
         turn: u32,
         agent: AgentSnapshot,
-        #[serde(skip)]
-        #[schemars(skip)]
+        #[serde(default, skip_serializing_if = "Option::is_none")]
         workflow_origin: Option<crate::workflow::WorkflowExecutionOrigin>,
     },
     DelegateUpdated {
         turn: u32,
         agent: AgentSnapshot,
-        #[serde(skip)]
-        #[schemars(skip)]
+        #[serde(default, skip_serializing_if = "Option::is_none")]
         workflow_origin: Option<crate::workflow::WorkflowExecutionOrigin>,
     },
     DelegateProgressUpdated {
         turn: u32,
         progress: AgentProgressSnapshot,
-        #[serde(skip)]
-        #[schemars(skip)]
+        #[serde(default, skip_serializing_if = "Option::is_none")]
         workflow_origin: Option<crate::workflow::WorkflowExecutionOrigin>,
     },
     DelegateFinished {
         turn: u32,
         agent: AgentSnapshot,
-        #[serde(skip)]
-        #[schemars(skip)]
+        #[serde(default, skip_serializing_if = "Option::is_none")]
         workflow_origin: Option<crate::workflow::WorkflowExecutionOrigin>,
     },
     DelegateSwarmStarted {
         turn: u32,
         swarm: SwarmSnapshot,
-        #[serde(skip)]
-        #[schemars(skip)]
+        #[serde(default, skip_serializing_if = "Option::is_none")]
         workflow_origin: Option<crate::workflow::WorkflowExecutionOrigin>,
     },
     DelegateSwarmUpdated {
         turn: u32,
         swarm: SwarmSnapshot,
-        #[serde(skip)]
-        #[schemars(skip)]
+        #[serde(default, skip_serializing_if = "Option::is_none")]
         workflow_origin: Option<crate::workflow::WorkflowExecutionOrigin>,
     },
     DelegateSwarmProgressUpdated {
@@ -448,15 +441,13 @@ pub enum AgentEvent {
         state: AgentLifecycleState,
         aggregate: SwarmAggregate,
         child_progress: SwarmChildProgress,
-        #[serde(skip)]
-        #[schemars(skip)]
+        #[serde(default, skip_serializing_if = "Option::is_none")]
         workflow_origin: Option<crate::workflow::WorkflowExecutionOrigin>,
     },
     DelegateSwarmFinished {
         turn: u32,
         swarm: SwarmSnapshot,
-        #[serde(skip)]
-        #[schemars(skip)]
+        #[serde(default, skip_serializing_if = "Option::is_none")]
         workflow_origin: Option<crate::workflow::WorkflowExecutionOrigin>,
     },
     WorkflowStarted {
@@ -714,7 +705,7 @@ mod tests {
     }
 
     #[test]
-    fn delegate_workflow_origin_is_live_only() {
+    fn workflow_child_origin_round_trips() {
         let origin = crate::workflow::WorkflowExecutionOrigin {
             run_id: crate::workflow::WorkflowId("workflow-run".into()),
             human_handle: None,
@@ -726,16 +717,96 @@ mod tests {
         };
         let runtime = crate::multi_agent::MultiAgentRuntime::new();
         let agent = runtime.start_foreground_delegate_for_test("task");
-        let event = AgentEvent::DelegateStarted {
-            turn: 1,
-            agent,
-            workflow_origin: Some(origin),
+        let progress = agent.progress_snapshot();
+        let swarm = crate::multi_agent::SwarmSnapshot {
+            swarm_id: "swarm".to_owned(),
+            description: "items".to_owned(),
+            role: crate::multi_agent::AgentRole::Coder,
+            mode: crate::multi_agent::AgentRunMode::Foreground,
+            state: crate::multi_agent::AgentLifecycleState::Running,
+            max_concurrency: 1,
+            aggregate: crate::multi_agent::SwarmAggregate {
+                total: 1,
+                running: 1,
+                ..crate::multi_agent::SwarmAggregate::default()
+            },
+            children: vec![crate::multi_agent::SwarmChildSnapshot {
+                item_index: 0,
+                item: "item".to_owned(),
+                agent: agent.clone(),
+            }],
         };
-        let json = serde_json::to_string(&event).expect("serialize");
-        assert!(!json.contains("workflow_origin"));
-        let restored: AgentEvent = serde_json::from_str(&json).expect("deserialize");
+        let events = vec![
+            AgentEvent::QuestionRequested {
+                turn: 1,
+                id: "question".to_owned(),
+                questions: Vec::new(),
+                workflow_origin: Some(origin.clone()),
+            },
+            AgentEvent::DelegateStarted {
+                turn: 1,
+                agent: agent.clone(),
+                workflow_origin: Some(origin.clone()),
+            },
+            AgentEvent::DelegateUpdated {
+                turn: 1,
+                agent: agent.clone(),
+                workflow_origin: Some(origin.clone()),
+            },
+            AgentEvent::DelegateProgressUpdated {
+                turn: 1,
+                progress: progress.clone(),
+                workflow_origin: Some(origin.clone()),
+            },
+            AgentEvent::DelegateFinished {
+                turn: 1,
+                agent: agent.clone(),
+                workflow_origin: Some(origin.clone()),
+            },
+            AgentEvent::DelegateSwarmStarted {
+                turn: 1,
+                swarm: swarm.clone(),
+                workflow_origin: Some(origin.clone()),
+            },
+            AgentEvent::DelegateSwarmUpdated {
+                turn: 1,
+                swarm: swarm.clone(),
+                workflow_origin: Some(origin.clone()),
+            },
+            AgentEvent::DelegateSwarmProgressUpdated {
+                turn: 1,
+                swarm_id: swarm.swarm_id.clone(),
+                state: swarm.state,
+                aggregate: swarm.aggregate,
+                child_progress: crate::multi_agent::SwarmChildProgress {
+                    item_index: 0,
+                    progress,
+                },
+                workflow_origin: Some(origin.clone()),
+            },
+            AgentEvent::DelegateSwarmFinished {
+                turn: 1,
+                swarm,
+                workflow_origin: Some(origin.clone()),
+            },
+        ];
+        for event in &events {
+            let json = serde_json::to_string(event).expect("serialize");
+            assert!(json.contains("workflow_origin"), "{event:?}");
+            let restored: AgentEvent = serde_json::from_str(&json).expect("deserialize");
+            assert_eq!(&restored, event);
+        }
+
+        let mut old_value = serde_json::to_value(&events[1]).expect("serialize old event");
+        old_value
+            .get_mut("DelegateStarted")
+            .and_then(serde_json::Value::as_object_mut)
+            .expect("delegate event object")
+            .remove("workflow_origin");
+        let restored_without_origin: AgentEvent =
+            serde_json::from_value(old_value).expect("deserialize old event");
         assert!(matches!(
-            restored,
+            restored_without_origin,
             AgentEvent::DelegateStarted {
                 workflow_origin: None,
                 ..

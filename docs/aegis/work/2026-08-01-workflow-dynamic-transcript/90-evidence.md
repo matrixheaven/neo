@@ -12,10 +12,18 @@ Focused evidence is recorded below.
 
 ## EvidenceBundleDraft
 
+- Artifact key: transcript-ordering-resume-regression
+- Type: test-review
+- Source: nine exact Rust tests, cargo fmt --all --check, git diff --check, and retired-symbol negative search
+- Summary: Optional workflow child provenance round-trips and survives compact progress persistence; old missing fields remain readable; ordinary Delegate cards commit once with headers before child tools; Workflow history remains bounded before the final assistant message; parent placeholders, workflow grouping, non-workflow card layout, recovery sequence gating, and the permission picker width regression pass.
+- Verifier: root
+
+## EvidenceBundleDraft
+
 - Artifact key: task1-workflow-origin-tests
 - Type: test
 - Source: exact cargo tests for event JSON, stamp coverage, AskUser path, core runtime, TUI transcript, and neo-agent replay
-- Summary: Six exact tests passed; workflow origin stays live-only, stamps nine event variants without overwrite, crosses PendingQuestion, and affected downstream targets compile and pass.
+- Summary: Initial slice evidence passed for stamping nine event variants and crossing PendingQuestion. The later `transcript-ordering-resume-regression` evidence supersedes its live-only persistence boundary.
 - Verifier: root
 
 ## EvidenceBundleDraft
@@ -39,7 +47,7 @@ Focused evidence is recorded below.
 - Artifact key: task3-task7-unified-verification
 - Type: test-review
 - Source: exact neo-tui workflow, terminal-frame, terminal-scrollback, approval-width, neo-agent replay tests; cargo check -p neo-tui -p neo-agent --tests; cargo fmt --all --check; git diff --check
-- Summary: The workflow main card, two sibling child summaries, non-workflow compatibility, single terminal history commit, earliest blocking input owner, bottom-region preservation, frame bounds, and permission-width regression all passed fresh focused checks. The only compile warning is a pre-existing unused mut in progressive_transcript.rs outside this task.
+- Summary: The workflow main card, two sibling child summaries, non-workflow compatibility, single terminal history commit, earliest blocking input owner, bottom-region preservation, frame bounds, and permission-width regression all passed fresh focused checks.
 - Verifier: root
 
 ## EvidenceBundleDraft
@@ -52,8 +60,24 @@ Focused evidence is recorded below.
 
 ## EvidenceBundleDraft
 
+- Artifact key: final-review-regressions
+- Type: focused-test
+- Source: exact neo-tui tests for parent placeholder absorption, Delegate fact retention and ordering, zero-height Workflow commit, and JSONL replay grouping
+- Summary: Progress updates suppress only an absorbed parent placeholder; trimmed child commands survive until one parent-owned terminal block; later complete payloads replace partial facts without changing tool order; Group and Swarm child rows follow parent order after reversed completion; zero history budget neither acknowledges nor lets later assistant history pass a terminal Workflow; JSONL replay keeps Bash, question, Delegate, and DelegateSwarm source grouping.
+- Verifier: root
+
+## EvidenceBundleDraft
+
 - Artifact key: workspace-structure-check
 - Type: structural-check
 - Source: aegis-workspace.py bundle and check
 - Summary: The current work proof bundle assembled. The repository-wide check remains blocked by pre-existing missing INDEX targets and legacy ADR format findings unrelated to this implementation; no unrelated workspace records were changed.
+- Verifier: root
+
+## EvidenceBundleDraft
+
+- Artifact key: final-stale-progress-review-repair
+- Type: review-test
+- Source: second unified review; six exact Rust tests; cargo fmt --all --check; git diff --check; retired-symbol negative search
+- Summary: Older progress is rejected at the shared merge owner before it can clear a newer terminal outcome. The direct regression, workflow-origin event round-trip, JSONL replay grouping, Swarm terminal order, zero-budget Workflow barrier, and permission picker width regression all pass.
 - Verifier: root

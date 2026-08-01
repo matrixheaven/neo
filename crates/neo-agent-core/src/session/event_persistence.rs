@@ -1,6 +1,7 @@
 use std::collections::HashMap;
 
 use crate::multi_agent::{AgentProgressSnapshot, SwarmChildProgress};
+use crate::workflow::WorkflowExecutionOrigin;
 use crate::{AgentEvent, AgentMessage};
 
 #[derive(Default)]
@@ -41,16 +42,28 @@ impl SessionEventPersistence {
             AgentEvent::DelegateStarted { .. } | AgentEvent::DelegateFinished { .. } => {
                 self.process_delegate_boundary(event)
             }
-            AgentEvent::DelegateUpdated { turn, agent, .. } => {
-                self.persist_delegate_progress(*turn, agent.progress_snapshot())
-            }
-            AgentEvent::DelegateProgressUpdated { turn, progress, .. } => {
-                self.persist_delegate_progress(*turn, progress.clone())
-            }
+            AgentEvent::DelegateUpdated {
+                turn,
+                agent,
+                workflow_origin,
+            } => self.persist_delegate_progress(
+                *turn,
+                agent.progress_snapshot(),
+                workflow_origin.clone(),
+            ),
+            AgentEvent::DelegateProgressUpdated {
+                turn,
+                progress,
+                workflow_origin,
+            } => self.persist_delegate_progress(*turn, progress.clone(), workflow_origin.clone()),
             AgentEvent::DelegateSwarmStarted { .. } | AgentEvent::DelegateSwarmFinished { .. } => {
                 self.process_swarm_boundary(event)
             }
-            AgentEvent::DelegateSwarmUpdated { turn, swarm, .. } => {
+            AgentEvent::DelegateSwarmUpdated {
+                turn,
+                swarm,
+                workflow_origin,
+            } => {
                 for child in &swarm.children {
                     let persisted = self.persist_swarm_progress(
                         *turn,
@@ -61,6 +74,7 @@ impl SessionEventPersistence {
                             item_index: child.item_index,
                             progress: child.agent.progress_snapshot(),
                         },
+                        workflow_origin.clone(),
                     );
                     if !persisted.is_empty() {
                         return persisted;
@@ -74,13 +88,14 @@ impl SessionEventPersistence {
                 state,
                 aggregate,
                 child_progress,
-                ..
+                workflow_origin,
             } => self.persist_swarm_progress(
                 *turn,
                 swarm_id.clone(),
                 *state,
                 *aggregate,
                 child_progress.clone(),
+                workflow_origin.clone(),
             ),
             // Live queue rank/wait ticks must not land in session JSONL.
             AgentEvent::ToolExecutionQueueUpdated { .. }
@@ -139,6 +154,7 @@ impl SessionEventPersistence {
         &mut self,
         turn: u32,
         mut progress: AgentProgressSnapshot,
+        workflow_origin: Option<WorkflowExecutionOrigin>,
     ) -> Vec<AgentEvent> {
         normalize_persisted_progress(&mut progress);
         let gate = self
@@ -151,7 +167,7 @@ impl SessionEventPersistence {
         vec![AgentEvent::DelegateProgressUpdated {
             turn,
             progress: gate.last_progress.clone().expect("progress recorded"),
-            workflow_origin: None,
+            workflow_origin,
         }]
     }
 
@@ -162,6 +178,7 @@ impl SessionEventPersistence {
         state: crate::multi_agent::AgentLifecycleState,
         aggregate: crate::multi_agent::SwarmAggregate,
         mut child_progress: SwarmChildProgress,
+        workflow_origin: Option<WorkflowExecutionOrigin>,
     ) -> Vec<AgentEvent> {
         normalize_persisted_progress(&mut child_progress.progress);
         let gate = self
@@ -180,7 +197,7 @@ impl SessionEventPersistence {
             state,
             aggregate,
             child_progress,
-            workflow_origin: None,
+            workflow_origin,
         }]
     }
 }

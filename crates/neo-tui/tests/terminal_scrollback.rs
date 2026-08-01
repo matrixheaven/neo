@@ -1753,6 +1753,226 @@ fn workflow_group_progress_preserves_bottom_region_and_native_history() {
     assert!(!output_text.contains("\x1b[2J") && !output_text.contains("\x1b[3J"));
 }
 
+#[test]
+fn restored_terminal_workflow_history_is_bounded_before_final_assistant_message() {
+    use neo_agent_core::workflow::WorkflowState;
+    use neo_tui::transcript::TranscriptBlockId;
+
+    let width = 88usize;
+    let height = 12usize;
+    let mut pane = TranscriptPane::new(width, height);
+    pane.set_live_chrome_height(0);
+    pane.apply_agent_event(AgentEvent::WorkflowStarted {
+        turn: 1,
+        workflow: scrollback_workflow_snapshot(WorkflowState::Running, 1),
+    });
+
+    for index in 0..24 {
+        let id = format!("restored-bash-{index}");
+        let origin = scrollback_workflow_origin(&id);
+        pane.apply_agent_event(AgentEvent::ToolExecutionStarted {
+            turn: 1,
+            id: id.clone(),
+            name: "Bash".to_owned(),
+            arguments: serde_json::json!({
+                "command": format!("cargo test restored-terminal-tool-{index}")
+            }),
+            workflow_origin: Some(origin.clone()),
+        });
+        pane.apply_agent_event(AgentEvent::ToolExecutionFinished {
+            turn: 1,
+            id,
+            name: "Bash".to_owned(),
+            result: ToolResult::ok(format!("restored-terminal-tool-{index}-done")),
+            workflow_origin: Some(origin),
+        });
+    }
+
+    for index in 0..16 {
+        let call_id = format!("restored-delegate-call-{index}");
+        let origin = scrollback_workflow_origin(&call_id);
+        pane.apply_agent_event(AgentEvent::ToolExecutionStarted {
+            turn: 1,
+            id: call_id,
+            name: "Delegate".to_owned(),
+            arguments: serde_json::json!({"task": format!("restored-delegate-{index}")}),
+            workflow_origin: Some(origin.clone()),
+        });
+        let agent = scrollback_agent_snapshot(&format!("restored-delegate-{index}"));
+        pane.apply_agent_event(AgentEvent::DelegateStarted {
+            turn: 1,
+            agent: agent.clone(),
+            workflow_origin: Some(origin.clone()),
+        });
+        pane.apply_agent_event(AgentEvent::DelegateFinished {
+            turn: 1,
+            agent: scrollback_completed_agent(agent, "restored delegate complete"),
+            workflow_origin: Some(origin),
+        });
+    }
+
+    pane.apply_agent_event(AgentEvent::WorkflowFinished {
+        turn: 1,
+        workflow: scrollback_workflow_snapshot(WorkflowState::Completed, 99),
+    });
+    pane.replay_assistant_message("restored-final-assistant-sentinel");
+
+    let full_workflow = pane
+        .transcript()
+        .entries()
+        .iter()
+        .find_map(|entry| match entry {
+            TranscriptEntry::Workflow { component } => {
+                Some(component.render_with_theme(width, &Default::default()))
+            }
+            _ => None,
+        })
+        .expect("restored workflow entry");
+    let full_workflow_text = full_workflow
+        .iter()
+        .map(|line| line.text())
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(
+        full_workflow.len() > height,
+        "full workflow view must remain larger than the ordinary history budget"
+    );
+    assert!(
+        full_workflow_text.matches("Used Bash").count() == 24
+            && full_workflow_text.contains("restored-delegate-15"),
+        "full workflow view lost terminal activity: {full_workflow_text}"
+    );
+
+    let update = pane.render_terminal_update(width, height);
+    let workflow_index = update
+        .history
+        .iter()
+        .position(|block| matches!(block.id, TranscriptBlockId::Workflow { .. }))
+        .expect("restored terminal workflow history");
+    let assistant_index = update
+        .history
+        .iter()
+        .position(|block| {
+            block
+                .lines
+                .iter()
+                .any(|line| strip_ansi(line).contains("restored-final-assistant-sentinel"))
+        })
+        .expect("restored final assistant history");
+    assert!(
+        workflow_index < assistant_index,
+        "restored history order: {:#?}",
+        update.history
+    );
+    let workflow = &update.history[workflow_index];
+    assert!(
+        workflow.lines.len() + usize::from(workflow.separator_before) <= height,
+        "terminal workflow history exceeded the ordinary terminal budget: {workflow:#?}"
+    );
+    let workflow_text = workflow
+        .lines
+        .iter()
+        .map(|line| strip_ansi(line))
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(
+        workflow_text.contains("direct tools omitted"),
+        "large terminal tool history was not summarized: {workflow_text}"
+    );
+    assert!(
+        workflow_text.contains("agents omitted"),
+        "large terminal delegate history was not summarized: {workflow_text}"
+    );
+
+    let mut screen = vt100::Parser::new(
+        u16::try_from(height).expect("test height fits u16"),
+        u16::try_from(width).expect("test width fits u16"),
+        512,
+    );
+    let mut inline = InlineTerminal::for_test(
+        u16::try_from(width).expect("test width fits u16"),
+        u16::try_from(height).expect("test height fits u16"),
+    );
+    let mut output = Vec::new();
+    render_and_process(
+        &mut inline,
+        &mut screen,
+        &TerminalFrame::new(update.history, update.live, None),
+        &mut output,
+    );
+    let rows = all_terminal_rows(&mut screen);
+    let workflow_row = rows
+        .iter()
+        .position(|row| row.contains("workflow-frame-sentinel"))
+        .expect("workflow row in native history");
+    let assistant_row = rows
+        .iter()
+        .position(|row| row.contains("restored-final-assistant-sentinel"))
+        .expect("final assistant row in native history");
+    assert!(
+        workflow_row < assistant_row,
+        "restored workflow rows appeared below the final assistant message: {rows:#?}"
+    );
+    assert!(
+        rows.iter().skip(assistant_row + 1).all(|row| {
+            !row.contains("workflow-frame-sentinel")
+                && !row.contains("restored-terminal-tool")
+                && !row.contains("restored-delegate")
+        }),
+        "restored workflow projection appeared after the final assistant message: {rows:#?}"
+    );
+}
+
+#[test]
+fn terminal_workflow_waits_for_nonzero_history_budget_before_commit() {
+    use neo_agent_core::workflow::WorkflowState;
+    use neo_tui::transcript::TranscriptBlockId;
+
+    let mut pane = TranscriptPane::new(80, 8);
+    pane.apply_agent_event(AgentEvent::WorkflowStarted {
+        turn: 1,
+        workflow: scrollback_workflow_snapshot(WorkflowState::Running, 1),
+    });
+    pane.apply_agent_event(AgentEvent::WorkflowFinished {
+        turn: 1,
+        workflow: scrollback_workflow_snapshot(WorkflowState::Completed, 2),
+    });
+    pane.replay_assistant_message("assistant-after-workflow");
+
+    pane.set_live_chrome_height(8);
+    let zero_budget = pane.render_terminal_update(80, 8);
+    assert!(zero_budget.history.is_empty());
+    assert!(zero_budget.live.is_empty());
+    pane.acknowledge_history(&zero_budget.history);
+
+    pane.set_live_chrome_height(0);
+    let visible = pane.render_terminal_update(80, 8);
+    let workflow_blocks = visible
+        .history
+        .iter()
+        .filter(|block| matches!(block.id, TranscriptBlockId::Workflow { .. }))
+        .collect::<Vec<_>>();
+    assert_eq!(workflow_blocks.len(), 1);
+    assert!(!workflow_blocks[0].lines.is_empty());
+    let workflow_index = visible
+        .history
+        .iter()
+        .position(|block| matches!(block.id, TranscriptBlockId::Workflow { .. }))
+        .expect("workflow block");
+    let assistant_index = visible
+        .history
+        .iter()
+        .position(|block| matches!(block.id, TranscriptBlockId::AssistantSegment { .. }))
+        .expect("assistant block");
+    assert!(
+        workflow_index < assistant_index,
+        "history order: {visible:#?}"
+    );
+
+    pane.acknowledge_history(&visible.history);
+    assert!(pane.render_terminal_update(80, 8).history.is_empty());
+}
+
 fn assert_workflow_frame_geometry(
     frame: &TerminalFrame,
     width: usize,

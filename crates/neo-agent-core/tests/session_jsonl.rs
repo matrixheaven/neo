@@ -18,6 +18,7 @@ use neo_agent_core::session::{
     agent_wire_path, agents_dir, main_agent_wire_path, relative_agent_record_dir,
     session_state_path,
 };
+use neo_agent_core::workflow::{WorkflowExecutionOrigin, WorkflowId};
 use neo_agent_core::{
     AgentContext, AgentEvent, AgentMessage, AgentToolCall, ApprovalAction, ApprovalOption,
     ApprovalPresentation, ApprovalRequest, ApprovalResolution, CompactionSummary, Content,
@@ -1427,9 +1428,18 @@ fn session_persists_queue_transition_but_not_live_queue_updates() {
 }
 
 #[test]
-fn delegate_persistence_strips_live_shell_queue_metadata() {
+fn delegate_persistence_strips_live_shell_queue_metadata_and_preserves_workflow_origin() {
     let mut agent = queued_shell_agent_snapshot("call-1", Some(2), 2_000);
     let mut persistence = SessionEventPersistence::default();
+    let origin = WorkflowExecutionOrigin {
+        run_id: WorkflowId("workflow-run".to_owned()),
+        human_handle: None,
+        definition_name: "workflow".to_owned(),
+        definition_revision: None,
+        phase_id: Some("verify".to_owned()),
+        invocation_id: Some("delegate-call".to_owned()),
+        swarm_item_id: None,
+    };
 
     let finished = AgentEvent::DelegateFinished {
         turn: 1,
@@ -1474,11 +1484,23 @@ fn delegate_persistence_strips_live_shell_queue_metadata() {
     let updated = AgentEvent::DelegateUpdated {
         turn: 2,
         agent: agent.clone(),
-        workflow_origin: None,
+        workflow_origin: Some(origin.clone()),
     };
     let progress_events = progress_persistence.persisted_events(&updated);
     assert_eq!(progress_events.len(), 1);
     assert_queued_phase_stripped(&progress_events[0]);
+    assert!(matches!(
+        &progress_events[0],
+        AgentEvent::DelegateProgressUpdated {
+            workflow_origin: Some(persisted),
+            ..
+        } if persisted == &origin
+    ));
+    let restored: AgentEvent = serde_json::from_str(
+        &serde_json::to_string(&progress_events[0]).expect("serialize delegate progress"),
+    )
+    .expect("restore delegate progress");
+    assert_eq!(restored, progress_events[0]);
 
     if let AgentActivityKind::Tool { phase, .. } = &mut agent.activity[0].kind {
         *phase = AgentToolActivityPhase::Queued {
@@ -1507,12 +1529,24 @@ fn delegate_persistence_strips_live_shell_queue_metadata() {
             item_index: 0,
             progress: direct_progress.clone(),
         },
-        workflow_origin: None,
+        workflow_origin: Some(origin.clone()),
     };
     let mut direct_persistence = SessionEventPersistence::default();
     let direct_events = direct_persistence.persisted_events(&direct);
     assert_eq!(direct_events.len(), 1);
     assert_queued_phase_stripped(&direct_events[0]);
+    assert!(matches!(
+        &direct_events[0],
+        AgentEvent::DelegateSwarmProgressUpdated {
+            workflow_origin: Some(persisted),
+            ..
+        } if persisted == &origin
+    ));
+    let restored: AgentEvent = serde_json::from_str(
+        &serde_json::to_string(&direct_events[0]).expect("serialize swarm progress"),
+    )
+    .expect("restore swarm progress");
+    assert_eq!(restored, direct_events[0]);
 
     let Some(tool) = &mut direct_progress.last_tool else {
         panic!("expected queued tool progress");

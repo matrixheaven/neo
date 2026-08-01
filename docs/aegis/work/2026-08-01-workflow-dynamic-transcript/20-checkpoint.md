@@ -95,3 +95,51 @@
 - Windows and Linux native terminal behavior and remote CI remain unverified.
 - The Aegis workspace structure check is still blocked by pre-existing missing INDEX targets and legacy ADR format findings outside this task.
 - Advisory decision: continue to scoped commit.
+
+## Checkpoint Update
+
+- Current todo: commit the transcript ordering and resume-provenance repair.
+- Active slice: final review and scoped commit.
+- Completed todos:
+- Retained typed terminal child-fact capture so trimmed commands are not lost, while removing standalone fact history; ordinary Delegate-family entries now commit one parent-owned block with the header before children and tools.
+- Updated repeated fact identities with later complete payloads while retaining their original tool position; Group and Swarm terminal rows follow parent-card order even when children finish out of order.
+- Kept a zero-budget terminal Workflow as a history barrier so later assistant history cannot commit ahead of it.
+- Bounded terminal Workflow history before the final assistant message.
+- Persisted optional question and Delegate-family workflow provenance, including compact progress events.
+- Preserved old-session readability without migration or source inference.
+- Evidence refs:
+- transcript-ordering-resume-regression
+- Blocked on: final unified reviewer rerun only.
+- Next step: rerun the reviewer and exact verification, then stage and commit the scoped repair.
+
+## DriftCheckDraft
+
+- Scope status: The user-approved follow-up supersedes the earlier live-only provenance boundary because new sessions otherwise lose grouping after resume.
+- Compatibility status: Old JSONL without provenance still deserializes to `None`; no historical records are rewritten and no text/order inference was added.
+- Retirement status: Standalone progressive history and its separate acknowledgement owner remain deleted; typed facts are capture-only until the existing parent entry terminalizes and commits once.
+- New risk signals:
+- Already persisted child events without provenance cannot be reliably reparented.
+- Native Windows and Linux terminal behavior and remote CI remain unverified.
+- Advisory decision: continue to unified review and scoped commit.
+
+## Checkpoint Update
+
+- Current todo: commit the verified workflow transcript repair.
+- Active slice: scoped staging and commit.
+- Completed todos:
+- Second unified review found that older terminal progress could clear a newer complete outcome at the shared progress merge owner.
+- `apply_agent_progress` now rejects older snapshots before changing any field; equal timestamps can still supply a more complete terminal payload.
+- The direct regression plus workflow-origin round-trip, JSONL replay grouping, Swarm terminal ordering, zero-budget Workflow barrier, permission-width, formatting, diff, and retired-symbol checks pass.
+- Evidence refs:
+- final-stale-progress-review-repair
+- Blocked on: none for the scoped commit.
+- Next step: run the workspace structure check, store the completion context, then stage and commit only the listed task files.
+
+## DriftCheckDraft
+
+- Scope status: The repair stays at the existing shared progress merge owner and one focused integration test.
+- Compatibility status: Equal-timestamp payload completion remains accepted; only strictly older snapshots are ignored.
+- Retirement status: No fallback, compatibility path, duplicate state owner, or retired progressive-history symbol was added.
+- New risk signals:
+- Native Windows and Linux terminal behavior and remote CI remain unverified.
+- Advisory decision: proceed to scoped commit.

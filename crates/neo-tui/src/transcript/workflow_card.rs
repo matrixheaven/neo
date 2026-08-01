@@ -274,12 +274,6 @@ impl WorkflowCardComponent {
         super::workflow_group::render_workflow_group(self, width, usize::MAX, theme).into_lines()
     }
 
-    /// Render the same complete workflow group used by explicit review.
-    #[must_use]
-    pub fn terminal_summary(&self, width: usize, theme: &TuiTheme) -> Vec<Line> {
-        self.render_with_theme(width, theme)
-    }
-
     #[must_use]
     pub(crate) const fn now_ms(&self) -> Option<u64> {
         self.now_ms
@@ -302,67 +296,100 @@ impl WorkflowCardComponent {
             return (lines, false);
         }
 
-        let stats_line = self.stats_line(width, theme);
         let action_line = self.actionable_line(width, theme);
-        let tool_indexes = self.direct_tool_indexes();
-        let first_actionable_tool = tool_indexes.iter().copied().find(|index| {
-            matches!(
-                self.direct_tools[*index].status(),
-                ToolStatusKind::Pending
-                    | ToolStatusKind::Queued
-                    | ToolStatusKind::Running
-                    | ToolStatusKind::Failed
-            )
-        });
-        let mut selected_tools = Vec::new();
-        lines.push(stats_line.clone());
-        if let Some(action_line) = action_line {
+        let (state_action_line, running_action_line) =
+            if self.snapshot.state == WorkflowState::Running {
+                (None, action_line)
+            } else {
+                (action_line, None)
+            };
+        if let Some(action_line) = state_action_line {
             lines.push(action_line);
-        } else if let Some(index) = first_actionable_tool {
+        }
+
+        let (actionable_tool_indexes, completed_tool_indexes): (Vec<_>, Vec<_>) =
+            self.direct_tool_indexes().into_iter().partition(|index| {
+                matches!(
+                    self.direct_tools[*index].status(),
+                    ToolStatusKind::Pending
+                        | ToolStatusKind::Queued
+                        | ToolStatusKind::Running
+                        | ToolStatusKind::Failed
+                )
+            });
+        let mut selected_tools = Vec::new();
+
+        for index in actionable_tool_indexes
+            .iter()
+            .copied()
+            .take(max_rows.saturating_sub(lines.len()))
+        {
             lines.push(self.direct_tool_line(index, width, theme));
             selected_tools.push(index);
         }
 
-        let report_line = self
-            .snapshot
-            .latest_report_summary
-            .as_deref()
-            .map(|report| self.summary_line("Report", report, width, theme));
-        let remaining = max_rows.saturating_sub(lines.len());
-        let reserve_report = usize::from(report_line.is_some() && remaining > 0);
-        let unselected_tools = tool_indexes.len().saturating_sub(selected_tools.len());
-        let tool_room_before_omission = remaining.saturating_sub(reserve_report);
-        let reserve_omission = usize::from(unselected_tools > tool_room_before_omission);
-        let tool_slots = tool_room_before_omission.saturating_sub(reserve_omission);
-        let remaining_tool_indexes = tool_indexes
-            .iter()
-            .copied()
-            .filter(|index| !selected_tools.contains(index))
-            .take(tool_slots)
-            .collect::<Vec<_>>();
-        for index in remaining_tool_indexes {
-            lines.push(self.direct_tool_line(index, width, theme));
-            selected_tools.push(index);
-        }
-        if let Some(report_line) = report_line
-            && lines.len() < max_rows
-        {
-            lines.push(report_line);
-        }
-        let omitted = self.direct_tools.len().saturating_sub(selected_tools.len());
-        if omitted > 0 && lines.len() < max_rows {
-            lines.push(
-                Line::styled(
-                    format!("│ … {omitted} direct tools omitted"),
-                    Style::default().fg(theme.text_muted),
-                )
-                .truncate_to_width(width),
-            );
-        }
-        if let Some(log) = self.snapshot.latest_log_summary.as_deref()
-            && lines.len() < max_rows
-        {
-            lines.push(self.summary_line("Log", log, width, theme));
+        if selected_tools.len() == actionable_tool_indexes.len() {
+            let mut report_line = self
+                .snapshot
+                .latest_report_summary
+                .as_deref()
+                .map(|report| self.summary_line("Report", report, width, theme));
+            let remaining = max_rows.saturating_sub(lines.len());
+            if completed_tool_indexes.len() > remaining {
+                let reserve_omission = usize::from(remaining >= 2);
+                let reserve_report = usize::from(report_line.is_some() && remaining >= 3);
+                let tool_slots = if remaining == 1 {
+                    1
+                } else {
+                    remaining
+                        .saturating_sub(reserve_omission)
+                        .saturating_sub(reserve_report)
+                };
+                for index in completed_tool_indexes.iter().copied().take(tool_slots) {
+                    lines.push(self.direct_tool_line(index, width, theme));
+                    selected_tools.push(index);
+                }
+                if reserve_report > 0 {
+                    lines.push(report_line.take().expect("report row was reserved"));
+                }
+                if reserve_omission > 0 {
+                    let omitted = self.direct_tools.len().saturating_sub(selected_tools.len());
+                    lines.push(
+                        Line::styled(
+                            format!("│ … {omitted} direct tools omitted"),
+                            Style::default().fg(theme.text_muted),
+                        )
+                        .truncate_to_width(width),
+                    );
+                }
+            } else {
+                for index in completed_tool_indexes {
+                    lines.push(self.direct_tool_line(index, width, theme));
+                    selected_tools.push(index);
+                }
+
+                let remaining = max_rows.saturating_sub(lines.len());
+                let reserve_running_action =
+                    usize::from(running_action_line.is_some() && remaining > 0);
+                let context_slots = remaining.saturating_sub(reserve_running_action);
+                for line in [report_line, Some(self.stats_line(width, theme))]
+                    .into_iter()
+                    .flatten()
+                    .take(context_slots)
+                {
+                    lines.push(line);
+                }
+                if let Some(action_line) = running_action_line
+                    && lines.len() < max_rows
+                {
+                    lines.push(action_line);
+                }
+                if let Some(log) = self.snapshot.latest_log_summary.as_deref()
+                    && lines.len() < max_rows
+                {
+                    lines.push(self.summary_line("Log", log, width, theme));
+                }
+            }
         }
         lines.truncate(max_rows);
         let has_visible_animation = self.workflow_elapsed_ticks()
@@ -619,6 +646,105 @@ impl Component for WorkflowCardComponent {
             | WorkflowState::Failed
             | WorkflowState::Cancelled
             | WorkflowState::ResourceLimited => Finalization::Finalized,
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use neo_agent_core::workflow::WorkflowId;
+
+    fn snapshot(state: WorkflowState) -> WorkflowSnapshot {
+        WorkflowSnapshot {
+            id: WorkflowId("wf-priority".to_owned()),
+            title: "Priority workflow".to_owned(),
+            state,
+            current_phase: Some("verify".to_owned()),
+            projection_sequence: Some(1),
+            recovery_failure: false,
+            started_at_ms: Some(1_000),
+            updated_at_ms: Some(2_000),
+            invocation_count: 4,
+            failure_count: 1,
+            actual_usage: None,
+            latest_log_summary: Some("latest log".to_owned()),
+            latest_report_summary: Some("latest report".to_owned()),
+            terminal_reason: state
+                .is_terminal()
+                .then(|| "bounded terminal reason".to_owned()),
+            display_name: "Priority workflow".to_owned(),
+            purpose: "Verify compact row priority".to_owned(),
+        }
+    }
+
+    fn tool(id: &str, name: &str, status: ToolStatusKind) -> ToolCallComponent {
+        ToolCallComponent::new(ToolCallState {
+            id: id.to_owned(),
+            name: name.to_owned(),
+            arguments: None,
+            result: None,
+            details: None,
+            status,
+            exit_code: None,
+        })
+    }
+
+    fn card(state: WorkflowState) -> WorkflowCardComponent {
+        let mut card = WorkflowCardComponent::new(snapshot(state));
+        card.direct_tools = vec![
+            tool("running", "RunningTool", ToolStatusKind::Running),
+            tool("queued", "QueuedTool", ToolStatusKind::Queued),
+            tool("failed", "FailedTool", ToolStatusKind::Failed),
+            tool("completed", "CompletedTool", ToolStatusKind::Succeeded),
+        ];
+        card
+    }
+
+    fn render_text(card: &WorkflowCardComponent, rows: usize) -> String {
+        card.render_main_with_theme(120, rows, None, &TuiTheme::default())
+            .0
+            .iter()
+            .map(Line::text)
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    #[test]
+    fn compact_main_card_keeps_actionable_rows_ahead_of_context() {
+        let running = card(WorkflowState::Running);
+        for (rows, expected_tools) in [
+            (2, &["RunningTool"][..]),
+            (3, &["RunningTool", "QueuedTool"][..]),
+            (4, &["RunningTool", "QueuedTool", "FailedTool"][..]),
+            (
+                5,
+                &["RunningTool", "QueuedTool", "FailedTool", "CompletedTool"][..],
+            ),
+        ] {
+            let rendered = render_text(&running, rows);
+            for expected in expected_tools {
+                assert!(rendered.contains(expected), "{rows} rows:\n{rendered}");
+            }
+            assert!(
+                !rendered.contains("latest report"),
+                "{rows} rows:\n{rendered}"
+            );
+            assert!(
+                !rendered.contains("phase verify"),
+                "{rows} rows:\n{rendered}"
+            );
+            assert!(!rendered.contains("TaskPause"), "{rows} rows:\n{rendered}");
+        }
+
+        for (state, expected) in [
+            (WorkflowState::Queued, "waiting for a worker permit"),
+            (WorkflowState::Paused, "paused at an invocation boundary"),
+            (WorkflowState::Failed, "bounded terminal reason"),
+        ] {
+            let rendered = render_text(&card(state), 2);
+            assert!(rendered.contains(expected), "{state:?}:\n{rendered}");
+            assert!(!rendered.contains("RunningTool"), "{state:?}:\n{rendered}");
         }
     }
 }

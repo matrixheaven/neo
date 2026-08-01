@@ -77,8 +77,8 @@ card, one workflow Delegate summary when present, and one workflow
 DelegateSwarm summary when present. Direct workflow-origin tool activity stays
 inside the main card. Each visible child occupies one summary row; the existing
 full Delegate-family cards are not nested. Typed workflow origin is carried
-only through live runtime and transcript state and is not added to persisted
-session JSON.
+through runtime, transcript state, and optional session-event metadata so the
+same grouping survives resume. Old events without that field remain readable.
 
 Queued, running, phase, log, report, paused, and waiting workflow snapshots
 update that same live group in place and never enter native history. Completion,
@@ -117,11 +117,13 @@ unresolved blocking entry by transcript order.
 
 ## Compatibility Boundary
 
-- Workflow execution, scheduling, journal, recovery, result, model-visible
-  output, and persisted session JSON remain unchanged.
+- Workflow execution, scheduling, journal, recovery, result, and model-visible
+  output remain unchanged. Session events add only optional workflow source
+  metadata; old records need no migration.
 - Non-workflow Delegate, DelegateGroup, and DelegateSwarm card layout,
-  expansion, ordering, activity rows, progressive history, and transcript
-  placement remain unchanged.
+  expansion, ordering, activity rows, and transcript placement remain
+  unchanged. Captured terminal child facts stay out of standalone history and
+  commit only with their parent entry.
 - Approval and question entries remain independent blocking input owners.
 - Ordinary normal-screen rendering, native scrollback, explicit `Ctrl+O`
   review, Task Browser, terminal writes, and acknowledgement ordering remain

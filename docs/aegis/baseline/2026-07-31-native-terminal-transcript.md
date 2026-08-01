@@ -34,8 +34,8 @@ The workflow-specific presentation rule was amended by the approved
 implementation branch evidence available at this baseline update is:
 
 - `29fa1cfc` — `fix(core): preserve live workflow child origin`
-  (live-only typed origin for workflow-hosted tools, Delegate-family activity,
-  and questions without changing persisted session JSON);
+  (typed origin for workflow-hosted tools, Delegate-family activity, and
+  questions; later amended so optional source metadata survives JSONL replay);
 - `39d6b40d` — `fix(tui): group typed workflow activity`
   (one workflow transcript entry owns direct tools and child snapshots;
   mutable workflow transition facts and isolated workflow-origin entries are
@@ -64,9 +64,9 @@ test evidence that was not yet part of the branch at `39d6b40d`.
 - Queue, running, phase, log, report, paused, and waiting updates mutate that
   group only in the live area. A terminal event submits the whole logical group
   to history once, at the terminal event position.
-- The live area is actually bounded by `live_budget`; completion appends
-  remaining unacknowledged facts plus one final status and never a duplicate
-  complete card.
+- The live area is actually bounded by `live_budget`; ordinary Delegate-family
+  completion combines captured terminal child facts with the parent header and
+  result in one final block, never standalone fact rows or a duplicate card.
 - Final live cost is the true rendered row cost, including wrapping and every
   separator, after reserving the fitted Todo, pending input, composer, footer,
   borders, gutters, and cursor row. Tail truncation after `append_chrome` is
@@ -81,7 +81,9 @@ test evidence that was not yet part of the branch at `39d6b40d`.
 - Non-workflow Delegate, DelegateGroup, and DelegateSwarm card layouts,
   expansion, ordering, activity rows, and transcript placement are unchanged.
   Approval and question entries remain independent input owners. Workflow
-  runtime, journal, result, recovery, and persistence remain unchanged;
+  runtime, journal, result, and recovery remain unchanged. Optional workflow
+  source metadata persists so grouping survives resume, while old JSONL without
+  that metadata remains readable;
   `Ctrl+O` review still shows complete current state from the same transcript
   data.
 - Ordinary conversation remains on the normal screen with native scrollback;

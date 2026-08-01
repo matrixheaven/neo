@@ -42,6 +42,11 @@ impl DelegateGroupComponent {
         self.agents.iter().find(|agent| agent.id.as_str() == id)
     }
 
+    #[must_use]
+    pub fn snapshots(&self) -> &[AgentSnapshot] {
+        &self.agents
+    }
+
     pub fn upsert(&mut self, snapshot: AgentSnapshot) -> bool {
         if let Some(existing) = self.agents.iter_mut().find(|agent| agent.id == snapshot.id) {
             let merged = merge_group_delegate_snapshot(existing, snapshot);
@@ -90,8 +95,6 @@ impl DelegateGroupComponent {
         lines
     }
 
-    /// One terminal status for native history once progressive fact rows were
-    /// emitted. The full card remains available through explicit review.
     #[must_use]
     pub fn terminal_summary(&self, width: usize, theme: &TuiTheme) -> Vec<Line> {
         vec![self.header(width, theme)]

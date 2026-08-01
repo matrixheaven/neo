@@ -536,6 +536,20 @@ fn compact_progress_preserves_live_shell_output() {
     assert!(output.is_some_and(|preview| preview.tail));
 }
 
+#[test]
+fn older_terminal_progress_cannot_clear_a_newer_outcome() {
+    let runtime = MultiAgentRuntime::new();
+    let started = runtime.start_foreground_delegate_for_test("preserve result");
+    let mut current = runtime.complete_delegate_for_test(&started.id, "complete result");
+    let mut older = current.progress_snapshot();
+    current.updated_at_ms = current.updated_at_ms.saturating_add(1);
+    older.outcome = None;
+    let expected = current.clone();
+
+    assert!(!apply_agent_progress(&mut current, &older));
+    assert_eq!(current, expected);
+}
+
 #[tokio::test]
 async fn child_run_appends_events_to_agent_wire() {
     use neo_agent_core::{

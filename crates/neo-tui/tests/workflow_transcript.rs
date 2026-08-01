@@ -6,12 +6,14 @@ use neo_agent_core::multi_agent::{
     AgentToolActivityPhase, DelegateContext, SwarmAggregate, SwarmChildProgress,
     SwarmChildSnapshot, SwarmSnapshot,
 };
+use neo_agent_core::session::{JsonlSessionReader, JsonlSessionWriter};
 use neo_agent_core::workflow::{
     WorkflowExecutionOrigin, WorkflowId, WorkflowSnapshot, WorkflowState,
 };
 use neo_agent_core::{
     AgentEvent, ApprovalAction, ApprovalOption, ApprovalPresentation, ApprovalRequest,
-    ApprovalResolution, PermissionOperation, ShellCommandOrigin, ShellCommandOutcome, ToolResult,
+    ApprovalResolution, PermissionOperation, QuestionEventData, QuestionOptionData,
+    ShellCommandOrigin, ShellCommandOutcome, ToolResult,
 };
 use neo_tui::dialogs::{QuestionDisplayData, QuestionDisplayOption};
 use neo_tui::primitive::{Component, Finalization, Line, strip_ansi, visible_width};
@@ -790,6 +792,148 @@ fn workflow_origin_routes_tools_and_children_into_one_entry() {
     };
     assert!(!text.contains("internal-run-id"), "{text}");
     assert!(!text.contains("internal-invocation-id"), "{text}");
+}
+
+#[tokio::test]
+async fn jsonl_replay_preserves_workflow_question_tool_and_child_grouping() {
+    let delegate_origin = origin("wf-test", "delegate-replay-call");
+    let swarm_origin = origin("wf-test", "swarm-replay-call");
+    let bash_origin = origin("wf-test", "bash-replay-call");
+    let question_origin = origin("wf-test", "question-replay-call");
+    let delegate = agent_snapshot("delegate-replay");
+    let swarm = swarm_snapshot("swarm-replay", agent_snapshot("swarm-child-replay"));
+    let events = vec![
+        AgentEvent::WorkflowStarted {
+            turn: 1,
+            workflow: snapshot(WorkflowState::Running),
+        },
+        AgentEvent::ToolExecutionStarted {
+            turn: 1,
+            id: "bash-replay-call".to_owned(),
+            name: "Bash".to_owned(),
+            arguments: serde_json::json!({"command": "printf replay"}),
+            workflow_origin: Some(bash_origin.clone()),
+        },
+        AgentEvent::ToolExecutionFinished {
+            turn: 1,
+            id: "bash-replay-call".to_owned(),
+            name: "Bash".to_owned(),
+            result: tool_result("replayed", false),
+            workflow_origin: Some(bash_origin),
+        },
+        AgentEvent::ToolExecutionStarted {
+            turn: 1,
+            id: "delegate-replay-call".to_owned(),
+            name: "Delegate".to_owned(),
+            arguments: serde_json::json!({"task": "delegate replay"}),
+            workflow_origin: Some(delegate_origin.clone()),
+        },
+        AgentEvent::DelegateStarted {
+            turn: 1,
+            agent: delegate,
+            workflow_origin: Some(delegate_origin),
+        },
+        AgentEvent::ToolExecutionStarted {
+            turn: 1,
+            id: "swarm-replay-call".to_owned(),
+            name: "DelegateSwarm".to_owned(),
+            arguments: serde_json::json!({"tasks": ["swarm replay"]}),
+            workflow_origin: Some(swarm_origin.clone()),
+        },
+        AgentEvent::DelegateSwarmStarted {
+            turn: 1,
+            swarm,
+            workflow_origin: Some(swarm_origin),
+        },
+        AgentEvent::QuestionRequested {
+            turn: 1,
+            id: "question-replay".to_owned(),
+            questions: vec![QuestionEventData {
+                question: "Continue replay?".to_owned(),
+                header: None,
+                body: None,
+                options: vec![QuestionOptionData {
+                    label: "Continue".to_owned(),
+                    description: None,
+                }],
+                multi_select: false,
+            }],
+            workflow_origin: Some(question_origin.clone()),
+        },
+    ];
+
+    let dir = tempfile::tempdir().expect("tempdir");
+    let path = dir.path().join("main.jsonl");
+    let mut writer = JsonlSessionWriter::create(&path).await.expect("writer");
+    for event in &events {
+        writer.append(event).await.expect("append event");
+    }
+    writer.flush().await.expect("flush");
+    let replayed = JsonlSessionReader::read_all(&path)
+        .await
+        .expect("read events");
+
+    let mut pane = neo_tui::transcript::TranscriptPane::new(120, 24);
+    for event in replayed {
+        match event {
+            AgentEvent::QuestionRequested {
+                id,
+                questions,
+                workflow_origin,
+                ..
+            } => {
+                let questions = questions
+                    .into_iter()
+                    .map(|question| QuestionDisplayData {
+                        question: question.question,
+                        header: question.header,
+                        body: question.body,
+                        options: question
+                            .options
+                            .into_iter()
+                            .map(|option| QuestionDisplayOption {
+                                label: option.label,
+                                description: option.description,
+                            })
+                            .collect(),
+                        multi_select: question.multi_select,
+                    })
+                    .collect();
+                pane.apply_question_stream_update(StreamUpdate::QuestionRequested {
+                    id,
+                    questions,
+                    workflow_origin,
+                });
+            }
+            event => pane.apply_agent_event(event),
+        }
+    }
+
+    let workflow = pane
+        .transcript()
+        .entries()
+        .iter()
+        .find_map(|entry| match entry {
+            TranscriptEntry::Workflow { component } => Some(component),
+            _ => None,
+        })
+        .expect("workflow entry");
+    assert_eq!(workflow.direct_tools().len(), 1);
+    assert_eq!(workflow.direct_tools()[0].id(), "bash-replay-call");
+    assert_eq!(
+        workflow.delegates()[0].display_name.as_str(),
+        "delegate-replay"
+    );
+    assert_eq!(workflow.swarms()[0].swarm_id, "swarm-replay");
+    assert!(!pane.transcript().entries().iter().any(|entry| matches!(
+        entry,
+        TranscriptEntry::Delegate { .. } | TranscriptEntry::DelegateSwarm { .. }
+    )));
+    assert!(pane.transcript().entries().iter().any(|entry| matches!(
+        entry,
+        TranscriptEntry::QuestionPrompt(data)
+            if data.workflow_origin.as_ref() == Some(&question_origin)
+    )));
 }
 
 #[test]

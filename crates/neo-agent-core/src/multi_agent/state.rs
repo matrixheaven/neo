@@ -466,7 +466,7 @@ pub fn apply_agent_progress(
     snapshot: &mut AgentSnapshot,
     progress: &AgentProgressSnapshot,
 ) -> bool {
-    if snapshot.id != progress.agent_id {
+    if snapshot.id != progress.agent_id || snapshot.updated_at_ms > progress.updated_at_ms {
         return false;
     }
     snapshot.state = progress.state;

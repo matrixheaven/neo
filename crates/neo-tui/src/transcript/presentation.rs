@@ -1,10 +1,10 @@
-use std::collections::{BTreeMap, BTreeSet, VecDeque};
+use std::collections::{BTreeMap, VecDeque};
 
 use crate::primitive::Finalization;
 use crate::primitive::theme::TuiTheme;
 use crate::terminal_image::{ImageRenderPolicy, TerminalImageCapabilities};
 
-use super::progressive::{ProgressiveFact, ProgressiveFactId, render_progressive_fact};
+use super::progressive::{ProgressiveFactPayload, render_progressive_fact};
 use super::streaming_prefix::stable_prefix_len;
 use super::{TranscriptEntry, TranscriptEntryId, TranscriptStore};
 
@@ -19,10 +19,6 @@ pub enum TranscriptBlockId {
         source_start: usize,
         source_end: usize,
     },
-    /// One immutable progressive fact projected from a mutable entry.
-    Progressive {
-        id: ProgressiveFactId,
-    },
 }
 
 impl TranscriptBlockId {
@@ -31,7 +27,6 @@ impl TranscriptBlockId {
             Self::Entries(ids) => ids.first().copied(),
             Self::Workflow { entry } => Some(*entry),
             Self::AssistantSegment { entry, .. } => Some(*entry),
-            Self::Progressive { id } => Some(id.entry()),
         }
     }
 
@@ -40,7 +35,6 @@ impl TranscriptBlockId {
             Self::Entries(ids) => ids.last().copied(),
             Self::Workflow { entry } => Some(*entry),
             Self::AssistantSegment { entry, .. } => Some(*entry),
-            Self::Progressive { id } => Some(id.entry()),
         }
     }
 }
@@ -53,7 +47,6 @@ pub enum FinalizedBlockProof {
         revision: u64,
     },
     AssistantSource(String),
-    Progressive(ProgressiveFact),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -253,9 +246,6 @@ pub(super) struct TranscriptPresentation {
     committed_entry_revisions: BTreeMap<TranscriptEntryId, u64>,
     assistant_offsets: BTreeMap<TranscriptEntryId, usize>,
     assistant_sources: BTreeMap<TranscriptEntryId, String>,
-    /// Typed identities of progressive facts whose terminal write succeeded.
-    /// Acknowledged facts are never rendered again.
-    acknowledged_facts: BTreeSet<ProgressiveFactId>,
     acknowledged_tail_owner: Option<TranscriptEntryId>,
     diagnostics: VecDeque<String>,
 }
@@ -273,6 +263,7 @@ impl TranscriptPresentation {
         let mut frame = PresentationFrame::new(self.acknowledged_tail_owner);
         let attempt_start = transcript.live_model_attempt_start();
         let blocking_index = blocking_dialog_index(transcript);
+        let mut terminal_history_barrier = false;
         let mut index = 0;
         while index < transcript.entries().len() {
             if blocking_index == Some(index) {
@@ -286,14 +277,13 @@ impl TranscriptPresentation {
                     index += 1;
                     continue;
                 };
-                render_entry(
-                    transcript, index, id, revision, true, false, options, &mut frame,
-                );
+                render_entry(transcript, index, id, revision, true, options, &mut frame);
                 break;
             }
             // Everything from the live model attempt start is rollback-able
             // attempt content: it renders bounded live, never as history.
             let in_attempt = attempt_start.is_some_and(|start| index >= start);
+            let blocked = in_attempt || terminal_history_barrier;
             let Some(id) = transcript.entry_ids().get(index).copied() else {
                 index += 1;
                 continue;
@@ -302,10 +292,6 @@ impl TranscriptPresentation {
                 index += 1;
                 continue;
             };
-            // Emit unacknowledged stable facts for this entry before its own
-            // content, preserving canonical order.
-            self.emit_progressive_facts(transcript, id, !in_attempt, options, &mut frame);
-
             if let Some(expected_revision) = self.committed_entry_revisions.get(&id).copied() {
                 if expected_revision != revision {
                     self.record_diagnostic(format!(
@@ -324,7 +310,7 @@ impl TranscriptPresentation {
                     id,
                     content,
                     finalization,
-                    in_attempt,
+                    blocked,
                     options,
                     &mut frame,
                 );
@@ -336,94 +322,26 @@ impl TranscriptPresentation {
                 transcript.entries().get(index),
                 Some(TranscriptEntry::Workflow { .. })
             ) {
-                render_workflow_entry(
-                    transcript, index, id, revision, in_attempt, options, &mut frame,
+                terminal_history_barrier |= render_workflow_entry(
+                    transcript, index, id, revision, blocked, options, &mut frame,
                 );
                 index += 1;
                 continue;
             }
 
             if let Some(next_index) =
-                self.render_tool_run(transcript, index, in_attempt, options, &mut frame)
+                self.render_tool_run(transcript, index, blocked, options, &mut frame)
             {
                 index = next_index;
                 continue;
             }
 
-            // Once progressive fact rows were emitted for an entry, its
-            // completion appends one terminal status instead of a complete
-            // duplicate card.
-            let progressive = self.has_progressive_history(transcript, id);
             render_entry(
-                transcript,
-                index,
-                id,
-                revision,
-                in_attempt,
-                progressive,
-                options,
-                &mut frame,
+                transcript, index, id, revision, blocked, options, &mut frame,
             );
             index += 1;
         }
         frame.finish(options.live_budget)
-    }
-
-    /// Whether an entry ever emitted progressive fact rows (acknowledged or
-    /// still pending). Such an entry must never append a complete card after
-    /// its stable facts.
-    fn has_progressive_history(
-        &self,
-        transcript: &TranscriptStore,
-        entry_id: TranscriptEntryId,
-    ) -> bool {
-        transcript
-            .progressive_facts()
-            .iter()
-            .any(|fact| fact.id.entry() == entry_id)
-            || self
-                .acknowledged_facts
-                .iter()
-                .any(|id| id.entry() == entry_id)
-    }
-
-    /// Project unacknowledged stable facts for one entry into pending history
-    /// in canonical arrival order. Facts of rollback-able attempt content are
-    /// held until the attempt is canonical.
-    fn emit_progressive_facts(
-        &self,
-        transcript: &TranscriptStore,
-        entry_id: TranscriptEntryId,
-        allowed: bool,
-        options: TranscriptRenderOptions<'_>,
-        frame: &mut PresentationFrame,
-    ) {
-        if !allowed {
-            return;
-        }
-        for fact in transcript.progressive_facts() {
-            if fact.id.entry() != entry_id {
-                continue;
-            }
-            if self.acknowledged_facts.contains(&fact.id) {
-                continue;
-            }
-            let lines = render_progressive_fact(fact, options.width, options.theme);
-            let separator_before = advance_semantic_owner(
-                &mut frame.rendered_tail_owner,
-                Some(entry_id),
-                Some(entry_id),
-                !lines.is_empty(),
-            );
-            frame.pending_history.push(FinalizedBlock {
-                id: TranscriptBlockId::Progressive {
-                    id: fact.id.clone(),
-                },
-                proof: FinalizedBlockProof::Progressive(fact.clone()),
-                lines,
-                separator_before,
-            });
-        }
     }
 
     fn render_assistant_entry(
@@ -619,9 +537,6 @@ impl TranscriptPresentation {
                         .and_modify(|offset| *offset = (*offset).max(*source_end))
                         .or_insert(*source_end);
                 }
-                (TranscriptBlockId::Progressive { id }, FinalizedBlockProof::Progressive(_)) => {
-                    self.acknowledged_facts.insert(id.clone());
-                }
                 _ => self.record_diagnostic(format!(
                     "presentation proof does not match block identity: {:?}",
                     block.id
@@ -647,12 +562,6 @@ impl TranscriptPresentation {
             self.diagnostics.pop_front();
         }
         self.diagnostics.push_back(diagnostic);
-    }
-
-    /// Drop acknowledged fact payloads from the store while retaining their
-    /// typed identities in the acknowledgement ledger so they never replay.
-    pub(super) fn prune_acknowledged_facts(&self, transcript: &mut TranscriptStore) {
-        transcript.retain_progressive_facts(|fact| !self.acknowledged_facts.contains(&fact.id));
     }
 }
 
@@ -706,29 +615,29 @@ fn render_entry(
     id: TranscriptEntryId,
     revision: u64,
     blocked: bool,
-    progressive: bool,
     options: TranscriptRenderOptions<'_>,
     frame: &mut PresentationFrame,
 ) {
     let block_id = TranscriptBlockId::Entries(vec![id]);
-    let finalized = transcript.entry_finalization(index) == Some(Finalization::Finalized);
-    // The terminal summary replaces only the completed card; the live
-    // projection always stays the full card.
-    let mut lines = if progressive && finalized {
-        terminal_summary_lines(transcript, index, options.width, options.theme)
-    } else {
-        transcript.render_entry_ansi_cached(
-            index,
-            options.width,
-            options.theme,
-            options.activity_frame,
-            options.image_render_policy,
-            options.image_capabilities,
-        )
-    };
+    let mut lines = transcript.render_entry_ansi_cached(
+        index,
+        options.width,
+        options.theme,
+        options.activity_frame,
+        options.image_render_policy,
+        options.image_capabilities,
+    );
     super::pane::trim_ansi_transcript_block(&mut lines);
     match transcript.entry_finalization(index) {
         Some(Finalization::Finalized) if !blocked => {
+            if let Some(terminal_lines) =
+                render_delegate_family_terminal(transcript, index, id, options)
+            {
+                lines = terminal_lines;
+            }
+            if lines.is_empty() {
+                return;
+            }
             let separator_before = advance_semantic_owner(
                 &mut frame.rendered_tail_owner,
                 block_id.first_owner(),
@@ -762,6 +671,113 @@ fn render_entry(
     }
 }
 
+fn render_delegate_family_terminal(
+    transcript: &TranscriptStore,
+    index: usize,
+    id: TranscriptEntryId,
+    options: TranscriptRenderOptions<'_>,
+) -> Option<Vec<String>> {
+    let entry = transcript.entries().get(index)?;
+    let summary = match entry {
+        TranscriptEntry::Delegate { component } => {
+            component.terminal_summary(options.width, options.theme)
+        }
+        TranscriptEntry::DelegateGroup { component } => {
+            component.terminal_summary(options.width, options.theme)
+        }
+        TranscriptEntry::DelegateSwarm { component } => {
+            component.terminal_summary(options.width, options.theme)
+        }
+        _ => return None,
+    };
+    let facts = transcript
+        .progressive_facts()
+        .iter()
+        .filter(|fact| fact.id.entry() == id)
+        .collect::<Vec<_>>();
+    if facts.is_empty() {
+        return None;
+    }
+
+    let mut lines = summary
+        .first()
+        .into_iter()
+        .map(|line| line.to_ansi())
+        .collect::<Vec<_>>();
+    let mut terminal_facts = facts
+        .iter()
+        .copied()
+        .filter(|fact| {
+            matches!(
+                &fact.payload,
+                ProgressiveFactPayload::ChildAgent(_) | ProgressiveFactPayload::SwarmItem(_)
+            )
+        })
+        .collect::<Vec<_>>();
+    terminal_facts.sort_by_key(|fact| fact_child_rank(entry, fact));
+    let mut tool_facts = facts
+        .iter()
+        .copied()
+        .filter(|fact| matches!(&fact.payload, ProgressiveFactPayload::ChildTool(_)))
+        .collect::<Vec<_>>();
+    tool_facts.sort_by_key(|fact| {
+        let activity_index = match &fact.payload {
+            ProgressiveFactPayload::ChildTool(tool) => tool.activity_index,
+            _ => usize::MAX,
+        };
+        (fact_child_rank(entry, fact), activity_index)
+    });
+
+    for fact in &terminal_facts {
+        if let Some(line) = render_progressive_fact(fact, options.width, options.theme).first() {
+            lines.push(line.clone());
+        }
+    }
+    for fact in &tool_facts {
+        lines.extend(render_progressive_fact(fact, options.width, options.theme));
+    }
+    lines.extend(summary.iter().skip(1).map(|line| line.to_ansi()));
+    for fact in &terminal_facts {
+        lines.extend(
+            render_progressive_fact(fact, options.width, options.theme)
+                .into_iter()
+                .skip(1),
+        );
+    }
+    super::pane::trim_ansi_transcript_block(&mut lines);
+    Some(lines)
+}
+
+fn fact_child_rank(entry: &TranscriptEntry, fact: &super::ProgressiveFact) -> usize {
+    let agent_id = match &fact.payload {
+        ProgressiveFactPayload::ChildTool(fact) => Some(fact.agent_id.as_str()),
+        ProgressiveFactPayload::ChildAgent(fact) => Some(fact.agent_id.as_str()),
+        ProgressiveFactPayload::SwarmItem(_) => None,
+    };
+    match entry {
+        TranscriptEntry::Delegate { .. } => 0,
+        TranscriptEntry::DelegateGroup { component } => agent_id
+            .and_then(|agent_id| {
+                component
+                    .snapshots()
+                    .iter()
+                    .position(|snapshot| snapshot.id.as_str() == agent_id)
+            })
+            .unwrap_or(usize::MAX),
+        TranscriptEntry::DelegateSwarm { component } => match &fact.payload {
+            ProgressiveFactPayload::SwarmItem(fact) => fact.item_index,
+            ProgressiveFactPayload::ChildTool(fact) => component
+                .snapshot()
+                .children
+                .iter()
+                .find(|child| child.agent.id.as_str() == fact.agent_id)
+                .map_or(usize::MAX, |child| child.item_index),
+            ProgressiveFactPayload::ChildAgent(_) => usize::MAX,
+        },
+        _ => usize::MAX,
+    }
+}
+
 fn render_workflow_entry(
     transcript: &TranscriptStore,
     index: usize,
@@ -770,19 +786,15 @@ fn render_workflow_entry(
     blocked: bool,
     options: TranscriptRenderOptions<'_>,
     frame: &mut PresentationFrame,
-) {
+) -> bool {
     let Some(TranscriptEntry::Workflow { component }) = transcript.entries().get(index) else {
-        return;
+        return false;
     };
     let finalized = transcript.entry_finalization(index) == Some(Finalization::Finalized);
     let separator_before = matches!(frame.rendered_tail_owner, Some(owner) if owner != id);
-    let available_rows = if finalized && !blocked {
-        usize::MAX
-    } else {
-        options
-            .live_budget
-            .saturating_sub(usize::from(separator_before))
-    };
+    let available_rows = options
+        .live_budget
+        .saturating_sub(usize::from(separator_before));
     let group = super::workflow_group::render_workflow_group(
         component,
         options.width,
@@ -796,6 +808,9 @@ fn render_workflow_entry(
         .map(|line| line.to_ansi())
         .collect::<Vec<_>>();
     super::pane::trim_ansi_transcript_block(&mut lines);
+    if lines.is_empty() {
+        return finalized && !blocked;
+    }
     let separator_before = advance_semantic_owner(
         &mut frame.rendered_tail_owner,
         Some(id),
@@ -819,30 +834,7 @@ fn render_workflow_entry(
             separator_before,
         ));
     }
-}
-
-/// Terminal status rows for an entry whose stable facts were already emitted
-/// progressively: one summary line per family, never a duplicate full card.
-fn terminal_summary_lines(
-    transcript: &TranscriptStore,
-    index: usize,
-    width: usize,
-    theme: &TuiTheme,
-) -> Vec<String> {
-    let lines = match transcript.entries().get(index) {
-        Some(TranscriptEntry::Delegate { component }) => component.terminal_summary(width, theme),
-        Some(TranscriptEntry::DelegateGroup { component }) => {
-            component.terminal_summary(width, theme)
-        }
-        Some(TranscriptEntry::DelegateSwarm { component }) => {
-            component.terminal_summary(width, theme)
-        }
-        _ => Vec::new(),
-    };
-    lines
-        .into_iter()
-        .map(|line| line.to_ansi())
-        .collect::<Vec<_>>()
+    false
 }
 
 fn tool_run_end(
@@ -1001,83 +993,6 @@ mod tests {
         assert_eq!(blocks.len(), 1, "no duplicate replay: {blocks:?}");
         assert!(blocks[0].contains("background task"));
         assert!(completed_update.live.is_empty());
-    }
-
-    #[test]
-    fn progressive_facts_retry_until_ack_then_never_replay() {
-        use crate::transcript::progressive::{
-            ChildToolFact, ProgressiveFact, ProgressiveFactId, ProgressiveFactPayload,
-        };
-        use neo_agent_core::multi_agent::AgentToolActivityPhase;
-
-        let mut transcript = TranscriptStore::new();
-        transcript.push(TranscriptEntry::status("anchor"));
-        let entry = transcript.entry_ids()[0];
-        let fact = ProgressiveFact {
-            id: ProgressiveFactId::ChildTool {
-                entry,
-                agent_id: "agent-a".to_owned(),
-                run_count: 1,
-                tool_id: "read-1".to_owned(),
-            },
-            payload: ProgressiveFactPayload::ChildTool(ChildToolFact {
-                agent_id: "agent-a".to_owned(),
-                run_count: 1,
-                tool_id: "read-1".to_owned(),
-                name: "Read".to_owned(),
-                summary: Some("one.rs".to_owned()),
-                phase: AgentToolActivityPhase::Done,
-                output: None,
-                files: Vec::new(),
-            }),
-        };
-        let ProgressiveFactPayload::ChildTool(tool) = &fact.payload else {
-            unreachable!("test constructs a ChildTool fact");
-        };
-        assert!(tool.is_terminal(), "Done phase is the typed finality proof");
-        assert!(transcript.capture_progressive_fact(fact.clone()));
-        assert!(
-            !transcript.capture_progressive_fact(fact.clone()),
-            "a duplicate typed identity must never be captured twice"
-        );
-
-        let mut presentation = TranscriptPresentation::default();
-        let theme = TuiTheme::default();
-        let options = TranscriptRenderOptions::new(
-            80,
-            &theme,
-            0,
-            ImageRenderPolicy::default(),
-            TerminalImageCapabilities::default(),
-            8,
-        );
-        let first = presentation.render(&mut transcript, options);
-        let fact_blocks = first
-            .history
-            .iter()
-            .filter(|block| matches!(block.id, TranscriptBlockId::Progressive { .. }))
-            .collect::<Vec<_>>();
-        assert_eq!(fact_blocks.len(), 1, "one progressive fact block");
-        assert!(
-            fact_blocks[0]
-                .lines
-                .iter()
-                .any(|line| line.contains("Read") && line.contains("one.rs")),
-            "fact rows: {:?}",
-            fact_blocks[0].lines
-        );
-
-        // Unacknowledged facts retry on the next frame.
-        let retry = presentation.render(&mut transcript, options);
-        assert_eq!(retry.history, first.history, "unacked facts must retry");
-
-        // Acknowledgement advances the typed ledger; the fact never replays
-        // and its payload is released while identity is retained.
-        presentation.acknowledge(&first.history);
-        presentation.prune_acknowledged_facts(&mut transcript);
-        assert!(transcript.progressive_facts().is_empty());
-        let after = presentation.render(&mut transcript, options);
-        assert!(after.history.is_empty(), "acked facts must never replay");
     }
 
     #[test]

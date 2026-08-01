@@ -132,8 +132,6 @@ impl SwarmCardComponent {
         lines
     }
 
-    /// One terminal status for native history once progressive fact rows were
-    /// emitted. The full card remains available through explicit review.
     #[must_use]
     pub fn terminal_summary(&self, width: usize, theme: &TuiTheme) -> Vec<Line> {
         let progress = self.weighted_progress();

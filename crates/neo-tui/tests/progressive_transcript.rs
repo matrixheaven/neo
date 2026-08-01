@@ -267,10 +267,9 @@ fn stable_facts_after_ordinary_live_entry_keep_canonical_order() {
     assert!(finished.live.is_empty());
 }
 
-/// A Delegate entry whose stable tool facts were already emitted must finish
-/// with exactly one terminal status — never a complete duplicate card.
+/// A Delegate remains one card so its title always precedes child tool rows.
 #[test]
-fn delegate_family_completion_appends_one_terminal_status_without_complete_card_duplicate() {
+fn ordinary_delegate_commits_one_complete_card_with_header_before_child_tools() {
     use neo_agent_core::multi_agent::{
         AgentActivityEntry, AgentActivityKind, AgentDisplayName, AgentId, AgentLifecycleState,
         AgentPath, AgentRole, AgentRunMode, AgentSnapshot, AgentToolActivityPhase, DelegateContext,
@@ -319,20 +318,11 @@ fn delegate_family_completion_appends_one_terminal_status_without_complete_card_
     };
     pane.transcript_mut().upsert_delegate(1, running.clone());
 
-    // The stable tool row enters history while the card is live.
+    // Nothing from the child card is split into earlier history.
     let update = pane.render_terminal_update(120, 24);
-    let history = update
-        .history
-        .iter()
-        .flat_map(|block| block.lines.iter())
-        .map(|line| strip_ansi(line))
-        .collect::<Vec<_>>()
-        .join("\n");
-    assert!(history.contains("Used Read"), "history:\n{history}");
-    pane.acknowledge_history(&update.history);
+    assert!(update.history.is_empty(), "history: {:#?}", update.history);
 
-    // Completion: remaining facts (none) plus ONE terminal status; the full
-    // card (with its tool row) must not be appended again.
+    // Completion commits the existing complete card once.
     running.state = AgentLifecycleState::Completed;
     running.terminal_at_ms = Some(3);
     running.updated_at_ms = 3;
@@ -343,7 +333,7 @@ fn delegate_family_completion_appends_one_terminal_status_without_complete_card_
     pane.transcript_mut().upsert_delegate(1, running);
 
     let finished = pane.render_terminal_update(120, 24);
-    assert_eq!(finished.history.len(), 1, "one terminal status");
+    assert_eq!(finished.history.len(), 1, "one complete delegate card");
     let summary = finished.history[0]
         .lines
         .iter()
@@ -351,12 +341,18 @@ fn delegate_family_completion_appends_one_terminal_status_without_complete_card_
         .collect::<Vec<_>>()
         .join("\n");
     assert!(summary.contains("agent-a"), "summary:\n{summary}");
-    assert!(summary.contains("done"), "summary:\n{summary}");
+    assert!(summary.contains("Used Read"), "summary:\n{summary}");
     assert!(
-        !summary.contains("Used Read"),
-        "complete card must not be replayed after progressive facts:\n{summary}"
+        summary.contains("feature implemented"),
+        "summary:\n{summary}"
+    );
+    assert!(
+        summary.find("Delegate").unwrap() < summary.find("Used Read").unwrap(),
+        "delegate header must precede child tools:\n{summary}"
     );
     assert!(finished.live.is_empty());
+    pane.acknowledge_history(&finished.history);
+    assert!(pane.render_terminal_update(120, 24).history.is_empty());
 }
 
 /// A pending approval defers every later stable fact; resolution releases
@@ -365,7 +361,8 @@ fn delegate_family_completion_appends_one_terminal_status_without_complete_card_
 fn pending_approval_defers_later_facts_in_canonical_order() {
     use neo_agent_core::multi_agent::{
         AgentActivityEntry, AgentActivityKind, AgentDisplayName, AgentId, AgentLifecycleState,
-        AgentPath, AgentRole, AgentRunMode, AgentSnapshot, AgentToolActivityPhase, DelegateContext,
+        AgentPath, AgentRole, AgentRunMode, AgentSnapshot, AgentTerminalOutcome,
+        AgentToolActivityPhase, DelegateContext,
     };
     use neo_agent_core::{
         ApprovalAction, ApprovalOption, ApprovalPresentation, ApprovalRequest, ApprovalResolution,
@@ -392,7 +389,7 @@ fn pending_approval_defers_later_facts_in_canonical_order() {
     });
 
     // A later delegate completes a tool while the approval stays pending.
-    let mut running = AgentSnapshot {
+    let running = AgentSnapshot {
         id: AgentId::from_suffix_for_test("agent-a"),
         display_name: AgentDisplayName::new("agent-a"),
         path: AgentPath::root_child(&AgentDisplayName::new("agent-a")),
@@ -453,8 +450,8 @@ fn pending_approval_defers_later_facts_in_canonical_order() {
         ))
     );
 
-    // Resolution releases the deferred facts once in canonical order: the
-    // resolved approval first, then the later stable fact.
+    // Resolution releases only the approval. Child facts remain capture-only
+    // until their parent card terminalizes.
     pane.resolve_approval(
         "approval-1",
         &ApprovalResolution::Selected {
@@ -475,6 +472,27 @@ fn pending_approval_defers_later_facts_in_canonical_order() {
         history.contains("approval: Allow once"),
         "history:\n{history}"
     );
+    assert!(!history.contains("Used Read"), "history:\n{history}");
+
+    let completed = AgentSnapshot {
+        state: AgentLifecycleState::Completed,
+        updated_at_ms: 3,
+        terminal_at_ms: Some(3),
+        outcome: Some(AgentTerminalOutcome {
+            summary: "feature implemented".to_owned(),
+            is_error: false,
+        }),
+        ..running
+    };
+    pane.transcript_mut().upsert_delegate(1, completed);
+    let update = pane.render_terminal_update(120, 24);
+    let history = update
+        .history
+        .iter()
+        .flat_map(|block| block.lines.iter())
+        .map(|line| strip_ansi(line))
+        .collect::<Vec<_>>()
+        .join("\n");
     assert!(history.contains("Used Read"), "history:\n{history}");
     assert!(
         history.find("approval: Allow once").unwrap() < history.find("Used Read").unwrap(),
@@ -482,12 +500,12 @@ fn pending_approval_defers_later_facts_in_canonical_order() {
     );
 }
 
-/// Every live-producing entry family must be handled by a progressive
-/// projector, a blocking projector, or the bounded finalization fallback:
+/// Every live-producing entry family must be handled by a bounded live
+/// projection, a blocking projection, or the bounded finalization fallback:
 /// bounded while live, exactly one canonical commit at finalization, and no
 /// mutable data acknowledged as history.
 #[test]
-fn every_live_entry_family_is_bounded_or_progressive() {
+fn every_live_entry_family_is_bounded_and_commits_once() {
     use neo_agent_core::{
         ApprovalAction, ApprovalOption, ApprovalPresentation, ApprovalRequest, ApprovalResolution,
         PermissionOperation, ShellCommandOrigin, ShellCommandOutcome,
@@ -525,6 +543,40 @@ fn every_live_entry_family_is_bounded_or_progressive() {
                 .history
                 .is_empty(),
             "acked history never replays"
+        );
+    }
+
+    fn assert_ordered_canonical_commit(
+        pane: &mut TranscriptPane,
+        width: usize,
+        height: usize,
+        ordered: &[&str],
+    ) {
+        let update = pane.render_terminal_update(width, height);
+        assert_eq!(update.history.len(), 1, "one complete card commit");
+        assert!(update.live.is_empty(), "live area must clear");
+        let history = update.history[0]
+            .lines
+            .iter()
+            .map(|line| strip_ansi(line))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let mut previous = 0;
+        for (index, needle) in ordered.iter().enumerate() {
+            let position = history
+                .find(needle)
+                .unwrap_or_else(|| panic!("missing {needle:?}:\n{history}"));
+            if index > 0 {
+                assert!(position > previous, "card order violated:\n{history}");
+            }
+            previous = position;
+        }
+        pane.acknowledge_history(&update.history);
+        assert!(
+            pane.render_terminal_update(width, height)
+                .history
+                .is_empty(),
+            "acked complete card never replays"
         );
     }
 
@@ -705,47 +757,35 @@ fn every_live_entry_family_is_bounded_or_progressive() {
     pane.resolve_question_prompt("question-1", vec!["Yes".to_owned()]);
     assert_one_canonical_commit(&mut pane, 100, 24);
 
-    // -- Delegate: progressive projector -----------------------------------
+    // -- Delegate: one complete card keeps header before child tools -------
     let mut pane = TranscriptPane::new(100, 24);
     pane.transcript_mut().upsert_delegate(
         1,
         running_agent("agent-a", vec![done_tool("read-1", "Read", "one.rs")]),
     );
     assert_bounded_live(&mut pane, 100, 24);
-    let history = plain_history(&mut pane, 100, 24);
-    assert!(
-        history.contains("Used Read"),
-        "stable tool fact projects:\n{history}"
-    );
-    let update = pane.render_terminal_update(100, 24);
-    pane.acknowledge_history(&update.history);
+    assert!(plain_history(&mut pane, 100, 24).is_empty());
     pane.transcript_mut().upsert_delegate(
         1,
         completed_agent("agent-a", vec![done_tool("read-1", "Read", "one.rs")]),
     );
-    assert_one_canonical_commit(&mut pane, 100, 24);
+    assert_ordered_canonical_commit(&mut pane, 100, 24, &["Delegate", "Used Read"]);
 
-    // -- DelegateGroup: progressive projector ------------------------------
+    // -- DelegateGroup: one complete card keeps group before child tools ---
     let mut pane = TranscriptPane::new(100, 24);
     pane.transcript_mut().upsert_delegate(
         1,
         running_agent("group-a", vec![done_tool("read-a", "Read", "a.rs")]),
     );
     assert_bounded_live(&mut pane, 100, 24);
-    let history = plain_history(&mut pane, 100, 24);
-    assert!(
-        history.contains("Used Read"),
-        "group tool fact projects:\n{history}"
-    );
-    let update = pane.render_terminal_update(100, 24);
-    pane.acknowledge_history(&update.history);
+    assert!(plain_history(&mut pane, 100, 24).is_empty());
     pane.transcript_mut().upsert_delegate(
         1,
         completed_agent("group-a", vec![done_tool("read-a", "Read", "a.rs")]),
     );
-    assert_one_canonical_commit(&mut pane, 100, 24);
+    assert_ordered_canonical_commit(&mut pane, 100, 24, &["Delegate", "Used Read"]);
 
-    // -- DelegateSwarm: progressive projector ------------------------------
+    // -- DelegateSwarm: one complete card keeps header before children -----
     let mut pane = TranscriptPane::new(100, 24);
     pane.transcript_mut().upsert_delegate_swarm(running_swarm(
         "swarm-1",
@@ -755,15 +795,8 @@ fn every_live_entry_family_is_bounded_or_progressive() {
         )],
     ));
     assert_bounded_live(&mut pane, 100, 24);
-    let history = plain_history(&mut pane, 100, 24);
-    assert!(
-        history.contains("Used Read"),
-        "swarm tool fact projects:\n{history}"
-    );
-    let update = pane.render_terminal_update(100, 24);
-    pane.acknowledge_history(&update.history);
-    // Completion appends the remaining terminal child fact plus one final
-    // status — never a complete duplicate card.
+    assert!(plain_history(&mut pane, 100, 24).is_empty());
+    pane.set_tool_output_expanded(true);
     pane.transcript_mut().upsert_delegate_swarm(running_swarm(
         "swarm-1",
         vec![completed_agent(
@@ -771,41 +804,19 @@ fn every_live_entry_family_is_bounded_or_progressive() {
             vec![done_tool("read-s", "Read", "s.rs")],
         )],
     ));
-    let update = pane.render_terminal_update(100, 24);
-    assert_eq!(
-        update.history.len(),
-        2,
-        "terminal child fact plus one swarm status"
+    assert_ordered_canonical_commit(
+        &mut pane,
+        100,
+        24,
+        &["DelegateSwarm", "child-a", "Used Read"],
     );
-    assert!(update.live.is_empty());
-    let history = update
-        .history
-        .iter()
-        .flat_map(|block| block.lines.iter())
-        .map(|line| strip_ansi(line))
-        .collect::<Vec<_>>()
-        .join("\n");
-    assert!(history.contains("child-a done"), "history:\n{history}");
-    assert!(history.contains("DelegateSwarm"), "history:\n{history}");
-    assert!(
-        !history.contains("Used Read"),
-        "no tool row replay:\n{history}"
-    );
-    pane.acknowledge_history(&update.history);
-    assert!(pane.render_terminal_update(100, 24).history.is_empty());
 
-    // -- Workflow: progressive projector -----------------------------------
+    // -- Workflow: mutable state stays live until one terminal commit -------
     let mut pane = TranscriptPane::new(100, 24);
     pane.transcript_mut()
         .upsert_workflow(running_workflow("wf-1", 1, "verify"));
     assert_bounded_live(&mut pane, 100, 24);
-    let history = plain_history(&mut pane, 100, 24);
-    assert!(
-        history.contains("running"),
-        "transition fact projects:\n{history}"
-    );
-    let update = pane.render_terminal_update(100, 24);
-    pane.acknowledge_history(&update.history);
+    assert!(plain_history(&mut pane, 100, 24).is_empty());
     let mut completed = running_workflow("wf-1", 9, "verify");
     completed.state = WorkflowState::Completed;
     completed.updated_at_ms = Some(9_000);
