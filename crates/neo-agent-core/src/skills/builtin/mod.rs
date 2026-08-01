@@ -311,6 +311,43 @@ mod tests {
                 "create-workflow must contain host contract phrase {required:?}"
             );
         }
+        // Closed strict behavior is taught verbatim before authoring, with no
+        // retired optional-inline-schema, flat-tool, catchable-fail, or
+        // string-return-marker guidance. Anchors are matched against a
+        // whitespace-normalized body because the compact block wraps lines.
+        let body_flat = create_workflow
+            .body
+            .split_whitespace()
+            .collect::<Vec<_>>()
+            .join(" ");
+        for anchor in [
+            "always require explicit",
+            "additionalProperties",
+            "{ name = \"ToolName\", input = { ... } }",
+            "call-shape decode error",
+            "marked Lua tables",
+            "pcall",
+            "raw read-only answer value",
+            "returns no value",
+            "TaskOutput",
+            "WaitDelegate",
+        ] {
+            assert!(
+                body_flat.contains(anchor),
+                "create-workflow must teach closed behavior anchor {anchor:?}"
+            );
+        }
+        for retired in [
+            "inline `input_schema` is optional",
+            "may omit `input_schema` for inline",
+            "catchable `neo.fail`",
+            "serialize to strings",
+        ] {
+            assert!(
+                !body_flat.contains(retired),
+                "create-workflow must not contain retired guidance {retired:?}"
+            );
+        }
         assert!(
             !create_workflow.body.contains("Compute `source_sha256`"),
             "create-workflow must not teach manual hash computation"

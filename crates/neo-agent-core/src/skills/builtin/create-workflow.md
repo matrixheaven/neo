@@ -83,6 +83,26 @@ and remaining risks.
 Prefer the smallest workflow that satisfies the request. Do not invent host
 APIs that are not listed below. Do not launch workflows from workflows.
 
+## Closed behavior: do not retry by changing the API shape
+
+- Inline `validate_inline`, `save`, and `run_inline` always require explicit
+  `input_schema` and `output_schema`. For no arguments, use
+  `{"type":"object","additionalProperties":false}`.
+- Call `neo.tool` only as
+  `{ name = "ToolName", input = { ... } }`. A call-shape decode error aborts
+  the host operation; an executed tool failure returns `ok = false` and may
+  be branched on.
+- `neo.json_array(table)` and `neo.json_object(table)` return marked Lua
+  tables. They do not serialize values, and `nil` is invalid.
+- `neo.fail(message)` is terminal. `pcall` cannot undo or recover that run
+  decision.
+- `neo.await_user(...)` returns the raw read-only answer value, not an outcome
+  table.
+- `neo.report(...)` records an intermediate report and returns no value. Use
+  it only as a statement.
+- Read and wait for workflow task IDs with `TaskOutput`. Never pass a
+  workflow ID to `WaitDelegate`.
+
 ## Workflow tool arguments (for the definition fields)
 
 `validate_inline`, `validate_saved`, `save`, `run_inline`, and `run_saved` all
@@ -234,10 +254,10 @@ matching the return table.
 |------|----------|
 | `neo.phase(id)` | Select phase `id` declared in `phases`. Unknown id fails. |
 | `neo.log(message)` | Non-empty progress line for the user/dashboard. |
-| `neo.report(value)` | Record a JSON-compatible intermediate report. |
-| `neo.fail(message)` | Fatal abort; subsequent host calls fail. |
+| `neo.report(value)` | Record a JSON-compatible intermediate report and return no value; use it only as a statement. |
+| `neo.fail(message)` | Terminal run decision; subsequent host calls fail. `pcall` cannot undo or recover it. |
 | `neo.verify(condition, message)` | Returns an immutable outcome. Check `outcome.ok`; false is an ordinary failed result, while `neo.fail` is terminal. |
-| `neo.json_array(t)` / `neo.json_object(t)` | Mark table JSON kind for serialization. |
+| `neo.json_array(t)` / `neo.json_object(t)` | Require a Lua table, return a marked table (never a string); `nil` is invalid. |
 
 ### Children
 
@@ -284,9 +304,9 @@ matching the return table.
 
 | Call | Behavior |
 |------|----------|
-| `neo.tool({ name, input })` | Canonical `ToolRegistry` tool. `input` must be a JSON object. |
+| `neo.tool({ name, input })` | Canonical `ToolRegistry` tool; only `{ name, input }` is accepted. A call-shape decode error aborts the host operation, while an executed tool failure returns `ok = false` and may be branched on. `input` must be a JSON object. |
 | `neo.verify_command({ command, cwd?, failure_message? })` | Runs via `Bash` and returns an immutable outcome for both success and ordinary failure. |
-| `neo.await_user({...})` | Durable human (or policy-allowed) gate; returns **answer value**. |
+| `neo.await_user({...})` | Durable human (or policy-allowed) gate; returns the raw read-only answer value, not an outcome table. |
 
 **`neo.tool` deny list** (exact names; not eligible):  
 `Workflow`, `Delegate`, `DelegateSwarm`, `TaskPause`, `TaskResume`,

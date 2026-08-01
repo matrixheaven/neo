@@ -46,7 +46,10 @@ description = "范围与路径"
 id = "execute"
 description = "执行工作"
 
-# 可选 input JSON Schema（Draft 2020-12）。省略表示不接受参数。
+# 仅对存储的配对定义可选：省略表示该已保存定义不接受参数。
+# 内联 Workflow(validate_inline)、Workflow(save) 与 Workflow(run_inline)
+# 始终要求显式 input_schema；无参数内联 workflow 使用
+# {"type":"object","additionalProperties":false}。
 [input_schema]
 type = "object"
 additionalProperties = false
@@ -166,30 +169,38 @@ neo workflow run <name> [--args <object> | --args-file <path>]
 | `neo.log(message)` | 有界进度日志 |
 | `neo.delegate(input)` | 单个子 agent；**必须**提供 `output_schema` |
 | `neo.swarm(input)` | 直接 child spec 批；包括同构 fan-out 在内，**每项** `output_schema` 都必需 |
-| `neo.tool({ name, input })` | 通过规范 `ToolRegistry` 调用合格工具 |
-| `neo.await_user(input)` | 持久化类型化用户输入（见下） |
+| `neo.tool({ name, input })` | 通过规范 `ToolRegistry` 调用合格工具；仅接受 `{ name, input }`。调用形状解码失败会中止宿主操作；已执行工具失败返回 `ok = false`。 |
+| `neo.await_user(input)` | 持久化类型化用户输入；返回原始只读 answer 值（见下） |
 | `neo.verify(condition, message)` | 返回不可变结果，直接检查 `outcome.ok` |
 | `neo.verify_command({ command, cwd?, failure_message? })` | 经 Bash 执行，成功和普通失败都返回结果 |
-| `neo.report(value)` | 中间报告（不能当作最终结果回退） |
-| `neo.fail(message)` | 显式终态失败 |
-| `neo.json_array(table)` | 将表标记为 JSON 数组（含空数组） |
-| `neo.json_object(table)` | 将表标记为 JSON 对象（含空对象） |
+| `neo.report(value)` | 中间报告；不返回任何值——仅作语句使用 |
+| `neo.fail(message)` | 显式终态失败；`pcall` 无法撤销或恢复 |
+| `neo.json_array(table)` | 要求传表；返回标记表（绝不返回字符串）；`nil` 无效 |
+| `neo.json_object(table)` | 要求传表；返回标记表（绝不返回字符串）；`nil` 无效 |
 
 没有 `neo.parallel`、递归 workflow 启动、detached workflow 任务、裸 shell 逃逸或引擎选择 API。
 
 ### Effect 结果形态
 
-有副作用的调用返回同一不可变表形态：
+宿主效果分为三种返回分组：
 
-```text
-ok, status, summary, details?, actual_usage?, agent_id?, swarm_id?, task_id?
-```
+- 返回结果表的调用（`neo.delegate`、`neo.swarm`、`neo.tool`、
+  `neo.verify`、`neo.verify_command`）返回同一不可变表形态：
+
+  ```text
+  ok, status, summary, details?, actual_usage?, agent_id?, swarm_id?, task_id?
+  ```
+
+- `neo.await_user` 返回原始只读 answer 值，而非结果表。
+- `neo.report` 记录中间报告且不返回任何值；仅作语句使用。
 
 `status` 为：`completed` | `failed` | `denied` | `cancelled` | `resource_limited` | `interrupted`。
 
 普通校验和工具失败会返回 `ok = false` 的结果值，脚本可以直接分支处理，不需要
 使用 `pcall`。`neo.fail`、未捕获的 Lua 错误、资源耗尽、取消以及最终结果无效会
-终止 workflow。
+终止 workflow。`neo.fail` 是终态运行决定，`pcall` 无法撤销或恢复。workflow
+task ID 一律通过 `TaskOutput` 读取与等待；绝不把 workflow ID 传给
+`WaitDelegate`。
 
 ### 最终结果
 

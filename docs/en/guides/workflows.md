@@ -46,7 +46,11 @@ description = "Scope and approach"
 id = "execute"
 description = "Do the work"
 
-# Optional input JSON Schema (Draft 2020-12). Omit it to accept no arguments.
+# Optional input JSON Schema (Draft 2020-12) for stored paired definitions
+# only: omitting it means this saved definition accepts no arguments. Inline
+# Workflow(validate_inline), Workflow(save), and Workflow(run_inline) always
+# require an explicit input_schema; a no-argument inline workflow uses
+# {"type":"object","additionalProperties":false}.
 [input_schema]
 type = "object"
 additionalProperties = false
@@ -172,31 +176,41 @@ The sandbox is **mlua only**. No filesystem, process, network, package, debug, t
 | `neo.log(message)` | Bounded progress log |
 | `neo.delegate(input)` | One child agent; **`output_schema` required** |
 | `neo.swarm(input)` | Direct child-spec batch; **per-item `output_schema` required**, including uniform fan-out |
-| `neo.tool({ name, input })` | Eligible tools via canonical `ToolRegistry` |
-| `neo.await_user(input)` | Durable typed user input (see below) |
+| `neo.tool({ name, input })` | Eligible tools via canonical `ToolRegistry`; only `{ name, input }` is accepted. A call-shape decode error aborts the host operation; an executed tool failure returns `ok = false`. |
+| `neo.await_user(input)` | Durable typed user input; returns the raw read-only answer value (see below) |
 | `neo.verify(condition, message)` | Returns an immutable outcome; check `outcome.ok` directly |
 | `neo.verify_command({ command, cwd?, failure_message? })` | Runs through Bash and returns an outcome for both success and ordinary failure |
-| `neo.report(value)` | Intermediate report (not a final-result fallback) |
-| `neo.fail(message)` | Explicit terminal failure |
-| `neo.json_array(table)` | Mark a table as a JSON array (including empty) |
-| `neo.json_object(table)` | Mark a table as a JSON object (including empty) |
+| `neo.report(value)` | Intermediate report; returns no value — statement only |
+| `neo.fail(message)` | Explicit terminal failure; `pcall` cannot undo or recover it |
+| `neo.json_array(table)` | Require a table; return a marked table (never a string); `nil` is invalid |
+| `neo.json_object(table)` | Require a table; return a marked table (never a string); `nil` is invalid |
 
 There is no `neo.parallel`, recursive workflow launch, detached workflow task, raw shell escape, or engine-selection API.
 
 ### Effect outcomes
 
-Effectful calls return one immutable table shape:
+Host effects fall into three return groups:
 
-```text
-ok, status, summary, details?, actual_usage?, agent_id?, swarm_id?, task_id?
-```
+- Outcome-table calls (`neo.delegate`, `neo.swarm`, `neo.tool`,
+  `neo.verify`, `neo.verify_command`) return one immutable table:
+
+  ```text
+  ok, status, summary, details?, actual_usage?, agent_id?, swarm_id?, task_id?
+  ```
+
+- `neo.await_user` returns the raw read-only answer value, not an outcome
+  table.
+- `neo.report` records an intermediate report and returns no value; use it
+  only as a statement.
 
 `status` is one of: `completed` | `failed` | `denied` | `cancelled` | `resource_limited` | `interrupted`.
 
 Ordinary verification and tool failures return `ok = false` values that the
 script can branch on; they do not require `pcall`. `neo.fail`, uncaught Lua
 errors, resource exhaustion, cancellation, and invalid final results terminate
-the workflow.
+the workflow. `neo.fail` is a terminal run decision that `pcall` cannot undo
+or recover. Workflow task IDs are read and waited through `TaskOutput`; never
+pass a workflow ID to `WaitDelegate`.
 
 ### Final result
 
