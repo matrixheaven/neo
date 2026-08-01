@@ -228,10 +228,13 @@ Context compaction is enabled by default. Fresh config writes include this table
 | `max_recent_messages` | usize | `4` | Number of very recent messages preserved during automatic compaction |
 | `micro_enabled` | bool | `false` | Whether micro compaction (truncation of old tool results) is enabled |
 | `micro_keep_recent` | usize | `20` | Number of recent messages exempt from micro compaction |
+| `snip_enabled` | bool | `true` | Whether stale oversized tool results (e.g. long Read outputs) are shortened to a head/tail snippet in the model input |
+| `snip_min_tokens` | usize | `1000` | Minimum tool-result size before a stale result is snipped |
+| `snip_keep_recent` | usize | `16` | Number of recent messages exempt from snip |
 | `max_rounds` | usize | `5` | Maximum rounds in a single compaction |
 | `max_retry_attempts` | u32 | `5` | Maximum retry attempts for empty/truncated summaries |
 
-> Tips: micro compaction will break the cache hitting rate, only use it in local experience environment 
+> Tips: micro compaction rewrites old tool results in the middle of the context, which breaks the provider prefix cache once per rewritten result; it is best used for non-hinted tools. The snip maintenance above is the cache-conscious path: it keeps head/tail context, rewrites deterministically (one break per result, then stable), and is enabled by default.
 
 ## `[tui]` Table
 
