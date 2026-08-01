@@ -9,8 +9,10 @@ pub(super) fn invoke_skill_tool_spec() -> ToolSpec {
         description: "Invoke an available skill by name with arguments. \
             BLOCKING REQUIREMENT: when a skill from the available skills listing matches \
             the user's request or current task, you MUST call this tool instead of \
-            attempting the work with free-form text. Do not re-invoke a skill whose \
-            instructions are already present in the conversation."
+            attempting the work with free-form text. Call Skill by itself, never in parallel or \
+            in a batch with any other tool call; wait for its result before making subsequent \
+            tool calls. Do not re-invoke a skill whose instructions are already present in the \
+            conversation."
             .to_owned(),
         input_schema: serde_json::json!({
             "type": "object",
@@ -183,6 +185,14 @@ disableModelInvocation: {manual_only}
         assert!(result.content.contains("name=\"review\""));
         assert!(result.content.contains("Review src/lib.rs."));
         assert!(result.content.contains("<neo-skill-loaded"));
+    }
+
+    #[test]
+    fn invoke_skill_tool_spec_explains_call_isolation() {
+        let spec = invoke_skill_tool_spec();
+
+        assert!(spec.description.contains("Call Skill by itself"));
+        assert!(spec.description.contains("wait for its result"));
     }
 
     #[test]
