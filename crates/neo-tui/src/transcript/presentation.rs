@@ -185,13 +185,7 @@ fn bound_live_blocks(blocks: Vec<LiveBlock>, live_budget: usize) -> Vec<LiveBloc
     let mut kept_start = blocks.len();
     for candidate_start in (0..blocks.len()).rev() {
         let candidate = &blocks[candidate_start..];
-        let summary_cost = usize::from(candidate_start > 0)
-            + usize::from(
-                candidate_start > 0
-                    && candidate
-                        .first()
-                        .is_some_and(|block| block.separator_before),
-            );
+        let summary_cost = usize::from(candidate_start > 0);
         if live_blocks_cost(candidate).saturating_add(summary_cost) > live_budget {
             break;
         }
@@ -226,17 +220,13 @@ fn bound_live_blocks(blocks: Vec<LiveBlock>, live_budget: usize) -> Vec<LiveBloc
 }
 
 fn live_blocks_cost(blocks: &[LiveBlock]) -> usize {
-    let mut has_preceding_visible = false;
     blocks
         .iter()
         .map(|block| {
             if block.lines.is_empty() {
                 return 0;
             }
-            let cost =
-                block.lines.len() + usize::from(has_preceding_visible && block.separator_before);
-            has_preceding_visible = true;
-            cost
+            block.lines.len() + usize::from(block.separator_before)
         })
         .sum()
 }
@@ -922,7 +912,7 @@ fn compose_live_blocks(blocks: Vec<LiveBlock>) -> (Vec<String>, bool) {
         if block.lines.is_empty() {
             continue;
         }
-        if !lines.is_empty() && block.separator_before {
+        if block.separator_before {
             lines.push(String::new());
         }
         let mut is_animated = vec![false; block.lines.len()];

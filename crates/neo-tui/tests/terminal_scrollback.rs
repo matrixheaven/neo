@@ -87,6 +87,45 @@ fn semantic_block_spacing_survives_history_live_partition_and_ack_boundaries() {
 }
 
 #[test]
+fn thinking_keeps_one_blank_row_after_tool_while_streaming_and_complete() {
+    let mut screen = vt100::Parser::new(24, 80, 128);
+    let mut inline = InlineTerminal::for_test(80, 24);
+    let mut pane = TranscriptPane::new(80, 24);
+    pane.set_live_chrome_height(0);
+    let mut output = Vec::new();
+
+    pane.apply_agent_event(AgentEvent::ToolExecutionStarted {
+        turn: 1,
+        id: "thinking-spacing-tool".to_owned(),
+        name: "Read".to_owned(),
+        arguments: serde_json::json!({ "path": ".tmp/report.md" }),
+        workflow_origin: None,
+    });
+    pane.apply_agent_event(AgentEvent::ToolExecutionFinished {
+        turn: 1,
+        id: "thinking-spacing-tool".to_owned(),
+        name: "Read".to_owned(),
+        result: ToolResult::ok("report body"),
+        workflow_origin: None,
+    });
+    let update = render_update(&mut inline, &mut screen, &mut pane, &mut output);
+    let tool_tail = block_tail_containing(&update.history, "report body");
+    pane.acknowledge_history(&update.history);
+
+    pane.transcript_mut().start_thinking();
+    pane.transcript_mut()
+        .append_thinking_delta("thinking spacing sentinel");
+    pane.mark_dirty();
+    render_update(&mut inline, &mut screen, &mut pane, &mut output);
+    assert_blank_rows_between(&mut screen, &tool_tail, "thinking...", 1);
+
+    pane.transcript_mut().finish_thinking();
+    pane.mark_dirty();
+    render_update(&mut inline, &mut screen, &mut pane, &mut output);
+    assert_blank_rows_between(&mut screen, &tool_tail, "thinking spacing sentinel", 1);
+}
+
+#[test]
 fn history_commit_never_moves_live_chrome_into_native_scrollback() {
     // Seed more than one screen of shell rows so later history commits can
     // push material into native scrollback rather than only the visible page.
