@@ -253,6 +253,9 @@ mod tests {
             cutoff_index: 2,
             min_tool_result_tokens: 100,
             keep_recent_messages: 0,
+            snip_enabled: false,
+            snip_min_tokens: 0,
+            snip_keep_recent: 0,
             mode: ProjectionMode::Request,
         };
 

@@ -1112,6 +1112,9 @@ fn request_projection_plan(
             .saturating_sub(settings.micro_keep_recent),
         min_tool_result_tokens: 1_000,
         keep_recent_messages: settings.micro_keep_recent,
+        snip_enabled: false,
+        snip_min_tokens: 0,
+        snip_keep_recent: 0,
         mode: ProjectionMode::Request,
     }
 }

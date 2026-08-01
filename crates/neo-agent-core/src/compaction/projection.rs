@@ -28,6 +28,12 @@ pub struct ProjectionPlan {
     pub min_tool_result_tokens: usize,
     /// Number of newest messages to keep verbatim regardless of cutoff.
     pub keep_recent_messages: usize,
+    /// Whether the stale-result snip/dedup maintenance pass runs.
+    pub snip_enabled: bool,
+    /// Minimum estimated tool-result tokens before a stale result is snipped.
+    pub snip_min_tokens: usize,
+    /// Number of newest messages exempt from snip.
+    pub snip_keep_recent: usize,
     /// Projection mode.
     pub mode: ProjectionMode,
 }
@@ -41,6 +47,9 @@ impl ProjectionPlan {
             cutoff_index: 0,
             min_tool_result_tokens: usize::MAX,
             keep_recent_messages: usize::MAX,
+            snip_enabled: false,
+            snip_min_tokens: 0,
+            snip_keep_recent: 0,
             mode: ProjectionMode::None,
         }
     }
@@ -194,6 +203,9 @@ mod tests {
             cutoff_index: 2,
             min_tool_result_tokens: 100,
             keep_recent_messages: 1,
+            snip_enabled: false,
+            snip_min_tokens: 0,
+            snip_keep_recent: 0,
             mode: ProjectionMode::Request,
         };
 
@@ -220,6 +232,9 @@ mod tests {
             cutoff_index: messages.len(),
             min_tool_result_tokens: 1,
             keep_recent_messages: 0,
+            snip_enabled: false,
+            snip_min_tokens: 0,
+            snip_keep_recent: 0,
             mode: ProjectionMode::Request,
         };
 
@@ -239,6 +254,9 @@ mod tests {
             cutoff_index: 1,
             min_tool_result_tokens: 100,
             keep_recent_messages: 1,
+            snip_enabled: false,
+            snip_min_tokens: 0,
+            snip_keep_recent: 0,
             mode: ProjectionMode::Request,
         };
         let summary_plan = ProjectionPlan {
@@ -282,6 +300,9 @@ mod tests {
                 cutoff_index: messages.len(),
                 min_tool_result_tokens: 100,
                 keep_recent_messages: 0,
+                snip_enabled: false,
+                snip_min_tokens: 0,
+                snip_keep_recent: 0,
                 mode,
             };
             let result = match mode {

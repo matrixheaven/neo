@@ -308,6 +308,9 @@ mod tests {
             cutoff_index: context.messages().len(),
             min_tool_result_tokens: 100,
             keep_recent_messages: 0,
+            snip_enabled: false,
+            snip_min_tokens: 0,
+            snip_keep_recent: 0,
             mode: crate::compaction::projection::ProjectionMode::Request,
         };
 
