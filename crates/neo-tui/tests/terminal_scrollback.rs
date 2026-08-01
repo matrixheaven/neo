@@ -126,6 +126,40 @@ fn thinking_keeps_one_blank_row_after_tool_while_streaming_and_complete() {
 }
 
 #[test]
+fn tool_keeps_one_blank_row_after_stable_content_while_running_and_complete() {
+    let mut screen = vt100::Parser::new(24, 80, 128);
+    let mut inline = InlineTerminal::for_test(80, 24);
+    let mut pane = TranscriptPane::new(80, 24);
+    pane.set_live_chrome_height(0);
+    let mut output = Vec::new();
+
+    pane.push_status("stable content before tool");
+    let update = render_update(&mut inline, &mut screen, &mut pane, &mut output);
+    let stable_tail = block_tail_containing(&update.history, "stable content before tool");
+    pane.acknowledge_history(&update.history);
+
+    pane.apply_agent_event(AgentEvent::ToolExecutionStarted {
+        turn: 1,
+        id: "running-tool-spacing".to_owned(),
+        name: "Bash".to_owned(),
+        arguments: serde_json::json!({ "command": "true" }),
+        workflow_origin: None,
+    });
+    render_update(&mut inline, &mut screen, &mut pane, &mut output);
+    assert_blank_rows_between(&mut screen, &stable_tail, "● Using Bash", 1);
+
+    pane.apply_agent_event(AgentEvent::ToolExecutionFinished {
+        turn: 1,
+        id: "running-tool-spacing".to_owned(),
+        name: "Bash".to_owned(),
+        result: ToolResult::ok("done"),
+        workflow_origin: None,
+    });
+    render_update(&mut inline, &mut screen, &mut pane, &mut output);
+    assert_blank_rows_between(&mut screen, &stable_tail, "● Used Bash", 1);
+}
+
+#[test]
 fn history_commit_never_moves_live_chrome_into_native_scrollback() {
     // Seed more than one screen of shell rows so later history commits can
     // push material into native scrollback rather than only the visible page.
