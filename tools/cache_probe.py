@@ -980,6 +980,87 @@ class RunStore:
 
 
 # ---------------------------------------------------------------------------
+# Historical run browsing
+# ---------------------------------------------------------------------------
+
+RUN_ID_SAFE_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
+
+
+def is_safe_run_id(run_id: str) -> bool:
+    """A run id is safe only when it names a single directory entry and can
+    never escape the output root."""
+    return bool(RUN_ID_SAFE_RE.fullmatch(run_id))
+
+
+def list_runs(output_root: Path) -> list[dict[str, object]]:
+    """Enumerate first-level run directories with a readable report.json.
+
+    Directories are the source of truth; no index, database, or cache is
+    created or updated. Runs are ordered by report.json modification time,
+    newest first. Missing, invalid, unreadable, or symlinked reports never
+    enter the list.
+    """
+    try:
+        entries = sorted(output_root.iterdir(), key=lambda entry: entry.name)
+    except OSError:
+        return []
+    runs: list[tuple[float, str, str]] = []
+    for entry in entries:
+        if not is_safe_run_id(entry.name) or entry.is_symlink() or not entry.is_dir():
+            continue
+        report_path = entry / "report.json"
+        if report_path.is_symlink() or not report_path.is_file():
+            continue
+        try:
+            with open(report_path, "r", encoding="utf-8") as handle:
+                payload = json.load(handle)
+            mtime = report_path.stat().st_mtime
+        except (OSError, ValueError, UnicodeDecodeError):
+            continue
+        if not isinstance(payload, dict):
+            continue
+        runs.append(
+            (
+                mtime,
+                entry.name,
+                datetime.fromtimestamp(mtime, timezone.utc).isoformat(),
+            )
+        )
+    runs.sort(key=lambda item: item[0], reverse=True)
+    return [
+        {"id": run_id, "active": False, "updated_at": updated_at}
+        for _, run_id, updated_at in runs
+    ]
+
+
+def run_report_path(output_root: Path, run_id: str) -> Optional[Path]:
+    """Resolve the report of an enumerated run, or None when the run id is
+    unsafe, the resolved directory leaves the output root, or the report is
+    not a regular file."""
+    if not is_safe_run_id(run_id):
+        return None
+    try:
+        root_resolved = output_root.resolve()
+        run_resolved = (output_root / run_id).resolve()
+    except OSError:
+        return None
+    if not run_resolved.is_relative_to(root_resolved):
+        return None
+    report_path = run_resolved / "report.json"
+    if report_path.is_symlink() or not report_path.is_file():
+        return None
+    return report_path
+
+
+def runs_payload(output_root: Path, active_run_id: str) -> dict[str, object]:
+    runs = list_runs(output_root)
+    for run in runs:
+        if run["id"] == active_run_id:
+            run["active"] = True
+    return {"active_run_id": active_run_id, "runs": runs}
+
+
+# ---------------------------------------------------------------------------
 # Streaming forwarding
 # ---------------------------------------------------------------------------
 
@@ -1426,14 +1507,28 @@ class ProbeHandler(BaseHTTPRequestHandler):
                 self._respond(500, "dashboard page missing")
                 return
             self._send_bytes(200, "text/html; charset=utf-8", payload, no_store=True)
-        elif path == "/report.json":
-            try:
-                payload = store.report_path.read_bytes()
-            except OSError:
-                payload = b"{}"
+        elif path == "/runs.json":
+            payload = json.dumps(
+                runs_payload(store.output_root, store.run_id),
+                ensure_ascii=False,
+                separators=(",", ":"),
+            ).encode("utf-8")
             self._send_bytes(200, "application/json", payload, no_store=True)
         else:
-            self._respond(404, "not found")
+            match = re.fullmatch(r"/runs/(?P<run_id>[^/]+)/report\.json", path)
+            if match is None:
+                self._respond(404, "not found")
+                return
+            report_path = run_report_path(store.output_root, match.group("run_id"))
+            if report_path is None:
+                self._respond(404, "run not found")
+                return
+            try:
+                payload = report_path.read_bytes()
+            except OSError:
+                self._respond(404, "report unavailable")
+                return
+            self._send_bytes(200, "application/json", payload, no_store=True)
 
     def _respond(self, status: int, message: str) -> None:
         payload = (message + "\n").encode("utf-8")
@@ -2177,7 +2272,7 @@ def _proxy_self_test() -> None:
 
 
 PAGE_ELEMENT_IDS = (
-    "run-status",
+    "run-select",
     "summary-grid",
     "sequence-filter",
     "request-table",
@@ -2186,6 +2281,10 @@ PAGE_ELEMENT_IDS = (
     "tool-chart",
     "last-updated",
     "error-banner",
+    "table-pagination",
+    "page-prev",
+    "page-next",
+    "page-info",
 )
 
 
@@ -2302,7 +2401,26 @@ def _populate_fixture(store: RunStore) -> None:
 def _page_self_test() -> None:
     """Deterministic dashboard assertions (Task 3 scope)."""
     print("self-test: dashboard endpoints and page constraints")
-    root = Path("target/cache-probe/self-test")
+    root = Path("target/cache-probe/self-test-page")
+    if root.exists():
+        shutil.rmtree(root)
+
+    # Historical runs with distinct report modification times.
+    hist_old = _fresh_store(root, "hist-old", upstream_base="fixture://self-test")
+    hist_new = _fresh_store(root, "hist-new", upstream_base="fixture://self-test")
+    old_time = time.time() - 1000
+    new_time = time.time() - 500
+    os.utime(hist_old.report_path, (old_time, old_time))
+    os.utime(hist_new.report_path, (new_time, new_time))
+
+    # Directories without a readable report never enter the run list.
+    missing_dir = root / "missing-report"
+    missing_dir.mkdir(parents=True, exist_ok=True)
+    (missing_dir / "events.jsonl").write_text("{}\n", encoding="utf-8")
+    invalid_dir = root / "invalid-report"
+    invalid_dir.mkdir(parents=True, exist_ok=True)
+    (invalid_dir / "report.json").write_text("not json\n", encoding="utf-8")
+
     store = _fresh_store(root, "page-test", upstream_base="fixture://self-test")
     _populate_fixture(store)
     server = ProbeServer(("127.0.0.1", 0), store, "fixture://self-test")
@@ -2326,8 +2444,45 @@ def _page_self_test() -> None:
     )
     connection.close()
 
+    print("self-test: historical run list")
     connection = http.client.HTTPConnection("127.0.0.1", port)
-    connection.request("GET", "/report.json")
+    connection.request("GET", "/runs.json")
+    response = connection.getresponse()
+    runs_bytes = response.read()
+    _check(response.status == 200, "runs endpoint returns 200")
+    _check(
+        response.getheader("Content-Type") == "application/json",
+        "runs content type",
+    )
+    _check(
+        response.getheader("Cache-Control") == "no-store",
+        "runs no-store cache header",
+    )
+    connection.close()
+    runs_data = json.loads(runs_bytes.decode("utf-8"))
+    _check(runs_data["active_run_id"] == "page-test", "active run is page-test")
+    run_ids = [run["id"] for run in runs_data["runs"]]
+    _check(run_ids[0] == "page-test", "newest report listed first")
+    _check(
+        run_ids.index("hist-new") < run_ids.index("hist-old"),
+        "runs ordered by report modification time descending",
+    )
+    _check(
+        "missing-report" not in run_ids and "invalid-report" not in run_ids,
+        "runs without a readable report are excluded",
+    )
+    active_by_id = {run["id"]: run["active"] for run in runs_data["runs"]}
+    _check(active_by_id["page-test"] is True, "active run marked active")
+    _check(active_by_id["hist-new"] is False, "historical run not active")
+    for run in runs_data["runs"]:
+        _check(
+            isinstance(run["updated_at"], str) and run["updated_at"],
+            "updated_at present per run",
+        )
+
+    print("self-test: selected run report")
+    connection = http.client.HTTPConnection("127.0.0.1", port)
+    connection.request("GET", "/runs/page-test/report.json")
     response = connection.getresponse()
     report_bytes = response.read()
     _check(response.status == 200, "report endpoint returns 200")
@@ -2336,6 +2491,20 @@ def _page_self_test() -> None:
         "report content type",
     )
     connection.close()
+
+    print("self-test: removed and unsafe report paths")
+    for bad_path in (
+        "/report.json",
+        "/runs/does-not-exist/report.json",
+        "/runs/../report.json",
+        "/runs/%2e%2e/report.json",
+    ):
+        connection = http.client.HTTPConnection("127.0.0.1", port)
+        connection.request("GET", bad_path)
+        response = connection.getresponse()
+        response.read()
+        _check(response.status == 404, f"{bad_path} returns 404")
+        connection.close()
 
     print("self-test: committed HTML constraints")
     page = html.decode("utf-8")

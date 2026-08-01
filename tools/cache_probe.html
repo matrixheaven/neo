@@ -32,8 +32,16 @@
   header { display: flex; flex-wrap: wrap; gap: 8px 24px; align-items: baseline; }
   h1 { font-size: 18px; margin: 0; }
   h2 { font-size: 15px; margin: 18px 0 8px; }
-  #run-status { font-weight: 600; }
   #last-updated { color: var(--muted); font-size: 12px; }
+  #run-select {
+    font: inherit;
+    padding: 2px 6px;
+    border: 1px solid var(--line);
+    border-radius: 6px;
+    background: var(--panel);
+    color: var(--ink);
+    max-width: 340px;
+  }
   #error-banner {
     margin: 10px 0;
     padding: 8px 12px;
@@ -44,7 +52,7 @@
   }
   #summary-grid {
     display: grid;
-    grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+    grid-template-columns: repeat(auto-fit, minmax(126px, 1fr));
     gap: 8px;
     margin: 14px 0;
   }
@@ -57,6 +65,24 @@
   .summary-card .label { color: var(--muted); font-size: 11px; text-transform: uppercase; letter-spacing: .04em; }
   .summary-card .value { font-size: 18px; font-weight: 700; margin-top: 2px; }
   .filters { margin: 10px 0; display: flex; align-items: center; gap: 8px; }
+  .pagination {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    margin: 10px 0 4px;
+    font-size: 13px;
+  }
+  .pagination button {
+    font: inherit;
+    padding: 4px 12px;
+    border: 1px solid var(--line);
+    border-radius: 6px;
+    background: var(--panel);
+    color: var(--ink);
+    cursor: pointer;
+  }
+  .pagination button:disabled { opacity: .45; cursor: default; }
+  #page-info { color: var(--muted); font-variant-numeric: tabular-nums; }
   .table-wrap { overflow-x: auto; background: var(--panel); border: 1px solid var(--line); border-radius: 8px; }
   table { border-collapse: collapse; width: 100%; min-width: 860px; }
   th, td { text-align: left; padding: 7px 10px; border-bottom: 1px solid var(--line); white-space: nowrap; }
@@ -110,7 +136,8 @@
 <body>
 <header>
   <h1>DeepSeek Cache Probe</h1>
-  <div id="run-status">no report yet</div>
+  <label for="run-select">Run:</label>
+  <select id="run-select"></select>
   <div id="last-updated"></div>
 </header>
 <div id="error-banner" hidden></div>
@@ -122,6 +149,12 @@
   <select id="sequence-filter">
     <option value="all">all</option>
   </select>
+</div>
+
+<div class="pagination" id="table-pagination">
+  <button type="button" id="page-prev">&#8592; Previous</button>
+  <span id="page-info"></span>
+  <button type="button" id="page-next">Next &#8594;</button>
 </div>
 
 <div class="table-wrap">
@@ -165,14 +198,20 @@
 <script>
 "use strict";
 (function () {
+  var PAGE_SIZE = 50;
+  var runs = null;
+  var selectedRunId = null;
   var report = null;
+  var reportForRun = null;
   var selectedId = null;
+  var page = 1;
   var timer = null;
+  var busy = false;
 
   var IDS = [
-    "run-status", "summary-grid", "sequence-filter", "request-table",
+    "run-select", "summary-grid", "sequence-filter", "request-table",
     "request-detail", "cache-chart", "tool-chart", "last-updated",
-    "error-banner"
+    "error-banner", "table-pagination", "page-prev", "page-next", "page-info"
   ];
 
   function el(id) {
@@ -214,9 +253,7 @@
       ["Requests", fmt(s.request_count)],
       ["Sequences", fmt(s.sequence_count)],
       ["Stable rate", s.stable_prefix_rate === null ? "\u2014" : (s.stable_prefix_rate * 100).toFixed(1) + "%"],
-      ["Stable", fmt(s.stable_prefix_count)],
       ["Changed", fmt(s.changed_prefix_count)],
-      ["First requests", fmt(s.first_request_count)],
       ["Cache hit", fmt(s.cache_hit_tokens)],
       ["Provider cache creation", fmt(s.cache_creation_tokens)],
       ["Uncached input", fmt(s.uncached_input_tokens)],
@@ -253,10 +290,17 @@
       option.appendChild(textNode(seq.sequence_id));
       select.appendChild(option);
     });
-    select.value = current;
+    var available = [];
+    for (var i = 0; i < select.options.length; i++) {
+      available.push(select.options[i].value);
+    }
+    select.value = available.indexOf(current) !== -1 ? current : "all";
   }
 
   function filteredRequests() {
+    if (!report || !Array.isArray(report.requests)) {
+      return [];
+    }
     var filter = el("sequence-filter").value;
     var list = report.requests.slice();
     if (filter !== "all") {
@@ -265,6 +309,79 @@
       });
     }
     return list;
+  }
+
+  function runList() {
+    return runs && Array.isArray(runs.runs) ? runs.runs : [];
+  }
+
+  function runIds() {
+    return runList().map(function (r) {
+      return r.id;
+    });
+  }
+
+  function resolveRunSelection() {
+    var ids = runIds();
+    if (selectedRunId !== null && ids.indexOf(selectedRunId) !== -1) {
+      return selectedRunId;
+    }
+    var active = runs ? runs.active_run_id : null;
+    if (active !== null && ids.indexOf(active) !== -1) {
+      return active;
+    }
+    return ids.length ? ids[0] : null;
+  }
+
+  function renderRunSelect() {
+    var select = el("run-select");
+    var ids = runIds();
+    if (ids.length === 0) {
+      clearNode(select);
+      return;
+    }
+    var changed = select.options.length !== ids.length;
+    if (!changed) {
+      for (var i = 0; i < select.options.length; i++) {
+        if (select.options[i].value !== ids[i]) {
+          changed = true;
+          break;
+        }
+      }
+    }
+    if (changed) {
+      clearNode(select);
+      runList().forEach(function (r) {
+        var option = document.createElement("option");
+        option.value = r.id;
+        option.appendChild(textNode(r.active ? r.id + " (active)" : r.id));
+        select.appendChild(option);
+      });
+    }
+    var current = resolveRunSelection();
+    select.value = current === null ? "" : current;
+  }
+
+  function totalPages() {
+    var count = filteredRequests().length;
+    return Math.max(1, Math.ceil(count / PAGE_SIZE));
+  }
+
+  function clampPage() {
+    var total = totalPages();
+    if (page < 1) {
+      page = 1;
+    }
+    if (page > total) {
+      page = total;
+    }
+  }
+
+  function renderPagination() {
+    var total = totalPages();
+    el("page-info").textContent = page + " / " + total;
+    el("page-prev").disabled = page <= 1;
+    el("page-next").disabled = page >= total;
   }
 
   function prefixBadge(request) {
@@ -293,9 +410,12 @@
   }
 
   function renderTable() {
+    clampPage();
     var tbody = document.querySelector("#request-table tbody");
     clearNode(tbody);
-    var requests = filteredRequests();
+    var all = filteredRequests();
+    var start = (page - 1) * PAGE_SIZE;
+    var requests = all.slice(start, start + PAGE_SIZE);
     requests.forEach(function (request) {
       var tr = document.createElement("tr");
       tr.className = "row";
@@ -339,6 +459,7 @@
       });
       tbody.appendChild(tr);
     });
+    renderPagination();
   }
 
   function kvRow(dt, dd) {
@@ -706,7 +827,6 @@
       showError("Report is not ready yet.");
       return;
     }
-    el("run-status").textContent = "run " + report.run.id;
     el("last-updated").textContent = "updated " + new Date().toLocaleTimeString("en-US");
     renderSummary();
     renderFilter();
@@ -723,28 +843,80 @@
     banner.appendChild(textNode(message));
   }
 
+  function fetchJSON(path) {
+    return fetch(path, { cache: "no-store" }).then(function (response) {
+      if (!response.ok) {
+        throw new Error("fetch failed: " + response.status);
+      }
+      return response.json();
+    });
+  }
+
+  function loadReport() {
+    return fetchJSON("/runs/" + selectedRunId + "/report.json").then(function (data) {
+      report = data;
+      reportForRun = selectedRunId;
+      el("error-banner").hidden = true;
+      render();
+    });
+  }
+
   function poll() {
-    fetch("/report.json", { cache: "no-store" })
-      .then(function (response) {
-        if (!response.ok) {
-          throw new Error("report fetch failed: " + response.status);
-        }
-        return response.json();
-      })
+    if (busy) {
+      return;
+    }
+    busy = true;
+    fetchJSON("/runs.json")
       .then(function (data) {
-        el("error-banner").hidden = true;
-        report = data;
-        render();
+        runs = data;
+        selectedRunId = resolveRunSelection();
+        renderRunSelect();
+        if (selectedRunId === null) {
+          throw new Error("no runs available");
+        }
+        return loadReport();
       })
       .catch(function (error) {
-        showError("Report unavailable: " + error.message + ". Showing the last valid report.");
+        if (report !== null && reportForRun !== null) {
+          showError("Report unavailable: " + error.message + ". Showing the last valid report.");
+        } else {
+          showError("Dashboard unavailable: " + error.message);
+        }
+      })
+      .then(function () {
+        busy = false;
       });
   }
 
   el("sequence-filter").addEventListener("change", function () {
+    page = 1;
+    selectedId = null;
     renderTable();
     renderDetail();
     drawCacheChart();
+  });
+
+  el("run-select").addEventListener("change", function () {
+    selectedRunId = el("run-select").value;
+    page = 1;
+    selectedId = null;
+    poll();
+  });
+
+  el("page-prev").addEventListener("click", function () {
+    if (page > 1) {
+      page -= 1;
+      renderTable();
+      renderDetail();
+    }
+  });
+
+  el("page-next").addEventListener("click", function () {
+    if (page < totalPages()) {
+      page += 1;
+      renderTable();
+      renderDetail();
+    }
   });
 
   document.addEventListener("visibilitychange", function () {

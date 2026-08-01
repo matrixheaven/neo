@@ -52,6 +52,8 @@ Current Neo behavior relevant to the probe:
 - Per-request appended-content and tool attribution.
 - Cache increment, variance, and spike reporting.
 - A live local web page backed by the same report data written to disk.
+- Historical run browsing by enumerating the local output root; the dashboard
+  can switch between the active run and earlier runs.
 - A stable JSON report that can be read directly by another coding agent.
 
 ### Out of scope
@@ -114,6 +116,10 @@ target/cache-probe/<run-id>/
 ```
 
 No generated run output is committed.
+
+Multiple runs may share the same output root. The dashboard enumerates the
+first-level subdirectories that contain a readable `report.json`; it never
+creates a database, index file, migration, or cache for that list.
 
 ## 6. Invocation
 
@@ -375,20 +381,49 @@ agent can compare runs without reading the HTML.
 
 ## 14. Web Page
 
-The page is served from the same process and polls `report.json` once per
-second.
+The page is served from the same process and polls two read-only endpoints once
+per second:
 
-The first view contains:
+- `GET /runs.json` returns `{active_run_id, runs:[{id, active, updated_at}]}`.
+  Runs are derived by enumerating the output root's first-level directories and
+  are ordered by `report.json` modification time, newest first. A run without a
+  readable `report.json` never enters the list.
+- `GET /runs/<run-id>/report.json` returns the stored report for one run
+  unchanged. Run ids come from the enumeration only; run-id validation rejects
+  path traversal, and only `report.json` inside the output root is ever read.
+  The legacy `GET /report.json` path is removed.
+
+The header Run selector lists the enumerated runs and defaults to the current
+agent's active run. Selecting a historical run keeps the dashboard on that run
+until the user selects another; polling never jumps back to the active run. A
+temporarily unreadable selected report keeps the last valid page and shows the
+existing error banner.
+
+The first view contains ten summary cards:
 
 - request count;
 - sequence count;
 - stable-prefix rate among comparable requests;
+- changed-prefix count;
 - cache-hit tokens;
 - provider cache-creation tokens;
 - uncached input tokens;
 - total observed input tokens;
-- structural-change count;
+- requests without usage data;
 - numeric-spike count.
+
+`first_request_count` and `stable_prefix_count` remain in `report.json` for
+machine consumers but are not rendered as cards: the first is already visible
+in the Sequences count and the second duplicates the stable rate. The cards
+keep a row at desktop widths of at least 1440 pixels; narrower screens wrap
+naturally without overflowing labels.
+
+The request table is fixed at 50 rows per page and has no page-size setting. A
+toolbar shows previous, next, and `current / total` pages. Switching runs or
+sequences resets to page one and clears the selected row; live refreshes keep
+the current page and retract it when the total page count shrinks. Pagination
+affects only the table: the summary, cache trend, and tool variance charts
+always use the full selected run and sequence.
 
 The request table contains:
 
@@ -432,6 +467,9 @@ formatting. All analyzed values come from `report.json`.
 ## 16. Security And Privacy
 
 - Bind only to `127.0.0.1`.
+- Run ids are validated against an allowlist pattern and resolved within the
+  output root; only `report.json` of a run directory is served, never an
+  arbitrary file path.
 - Never persist request headers.
 - Never persist authentication values.
 - Do not expose a remote-listen option in the first implementation.
@@ -478,6 +516,12 @@ formatting. All analyzed values come from `report.json`.
 - The page and `report.json` show the same analyzed values.
 - A coding agent can determine prefix stability, changed paths, tool
   attribution, and cache-token trends from `report.json` alone.
+- The page lists historical runs, defaults to the active run, and never jumps
+  back to it after a manual switch.
+- A 120-request run paginates as 50 / 50 / 20 while the summary and charts are
+  still computed over all requests.
+- Historical reports are read only through `/runs/<run-id>/report.json`; the
+  legacy `/report.json`, unknown runs, and `../` run ids return 404.
 
 ## 18. Verification Boundary
 
