@@ -1534,7 +1534,7 @@ impl InteractiveController {
     fn active_session_directory(&self) -> Option<PathBuf> {
         let session_id = self.active_session_id.as_ref()?;
         let config = self.local_config.as_ref()?;
-        Some(crate::config::workspace_sessions_dir(config).join(session_id))
+        crate::modes::sessions::session_dir(session_id, config).ok()
     }
 
     /// Sanitize pasted text: strip CR and drop control characters except newline.
@@ -2042,7 +2042,9 @@ impl InteractiveController {
         ) else {
             return;
         };
-        let session_directory = workspace_sessions_dir(config).join(session_id);
+        let Ok(session_directory) = crate::modes::sessions::session_dir(session_id, config) else {
+            return;
+        };
         let session_id = session_id.to_owned();
         let route_session_id = session_id.clone();
         let generation = self.workflow_event_generation;
@@ -2074,7 +2076,9 @@ impl InteractiveController {
         let Some(config) = self.local_config.as_ref() else {
             return;
         };
-        let session_directory = workspace_sessions_dir(config).join(session_id);
+        let Ok(session_directory) = crate::modes::sessions::session_dir(session_id, config) else {
+            return;
+        };
         let route_session_id = session_id.to_owned();
         let approval_session_id = route_session_id.clone();
         let ingress = self.workflow_approval_ingress.clone();
@@ -2646,9 +2650,9 @@ async fn load_session_transcript(
     if let Some(summary) = context.compaction_summary() {
         notices.push(format!("compaction: {}", summary.summary));
     }
-    let session_summary = SessionMetadataStore::new(workspace_sessions_dir(config))
-        .list()
+    let session_summary = crate::modes::sessions::session_bucket_dir(&session_id, config)
         .ok()
+        .and_then(|bucket| SessionMetadataStore::new(bucket).list().ok())
         .and_then(|sessions| {
             sessions
                 .into_iter()
@@ -2920,7 +2924,8 @@ async fn fork_session_transcript(
     parent_id: String,
     config: &AppConfig,
 ) -> Result<ForkedSessionTranscript> {
-    let session = SessionMetadataStore::new(workspace_sessions_dir(config))
+    let bucket_dir = crate::modes::sessions::session_bucket_dir(&parent_id, config)?;
+    let session = SessionMetadataStore::new(bucket_dir)
         .fork(&parent_id, None)
         .with_context(|| format!("failed to create local fork for session {parent_id}"))?;
     let child_id = session.id;

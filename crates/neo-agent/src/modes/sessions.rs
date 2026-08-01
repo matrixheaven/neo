@@ -310,10 +310,28 @@ fn render_messages_html(title: String, messages: &[AgentMessage]) -> anyhow::Res
 
 pub fn session_path(session_ref: &str, config: &AppConfig) -> anyhow::Result<PathBuf> {
     let session_id = resolve_session_id(session_ref, config)?;
-    let bucket_dir = workspace_sessions_dir(config);
-    Ok(neo_agent_core::session::main_agent_wire_path(
-        &bucket_dir.join(&session_id),
-    ))
+    Ok(neo_agent_core::session::main_agent_wire_path(&session_dir(
+        &session_id,
+        config,
+    )?))
+}
+
+pub(crate) fn session_dir(session_id: &str, config: &AppConfig) -> anyhow::Result<PathBuf> {
+    validate_session_id(session_id)
+        .map_err(|_| anyhow::anyhow!("invalid session id {session_id:?}"))?;
+    let neo_home = crate::config::neo_home()
+        .context("could not resolve Neo home directory for the global session index")?;
+    if let Some(entry) = SessionIndex::new(&neo_home).find(session_id)? {
+        return Ok(entry.session_dir.join(session_id));
+    }
+    Ok(workspace_sessions_dir(config).join(session_id))
+}
+
+pub(crate) fn session_bucket_dir(session_id: &str, config: &AppConfig) -> anyhow::Result<PathBuf> {
+    session_dir(session_id, config)?
+        .parent()
+        .map(Path::to_path_buf)
+        .with_context(|| format!("session {session_id} has no bucket directory"))
 }
 
 pub fn resolve_session_id(session_ref: &str, config: &AppConfig) -> anyhow::Result<String> {
@@ -501,6 +519,14 @@ mod tests {
                     .expect("session is indexed");
                 assert_eq!(indexed.session_dir, workspace_sessions_dir(&config));
                 assert_eq!(indexed.workdir, config.project_dir);
+
+                let mut resumed_config = config.clone();
+                resumed_config.project_dir = temp.path().join("other-project");
+                assert_eq!(
+                    session_path(&created.session_id, &resumed_config)
+                        .expect("resolve indexed session from another workspace"),
+                    created.wire_path
+                );
             });
         });
     }

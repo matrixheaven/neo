@@ -133,7 +133,7 @@ async fn dispatch(
             .context("failed to resolve launch directory for relative --config path")?
             .join(&*config_path);
     }
-    resolve_resume_workspace(&cli)?;
+    ensure_resume_session_is_indexed(&cli)?;
     let config = AppConfig::load(overrides)?;
 
     // Automatic retention at startup — reclaim oldest eligible terminal runs.
@@ -167,7 +167,7 @@ async fn dispatch(
     .await
 }
 
-fn resolve_resume_workspace(cli: &Cli) -> anyhow::Result<()> {
+fn ensure_resume_session_is_indexed(cli: &Cli) -> anyhow::Result<()> {
     let Some(Command::Resume {
         session_id: Some(session_id),
     }) = &cli.command
@@ -177,15 +177,9 @@ fn resolve_resume_workspace(cli: &Cli) -> anyhow::Result<()> {
     let neo_home = config::neo_home()
         .context("could not resolve Neo home directory for the global session index")?;
     let index = neo_agent_core::session::SessionIndex::new(&neo_home);
-    let entry = index
+    index
         .find(session_id)?
         .with_context(|| format!("indexed session not found: {session_id}"))?;
-    std::env::set_current_dir(&entry.workdir).with_context(|| {
-        format!(
-            "failed to enter indexed workspace {} for session {session_id}",
-            entry.workdir.display()
-        )
-    })?;
     Ok(())
 }
 

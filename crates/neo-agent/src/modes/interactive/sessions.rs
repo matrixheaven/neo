@@ -51,7 +51,7 @@ impl InteractiveController {
         let Some(config) = self.local_config.as_ref() else {
             return Ok(Vec::new());
         };
-        let session_dir = crate::config::workspace_sessions_dir(config).join(session_id);
+        let session_dir = crate::modes::sessions::session_dir(session_id, config)?;
         crate::modes::run::rehydrate_session_workflows(
             config,
             session_id,

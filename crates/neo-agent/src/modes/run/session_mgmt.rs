@@ -103,7 +103,9 @@ pub(crate) fn latest_session_id(config: &AppConfig) -> anyhow::Result<String> {
 }
 
 pub(super) fn record_session_activity(config: &AppConfig, session_id: &str, prompt: &str) {
-    let bucket_dir = workspace_sessions_dir(config);
+    let Ok(bucket_dir) = crate::modes::sessions::session_bucket_dir(session_id, config) else {
+        return;
+    };
     let _ = SessionMetadataStore::new(&bucket_dir).record_activity(
         session_id,
         Some(config.project_dir.display().to_string()),
