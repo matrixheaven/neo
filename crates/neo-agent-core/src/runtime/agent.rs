@@ -611,7 +611,7 @@ mod tests {
             max_recent_messages: 4,
             micro_enabled: false,
             micro_keep_recent: 20,
-            snip_enabled: true,
+            snip_enabled: false,
             snip_min_tokens: 1_000,
             snip_keep_recent: 16,
             max_rounds: 5,

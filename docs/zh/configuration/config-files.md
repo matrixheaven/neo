@@ -228,13 +228,13 @@ swarm_concurrency = 4
 | `max_recent_messages` | usize | `4` | 自动压缩保留的极近消息数 |
 | `micro_enabled` | bool | `false` | 是否启用 micro compaction（旧 tool-result 截断） |
 | `micro_keep_recent` | usize | `20` | micro compaction 豁免的最近消息数 |
-| `snip_enabled` | bool | `true` | 是否把过时的大 tool result（如长 Read 输出）在模型输入中剪为头+尾片段 |
+| `snip_enabled` | bool | `false` | 是否把过时的大 tool result（如长 Read 输出）在模型输入中剪为头+尾片段。默认关闭：snip 会改写旧结果，每个被改写结果会使前缀缓存失效一次——仅在能接受该代价时开启（如本地模型） |
 | `snip_min_tokens` | usize | `1000` | 触发剪枝的最小 tool-result 大小 |
 | `snip_keep_recent` | usize | `16` | 剪枝豁免的最近消息数 |
 | `max_rounds` | usize | `5` | 单次压缩最大轮数 |
 | `max_retry_attempts` | u32 | `5` | 空/截断摘要的最大重试次数 |
 
-> Tips: micro compaction 会改写上下文中间的历史 tool result，每个被改写结果会使前缀缓存失效一次，建议仅用于未声明剪枝几何的工具。上表 snip 维护是缓存友好路径：保留头尾上下文、确定性改写（每个结果仅失效一次，之后稳定），默认开启。
+> Tips: `micro_enabled` 与 `snip_enabled` 都会改写上下文中间的历史 tool result，使前缀缓存从该消息起失效（每个被改写结果一次）。它们用暂时的命中率下降换取更小的历史体积；付费 provider 建议两者都关闭。snip 是较温和的变体（保留头尾、确定性改写、默认仅 Read），但仍然是前缀改写——仅建议本地或实验环境开启。
 
 ## `[tui]` 表
 

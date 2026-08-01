@@ -705,7 +705,7 @@ impl CompactionSettings {
             max_recent_messages: 4,
             micro_enabled: false,
             micro_keep_recent: 20,
-            snip_enabled: true,
+            snip_enabled: false,
             snip_min_tokens: 1_000,
             snip_keep_recent: 16,
             max_rounds: 5,
@@ -788,9 +788,9 @@ mod tests {
     }
 
     #[test]
-    fn compaction_settings_new_enables_snip() {
+    fn compaction_settings_new_disables_snip_by_default() {
         let settings = CompactionSettings::new(100_000, 4);
-        assert!(settings.snip_enabled);
+        assert!(!settings.snip_enabled);
         assert_eq!(settings.snip_min_tokens, 1_000);
         assert_eq!(settings.snip_keep_recent, 16);
     }

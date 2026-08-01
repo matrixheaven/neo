@@ -61,7 +61,7 @@ reasonix 差距根源（对照 `.references/reasonix`）：
 
 **触发**：`turn_loop::request_projection_plan` 改为 `enabled = micro_enabled || snip_enabled`；`prepare_model_request` 的 `NoAction` 分支返回 `snapshot.projection`（即带 snip 的 request plan）而不是 `ProjectionPlan::disabled()`。压缩 controller 零改动（`UseProjectionOnly` 已经透传 `snapshot.projection`）。`summary.rs` 的 SummaryInput plan 同样带上 snip 字段。
 
-**缓存经济学**（为什么"改写前缀"可接受）：snip 是确定性改写，每个结果只破坏一次前缀（一次 uncached 尖峰 ≈ 该消息之后的全部 tokens × miss 单价），此后前缀稳定；而剪掉的是**每个后续请求都要按 hit 单价计费**的历史载荷（hit 并非免费）。一次剪掉 100K 历史 tokens，在剩余 100 个请求里省 `100K × hit单价 × 100`，远大于一次性尖峰。这是"用一次小 miss 换长期小历史"。
+**缓存经济学（2026-08-02 修订）**：初版论证"一次小 miss 换长期小历史"把每个结果的一次性改写当成了总量，**低估了会话增长中结果持续越过 keep-recent 边界造成的反复断前缀**。真实机制：某条 Read 结果在它之后累计 16+ 条消息时才被剪（`snip_keep_recent`），此时它的投影形态从"全文"变为"头尾片段"，与该条消息处的缓存前缀不一致 → 该消息之后全部 uncached 一次；会话越长，越多的合格结果依次越过边界 → **反复断前缀**。频率 ≈ 合格 Read 结果的产生速率（实测 run 中 Read 约占消息的 6%，约每 8 轮断一次，每次重新计费最近 20-60K tokens 的 miss）。这会把缓存命中率从纯追加会话的 99%+ 拉低，与 micro compaction 同一失败类别（micro 更严重：它对所有 ≥1000 tokens 的结果每轮都断）。**结论：snip/dedup 对付费 provider 不是无代价优化，默认必须关闭（`snip_enabled=false`），仅本地/实验模型可开启。**
 
 **为什么不用 reasonix 的"紧窄带才触发"**：用户实测问题发生在低占用（1M 窗口下历史 200K，远未触发压缩）。占用带触发在此场景永不生效，无法解决实测问题。故采用"陈旧即剪（stale-only + 尺寸门槛 + 近期保护带）"，保持确定性、幂等。
 
@@ -87,9 +87,9 @@ reasonix 差距根源（对照 `.references/reasonix`）：
 
 ### 4.4 配置面
 
-- `neo-agent/src/config/mod.rs` `RuntimeCompactionConfig`：+`snip_enabled: bool`（serde default true）、`snip_min_tokens: usize`（1000）、`snip_keep_recent: usize`（16）。旧配置省略新键不破坏（`#[serde(default)]`）。
-- `neo-agent-core/src/runtime/config.rs` `CompactionSettings`：同 3 字段；`CompactionSettings::new` 默认 `snip_enabled=true`。所有 struct-literal 站点同步（`neo-agent/src/modes/run/mod.rs` 断言 3 处、`runtime/agent.rs` 映射 + 断言、core `runtime/agent.rs` 测试 1 处）。
-- 语义：`config.compaction` 为 `None`（无上下文窗口）时 snip/dedup 不生效（与 reasonix `contextWindow<=0` 一致）。`micro_enabled`（全删 omission）行为不变，仅供非 hint 工具。
+- `neo-agent/src/config/mod.rs` `RuntimeCompactionConfig`：+`snip_enabled: bool`（serde default **false**）、`snip_min_tokens: usize`（1000）、`snip_keep_recent: usize`（16）。旧配置省略新键不破坏（`#[serde(default)]`）。
+- `neo-agent-core/src/runtime/config.rs` `CompactionSettings`：同 3 字段；`CompactionSettings::new` 默认 **`snip_enabled=false`**（与 micro 同为前缀改写类，付费 provider 默认关）。所有 struct-literal 站点同步。
+- 语义：`config.compaction` 为 `None`（无上下文窗口）时 snip/dedup 不生效（与 reasonix `contextWindow<=0` 一致）。`micro_enabled`（全删 omission）行为不变。`snip_enabled` 同时控制 snip 与 dedup（同一维护 pass，同一开关）。
 
 ## 5. 兼容性边界 / Non-goals
 
@@ -103,10 +103,10 @@ reasonix 差距根源（对照 `.references/reasonix`）：
 
 | 风险 | 等级 | 缓解 |
 | --- | --- | --- |
-| snip 首触发一次前缀破坏（~会话大小 uncached 尖峰） | 中 | 确定性、一次性、长期收益为正（§4.1）；`snip_keep_recent` 保护近期尾段；`snip_enabled=false` 可关 |
+| **前缀改写导致缓存命中率下降（与 micro 同类，最高风险）**：每条约定的 Read 结果在越过 keep-recent 边界时断一次前缀，会话越长断得越频繁；付费 provider 的 hit 率从纯追加会话的 99%+ 下降，miss 单价为 hit 的 ~4 倍 | **高（付费场景）** | **默认 `snip_enabled=false`**；仅本地/实验模型开启；文档明确警告 |
 | 模型在需要被剪内容的场景信息缺失 | 低 | marker 明示"已入会话历史，重跑 Read 恢复"；剪枝仅作用于 >16 条消息前、≥1000 tokens 的旧结果 |
 | dedup 误判（hash 碰撞） | 极低 | FNV-1a 命中后字符串全等校验 |
-| 测试行为漂移（默认开启使 projection 在更多测试中启用） | 低 | 新会话无陈旧大结果时 snip/dedup 均为 no-op；断言用显式 plan 的测试不受影响 |
+| 测试行为漂移（开启时 projection 在更多测试中启用） | 低 | 新会话无陈旧大结果时 snip/dedup 均为 no-op；断言用显式 plan 的测试不受影响 |
 | 多内容块（含 Image）结果 | 低 | 非纯文本一律跳过 snip/dedup，原样保留 |
 
 ## 7. 验收标准（Acceptance）

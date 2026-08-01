@@ -1315,8 +1315,10 @@ mod tests {
 
     #[test]
     fn request_projection_plan_enables_snip_without_micro() {
-        let config = AgentConfig::for_model(fake_model())
-            .with_compaction(CompactionSettings::new(usize::MAX, 4));
+        let config = AgentConfig::for_model(fake_model()).with_compaction(CompactionSettings {
+            snip_enabled: true,
+            ..CompactionSettings::new(usize::MAX, 4)
+        });
         let mut context = super::super::context::AgentContext::new();
         context.append_message(AgentMessage::user_text("x"));
         let plan = request_projection_plan(&config, &context);
