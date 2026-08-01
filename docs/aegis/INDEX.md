@@ -340,3 +340,4 @@ Entries are workspace records, not authoritative runtime decisions.
 | 2026-08-01 | artifact | docs/aegis/work/2026-08-01-workflow-dynamic-transcript/evidence-bundle-draft-task2-typed-workflow-activity.json | 2026-08-01-workflow-dynamic-transcript evidence task2-typed-workflow-activity |
 | 2026-08-01 | artifact | docs/aegis/work/2026-08-01-workflow-dynamic-transcript/gate-input-pack.json | 2026-08-01-workflow-dynamic-transcript gate input pack |
 | 2026-08-01 | work | docs/aegis/work/2026-08-01-workflow-dynamic-transcript/proof-bundle.md | 2026-08-01-workflow-dynamic-transcript proof bundle |
+| 2026-08-01 | spec | docs/aegis/specs/2026-08-01-provider-model-refresh-brief.md | Provider Model Refresh Spec Brief |
