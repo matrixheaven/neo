@@ -1258,6 +1258,7 @@ mod tests {
                     snip_enabled: false,
                     snip_min_tokens: 1_000,
                     snip_keep_recent: 16,
+                    snip_trigger_ratio: 0.6,
                     max_rounds: 5,
                     max_retry_attempts: 5,
                 }),
@@ -1324,6 +1325,7 @@ mod tests {
                 snip_enabled: false,
                 snip_min_tokens: 1_000,
                 snip_keep_recent: 16,
+                snip_trigger_ratio: 0.6,
                 max_rounds: 5,
                 max_retry_attempts: 5,
             })
@@ -1663,6 +1665,7 @@ mod tests {
                     snip_enabled: false,
                     snip_min_tokens: 1_000,
                     snip_keep_recent: 16,
+                    snip_trigger_ratio: 0.6,
                     max_rounds: 5,
                     max_retry_attempts: 5,
                 }),
@@ -1712,6 +1715,7 @@ mod tests {
                 snip_enabled: false,
                 snip_min_tokens: 1_000,
                 snip_keep_recent: 16,
+                snip_trigger_ratio: 0.6,
                 max_rounds: 5,
                 max_retry_attempts: 5,
             })
@@ -1756,6 +1760,7 @@ mod tests {
                     snip_enabled: false,
                     snip_min_tokens: 1_000,
                     snip_keep_recent: 16,
+                    snip_trigger_ratio: 0.6,
                     max_rounds: 5,
                     max_retry_attempts: 5,
                 }),
@@ -1805,6 +1810,7 @@ mod tests {
                 snip_enabled: false,
                 snip_min_tokens: 1_000,
                 snip_keep_recent: 16,
+                snip_trigger_ratio: 0.6,
                 max_rounds: 5,
                 max_retry_attempts: 5,
             })

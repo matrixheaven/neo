@@ -63,7 +63,7 @@ reasonix 差距根源（对照 `.references/reasonix`）：
 
 **缓存经济学（2026-08-02 修订）**：初版论证"一次小 miss 换长期小历史"把每个结果的一次性改写当成了总量，**低估了会话增长中结果持续越过 keep-recent 边界造成的反复断前缀**。真实机制：某条 Read 结果在它之后累计 16+ 条消息时才被剪（`snip_keep_recent`），此时它的投影形态从"全文"变为"头尾片段"，与该条消息处的缓存前缀不一致 → 该消息之后全部 uncached 一次；会话越长，越多的合格结果依次越过边界 → **反复断前缀**。频率 ≈ 合格 Read 结果的产生速率（实测 run 中 Read 约占消息的 6%，约每 8 轮断一次，每次重新计费最近 20-60K tokens 的 miss）。这会把缓存命中率从纯追加会话的 99%+ 拉低，与 micro compaction 同一失败类别（micro 更严重：它对所有 ≥1000 tokens 的结果每轮都断）。**结论：snip/dedup 对付费 provider 不是无代价优化，默认必须关闭（`snip_enabled=false`），仅本地/实验模型可开启。**
 
-**为什么不用 reasonix 的"紧窄带才触发"**：用户实测问题发生在低占用（1M 窗口下历史 200K，远未触发压缩）。占用带触发在此场景永不生效，无法解决实测问题。故采用"陈旧即剪（stale-only + 尺寸门槛 + 近期保护带）"，保持确定性、幂等。
+**触发策略（2026-08-02 修订为 reasonix 占用带模型）**：初版采用"陈旧即剪（每请求、按消息年龄）"——结果一越过 keep-recent 边界就改写，会话增长中反复断前缀，实测会拉低命中率。现改为 reasonix 的占用带触发：仅当**会话累计占用**（`context.estimated_tokens()`）达到 `snip_trigger_ratio`（默认 0.6）× 模型上下文窗口时才启用 snip/dedup 维护 pass；低于该带时 `request_projection_plan` 返回 disabled，前缀保持**纯追加、缓存稳定**。窗口未知（`max_context_tokens=None`）时永不进入该带。这样健康会话（1M 窗口下 200K，20%）零改写；只有会话真正逼近窗口（60%）才做一次性剪枝，且剪后低于触发点即停。与 micro compaction 的"每轮改写"彻底区分。
 
 **否决的替代**：durable 重写会话历史 + 归档（reasonix 做法）——Neo 会话 JSONL 本身就是归档，projection 是 ephemeral 变换（projection.rs:3-4 既有哲学），durable 改写需要新的会话重写机制，收益不变，风险更高。否决。
 
@@ -87,8 +87,8 @@ reasonix 差距根源（对照 `.references/reasonix`）：
 
 ### 4.4 配置面
 
-- `neo-agent/src/config/mod.rs` `RuntimeCompactionConfig`：+`snip_enabled: bool`（serde default **false**）、`snip_min_tokens: usize`（1000）、`snip_keep_recent: usize`（16）。旧配置省略新键不破坏（`#[serde(default)]`）。
-- `neo-agent-core/src/runtime/config.rs` `CompactionSettings`：同 3 字段；`CompactionSettings::new` 默认 **`snip_enabled=false`**（与 micro 同为前缀改写类，付费 provider 默认关）。所有 struct-literal 站点同步。
+- `neo-agent/src/config/mod.rs` `RuntimeCompactionConfig`：+`snip_enabled: bool`（serde default **false**）、`snip_min_tokens: usize`（1000）、`snip_keep_recent: usize`（16）、`snip_trigger_ratio: f64`（0.6，占用带阈值）。旧配置省略新键不破坏（`#[serde(default)]`）。
+- `neo-agent-core/src/runtime/config.rs` `CompactionSettings`：同 4 字段；`CompactionSettings::new` 默认 **`snip_enabled=false`**、`snip_trigger_ratio=0.6`（与 micro 同为前缀改写类，付费 provider 默认关）。所有 struct-literal 站点同步。
 - 语义：`config.compaction` 为 `None`（无上下文窗口）时 snip/dedup 不生效（与 reasonix `contextWindow<=0` 一致）。`micro_enabled`（全删 omission）行为不变。`snip_enabled` 同时控制 snip 与 dedup（同一维护 pass，同一开关）。
 
 ## 5. 兼容性边界 / Non-goals

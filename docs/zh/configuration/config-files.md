@@ -231,6 +231,7 @@ swarm_concurrency = 4
 | `snip_enabled` | bool | `false` | 是否把过时的大 tool result（如长 Read 输出）在模型输入中剪为头+尾片段。默认关闭：snip 会改写旧结果，每个被改写结果会使前缀缓存失效一次——仅在能接受该代价时开启（如本地模型） |
 | `snip_min_tokens` | usize | `1000` | 触发剪枝的最小 tool-result 大小 |
 | `snip_keep_recent` | usize | `16` | 剪枝豁免的最近消息数 |
+| `snip_trigger_ratio` | f64 | `0.6` | snip 进入占用带的窗口比例阈值。低于该比例时请求前缀保持纯追加（缓存稳定）；仅当会话累计增长进入该带后才执行剪枝 |
 | `max_rounds` | usize | `5` | 单次压缩最大轮数 |
 | `max_retry_attempts` | u32 | `5` | 空/截断摘要的最大重试次数 |
 

@@ -85,6 +85,7 @@ pub(crate) fn agent_config_for_app(
             snip_enabled: compaction.snip_enabled,
             snip_min_tokens: compaction.snip_min_tokens,
             snip_keep_recent: compaction.snip_keep_recent,
+            snip_trigger_ratio: compaction.snip_trigger_ratio,
             max_rounds: compaction.max_rounds,
             max_retry_attempts: compaction.max_retry_attempts,
         });

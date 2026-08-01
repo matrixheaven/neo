@@ -1102,7 +1102,12 @@ fn request_projection_plan(
         return ProjectionPlan::disabled();
     };
     let micro_on = settings.micro_enabled;
-    let snip_on = settings.snip_enabled;
+    // reasonix-style occupancy band: the snip/dedup maintenance pass rewrites
+    // old results and therefore breaks the provider prefix cache, so it only
+    // engages once the cumulative session has grown into the elevated band
+    // (snip_trigger_ratio of the context window). Below the band the request
+    // prefix stays append-only and cache-stable.
+    let snip_on = settings.snip_enabled && snip_band_reached(config, context, &settings);
     if !micro_on && !snip_on {
         return ProjectionPlan::disabled();
     }
@@ -1125,6 +1130,23 @@ fn request_projection_plan(
         snip_keep_recent: settings.snip_keep_recent,
         mode: ProjectionMode::Request,
     }
+}
+
+/// Whether the cumulative session occupancy has reached the snip band
+/// (`snip_trigger_ratio` of the model context window). Mirrors reasonix's
+/// tool-result-snip band: the maintenance pass runs only near the window, so
+/// healthy sessions never rewrite the cache prefix. Uses the durable
+/// estimated tokens; an unknown window means the band is never reached.
+fn snip_band_reached(
+    config: &AgentConfig,
+    context: &super::context::AgentContext,
+    settings: &super::config::CompactionSettings,
+) -> bool {
+    let Some(window) = config.model.capabilities.max_context_tokens else {
+        return false;
+    };
+    let threshold = (f64::from(window) * settings.snip_trigger_ratio) as usize;
+    context.estimated_tokens() >= threshold
 }
 
 fn take_manual_compact_request(config: &AgentConfig) -> Option<String> {
@@ -1315,10 +1337,14 @@ mod tests {
 
     #[test]
     fn request_projection_plan_enables_snip_without_micro() {
-        let config = AgentConfig::for_model(fake_model()).with_compaction(CompactionSettings {
+        let mut config = AgentConfig::for_model(fake_model()).with_compaction(CompactionSettings {
             snip_enabled: true,
+            // Ratio 0.0 puts the threshold at zero tokens: the band is always
+            // reached, so the test pins the non-band plan shape.
+            snip_trigger_ratio: 0.0,
             ..CompactionSettings::new(usize::MAX, 4)
         });
+        config.model.capabilities.max_context_tokens = Some(100_000);
         let mut context = super::super::context::AgentContext::new();
         context.append_message(AgentMessage::user_text("x"));
         let plan = request_projection_plan(&config, &context);
@@ -1329,6 +1355,38 @@ mod tests {
         assert_eq!(plan.snip_keep_recent, 16);
         assert_eq!(plan.cutoff_index, context.messages().len());
         assert_eq!(plan.keep_recent_messages, 0);
+    }
+
+    #[test]
+    fn request_projection_plan_keeps_snip_off_below_band() {
+        // Cumulative session well under snip_trigger_ratio of the window:
+        // the prefix must stay append-only (plan disabled, no rewrite).
+        let mut config = AgentConfig::for_model(fake_model()).with_compaction(CompactionSettings {
+            snip_enabled: true,
+            ..CompactionSettings::new(usize::MAX, 4)
+        });
+        config.model.capabilities.max_context_tokens = Some(100_000);
+        let mut context = super::super::context::AgentContext::new();
+        context.append_message(AgentMessage::user_text("x".repeat(200)));
+        let plan = request_projection_plan(&config, &context);
+        assert!(!plan.enabled);
+        assert!(!plan.snip_enabled);
+    }
+
+    #[test]
+    fn request_projection_plan_snip_requires_known_window() {
+        // fake_model advertises no context window: the band can never be
+        // reached, so snip stays off even when enabled.
+        let config = AgentConfig::for_model(fake_model()).with_compaction(CompactionSettings {
+            snip_enabled: true,
+            snip_trigger_ratio: 0.0,
+            ..CompactionSettings::new(usize::MAX, 4)
+        });
+        let mut context = super::super::context::AgentContext::new();
+        context.append_message(AgentMessage::user_text("x".repeat(10_000)));
+        let plan = request_projection_plan(&config, &context);
+        assert!(!plan.enabled);
+        assert!(!plan.snip_enabled);
     }
 
     #[test]

@@ -231,6 +231,7 @@ Context compaction is enabled by default. Fresh config writes include this table
 | `snip_enabled` | bool | `false` | Whether stale oversized tool results (e.g. long Read outputs) are shortened to a head/tail snippet in the model input. Off by default: snip rewrites old results, which breaks the provider prefix cache once per rewritten result — enable it only when you accept that trade-off (e.g. local models) |
 | `snip_min_tokens` | usize | `1000` | Minimum tool-result size before a stale result is snipped |
 | `snip_keep_recent` | usize | `16` | Number of recent messages exempt from snip |
+| `snip_trigger_ratio` | f64 | `0.6` | Fraction of the model context window at which the snip pass engages. Below it the request prefix stays append-only (cache-stable); the pass only runs once the cumulative session grows into the band |
 | `max_rounds` | usize | `5` | Maximum rounds in a single compaction |
 | `max_retry_attempts` | u32 | `5` | Maximum retry attempts for empty/truncated summaries |
 

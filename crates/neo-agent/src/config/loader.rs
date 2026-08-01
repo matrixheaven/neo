@@ -378,6 +378,7 @@ fn runtime_compaction_from_file(
             snip_enabled: false,
             snip_min_tokens: 1_000,
             snip_keep_recent: 16,
+            snip_trigger_ratio: 0.6,
             max_rounds: compaction.max_rounds.unwrap_or(5),
             max_retry_attempts: compaction.max_retry_attempts.unwrap_or(5),
         }

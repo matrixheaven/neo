@@ -242,6 +242,8 @@ pub struct RuntimeCompactionConfig {
     pub snip_min_tokens: usize,
     #[serde(default = "default_snip_keep_recent")]
     pub snip_keep_recent: usize,
+    #[serde(default = "default_snip_trigger_ratio")]
+    pub snip_trigger_ratio: f64,
     pub max_rounds: usize,
     pub max_retry_attempts: u32,
 }
@@ -261,6 +263,10 @@ fn default_snip_keep_recent() -> usize {
     16
 }
 
+fn default_snip_trigger_ratio() -> f64 {
+    0.6
+}
+
 impl Default for RuntimeCompactionConfig {
     fn default() -> Self {
         Self {
@@ -275,6 +281,7 @@ impl Default for RuntimeCompactionConfig {
             snip_enabled: false,
             snip_min_tokens: 1_000,
             snip_keep_recent: 16,
+            snip_trigger_ratio: 0.6,
             max_rounds: 5,
             max_retry_attempts: 5,
         }
