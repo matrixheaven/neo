@@ -485,4 +485,81 @@ mod tests {
             "{request:?}"
         );
     }
+
+    #[tokio::test]
+    async fn chat_request_applies_sniped_projection_plan() {
+        // Ensure a snip hint exists for "ChatRequestRead" in this process
+        // regardless of whether other parallel lib tests registered the
+        // built-in ReadTool (the unique name avoids touching the process-level
+        // "Read" hint table; registration is idempotent by constant and the
+        // assertion below is geometry-agnostic).
+        {
+            struct HintedRead;
+            impl crate::tools::Tool for HintedRead {
+                fn name(&self) -> &str {
+                    "ChatRequestRead"
+                }
+                fn description(&self) -> &str {
+                    "hinted read"
+                }
+                fn input_schema(&self) -> serde_json::Value {
+                    serde_json::json!({"type": "object"})
+                }
+                fn execute<'a>(
+                    &'a self,
+                    _ctx: &'a crate::tools::ToolContext,
+                    _input: serde_json::Value,
+                ) -> crate::tools::ToolFuture<'a> {
+                    Box::pin(async { Ok(crate::tools::ToolResult::ok("ok")) })
+                }
+                fn snip_hint(&self) -> Option<crate::tools::SnipHint> {
+                    Some(crate::tools::SnipHint {
+                        head_lines: 3,
+                        tail_lines: 2,
+                        head_chars: 100,
+                        tail_chars: 100,
+                    })
+                }
+            }
+            let mut registry = ToolRegistry::default();
+            registry.register(HintedRead);
+        }
+
+        let mut context = AgentContext::new();
+        context.append_message(AgentMessage::assistant(
+            Vec::new(),
+            vec![crate::AgentToolCall {
+                id: "call".into(),
+                name: "ChatRequestRead".into(),
+                raw_arguments: "{}".into(),
+            }],
+            crate::StopReason::ToolUse,
+        ));
+        let content = (1..=200)
+            .map(|i| format!("line {i}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        context.append_message(AgentMessage::tool_result(
+            "call",
+            "ChatRequestRead",
+            vec![Content::text(content)],
+            false,
+        ));
+        let config = AgentConfig::for_model(tool_model())
+            .with_compaction(crate::CompactionSettings::new(usize::MAX, 4));
+        let plan = ProjectionPlan {
+            enabled: true,
+            cutoff_index: 2,
+            min_tool_result_tokens: usize::MAX,
+            keep_recent_messages: 0,
+            snip_enabled: true,
+            snip_min_tokens: 100,
+            snip_keep_recent: 0,
+            mode: ProjectionMode::Request,
+        };
+
+        let request = chat_request(&config, &context, &plan).await;
+
+        assert!(tool_result_texts(&request).contains("[tool result snipped: tool=ChatRequestRead"));
+    }
 }

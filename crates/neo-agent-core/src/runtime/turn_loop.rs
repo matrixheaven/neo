@@ -1014,7 +1014,7 @@ async fn prepare_model_request(
     ) {
         CompactionDecision::NoAction { snapshot: decided } => {
             snapshot = decided;
-            ProjectionPlan::disabled()
+            snapshot.projection
         }
         CompactionDecision::UseProjectionOnly {
             snapshot: decided,
@@ -1101,20 +1101,28 @@ fn request_projection_plan(
     let Some(settings) = config.compaction else {
         return ProjectionPlan::disabled();
     };
-    if !settings.micro_enabled {
+    let micro_on = settings.micro_enabled;
+    let snip_on = settings.snip_enabled;
+    if !micro_on && !snip_on {
         return ProjectionPlan::disabled();
     }
+    let message_count = context.messages().len();
     ProjectionPlan {
         enabled: true,
-        cutoff_index: context
-            .messages()
-            .len()
-            .saturating_sub(settings.micro_keep_recent),
-        min_tool_result_tokens: 1_000,
-        keep_recent_messages: settings.micro_keep_recent,
-        snip_enabled: false,
-        snip_min_tokens: 0,
-        snip_keep_recent: 0,
+        cutoff_index: if micro_on {
+            message_count.saturating_sub(settings.micro_keep_recent)
+        } else {
+            message_count
+        },
+        min_tool_result_tokens: if micro_on { 1_000 } else { usize::MAX },
+        keep_recent_messages: if micro_on {
+            settings.micro_keep_recent
+        } else {
+            0
+        },
+        snip_enabled: snip_on,
+        snip_min_tokens: settings.snip_min_tokens,
+        snip_keep_recent: settings.snip_keep_recent,
         mode: ProjectionMode::Request,
     }
 }
@@ -1175,6 +1183,8 @@ fn append_queued_messages(emitter: &mut EventEmitter, messages: Vec<AgentMessage
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::CompactionSettings;
+    use crate::harness::fake_model;
     use neo_ai::{ApiKind, ModelCapabilities, ModelSpec, ProviderId};
     use tokio::sync::mpsc;
 
@@ -1301,5 +1311,30 @@ mod tests {
                 .text()
                 .contains(GOAL_MODE_AUTHORING_REMINDER)
         );
+    }
+
+    #[test]
+    fn request_projection_plan_enables_snip_without_micro() {
+        let config = AgentConfig::for_model(fake_model())
+            .with_compaction(CompactionSettings::new(usize::MAX, 4));
+        let mut context = super::super::context::AgentContext::new();
+        context.append_message(AgentMessage::user_text("x"));
+        let plan = request_projection_plan(&config, &context);
+        assert!(plan.enabled);
+        assert!(plan.snip_enabled);
+        assert_eq!(plan.min_tool_result_tokens, usize::MAX);
+        assert_eq!(plan.snip_min_tokens, 1_000);
+        assert_eq!(plan.snip_keep_recent, 16);
+        assert_eq!(plan.cutoff_index, context.messages().len());
+        assert_eq!(plan.keep_recent_messages, 0);
+    }
+
+    #[test]
+    fn request_projection_plan_disabled_without_compaction() {
+        let config = AgentConfig::for_model(fake_model());
+        let context = super::super::context::AgentContext::new();
+        let plan = request_projection_plan(&config, &context);
+        assert!(!plan.enabled);
+        assert!(!plan.snip_enabled);
     }
 }
