@@ -2683,9 +2683,23 @@ async fn run_agent_snapshot(
         let event = match event {
             Ok(event) => event,
             Err(err) => {
-                flush_child_writer(&mut writer).await?;
-                cancel_token.cancel();
-                return Err(err.to_string());
+                let event = AgentEvent::Error {
+                    turn: events
+                        .iter()
+                        .rev()
+                        .find_map(|event| match event {
+                            AgentEvent::RunFinished { turn, .. } => Some(*turn),
+                            _ => None,
+                        })
+                        .unwrap_or_default(),
+                    message: err.to_string(),
+                    code: err.code().map(str::to_owned),
+                    retry_after: None,
+                };
+                persist_child_wire_event(&mut writer, &mut persistence, &event).await?;
+                on_event(&event);
+                events.push(event);
+                break;
             }
         };
         let write_result = if let Some(child_writer) = writer.as_mut() {

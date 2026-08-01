@@ -344,6 +344,36 @@ fn tool_attempt_turn() -> Vec<neo_ai::AiStreamEvent> {
     ]
 }
 
+fn todo_turn_with_usage(
+    id: &str,
+    input_tokens: u32,
+    output_tokens: u32,
+) -> Vec<neo_ai::AiStreamEvent> {
+    use neo_ai::{AiStreamEvent, StopReason, TokenUsage};
+    vec![
+        AiStreamEvent::MessageStart {
+            id: format!("message_{id}"),
+        },
+        AiStreamEvent::ToolCallStart {
+            id: id.to_owned(),
+            name: "TodoList".to_owned(),
+        },
+        AiStreamEvent::ToolCallEnd {
+            id: id.to_owned(),
+            raw_arguments: "{}".to_owned(),
+        },
+        AiStreamEvent::MessageEnd {
+            stop_reason: StopReason::ToolUse,
+            usage: Some(TokenUsage {
+                input_tokens,
+                output_tokens,
+                input_cache_read_tokens: 0,
+                input_cache_write_tokens: 0,
+            }),
+        },
+    ]
+}
+
 fn error_turn_with_usage(
     message: &str,
     input_tokens: u32,
@@ -870,10 +900,10 @@ async fn crash_during_repair_never_repeats_model_effect() {
     assert_eq!(harness.requests().len(), 1);
 }
 
-/// A provider-reported error stop keeps observed usage and its child reference,
-/// but never starts schema repair.
+/// A non-model runtime failure keeps prior events, usage, and its child
+/// reference, but never starts schema repair.
 #[tokio::test]
-async fn workflow_delegate_failure_skips_schema_repair_and_preserves_error() {
+async fn workflow_delegate_runtime_failure_skips_schema_repair_and_preserves_events() {
     use neo_agent_core::workflow::journal::{JournalPayload, collect_journal};
     use neo_agent_core::workflow::{
         WorkflowInvocationKind, WorkflowLaunchRequest, WorkflowOutcomeStatus,
@@ -885,8 +915,8 @@ async fn workflow_delegate_failure_skips_schema_repair_and_preserves_error() {
         .create_run(
             session_dir,
             WorkflowLaunchRequest {
-                name: "delegate-protocol".to_owned(),
-                description: "delegate protocol failure".to_owned(),
+                name: "delegate-runtime".to_owned(),
+                description: "delegate runtime failure".to_owned(),
                 phases: Vec::new(),
                 script: String::new(),
                 args: json!({}),
@@ -905,16 +935,29 @@ async fn workflow_delegate_failure_skips_schema_repair_and_preserves_error() {
         .await
         .expect("enter running");
 
-    let harness = FakeHarness::from_turns([error_turn_with_usage(
-        "response_format unsupported on compatible endpoint",
-        11,
-        13,
-    )]);
+    let harness = FakeHarness::from_turns([
+        todo_turn_with_usage("remove_workspace", 11, 13),
+        todo_turn_with_usage("fail_context", 17, 19),
+    ]);
+    let workspace = session_dir.join("runtime-workspace");
+    std::fs::create_dir(&workspace).expect("create workspace");
+    let workspace_to_remove = workspace.clone();
     let mut config = neo_agent_core::AgentConfig::for_model(harness.model());
     config.max_retries = 0;
     config = config
         .with_permission_mode(neo_agent_core::PermissionMode::Yolo)
-        .with_workflow_runtime(runtime);
+        .with_workflow_runtime(runtime)
+        .with_workspace_root(&workspace)
+        .expect("workspace")
+        .with_async_before_tool_call(move |call, _| {
+            let workspace = workspace_to_remove.clone();
+            async move {
+                if call.name.as_ref() == "TodoList" && workspace.exists() {
+                    std::fs::remove_dir(&workspace).expect("remove empty workspace");
+                }
+                None
+            }
+        });
     // Foreground Delegate path through normal workflow dispatch: the tool runs
     // the child turn and then applies the output schema.
     let input = json!({
@@ -947,19 +990,19 @@ async fn workflow_delegate_failure_skips_schema_repair_and_preserves_error() {
     assert!(!outcome.ok, "{outcome:?}");
     assert_eq!(outcome.status, WorkflowOutcomeStatus::Failed, "{outcome:?}");
     assert!(
-        outcome.summary.contains("response_format unsupported"),
-        "original provider error must survive in summary: {}",
+        outcome.summary.contains("tool execution failed"),
+        "original runtime error must survive in summary: {}",
         outcome.summary
     );
     assert_eq!(
         harness.requests().len(),
-        1,
+        2,
         "failed child must not trigger a repair request: {:?}",
         harness.requests()
     );
-    let usage = outcome.actual_usage.expect("usage before provider failure");
-    assert_eq!(usage.input_tokens, 11);
-    assert_eq!(usage.output_tokens, 13);
+    let usage = outcome.actual_usage.expect("usage before runtime failure");
+    assert_eq!(usage.input_tokens, 28);
+    assert_eq!(usage.output_tokens, 32);
     assert_eq!(outcome.child_refs.len(), 1, "{outcome:?}");
     assert_eq!(outcome.child_refs[0].kind, "delegate");
     assert!(!outcome.child_refs[0].id.is_empty());
