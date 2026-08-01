@@ -6,6 +6,7 @@ use super::{SnipHint, Tool, ToolContext, ToolError, ToolFuture, ToolResult, pars
 use crate::workspace_policy::normalize_path;
 
 const MAX_LINES: usize = 1000;
+const DEFAULT_LINES: usize = 400;
 const MAX_LINE_LENGTH: usize = 2000;
 const MAX_BYTES: usize = 100 * 1024;
 const READ_CHUNK_SIZE: usize = 64 * 1024;
@@ -41,17 +42,21 @@ impl Tool for ReadTool {
         other pre-checks for known text file paths; missing or invalid paths return errors you can \
         handle. Use Glob for pattern searches and Bash `ls` for directories.\
         \
+        Prefer targeted reads: for files over ~200 lines, use `line_offset` and `n_lines` to read \
+        only the range you need instead of the whole file. Small windows keep the context and the \
+        provider cache small; a full read of a large file costs tokens for every line, and old \
+        read results are shortened in the model input when they go stale.\
+        \
         Parameters:\
         - path: Path to the text file. Relative paths resolve against the working directory; \
           absolute paths are used as-is, including paths outside the working directory.\
         - line_offset: 1-based line number to start reading from. Omit to start at line 1. Negative \
           values read from the end (e.g. -100 reads the last 100 lines); the absolute value must \
           not exceed 1000.\
-        - n_lines: Maximum number of lines to read. Omit to read up to the internal cap of 1000 \
-          lines.\
+        - n_lines: Maximum number of lines to read (default 400; cap 1000).\
         \
         Behavior:\
-        - Returns up to 1000 lines or 100 KB per call, whichever comes first.\
+        - Returns up to 400 lines by default (1000 max) or 100 KB per call, whichever comes first.\
         - Lines longer than 2000 characters are truncated mid-line and marked with `...`.\
         - Output format: each line is prefixed with `<line-number>\\t<content>`.\
         - A `<system>...</system>` status block is appended after the content; it summarizes how \
@@ -301,7 +306,7 @@ async fn run_read(
         )));
     }
 
-    let requested_lines = n_lines.unwrap_or(MAX_LINES);
+    let requested_lines = n_lines.unwrap_or(DEFAULT_LINES);
     if requested_lines == 0 {
         return Err(ReadError::InvalidInput(
             "n_lines must be greater than 0".to_owned(),
@@ -642,13 +647,37 @@ mod tests {
             .collect::<Vec<_>>()
             .join("\n")
             + "\n";
-        let result = render_from_content(&content, None, None).unwrap();
+        let result = render_from_content(&content, None, Some(MAX_LINES)).unwrap();
         assert_eq!(result.rendered_lines.len(), MAX_LINES);
         assert!(
             result
                 .finish_output()
                 .contains(&format!("Max {MAX_LINES} lines reached."))
         );
+    }
+
+    #[test]
+    fn default_window_is_four_hundred_lines() {
+        let content = (1..=MAX_LINES + 10)
+            .map(|i| format!("line {i}"))
+            .collect::<Vec<_>>()
+            .join("\n")
+            + "\n";
+        let result = render_from_content(&content, None, None).unwrap();
+        assert_eq!(result.rendered_lines.len(), DEFAULT_LINES);
+        assert!(
+            result
+                .finish_output()
+                .contains(&format!("Total lines in file: {}.", MAX_LINES + 10))
+        );
+    }
+
+    #[test]
+    fn description_guides_targeted_reads() {
+        let description = ReadTool.description();
+        assert!(description.contains("Prefer targeted reads"));
+        assert!(description.contains("default 400"));
+        assert!(description.contains("line_offset"));
     }
 
     #[test]
