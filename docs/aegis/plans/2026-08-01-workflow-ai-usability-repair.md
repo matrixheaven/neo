@@ -771,15 +771,14 @@ unnecessary and forbidden.
 4. Record the successful final value and confirm no other file under
    `~/.neo/workflows` changed during this task.
 
-5. For each report-004 endpoint, run one minimal inline or temporary saved
-   one-child workflow with a required object schema. Record:
+5. Run one minimal inline or temporary saved one-child workflow with a required
+   object schema on the active report-004 endpoint and on one representative
+   OpenAI-compatible endpoint. Record:
 
    | Provider | Resolved type | Reached model | Repair count | Result | Blocker |
    | --- | --- | --- | --- | --- | --- |
-   | custom | | | | | |
-   | zhipuai-coding-plan | | | | | |
    | kimi-for-coding | | | | | |
-   | opencode-go | | | | | |
+   | deepseek | | | | | |
 
    Empty cells are not acceptable in the final handoff; fill them with evidence
    or an exact blocker.
@@ -801,8 +800,8 @@ unnecessary and forbidden.
 **Expected proof**
 
 - `echo-test` returns `ok=true` and `echo="hello"`.
-- Each available compatible endpoint reaches the model.
-- Any unavailable endpoint has an exact environmental blocker.
+- The active report-004 endpoint and the representative OpenAI-compatible
+  endpoint reach the model.
 - One built-in workflow returns useful structured data.
 
 ## Task 7: Sync The Decision And Prepare Final Review

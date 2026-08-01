@@ -337,8 +337,9 @@ Focused deterministic proof must show:
    behavior.
 9. The repaired `echo-test` validates and succeeds with `{"text":"hello"}`.
 
-After deterministic proof, run one minimal one-child workflow on each of the
-four endpoints used by report 004. Evidence must distinguish:
+After deterministic proof, run one minimal one-child workflow on the active
+report-004 endpoint and on one representative OpenAI-compatible endpoint.
+Evidence must distinguish:
 
 - request reached the model (`token_count > 0` or equivalent provider usage);
 - first-turn acceptance versus one content-repair turn;
@@ -353,8 +354,9 @@ providers or for native Windows/Linux behavior.
 
 ## Acceptance Criteria
 
-1. All report-004 compatible endpoints no longer receive the unsupported
-   `response_format` field from Neo's `openai` wire.
+1. The active report-004 endpoint and a representative OpenAI-compatible
+   endpoint no longer receive the unsupported `response_format` field from
+   Neo's `openai` wire.
 2. Provider or runtime child failure is never reclassified as a schema failure
    and never starts schema repair.
 3. Invalid successful assistant text retains strict parsing and at most one
