@@ -230,6 +230,21 @@ fn final_lua_schema_error_includes_path_and_bounded_actual() {
         short_err.message
     );
 
+    // A serialized value at exactly 160 characters stays intact.
+    let exact = json!({ "name": "汉".repeat(158) });
+    let exact_err = validate_final_lua_result(&schema, &exact).expect_err("exact boundary");
+    let exact_actual = exact_err
+        .message
+        .split_once("actual=")
+        .map(|(_, tail)| tail)
+        .expect("preview must be present");
+    assert_eq!(exact_actual.chars().count(), 160, "{exact_actual}");
+    assert_eq!(
+        exact_actual,
+        serde_json::to_string(&exact["name"]).expect("serialize exact value")
+    );
+    assert!(!exact_actual.ends_with('…'), "{exact_actual}");
+
     // Long Unicode value: the preview is cut safely at 160 characters and ends
     // with the Neo ellipsis; the complete long root object never leaks.
     let long_name = "汉".repeat(200);
@@ -329,6 +344,35 @@ fn tool_attempt_turn() -> Vec<neo_ai::AiStreamEvent> {
     ]
 }
 
+fn todo_turn_with_usage(
+    input_tokens: u32,
+    output_tokens: u32,
+) -> Vec<Result<neo_ai::AiStreamEvent, neo_ai::AiError>> {
+    use neo_ai::{AiStreamEvent, StopReason, TokenUsage};
+    vec![
+        Ok(AiStreamEvent::MessageStart {
+            id: "usage_before_failure".to_owned(),
+        }),
+        Ok(AiStreamEvent::ToolCallStart {
+            id: "todo_before_failure".to_owned(),
+            name: "TodoList".to_owned(),
+        }),
+        Ok(AiStreamEvent::ToolCallEnd {
+            id: "todo_before_failure".to_owned(),
+            raw_arguments: "{}".to_owned(),
+        }),
+        Ok(AiStreamEvent::MessageEnd {
+            stop_reason: StopReason::ToolUse,
+            usage: Some(TokenUsage {
+                input_tokens,
+                output_tokens,
+                input_cache_read_tokens: 0,
+                input_cache_write_tokens: 0,
+            }),
+        }),
+    ]
+}
+
 async fn running_workflow_handle(
     dir: &std::path::Path,
 ) -> neo_agent_core::workflow::WorkflowHandle {
@@ -359,108 +403,82 @@ async fn running_workflow_handle(
     handle
 }
 
-/// Invalid first child output journals repair-start, runs exactly one tools-disabled
-/// corrective model call, then journals repair-finish with aggregated usage.
+/// The real workflow Delegate entry repairs invalid child output exactly once
+/// with tools disabled and preserves aggregate usage.
 #[tokio::test]
 async fn child_schema_invalid_output_gets_exactly_one_tools_disabled_repair() {
-    use neo_agent_core::multi_agent::{
-        AgentRunMode, ChildRuntimeDeps, DelegateContext, DelegateRequest, MultiAgentRuntime,
-    };
     use neo_agent_core::workflow::journal::{JournalPayload, collect_journal};
     use neo_agent_core::workflow::{WorkflowInvocationKind, WorkflowOutcomeStatus};
 
     let dir = tempfile::tempdir().unwrap();
     let session_dir = dir.path();
-    let handle = running_workflow_handle(session_dir).await;
+    let runtime = WorkflowRuntime::new(WorkflowLimits::default());
+    let handle = runtime
+        .create_run(
+            session_dir,
+            neo_agent_core::workflow::WorkflowLaunchRequest {
+                name: "delegate-schema-repair".to_owned(),
+                description: "delegate schema repair".to_owned(),
+                phases: Vec::new(),
+                script: String::new(),
+                args: json!({}),
+                launch_source: "test".to_owned(),
+                output_schema: None,
+                display_name: None,
+                input_schema: None,
+                definition_origin: None,
+                inline_unsaved: false,
+            },
+        )
+        .await
+        .expect("create run");
+    handle
+        .enter_running_for_direct_execution()
+        .await
+        .expect("enter running");
 
     let harness = FakeHarness::from_turns([
         text_turn(r#"{"ok":"nope"}"#, Some((10, 20))),
         text_turn(r#"{"ok":true}"#, Some((5, 7))),
     ]);
-    let multi = MultiAgentRuntime::new().with_session_directory(session_dir.to_path_buf());
-    let deps = ChildRuntimeDeps::new(
-        neo_agent_core::AgentConfig::for_model(harness.model())
-            .with_workspace_root(session_dir.to_path_buf())
-            .expect("workspace"),
-        harness.client(),
-        std::sync::Arc::new(ToolRegistry::new()),
-    );
-    let request = DelegateRequest {
-        task: "return structured ok".to_owned(),
-        resume: None,
-        title: None,
-        role: None,
-        mode: AgentRunMode::Foreground,
-        context: DelegateContext::None,
-        output_schema: Some(child_schema_doc()),
+    let mut config = neo_agent_core::AgentConfig::for_model(harness.model());
+    config.max_retries = 0;
+    config = config
+        .with_permission_mode(neo_agent_core::PermissionMode::Yolo)
+        .with_workflow_runtime(runtime);
+    let input = json!({
+        "task": "return structured ok",
+        "output_schema": child_schema_doc(),
+    });
+    let dispatch = WorkflowDispatchHandle {
+        config,
+        model_client: harness.client(),
+        registry: std::sync::Arc::new(ToolRegistry::with_builtin_tools()),
+        process_supervisor: ProcessSupervisor::default(),
+        context: AgentContext::new(),
     };
-    let first = multi
-        .run_child_turn(deps.clone(), &request, AgentRunMode::Foreground)
-        .await
-        .expect("first child turn");
-    assert_eq!(
-        harness.requests().len(),
-        1,
-        "only original child turn so far"
-    );
-
-    let schema = CompiledSchema::compile(&child_schema_doc()).expect("schema");
-
-    let accepted = handle
+    let origin = handle.execution_origin(None).await;
+    let outcome = handle
         .invoke(
             0,
             WorkflowInvocationKind::Delegate,
-            json!({"task": "return structured ok", "output_schema": child_schema_doc()}),
+            input.clone(),
             true,
-            {
-                let multi = multi.clone();
-                let deps = deps.clone();
-                let agent_id = first.snapshot.id.clone();
-                let first = first.clone();
-                let schema = schema.clone();
-                let handle = handle.clone();
-                move |ctx| async move {
-                    let accepted = handle
-                        .accept_child_structured_output_with_repair(
-                            &multi,
-                            deps,
-                            neo_agent_core::workflow::ChildSchemaRepairRequest {
-                                invocation_id: &ctx.invocation_id,
-                                agent_id: &agent_id,
-                                schema: &schema,
-                                first_output: &first,
-                            },
-                        )
-                        .await
-                        .expect("accept with repair");
-                    neo_agent_core::workflow::WorkflowInvocationOutcome {
-                        ok: accepted.ok,
-                        status: if accepted.ok {
-                            WorkflowOutcomeStatus::Completed
-                        } else {
-                            WorkflowOutcomeStatus::Failed
-                        },
-                        summary: accepted.summary.clone(),
-                        interruption: None,
-                        details: json!({
-                            "structured_output": accepted.value,
-                            "schema_repair_attempted": accepted.repair_attempted,
-                            "first_raw": accepted.first_raw,
-                            "repair_raw": accepted.repair_raw,
-                            "actual_usage": accepted.actual_usage,
-                        }),
-                        actual_usage: accepted.actual_usage,
-                        child_refs: vec![],
-                    }
-                }
+            move |invocation| async move {
+                dispatch
+                    .run_one_with_origin(invocation, "Delegate", input, Some(origin))
+                    .await
             },
         )
         .await
         .expect("invoke");
 
-    assert!(accepted.ok, "{accepted:?}");
-    assert_eq!(accepted.details["structured_output"], json!({"ok": true}));
-    assert_eq!(accepted.details["schema_repair_attempted"], json!(true));
+    assert!(outcome.ok, "{outcome:?}");
+    assert_eq!(outcome.status, WorkflowOutcomeStatus::Completed);
+    assert_eq!(outcome.details["structured_output"], json!({"ok": true}));
+    assert_eq!(outcome.details["schema_repair_attempted"], json!(true));
+    assert_eq!(outcome.child_refs.len(), 1, "{outcome:?}");
+    assert_eq!(outcome.child_refs[0].kind, "delegate");
 
     let requests = harness.requests();
     assert_eq!(
@@ -514,7 +532,7 @@ async fn child_schema_invalid_output_gets_exactly_one_tools_disabled_repair() {
         assert!(prompt.contains("Do not call a formatting tool"), "{prompt}");
     }
 
-    let usage = accepted.actual_usage.expect("usage");
+    let usage = outcome.actual_usage.expect("usage");
     assert_eq!(usage.input_tokens, 15);
     assert_eq!(usage.output_tokens, 27);
 
@@ -547,6 +565,109 @@ async fn child_schema_invalid_output_gets_exactly_one_tools_disabled_repair() {
         .filter(|k| **k == "schema_repair_started")
         .count();
     assert_eq!(repair_starts, 1, "exactly one repair start: {kinds:?}");
+}
+
+/// The real workflow swarm entry applies the same single tools-disabled repair
+/// to a successful child whose content violates its output schema.
+#[tokio::test]
+async fn workflow_swarm_invalid_output_gets_exactly_one_tools_disabled_repair() {
+    use neo_agent_core::multi_agent::{
+        AgentRole, ChildPlan, ChildRuntimeDeps, ChildWorktreePolicy, DelegateContext,
+        MultiAgentRuntime,
+    };
+    use neo_agent_core::workflow::journal::{JournalPayload, collect_journal};
+    use neo_agent_core::workflow::{SwarmBatchRequest, WorkflowOutcomeStatus};
+
+    let dir = tempfile::tempdir().unwrap();
+    let session_dir = dir.path();
+    let handle = running_workflow_handle(session_dir).await;
+    let harness = FakeHarness::from_turns([
+        text_turn(r#"{"ok":"nope"}"#, Some((10, 20))),
+        text_turn(r#"{"ok":true}"#, Some((5, 7))),
+    ]);
+    let mut config = neo_agent_core::AgentConfig::for_model(harness.model());
+    config.max_retries = 0;
+    config = config.with_permission_mode(neo_agent_core::PermissionMode::Yolo);
+    let multi = MultiAgentRuntime::new().with_session_directory(session_dir.to_path_buf());
+    let deps = ChildRuntimeDeps::new(
+        config
+            .with_workspace_root(session_dir.to_path_buf())
+            .expect("workspace"),
+        harness.client(),
+        std::sync::Arc::new(ToolRegistry::new()),
+    );
+    let plan = ChildPlan {
+        item_id: "item-a".to_owned(),
+        item_label: "a".to_owned(),
+        task: "return structured ok".to_owned(),
+        title: None,
+        resume: None,
+        role: None,
+        model: None,
+        provider: None,
+        context: DelegateContext::None,
+        worktree: ChildWorktreePolicy::Shared,
+        tool_allow: None,
+        output_schema: Some(child_schema_doc()),
+    };
+    let outcome = handle
+        .invoke_swarm_batch(
+            SwarmBatchRequest {
+                call_index: 0,
+                canonical_input: json!({
+                    "description": "schema repair swarm",
+                    "items": [{
+                        "task": "return structured ok",
+                        "output_schema": child_schema_doc(),
+                    }],
+                }),
+                description: "schema repair swarm".to_owned(),
+                role: AgentRole::Coder,
+                max_concurrency: 1,
+                plans: vec![plan],
+            },
+            multi,
+            deps,
+        )
+        .await
+        .expect("swarm batch");
+
+    assert!(outcome.ok, "{outcome:?}");
+    assert_eq!(outcome.status, WorkflowOutcomeStatus::Completed);
+    assert_eq!(
+        outcome.details["items"][0]["structured_output"],
+        json!({"ok": true})
+    );
+    let usage = outcome.actual_usage.expect("usage");
+    assert_eq!(usage.input_tokens, 15);
+    assert_eq!(usage.output_tokens, 27);
+    let requests = harness.requests();
+    assert_eq!(
+        requests.len(),
+        2,
+        "one child turn plus one repair: {requests:?}"
+    );
+    assert!(requests[1].tools.is_empty(), "{requests:?}");
+
+    let run_dir = neo_agent_core::workflow::run_dir(session_dir, &handle.run_id);
+    let envelopes = collect_journal(
+        &run_dir.join("journal.jsonl"),
+        Some(&handle.run_id),
+        WorkflowLimits::default().journal_record_bytes,
+        WorkflowLimits::default().journal_total_bytes,
+    )
+    .expect("journal");
+    assert_eq!(
+        envelopes
+            .iter()
+            .filter(|envelope| matches!(
+                envelope.payload,
+                JournalPayload::SchemaRepairStarted { .. }
+            ))
+            .count(),
+        1,
+        "{envelopes:?}"
+    );
 }
 
 /// A tool call during the repair turn fails with schema_repair_tool_forbidden and
@@ -753,9 +874,8 @@ async fn crash_during_repair_never_repeats_model_effect() {
     assert_eq!(harness.requests().len(), 1);
 }
 
-/// A child turn that fails at the provider level (protocol error) must never be
-/// parsed as assistant text and never start schema repair: exactly one request,
-/// the original error survives, and no schema-repair journal event is written.
+/// A child turn that fails at the provider level after an earlier tool round
+/// keeps observed usage and its child reference, but never starts schema repair.
 #[tokio::test]
 async fn workflow_delegate_protocol_failure_skips_schema_repair_and_preserves_error() {
     use neo_agent_core::workflow::journal::{JournalPayload, collect_journal};
@@ -791,9 +911,12 @@ async fn workflow_delegate_protocol_failure_skips_schema_repair_and_preserves_er
         .await
         .expect("enter running");
 
-    let harness = FakeHarness::from_result_turns([vec![Err(AiError::Protocol {
-        message: "response_format unsupported on compatible endpoint".to_owned(),
-    })]]);
+    let harness = FakeHarness::from_result_turns([
+        todo_turn_with_usage(11, 13),
+        vec![Err(AiError::Protocol {
+            message: "response_format unsupported on compatible endpoint".to_owned(),
+        })],
+    ]);
     let mut config = neo_agent_core::AgentConfig::for_model(harness.model());
     config.max_retries = 0;
     config = config
@@ -835,12 +958,26 @@ async fn workflow_delegate_protocol_failure_skips_schema_repair_and_preserves_er
         "original protocol error must survive in summary: {}",
         outcome.summary
     );
+    let requests = harness.requests();
     assert_eq!(
-        harness.requests().len(),
-        1,
-        "failed child must not trigger a repair request: {:?}",
-        harness.requests()
+        requests.len(),
+        2,
+        "failed child must stop after its tool continuation without a repair request: {:?}",
+        requests
     );
+    assert!(
+        requests[1]
+            .messages
+            .iter()
+            .any(|message| matches!(message, neo_ai::ChatMessage::ToolResult { .. })),
+        "second request must be the original child continuation: {requests:?}"
+    );
+    let usage = outcome.actual_usage.expect("usage before provider failure");
+    assert_eq!(usage.input_tokens, 11);
+    assert_eq!(usage.output_tokens, 13);
+    assert_eq!(outcome.child_refs.len(), 1, "{outcome:?}");
+    assert_eq!(outcome.child_refs[0].kind, "delegate");
+    assert!(!outcome.child_refs[0].id.is_empty());
 
     let run_dir = neo_agent_core::workflow::run_dir(session_dir, &handle.run_id);
     let envelopes = collect_journal(
@@ -874,8 +1011,8 @@ async fn workflow_delegate_protocol_failure_skips_schema_repair_and_preserves_er
     );
 }
 
-/// A direct workflow swarm child that fails at the provider level must keep its
-/// original error and skip schema repair through the real swarm consumer.
+/// A direct workflow swarm child that fails after an earlier tool round keeps
+/// observed usage and skips schema repair through the real swarm consumer.
 #[tokio::test]
 async fn workflow_swarm_protocol_failure_skips_schema_repair_and_preserves_error() {
     use neo_agent_core::multi_agent::{
@@ -890,9 +1027,12 @@ async fn workflow_swarm_protocol_failure_skips_schema_repair_and_preserves_error
     let session_dir = dir.path();
     let handle = running_workflow_handle(session_dir).await;
 
-    let harness = FakeHarness::from_result_turns([vec![Err(AiError::Protocol {
-        message: "response_format unsupported on compatible endpoint".to_owned(),
-    })]]);
+    let harness = FakeHarness::from_result_turns([
+        todo_turn_with_usage(17, 19),
+        vec![Err(AiError::Protocol {
+            message: "response_format unsupported on compatible endpoint".to_owned(),
+        })],
+    ]);
     let mut config = neo_agent_core::AgentConfig::for_model(harness.model());
     config.max_retries = 0;
     config = config.with_permission_mode(neo_agent_core::PermissionMode::Yolo);
@@ -902,7 +1042,7 @@ async fn workflow_swarm_protocol_failure_skips_schema_repair_and_preserves_error
             .with_workspace_root(session_dir.to_path_buf())
             .expect("workspace"),
         harness.client(),
-        std::sync::Arc::new(ToolRegistry::new()),
+        std::sync::Arc::new(ToolRegistry::with_builtin_tools()),
     );
 
     let plan = ChildPlan {
@@ -940,12 +1080,23 @@ async fn workflow_swarm_protocol_failure_skips_schema_repair_and_preserves_error
 
     assert!(!outcome.ok, "{outcome:?}");
     assert_eq!(outcome.status, WorkflowOutcomeStatus::Failed, "{outcome:?}");
+    let requests = harness.requests();
     assert_eq!(
-        harness.requests().len(),
-        1,
-        "failed swarm child must not trigger a repair request: {:?}",
-        harness.requests()
+        requests.len(),
+        2,
+        "failed swarm child must stop after its tool continuation without repair: {:?}",
+        requests
     );
+    assert!(
+        requests[1]
+            .messages
+            .iter()
+            .any(|message| matches!(message, neo_ai::ChatMessage::ToolResult { .. })),
+        "second request must be the original child continuation: {requests:?}"
+    );
+    let usage = outcome.actual_usage.expect("usage before provider failure");
+    assert_eq!(usage.input_tokens, 17);
+    assert_eq!(usage.output_tokens, 19);
     let items = outcome
         .details
         .get("items")

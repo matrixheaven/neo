@@ -199,13 +199,11 @@ pub fn validate_final_lua_result(
 fn bounded_actual_preview(value: &Value) -> String {
     const MAX_CHARS: usize = 160;
     let serialized = serde_json::to_string(value).unwrap_or_else(|_| value.to_string());
-    let mut characters = serialized.chars();
-    let first: String = characters.by_ref().take(MAX_CHARS - 1).collect();
-    if characters.next().is_some() {
-        format!("{first}…")
-    } else {
-        first
+    if serialized.chars().count() <= MAX_CHARS {
+        return serialized;
     }
+    let first: String = serialized.chars().take(MAX_CHARS - 1).collect();
+    format!("{first}…")
 }
 
 /// Child-call composition seam: attach a provider-neutral response-format hint.
