@@ -350,6 +350,13 @@ pub struct RequestOptions {
     pub timeout: Option<Duration>,
     pub reasoning: ReasoningSelection,
     pub replay_reasoning: bool,
+    /// Explicitly disable reasoning even when the provider would otherwise
+    /// default to emitting a reasoning/thinking block. Anthropic-compatible
+    /// providers serialize this as `thinking: {"type": "disabled"}`; other
+    /// providers ignore it. Used by background requests (e.g. session titles)
+    /// that must stay fast and deterministic.
+    #[serde(default)]
+    pub disable_reasoning: bool,
     pub cache: CacheRetention,
     pub session_id: Option<String>,
     pub metadata: RequestMetadata,
@@ -368,6 +375,7 @@ impl Default for RequestOptions {
             timeout: None,
             reasoning: ReasoningSelection::Off,
             replay_reasoning: true,
+            disable_reasoning: false,
             cache: CacheRetention::Short,
             session_id: None,
             metadata: RequestMetadata::default(),

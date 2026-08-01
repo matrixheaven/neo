@@ -144,6 +144,9 @@ fn request_body(request: &ChatRequest) -> Result<Value, ProviderError> {
     }
     match &request.options.reasoning {
         ReasoningSelection::Off => {
+            if request.options.disable_reasoning {
+                body["thinking"] = json!({ "type": "disabled" });
+            }
             if let Some(temperature) = request.options.temperature {
                 body["temperature"] = json!(rounded_f64(temperature));
             }
@@ -906,6 +909,45 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn request_body_reasoning_off_disable_mapping() {
+        let base = ChatRequest {
+            model: ModelSpec {
+                provider: ProviderId("anthropic".to_owned()),
+                model: "claude-test".to_owned(),
+                api: ApiKind::AnthropicMessages,
+                capabilities: ModelCapabilities::tool_chat(),
+            },
+            messages: vec![ChatMessage::User {
+                content: vec![ContentPart::Text {
+                    text: "hello".to_owned(),
+                }],
+            }],
+            tools: Vec::new(),
+            options: RequestOptions::default(),
+        };
+
+        let plain = request_body(&base).unwrap();
+        assert!(
+            plain.pointer("/thinking").is_none(),
+            "reasoning Off without the flag must keep omitting the thinking field"
+        );
+
+        let disabled = request_body(&ChatRequest {
+            options: RequestOptions {
+                disable_reasoning: true,
+                ..RequestOptions::default()
+            },
+            ..base
+        })
+        .unwrap();
+        assert_eq!(
+            disabled.pointer("/thinking"),
+            Some(&json!({ "type": "disabled" })),
+            "explicit disable must serialize to thinking disabled"
+        );
     }
 
     #[test]
