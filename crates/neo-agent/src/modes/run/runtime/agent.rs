@@ -82,6 +82,9 @@ pub(crate) fn agent_config_for_app(
             max_recent_messages: compaction.max_recent_messages,
             micro_enabled: compaction.micro_enabled,
             micro_keep_recent: compaction.micro_keep_recent,
+            snip_enabled: compaction.snip_enabled,
+            snip_min_tokens: compaction.snip_min_tokens,
+            snip_keep_recent: compaction.snip_keep_recent,
             max_rounds: compaction.max_rounds,
             max_retry_attempts: compaction.max_retry_attempts,
         });

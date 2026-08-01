@@ -236,8 +236,26 @@ pub struct RuntimeCompactionConfig {
     pub max_recent_messages: usize,
     pub micro_enabled: bool,
     pub micro_keep_recent: usize,
+    #[serde(default = "default_true")]
+    pub snip_enabled: bool,
+    #[serde(default = "default_snip_min_tokens")]
+    pub snip_min_tokens: usize,
+    #[serde(default = "default_snip_keep_recent")]
+    pub snip_keep_recent: usize,
     pub max_rounds: usize,
     pub max_retry_attempts: u32,
+}
+
+fn default_true() -> bool {
+    true
+}
+
+fn default_snip_min_tokens() -> usize {
+    1_000
+}
+
+fn default_snip_keep_recent() -> usize {
+    16
 }
 
 impl Default for RuntimeCompactionConfig {
@@ -251,6 +269,9 @@ impl Default for RuntimeCompactionConfig {
             max_recent_messages: 4,
             micro_enabled: false,
             micro_keep_recent: 20,
+            snip_enabled: true,
+            snip_min_tokens: 1_000,
+            snip_keep_recent: 16,
             max_rounds: 5,
             max_retry_attempts: 5,
         }

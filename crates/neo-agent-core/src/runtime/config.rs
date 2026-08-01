@@ -679,6 +679,14 @@ pub struct CompactionSettings {
     pub micro_enabled: bool,
     /// Number of recent messages exempt from micro compaction.
     pub micro_keep_recent: usize,
+    /// Whether stale oversized tool results are shortened to head/tail in the
+    /// model input (deterministic; the prefix is rewritten once per result,
+    /// then stable). Independent of `micro_enabled`.
+    pub snip_enabled: bool,
+    /// Minimum estimated tool-result tokens before a stale result is snipped.
+    pub snip_min_tokens: usize,
+    /// Number of newest messages exempt from snip.
+    pub snip_keep_recent: usize,
     /// Maximum compaction rounds per invocation.
     pub max_rounds: usize,
     /// Maximum retry attempts for empty/truncated summaries.
@@ -697,6 +705,9 @@ impl CompactionSettings {
             max_recent_messages: 4,
             micro_enabled: false,
             micro_keep_recent: 20,
+            snip_enabled: true,
+            snip_min_tokens: 1_000,
+            snip_keep_recent: 16,
             max_rounds: 5,
             max_retry_attempts: 5,
         }
@@ -774,6 +785,14 @@ mod tests {
         let settings = CompactionSettings::new(100_000, 4);
 
         assert!(!settings.micro_enabled);
+    }
+
+    #[test]
+    fn compaction_settings_new_enables_snip() {
+        let settings = CompactionSettings::new(100_000, 4);
+        assert!(settings.snip_enabled);
+        assert_eq!(settings.snip_min_tokens, 1_000);
+        assert_eq!(settings.snip_keep_recent, 16);
     }
 
     #[test]
