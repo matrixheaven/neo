@@ -2,7 +2,7 @@ use schemars::JsonSchema;
 use serde::Deserialize;
 use tokio::io::{AsyncBufReadExt, BufReader};
 
-use super::{Tool, ToolContext, ToolError, ToolFuture, ToolResult, parse_input, schema};
+use super::{SnipHint, Tool, ToolContext, ToolError, ToolFuture, ToolResult, parse_input, schema};
 use crate::workspace_policy::normalize_path;
 
 const MAX_LINES: usize = 1000;
@@ -84,6 +84,15 @@ impl Tool for ReadTool {
                 Err(ReadError::NotReadable(message)) => Ok(ToolResult::error(message)),
                 Err(ReadError::Missing(message)) => Ok(ToolResult::error(message)),
             }
+        })
+    }
+
+    fn snip_hint(&self) -> Option<SnipHint> {
+        Some(SnipHint {
+            head_lines: 120,
+            tail_lines: 12,
+            head_chars: 12_000,
+            tail_chars: 2_000,
         })
     }
 }
