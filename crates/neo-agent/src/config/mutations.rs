@@ -140,6 +140,76 @@ pub fn add_provider_from_catalog_entry(
     ))
 }
 
+/// Replace one provider's configured models from an already-fetched catalog entry.
+///
+/// Provider connection settings and models owned by other providers are preserved.
+pub fn refresh_provider_models_from_catalog_entry(
+    config_path: &Path,
+    provider_id: &str,
+    entry: &neo_ai::catalog::CatalogEntry,
+) -> anyhow::Result<String> {
+    let provider_config =
+        neo_ai::catalog::catalog_to_provider_config(entry, None).ok_or_else(|| {
+            anyhow::anyhow!(
+                "provider '{provider_id}' has an unsupported wire type or no usable models"
+            )
+        })?;
+    anyhow::ensure!(
+        !provider_config.models.is_empty(),
+        "provider '{provider_id}' has no usable models"
+    );
+    let count = provider_config.models.len();
+
+    update_file_config(config_path, |file_config| {
+        let current_default = file_config.default_model.as_deref();
+        let refreshes_default = current_default.is_some_and(|alias| {
+            file_config
+                .models
+                .as_ref()
+                .and_then(|models| models.get(alias))
+                .is_some_and(|model| model.provider == provider_id)
+                || provider_owns_default(provider_id, alias)
+        });
+        let current_model_id = current_default.and_then(|alias| {
+            file_config
+                .models
+                .as_ref()
+                .and_then(|models| models.get(alias))
+                .filter(|model| model.provider == provider_id)
+                .map(|model| model.model.clone())
+        });
+
+        remove_provider_models(file_config.models.as_mut(), provider_id);
+        insert_catalog_models(file_config, provider_id, &provider_config);
+
+        if refreshes_default {
+            let matching_model = current_model_id.as_deref().and_then(|model_id| {
+                provider_config
+                    .models
+                    .iter()
+                    .find(|model| model.id == model_id)
+            });
+            let fell_back = matching_model.is_none();
+            let selected_model = matching_model
+                .or_else(|| provider_config.models.first())
+                .expect("catalog conversion guarantees at least one model");
+            file_config.default_model = Some(catalog_model_alias(provider_id, &selected_model.id));
+            file_config.default_provider = Some(provider_id.to_owned());
+            if fell_back {
+                file_config.runtime.get_or_insert_default().reasoning = Some(
+                    neo_ai::automatic_reasoning_selection(&selected_model.reasoning),
+                );
+            }
+        }
+        Ok(())
+    })?;
+
+    Ok(format!(
+        "refreshed provider '{provider_id}' with {count} model{}\n",
+        if count == 1 { "" } else { "s" }
+    ))
+}
+
 /// Add or replace a custom endpoint provider and its reviewed model configs.
 pub fn add_custom_endpoint_provider(
     config_path: &Path,
@@ -529,7 +599,10 @@ mod tests {
     use neo_ai::{ApiType, catalog};
     use tempfile::TempDir;
 
-    use super::{add_provider, add_provider_from_catalog_entry, list_providers, remove_provider};
+    use super::{
+        add_provider, add_provider_from_catalog_entry, list_providers,
+        refresh_provider_models_from_catalog_entry, remove_provider,
+    };
     use crate::config::{
         AppConfig, Defaults, McpConfig, ModelConfig, ProviderConfig, RuntimeConfig, TuiConfig,
         config_process_lock_is_available, read_file_config, update_file_config,
@@ -1172,6 +1245,96 @@ model = "gpt-4.1"
         let written = fs::read_to_string(config_path).expect("read config");
         assert!(!written.contains("default_model"));
         assert!(!written.contains("[models.fast]"));
+    }
+
+    #[test]
+    fn refresh_provider_models_preserves_provider_and_surviving_default() {
+        let temp = TempDir::new().expect("temp dir");
+        let config_path = write_project_header(
+            temp.path(),
+            r#"
+default_model = "openai/custom-large"
+default_provider = "openai"
+
+[providers.openai]
+display_name = "My OpenAI"
+type = "openai"
+base_url = "https://gateway.example/v1"
+api_key = "keep-me"
+
+[providers.other]
+type = "openai"
+
+[models."openai/custom-large"]
+provider = "openai"
+model = "gpt-large"
+
+[models."openai/old"]
+provider = "openai"
+model = "old"
+
+[models."other/stays"]
+provider = "other"
+model = "stays"
+
+[runtime.reasoning]
+mode = "effort"
+effort = "high"
+"#,
+        );
+
+        let message =
+            refresh_provider_models_from_catalog_entry(&config_path, "openai", &catalog_entry())
+                .expect("refresh provider models");
+
+        assert_eq!(message, "refreshed provider 'openai' with 2 models\n");
+        let written = fs::read_to_string(config_path).expect("read config");
+        assert!(
+            written.contains("display_name = \"My OpenAI\""),
+            "{written}"
+        );
+        assert!(written.contains("base_url = \"https://gateway.example/v1\""));
+        assert!(written.contains("api_key = \"keep-me\""), "{written}");
+        assert!(written.contains("default_model = \"openai/gpt-large\""));
+        assert!(written.contains("default_provider = \"openai\""));
+        assert!(written.contains("effort = \"high\""), "{written}");
+        assert!(written.contains("[models.\"openai/gpt-small\"]"));
+        assert!(written.contains("[models.\"openai/gpt-large\"]"));
+        assert!(!written.contains("[models.\"openai/old\"]"));
+        assert!(written.contains("[models.\"other/stays\"]"));
+        assert!(written.contains("[providers.other]"));
+    }
+
+    #[test]
+    fn refresh_provider_models_falls_back_with_automatic_reasoning() {
+        let temp = TempDir::new().expect("temp dir");
+        let config_path = write_project_header(
+            temp.path(),
+            r#"
+default_model = "openai/removed"
+default_provider = "openai"
+
+[providers.openai]
+type = "openai_response"
+
+[models."openai/removed"]
+provider = "openai"
+model = "removed"
+
+[runtime.reasoning]
+mode = "effort"
+effort = "max"
+"#,
+        );
+
+        refresh_provider_models_from_catalog_entry(&config_path, "openai", &catalog_entry())
+            .expect("refresh provider models");
+
+        let written = fs::read_to_string(config_path).expect("read config");
+        assert!(written.contains("default_model = \"openai/gpt-large\""));
+        assert!(written.contains("default_provider = \"openai\""));
+        assert!(written.contains("effort = \"medium\""), "{written}");
+        assert!(!written.contains("effort = \"max\""), "{written}");
     }
 
     #[test]

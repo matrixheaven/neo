@@ -110,12 +110,13 @@ impl NeoChromeState {
         state.result()
     }
 
-    #[must_use]
-    pub fn provider_manager_action(&self) -> Option<crate::dialogs::ProviderManagerAction> {
-        let OverlayKind::ProviderManager(state) = &self.focused_overlay()?.kind else {
+    pub fn take_provider_manager_action(
+        &mut self,
+    ) -> Option<crate::dialogs::ProviderManagerAction> {
+        let OverlayKind::ProviderManager(state) = &mut self.focused_overlay_mut()?.kind else {
             return None;
         };
-        state.action()
+        state.take_action()
     }
 
     #[must_use]

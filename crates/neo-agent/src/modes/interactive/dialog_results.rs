@@ -37,8 +37,8 @@ impl InteractiveController {
     }
 
     pub(super) async fn process_provider_dialog_result(&mut self) -> bool {
-        if self.tui.chrome_mut().provider_manager_action().is_some() {
-            self.handle_provider_manager_action();
+        if let Some(action) = self.tui.chrome_mut().take_provider_manager_action() {
+            self.handle_provider_manager_action(action);
         } else if self.tui.chrome_mut().workspace_manager_action().is_some() {
             self.handle_workspace_manager_action();
         } else if self.tui.chrome_mut().mcp_manager_action().is_some() {
@@ -169,12 +169,11 @@ impl InteractiveController {
         }
     }
 
-    /// Handle a `ProviderManager` action (Add / `DeleteSource` / Close).
-    pub(super) fn handle_provider_manager_action(&mut self) {
-        let action = self.tui.chrome_mut().provider_manager_action();
-        let Some(action) = action else {
-            return;
-        };
+    /// Handle a provider manager action.
+    pub(super) fn handle_provider_manager_action(
+        &mut self,
+        action: neo_tui::dialogs::ProviderManagerAction,
+    ) {
         match action {
             neo_tui::dialogs::ProviderManagerAction::Close => {
                 self.tui.chrome_mut().close_focused_overlay();
@@ -186,6 +185,9 @@ impl InteractiveController {
             neo_tui::dialogs::ProviderManagerAction::DeleteSource(ids) => {
                 self.tui.chrome_mut().close_focused_overlay();
                 self.delete_provider_sources(&ids);
+            }
+            neo_tui::dialogs::ProviderManagerAction::Refresh(provider_id) => {
+                self.start_provider_model_refresh(provider_id);
             }
         }
     }

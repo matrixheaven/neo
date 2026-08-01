@@ -29,6 +29,7 @@ use neo_tui::{
 use tokio::sync::oneshot;
 use tracing_subscriber::prelude::*;
 
+use super::catalog_fetch::{CatalogFetchCompletion, CatalogFetchSource, PendingCatalogRefresh};
 use super::git_status::{
     count_untracked_changes, git_status_label_with_program, parse_git_numstat,
     parse_git_status_porcelain, parse_git_untracked_files_z,
@@ -1891,6 +1892,132 @@ async fn empty_async_polls_report_no_visible_change() {
     assert!(!controller.poll_pending_custom_endpoint_fetch().await);
     assert!(!controller.poll_pending_custom_endpoint_test().await);
     assert!(!controller.poll_pending_mcp_probe().await);
+}
+
+#[tokio::test]
+async fn provider_refresh_completion_reloads_config_and_keeps_dialog_open() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let config_path = temp.path().join(".neo/config.toml");
+    fs::create_dir_all(config_path.parent().expect("config parent")).expect("create config dir");
+    fs::write(
+        &config_path,
+        r#"
+default_model = "openai/old"
+default_provider = "openai"
+
+[providers.openai]
+type = "openai_response"
+api_key = "keep-me"
+
+[models."openai/old"]
+provider = "openai"
+model = "old"
+"#,
+    )
+    .expect("write config");
+    let config = crate::config::AppConfig::load(crate::config::ConfigOverrides {
+        config_path: Some(config_path.clone()),
+        project_dir: Some(temp.path().to_path_buf()),
+        ..crate::config::ConfigOverrides::default()
+    })
+    .expect("load config");
+    let mut controller = controller_for_config(&config);
+    controller.open_provider_picker();
+
+    let entry: neo_ai::catalog::CatalogEntry = serde_json::from_value(serde_json::json!({
+        "id": "openai",
+        "name": "OpenAI",
+        "api": "https://api.openai.test/v1",
+        "type": "openai_response",
+        "models": {
+            "gpt-new": {
+                "id": "gpt-new",
+                "name": "GPT New",
+                "tool_call": true,
+                "reasoning": false
+            }
+        }
+    }))
+    .expect("catalog entry");
+    let catalog = BTreeMap::from([("openai".to_owned(), entry)]);
+    let handle = tokio::spawn(async move { Ok(catalog) });
+    while !handle.is_finished() {
+        tokio::task::yield_now().await;
+    }
+    controller.pending_catalog_fetch = Some(PendingCatalogFetch {
+        source: CatalogFetchSource::Known,
+        handle,
+        completion: CatalogFetchCompletion::Refresh(PendingCatalogRefresh {
+            provider_id: "openai".to_owned(),
+            config_path: config_path.clone(),
+        }),
+    });
+    controller
+        .tui
+        .chrome_mut()
+        .set_custom_working_label(Some("Refreshing provider openai...".to_owned()));
+
+    assert!(controller.poll_pending_catalog_fetch().await);
+
+    let written = fs::read_to_string(&config_path).expect("read refreshed config");
+    assert!(written.contains("api_key = \"keep-me\""), "{written}");
+    assert!(written.contains("[models.\"openai/gpt-new\"]"));
+    assert!(!written.contains("[models.\"openai/old\"]"));
+    assert_eq!(
+        controller
+            .local_config
+            .as_ref()
+            .expect("reloaded config")
+            .default_model,
+        "openai/gpt-new"
+    );
+    assert_eq!(
+        controller
+            .active_model
+            .as_ref()
+            .map(|model| model.alias.as_str()),
+        Some("openai/gpt-new")
+    );
+    assert_eq!(controller.chrome().model_label(), "openai/gpt-new");
+    assert_eq!(
+        controller.current_reasoning,
+        neo_ai::ReasoningSelection::Off
+    );
+    assert!(transcript_has_status(
+        &controller,
+        "refreshed provider 'openai' with 1 model"
+    ));
+    assert!(controller.chrome().working_label().is_none());
+    assert!(matches!(
+        controller
+            .chrome()
+            .focused_overlay()
+            .map(|overlay| &overlay.kind),
+        Some(OverlayKind::ProviderManager(_))
+    ));
+
+    let (_hold_sender, receiver) = oneshot::channel::<()>();
+    controller.pending_catalog_fetch = Some(PendingCatalogFetch {
+        source: CatalogFetchSource::Known,
+        handle: tokio::spawn(async move {
+            let _ = receiver.await;
+            Ok(BTreeMap::new())
+        }),
+        completion: CatalogFetchCompletion::Browse,
+    });
+    controller.start_provider_model_refresh("openai".to_owned());
+    assert!(matches!(
+        controller
+            .pending_catalog_fetch
+            .as_ref()
+            .map(|pending| &pending.completion),
+        Some(CatalogFetchCompletion::Browse)
+    ));
+    assert!(transcript_has_status(
+        &controller,
+        "Provider refresh is already running"
+    ));
+    controller.abort_pending_catalog_fetch();
 }
 
 #[tokio::test]

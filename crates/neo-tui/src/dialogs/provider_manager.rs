@@ -37,6 +37,8 @@ pub enum ProviderManagerAction {
     Add,
     /// User confirmed deletion of a source and all its providers.
     DeleteSource(Vec<String>),
+    /// User requested a model refresh for one provider.
+    Refresh(String),
     /// User chose to close the dialog.
     Close,
 }
@@ -69,7 +71,7 @@ struct ConfirmState {
 }
 
 const ADD_ROW_LABEL: &str = "[ Add New Platform ]";
-const HEADER_HINT: &str = "↑↓ navigate · D delete · Enter add · Esc close";
+const HEADER_HINT: &str = "↑↓ navigate · R refresh · D delete · Enter add · Esc close";
 
 impl ProviderManagerState {
     /// Create a new provider manager with the given options.
@@ -239,11 +241,13 @@ impl ProviderManagerState {
     }
 
     fn handle_insert(&mut self, character: char) -> InputResult {
-        if matches!(character, 'd' | 'D') {
-            self.arm_delete();
-            InputResult::Handled
-        } else {
-            InputResult::Ignored
+        match character {
+            'r' | 'R' => self.refresh_selected_provider(),
+            'd' | 'D' => {
+                self.arm_delete();
+                InputResult::Handled
+            }
+            _ => InputResult::Ignored,
         }
     }
 
@@ -293,10 +297,20 @@ impl ProviderManagerState {
         InputResult::Cancelled
     }
 
-    /// Return the action selected by the user, if any.
-    #[must_use]
-    pub fn action(&self) -> Option<ProviderManagerAction> {
-        self.action.clone()
+    /// Consume the action selected by the user, if any.
+    pub fn take_action(&mut self) -> Option<ProviderManagerAction> {
+        self.action.take()
+    }
+
+    fn refresh_selected_provider(&mut self) -> InputResult {
+        let Some(Row::Source { provider_ids, .. }) = self.rows.get(self.selected_index) else {
+            return InputResult::Handled;
+        };
+        let [provider_id] = provider_ids.as_slice() else {
+            return InputResult::Handled;
+        };
+        self.action = Some(ProviderManagerAction::Refresh(provider_id.clone()));
+        InputResult::Submitted
     }
 
     fn move_up(&mut self) {
@@ -539,7 +553,7 @@ mod tests {
         let visible = visible_lines(&state, 80);
         let joined = visible.join("\n");
         assert!(
-            joined.contains("↑↓ navigate · D delete · Enter add · Esc close"),
+            joined.contains("↑↓ navigate · R refresh · D delete · Enter add · Esc close"),
             "hint missing: {joined}"
         );
     }
@@ -576,7 +590,7 @@ mod tests {
         let result = state.handle_input(&InputEvent::Insert('Y'));
         assert_eq!(result, InputResult::Submitted);
         assert_eq!(
-            state.action(),
+            state.action.clone(),
             Some(ProviderManagerAction::DeleteSource(vec![
                 "openai".to_owned()
             ]))
@@ -590,7 +604,7 @@ mod tests {
         state.handle_input(&InputEvent::Insert('D'));
         let result = state.handle_input(&InputEvent::Insert('n'));
         assert_eq!(result, InputResult::Handled);
-        assert!(state.action().is_none());
+        assert!(state.action.is_none());
         assert!(state.confirm.is_none());
 
         let visible = visible_lines(&state, 60);
@@ -615,7 +629,7 @@ mod tests {
         state.handle_input(&InputEvent::Action(KeybindingAction::SelectDown));
         let result = state.handle_input(&InputEvent::Submit);
         assert_eq!(result, InputResult::Submitted);
-        assert_eq!(state.action(), Some(ProviderManagerAction::Add));
+        assert_eq!(state.action, Some(ProviderManagerAction::Add));
     }
 
     #[test]
@@ -623,7 +637,7 @@ mod tests {
         let mut state = manager(vec![source("OpenAI", &["openai"])], None);
         let result = state.handle_input(&InputEvent::Submit);
         assert_eq!(result, InputResult::Handled);
-        assert!(state.action().is_none());
+        assert!(state.action.is_none());
     }
 
     #[test]
@@ -631,7 +645,7 @@ mod tests {
         let mut state = manager(vec![source("OpenAI", &["openai"])], None);
         let result = state.handle_input(&InputEvent::Cancel);
         assert_eq!(result, InputResult::Cancelled);
-        assert_eq!(state.action(), Some(ProviderManagerAction::Close));
+        assert_eq!(state.action, Some(ProviderManagerAction::Close));
     }
 
     #[test]
@@ -641,7 +655,39 @@ mod tests {
         let result = state.handle_input(&InputEvent::Cancel);
         assert_eq!(result, InputResult::Handled);
         assert!(state.confirm.is_none());
-        assert!(state.action().is_none());
+        assert!(state.action.is_none());
+    }
+
+    #[test]
+    fn r_refreshes_selected_provider_but_not_add_or_confirmation() {
+        for key in ['r', 'R'] {
+            let mut state = manager(vec![source("OpenAI", &["openai"])], None);
+            assert_eq!(
+                state.handle_input(&InputEvent::Insert(key)),
+                InputResult::Submitted
+            );
+            assert_eq!(
+                state.take_action(),
+                Some(ProviderManagerAction::Refresh("openai".to_owned()))
+            );
+        }
+
+        let mut add = manager(vec![source("OpenAI", &["openai"])], None);
+        add.handle_input(&InputEvent::Action(KeybindingAction::SelectDown));
+        assert_eq!(
+            add.handle_input(&InputEvent::Insert('R')),
+            InputResult::Handled
+        );
+        assert!(add.take_action().is_none());
+
+        let mut confirming = manager(vec![source("OpenAI", &["openai"])], None);
+        confirming.handle_input(&InputEvent::Insert('D'));
+        assert_eq!(
+            confirming.handle_input(&InputEvent::Insert('R')),
+            InputResult::Ignored
+        );
+        assert!(confirming.take_action().is_none());
+        assert!(confirming.confirm.is_some());
     }
 
     #[test]

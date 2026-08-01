@@ -32,10 +32,21 @@ pub(super) struct PendingCatalogAdd {
     pub(super) config_path: PathBuf,
 }
 
+pub(super) struct PendingCatalogRefresh {
+    pub(super) provider_id: String,
+    pub(super) config_path: PathBuf,
+}
+
+pub(super) enum CatalogFetchCompletion {
+    Browse,
+    Add(PendingCatalogAdd),
+    Refresh(PendingCatalogRefresh),
+}
+
 pub(super) struct PendingCatalogFetch {
     pub(super) source: CatalogFetchSource,
     pub(super) handle: tokio::task::JoinHandle<Result<CatalogEntries, neo_ai::error::AiError>>,
-    pub(super) pending_add: Option<PendingCatalogAdd>,
+    pub(super) completion: CatalogFetchCompletion,
 }
 
 /// Build choice-picker items from a fetched catalog.
@@ -83,7 +94,30 @@ impl InteractiveController {
         self.set_pending_catalog_fetch(PendingCatalogFetch {
             source: CatalogFetchSource::Known,
             handle,
-            pending_add: None,
+            completion: CatalogFetchCompletion::Browse,
+        });
+    }
+
+    pub(super) fn start_provider_model_refresh(&mut self, provider_id: String) {
+        if self.pending_catalog_fetch.is_some() {
+            self.push_status("Provider refresh is already running");
+            return;
+        }
+        let Some(config_path) = self.config_path() else {
+            self.push_status("No config available");
+            return;
+        };
+        self.tui
+            .chrome_mut()
+            .set_custom_working_label(Some(format!("Refreshing provider {provider_id}...")));
+        let handle = tokio::spawn(async move { neo_ai::catalog::fetch_catalog().await });
+        self.set_pending_catalog_fetch(PendingCatalogFetch {
+            source: CatalogFetchSource::Known,
+            handle,
+            completion: CatalogFetchCompletion::Refresh(PendingCatalogRefresh {
+                provider_id,
+                config_path,
+            }),
         });
     }
 
@@ -170,7 +204,7 @@ impl InteractiveController {
         self.set_pending_catalog_fetch(PendingCatalogFetch {
             source: CatalogFetchSource::Known,
             handle,
-            pending_add: Some(PendingCatalogAdd {
+            completion: CatalogFetchCompletion::Add(PendingCatalogAdd {
                 provider_id,
                 api_key: Some(key.to_owned()),
                 config_path,
@@ -200,7 +234,7 @@ impl InteractiveController {
                 self.set_pending_catalog_fetch(PendingCatalogFetch {
                     source: CatalogFetchSource::Custom(source),
                     handle,
-                    pending_add: None,
+                    completion: CatalogFetchCompletion::Browse,
                 });
             }
             CustomRegistryImportResult::Cancelled => {}
@@ -219,45 +253,63 @@ impl InteractiveController {
         }
         self.tui.chrome_mut().set_custom_working_label(None);
         match pending.handle.await {
-            Ok(Ok(catalog)) => {
-                // API-key submit path: write the provider into config and report.
-                if let Some(add) = pending.pending_add {
-                    match catalog.get(&add.provider_id) {
+            Ok(Ok(catalog)) => match pending.completion {
+                CatalogFetchCompletion::Browse => {
+                    let items = catalog_choice_items(&catalog);
+                    if items.is_empty() {
+                        self.push_status("No providers found in catalog.");
+                        return true;
+                    }
+                    self.open_catalog_fetch_result(pending.source, catalog, items);
+                }
+                CatalogFetchCompletion::Add(add) => match catalog.get(&add.provider_id) {
+                    Some(entry) => {
+                        match crate::config::mutations::add_provider_from_catalog_entry(
+                            &add.config_path,
+                            &add.provider_id,
+                            entry,
+                            add.api_key.as_deref(),
+                            None,
+                        ) {
+                            Ok(message) => {
+                                self.push_status(message);
+                                self.refresh_config();
+                            }
+                            Err(error) => {
+                                self.push_status(format!("Error: Failed to add provider: {error}"))
+                            }
+                        }
+                    }
+                    None => self.push_status(format!(
+                        "Error: provider '{}' not found in models.dev catalog",
+                        add.provider_id
+                    )),
+                },
+                CatalogFetchCompletion::Refresh(refresh) => {
+                    match catalog.get(&refresh.provider_id) {
                         Some(entry) => {
-                            match crate::config::mutations::add_provider_from_catalog_entry(
-                                &add.config_path,
-                                &add.provider_id,
+                            match crate::config::mutations::refresh_provider_models_from_catalog_entry(
+                                &refresh.config_path,
+                                &refresh.provider_id,
                                 entry,
-                                add.api_key.as_deref(),
-                                None,
                             ) {
                                 Ok(message) => {
                                     self.push_status(message);
                                     self.refresh_config();
+                                    self.select_reloaded_default_model();
                                 }
-                                Err(error) => {
-                                    self.push_status(format!(
-                                        "Error: Failed to add provider: {error}"
-                                    ));
-                                }
+                                Err(error) => self.push_status(format!(
+                                    "Error: Failed to refresh provider: {error}"
+                                )),
                             }
                         }
-                        None => {
-                            self.push_status(format!(
-                                "Error: provider '{}' not found in models.dev catalog",
-                                add.provider_id
-                            ));
-                        }
+                        None => self.push_status(format!(
+                            "Error: provider '{}' not found in models.dev catalog",
+                            refresh.provider_id
+                        )),
                     }
-                    return true;
                 }
-                let items = catalog_choice_items(&catalog);
-                if items.is_empty() {
-                    self.push_status("No providers found in catalog.");
-                    return true;
-                }
-                self.open_catalog_fetch_result(pending.source, catalog, items);
-            }
+            },
             Ok(Err(error)) => {
                 self.push_status(format!("Error: Failed to fetch catalog: {error}"));
             }

@@ -30,7 +30,7 @@ impl ReasoningPolicy {
     pub fn resolve_for_model(self, model: &ModelSpec) -> ReasoningSelection {
         match self {
             Self::Off => ReasoningSelection::Off,
-            Self::Auto => auto_selection(&model.capabilities.reasoning),
+            Self::Auto => automatic_reasoning_selection(&model.capabilities.reasoning),
             Self::Minimal => effort_selection(ReasoningEffort::minimal()),
             Self::Low => effort_selection(ReasoningEffort::low()),
             Self::Medium => effort_selection(ReasoningEffort::medium()),
@@ -41,7 +41,9 @@ impl ReasoningPolicy {
     }
 }
 
-fn auto_selection(capability: &ReasoningCapability) -> ReasoningSelection {
+/// Choose Neo's default reasoning selection for one model capability.
+#[must_use]
+pub fn automatic_reasoning_selection(capability: &ReasoningCapability) -> ReasoningSelection {
     match capability {
         ReasoningCapability::None => ReasoningSelection::Off,
         ReasoningCapability::Toggle { .. } => ReasoningSelection::On,

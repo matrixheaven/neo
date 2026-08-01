@@ -1199,6 +1199,32 @@ impl InteractiveController {
         }
     }
 
+    fn select_reloaded_default_model(&mut self) {
+        let Some(config) = self.local_config.as_ref() else {
+            return;
+        };
+        let alias = config.default_model.clone();
+        let reasoning = config.runtime.reasoning.clone();
+        let selected_model = match SelectedModel::from_alias(
+            &alias,
+            self.local_config.as_ref(),
+            &self.model_items,
+        ) {
+            Ok(model) => model,
+            Err(error) => {
+                tracing::warn!("failed to select refreshed default model: {error}");
+                return;
+            }
+        };
+        self.tui.chrome_mut().set_model_label(alias);
+        self.tui
+            .chrome_mut()
+            .set_context_window(selected_model.max_context_tokens.map(ContextWindow::new));
+        self.active_model = Some(selected_model);
+        self.set_current_reasoning(reasoning);
+        self.refresh_workflow_dispatch_model();
+    }
+
     fn refresh_workflow_dispatch_model(&self) {
         let session_directory = self.active_session_directory();
         let Some(base_config) = self.local_config.as_ref() else {
