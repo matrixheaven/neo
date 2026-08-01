@@ -1079,7 +1079,7 @@ fn delegate_to_group_replacement_preserves_progressive_fact_identity() {
 }
 
 #[test]
-fn delegate_swarm_terminal_block_keeps_each_child_tools_and_result_together() {
+fn delegate_swarm_terminal_block_uses_one_row_per_child() {
     let mut pane = TranscriptPane::new(120, 24);
     let mut first = agent_snapshot("swarm-first", AgentLifecycleState::Running);
     let mut second = agent_snapshot("swarm-second", AgentLifecycleState::Running);
@@ -1133,20 +1133,12 @@ fn delegate_swarm_terminal_block_keeps_each_child_tools_and_result_together() {
         .lines
         .iter()
         .map(|line| strip_ansi(line))
-        .collect::<Vec<_>>()
-        .join("\n");
-    let header = history.find("DelegateSwarm").expect("parent header");
-    let first = history.find("swarm-first").expect("first child row");
-    let second = history.find("swarm-second").expect("second child row");
-    let tool = history.find("Used Bash").expect("retained tool");
-    let first_result = history.find("swarm first result").expect("first result");
-    let second_result = history.find("swarm second result").expect("second result");
-    assert!(
-        header < first
-            && first < first_result
-            && first_result < second
-            && second < tool
-            && tool < second_result,
-        "history:\n{history}"
-    );
+        .collect::<Vec<_>>();
+    assert_eq!(history.len(), 3, "history:\n{}", history.join("\n"));
+    assert!(history[0].contains("DelegateSwarm"), "{history:#?}");
+    assert!(history[1].contains("swarm-first"), "{history:#?}");
+    assert!(history[1].contains("swarm first result"), "{history:#?}");
+    assert!(history[2].contains("swarm-second"), "{history:#?}");
+    assert!(history[2].contains("swarm second result"), "{history:#?}");
+    assert!(!history.iter().any(|line| line.contains("Used Bash")));
 }

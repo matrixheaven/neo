@@ -156,3 +156,16 @@
 - delegate-family-terminal-child-grouping
 - Blocked on: none for the scoped commit.
 - Next step: run final focused verification, store the resolved error, then stage and commit the four task files.
+
+## Checkpoint Update
+
+- Current todo: restore the compact DelegateSwarm terminal identity.
+- Active slice: implementation and focused verification.
+- Completed todos:
+- User approved the compact terminal design: parent header plus exactly one collapsed row per child.
+- Reused the existing Swarm child-row renderer and omitted terminal scheduling and duplicate completion rows.
+- Kept full child tools and results in the existing expanded and review surfaces.
+- Evidence refs:
+- delegate-swarm-compact-terminal-history
+- Blocked on: none for the scoped commit.
+- Next step: run final formatting and diff checks, store completion context, then commit the scoped files.

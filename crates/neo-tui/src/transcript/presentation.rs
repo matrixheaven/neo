@@ -678,14 +678,20 @@ fn render_delegate_family_terminal(
     options: TranscriptRenderOptions<'_>,
 ) -> Option<Vec<String>> {
     let entry = transcript.entries().get(index)?;
+    if let TranscriptEntry::DelegateSwarm { component } = entry {
+        let mut lines = component
+            .terminal_summary(options.width, options.theme)
+            .into_iter()
+            .map(|line| line.to_ansi())
+            .collect::<Vec<_>>();
+        super::pane::trim_ansi_transcript_block(&mut lines);
+        return Some(lines);
+    }
     let summary = match entry {
         TranscriptEntry::Delegate { component } => {
             component.terminal_summary(options.width, options.theme)
         }
         TranscriptEntry::DelegateGroup { component } => {
-            component.terminal_summary(options.width, options.theme)
-        }
-        TranscriptEntry::DelegateSwarm { component } => {
             component.terminal_summary(options.width, options.theme)
         }
         _ => return None,

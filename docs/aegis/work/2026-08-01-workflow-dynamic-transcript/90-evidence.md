@@ -87,5 +87,13 @@ Focused evidence is recorded below.
 - Artifact key: delegate-family-terminal-child-grouping
 - Type: focused-test
 - Source: exact DelegateGroup, DelegateSwarm, and single-Delegate terminal history tests
-- Summary: Parent history commits once; each child header is followed by its own tools and result before the next child, while live card rendering and the single-Delegate order remain unchanged.
+- Summary: Parent history commits once; DelegateGroup keeps each child header with its tools and result. The later compact-Swarm decision supersedes the Swarm portion of this evidence, while live card rendering and the single-Delegate order remain unchanged.
+- Verifier: root
+
+## EvidenceBundleDraft
+
+- Artifact key: delegate-swarm-compact-terminal-history
+- Type: focused-test
+- Source: exact compact terminal, expanded detail, non-workflow layout, and bounded single-commit tests
+- Summary: Five exact tests passed. Terminal DelegateSwarm history contains one parent header and exactly one collapsed row per child; seven-child collapsed rendering remains one row each; expanded child tools and results remain available; other Delegate-family layouts are unchanged; final history commits once and never replays after acknowledgement.
 - Verifier: root

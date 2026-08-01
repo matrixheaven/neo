@@ -75,6 +75,9 @@ existing non-workflow paths remain unchanged.
 - preserve all non-workflow Delegate, DelegateGroup, and DelegateSwarm layouts
   and expansion behavior; commit each complete card once so its header remains
   before its child activity;
+- project a terminal non-workflow DelegateSwarm as its existing collapsed
+  header plus exactly one row per child; omit the duplicate scheduling and
+  completion rows while keeping full child activity available in review;
 - preserve ordinary non-workflow tool grouping and output expansion;
 - preserve approval and question entries as independent blocking input owners;
 - preserve explicit `Ctrl+O` review and Task Browser alternate-screen behavior;

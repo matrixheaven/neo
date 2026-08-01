@@ -134,8 +134,11 @@ impl SwarmCardComponent {
 
     #[must_use]
     pub fn terminal_summary(&self, width: usize, theme: &TuiTheme) -> Vec<Line> {
+        let child_progress = self.child_progresses();
         let progress = self.weighted_progress();
-        vec![self.render_header(width, theme, progress)]
+        let mut lines = vec![self.render_header(width, theme, progress)];
+        lines.extend(self.render_child_rows(width, theme, &child_progress));
+        lines
     }
 
     fn render_header(&self, width: usize, theme: &TuiTheme, progress: f32) -> Line {

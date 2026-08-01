@@ -785,7 +785,7 @@ fn every_live_entry_family_is_bounded_and_commits_once() {
     );
     assert_ordered_canonical_commit(&mut pane, 100, 24, &["Delegate", "Used Read"]);
 
-    // -- DelegateSwarm: one complete card keeps header before children -----
+    // -- DelegateSwarm: one compact terminal card keeps one row per child --
     let mut pane = TranscriptPane::new(100, 24);
     pane.transcript_mut().upsert_delegate_swarm(running_swarm(
         "swarm-1",
@@ -804,12 +804,7 @@ fn every_live_entry_family_is_bounded_and_commits_once() {
             vec![done_tool("read-s", "Read", "s.rs")],
         )],
     ));
-    assert_ordered_canonical_commit(
-        &mut pane,
-        100,
-        24,
-        &["DelegateSwarm", "child-a", "Used Read"],
-    );
+    assert_ordered_canonical_commit(&mut pane, 100, 24, &["DelegateSwarm", "child-a"]);
 
     // -- Workflow: mutable state stays live until one terminal commit -------
     let mut pane = TranscriptPane::new(100, 24);
