@@ -31,6 +31,8 @@ import hashlib
 import http.client
 import json
 import os
+import re
+import shutil
 import threading
 import time
 import uuid
@@ -1160,13 +1162,41 @@ class ProbeHandler(BaseHTTPRequestHandler):
             )
 
     def do_GET(self) -> None:
-        self._respond(404, "not found")
+        store: RunStore = self.server.store
+        path = urlsplit(self.path).path
+        if path in ("/", ""):
+            page = Path(__file__).resolve().with_name("cache_probe.html")
+            try:
+                payload = page.read_bytes()
+            except OSError:
+                self._respond(500, "dashboard page missing")
+                return
+            self._send_bytes(200, "text/html; charset=utf-8", payload, no_store=True)
+        elif path == "/report.json":
+            try:
+                payload = store.report_path.read_bytes()
+            except OSError:
+                payload = b"{}"
+            self._send_bytes(200, "application/json", payload, no_store=True)
+        else:
+            self._respond(404, "not found")
 
     def _respond(self, status: int, message: str) -> None:
         payload = (message + "\n").encode("utf-8")
+        self._send_bytes(status, "text/plain; charset=utf-8", payload)
+
+    def _send_bytes(
+        self,
+        status: int,
+        content_type: str,
+        payload: bytes,
+        no_store: bool = False,
+    ) -> None:
         self.send_response(status)
-        self.send_header("Content-Type", "text/plain; charset=utf-8")
+        self.send_header("Content-Type", content_type)
         self.send_header("Content-Length", str(len(payload)))
+        if no_store:
+            self.send_header("Cache-Control", "no-store")
         self.send_header("Connection", "close")
         self.end_headers()
         self.wfile.write(payload)
@@ -1405,7 +1435,7 @@ def _analysis_self_test() -> None:
 
     print("self-test: atomic report and top-level keys")
     root = Path("target/cache-probe/self-test")
-    store = RunStore(root, upstream_base="https://fixture.invalid", run_id="analysis-test")
+    store = _fresh_store(root, "analysis-test", upstream_base="https://fixture.invalid")
     first = store.begin_request("/messages", base)
     store.finish_request(first["request_id"], usage, {"status": 200})
     second = store.begin_request("/messages", appended)
@@ -1486,10 +1516,10 @@ def _proxy_self_test() -> None:
     fixture_thread.start()
 
     root = Path("target/cache-probe/self-test")
-    store = RunStore(
+    store = _fresh_store(
         root,
+        "proxy-test",
         upstream_base=f"http://127.0.0.1:{fixture.server_address[1]}",
-        run_id="proxy-test",
     )
     probe = ProbeServer(
         ("127.0.0.1", 0), store, f"http://127.0.0.1:{fixture.server_address[1]}"
@@ -1651,10 +1681,240 @@ def _proxy_self_test() -> None:
     fixture.server_close()
 
 
+PAGE_ELEMENT_IDS = (
+    "run-status",
+    "summary-grid",
+    "sequence-filter",
+    "request-table",
+    "request-detail",
+    "cache-chart",
+    "tool-chart",
+    "last-updated",
+    "error-banner",
+)
+
+
+def _fresh_store(root: Path, run_id: str, upstream_base: Optional[str] = None) -> RunStore:
+    """Create a RunStore with a deterministic run directory, replacing any
+    previous self-test run with the same id."""
+    run_dir = root / run_id
+    if run_dir.exists():
+        shutil.rmtree(run_dir)
+    return RunStore(root, upstream_base=upstream_base, run_id=run_id)
+
+
+def _populate_fixture(store: RunStore) -> None:
+    """Deterministic multi-sequence population for the dashboard: two
+    sequences, stable and changed requests, an unknown first request, tool
+    attribution, merged usage, and one numeric spike."""
+    system = [{"type": "text", "text": "fixture system"}]
+    tools = [{"name": "read", "input_schema": {"type": "object"}}]
+    usage_a = {
+        "input_tokens": 100,
+        "cache_read_input_tokens": 0,
+        "cache_creation_input_tokens": 50,
+        "output_tokens": 10,
+    }
+    usage_b = {
+        "input_tokens": 100,
+        "cache_read_input_tokens": 90,
+        "cache_creation_input_tokens": 10,
+        "output_tokens": 8,
+    }
+    usage_spike = {
+        "input_tokens": 100,
+        "cache_read_input_tokens": 0,
+        "cache_creation_input_tokens": 5000,
+        "output_tokens": 8,
+    }
+
+    def request(
+        messages: list[object],
+        usage: dict[str, object],
+        system_override: Optional[list[object]] = None,
+    ) -> None:
+        body = {
+            "model": "deepseek-chat",
+            "system": system_override if system_override is not None else system,
+            "tools": tools,
+            "messages": messages,
+            "metadata": {"user_id": "ui"},
+        }
+        record = store.begin_request("/messages", body)
+        store.finish_request(record["request_id"], usage, {"status": 200})
+
+    # Sequence 1: unknown, then four stable, one tool-active, then a spike.
+    request(
+        [{"role": "user", "content": [{"type": "text", "text": "alpha first"}]}],
+        usage_a,
+    )
+    messages = [
+        {"role": "user", "content": [{"type": "text", "text": "alpha first"}]},
+        {"role": "assistant", "content": [{"type": "text", "text": "assist 0"}]},
+    ]
+    request(messages, usage_b)
+    messages = messages + [
+        {
+            "role": "assistant",
+            "content": [
+                {"type": "tool_use", "id": "tu-1", "name": "read", "input": {"path": "x"}}
+            ],
+        },
+        {
+            "role": "user",
+            "content": [
+                {
+                    "type": "tool_result",
+                    "tool_use_id": "tu-1",
+                    "content": [{"type": "text", "text": "file body"}],
+                }
+            ],
+        },
+    ]
+    request(messages, usage_b)
+    messages = messages + [
+        {"role": "assistant", "content": [{"type": "text", "text": "assist 1"}]}
+    ]
+    request(messages, usage_b)
+    messages = messages + [
+        {"role": "user", "content": [{"type": "text", "text": "alpha turn 1"}]}
+    ]
+    request(messages, usage_b)
+    messages = messages + [
+        {"role": "assistant", "content": [{"type": "text", "text": "assist 2"}]}
+    ]
+    request(messages, usage_b)
+    messages = messages + [
+        {"role": "user", "content": [{"type": "text", "text": "alpha turn 2"}]}
+    ]
+    request(messages, usage_spike)
+
+    # Sequence 2: unknown, then a system change reported as changed.
+    request(
+        [{"role": "user", "content": [{"type": "text", "text": "beta first"}]}],
+        usage_a,
+    )
+    request(
+        [
+            {"role": "user", "content": [{"type": "text", "text": "beta first"}]},
+            {"role": "assistant", "content": [{"type": "text", "text": "beta assist"}]},
+        ],
+        usage_b,
+        system_override=[{"type": "text", "text": "fixture system v2"}],
+    )
+
+
+def _page_self_test() -> None:
+    """Deterministic dashboard assertions (Task 3 scope)."""
+    print("self-test: dashboard endpoints and page constraints")
+    root = Path("target/cache-probe/self-test")
+    store = _fresh_store(root, "page-test", upstream_base="fixture://self-test")
+    _populate_fixture(store)
+    server = ProbeServer(("127.0.0.1", 0), store, "fixture://self-test")
+    server.daemon_threads = True
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    port = server.server_address[1]
+
+    connection = http.client.HTTPConnection("127.0.0.1", port)
+    connection.request("GET", "/")
+    response = connection.getresponse()
+    html = response.read()
+    _check(response.status == 200, "page endpoint returns 200")
+    _check(
+        response.getheader("Content-Type") == "text/html; charset=utf-8",
+        "page content type",
+    )
+    _check(
+        response.getheader("Cache-Control") == "no-store",
+        "page no-store cache header",
+    )
+    connection.close()
+
+    connection = http.client.HTTPConnection("127.0.0.1", port)
+    connection.request("GET", "/report.json")
+    response = connection.getresponse()
+    report_bytes = response.read()
+    _check(response.status == 200, "report endpoint returns 200")
+    _check(
+        response.getheader("Content-Type") == "application/json",
+        "report content type",
+    )
+    connection.close()
+
+    print("self-test: committed HTML constraints")
+    page = html.decode("utf-8")
+    for element_id in PAGE_ELEMENT_IDS:
+        _check(f'id="{element_id}"' in page, f"element id present: {element_id}")
+    _check("http://" not in page and "https://" not in page, "no external URLs")
+    _check("innerHTML" not in page, "no innerHTML assignment")
+    _check(
+        re.search(r"<script[^>]+src=", page) is None,
+        "no external script sources",
+    )
+    _check(
+        re.search(r"<link[^>]+stylesheet", page) is None,
+        "no stylesheet links",
+    )
+
+    print("self-test: fixture report contents")
+    report = json.loads(report_bytes.decode("utf-8"))
+    _check(len(report["sequences"]) >= 2, "at least two sequences")
+    statuses = {r["prefix_status"] for r in report["requests"]}
+    _check("stable" in statuses, "one stable request")
+    _check("changed" in statuses, "one changed request")
+    _check("unknown" in statuses, "one unknown request")
+    _check(len(report["tool_summary"]) >= 1, "tool summary data present")
+    tool_names = {t["tool"] for t in report["tool_summary"]}
+    _check("read" in tool_names, "tool attribution names the read tool")
+    merged = [
+        r
+        for r in report["requests"]
+        if r["usage"] is not None and r["usage"].get("output_tokens") == 8
+    ]
+    _check(len(merged) >= 2, "merged usage present across requests")
+    spikes = [r for r in report["requests"] if r["spike"]]
+    _check(len(spikes) == 1, "exactly one numeric spike in the fixture")
+    changed = [r for r in report["requests"] if r["prefix_status"] == "changed"][0]
+    _check(
+        changed["first_changed_path"] == "$.system[0].text",
+        "changed request reports its first changed path",
+    )
+    tool_active = [r for r in report["requests"] if r["tools"] == ["read"]]
+    _check(len(tool_active) == 1, "tool-active request is attributed")
+
+    print("self-test: page carries no request content or credential")
+    _check(b"alpha turn 2" not in html, "no request content in the page")
+    _check(b"self-test-secret" not in html, "no credential in the page")
+    _check(b"x-api-key" not in html and b"authorization" not in html, "no header names")
+
+    server.shutdown()
+    server.server_close()
+
+
 def run_self_test() -> None:
     _analysis_self_test()
     _proxy_self_test()
-    print("cache probe self-test: proxy ok")
+    _page_self_test()
+    print("cache probe self-test: ok")
+
+
+def run_self_test_server(port: int, output_root: Path) -> int:
+    """Populate the deterministic fixture and serve the completed report and
+    dashboard until interrupted. Never contacts a real upstream."""
+    store = _fresh_store(output_root, "server-test", upstream_base="fixture://self-test")
+    _populate_fixture(store)
+    server = ProbeServer(("127.0.0.1", port), store, "fixture://self-test")
+    print(f"Dashboard: http://127.0.0.1:{port}/", flush=True)
+    print(f"Report: {store.report_path.resolve()}", flush=True)
+    print("Fixture data only; press Ctrl+C to stop.", flush=True)
+    try:
+        server.serve_forever()
+    except KeyboardInterrupt:
+        pass
+    finally:
+        server.server_close()
+    return 0
 
 
 def main(argv: Optional[list[str]] = None) -> int:
@@ -1690,11 +1950,22 @@ def main(argv: Optional[list[str]] = None) -> int:
         action="store_true",
         help="run the deterministic self-test and exit",
     )
+    parser.add_argument(
+        "--self-test-server",
+        action="store_true",
+        help=(
+            "populate the deterministic fixture and keep the dashboard "
+            "running on --port (test-only; never contacts the real upstream)"
+        ),
+    )
     args = parser.parse_args(argv)
 
     if args.self_test:
         run_self_test()
         return 0
+
+    if args.self_test_server:
+        return run_self_test_server(args.port, args.output_root)
 
     if not args.upstream_base:
         parser.error("--upstream-base is required in runtime mode")
@@ -1706,18 +1977,19 @@ def main(argv: Optional[list[str]] = None) -> int:
     print(
         "WARNING: request bodies are stored locally under the output "
         "directory and may contain private source code, prompts, and tool "
-        "output."
+        "output.",
+        flush=True,
     )
     store = RunStore(args.output_root, upstream_base=args.upstream_base)
     server = ProbeServer(
         ("127.0.0.1", args.port), store, args.upstream_base
     )
     host, port = server.server_address[:2]
-    print(f"Local proxy: http://127.0.0.1:{port}")
-    print(f"Dashboard: http://127.0.0.1:{port}/")
-    print(f"Report: {store.report_path}")
-    print(f"Requests: {store.requests_dir}")
-    print("Press Ctrl+C to stop.")
+    print(f"Local proxy: http://127.0.0.1:{port}", flush=True)
+    print(f"Dashboard: http://127.0.0.1:{port}/", flush=True)
+    print(f"Report: {store.report_path.resolve()}", flush=True)
+    print(f"Requests: {store.requests_dir.resolve()}", flush=True)
+    print("Press Ctrl+C to stop.", flush=True)
     try:
         server.serve_forever()
     except KeyboardInterrupt:

@@ -1,0 +1,740 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>DeepSeek Cache Probe</title>
+<style>
+  :root {
+    --bg: #f7f7f5;
+    --panel: #ffffff;
+    --ink: #1c1c1a;
+    --muted: #6b6b66;
+    --line: #dcdcd6;
+    --stable-bg: #e3f2e4;
+    --stable-ink: #1e5c24;
+    --changed-bg: #fdeede;
+    --changed-ink: #8a4b0f;
+    --unknown-bg: #ececea;
+    --unknown-ink: #4d4d48;
+    --spike-bg: #fde3e3;
+    --spike-ink: #9c2222;
+    --accent: #2f5fa8;
+  }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; padding: 0; }
+  body {
+    background: var(--bg);
+    color: var(--ink);
+    font: 14px/1.45 system-ui, -apple-system, "Segoe UI", sans-serif;
+    padding: 16px;
+  }
+  header { display: flex; flex-wrap: wrap; gap: 8px 24px; align-items: baseline; }
+  h1 { font-size: 18px; margin: 0; }
+  h2 { font-size: 15px; margin: 18px 0 8px; }
+  #run-status { font-weight: 600; }
+  #last-updated { color: var(--muted); font-size: 12px; }
+  #error-banner {
+    margin: 10px 0;
+    padding: 8px 12px;
+    border: 1px solid #d9a0a0;
+    border-radius: 6px;
+    background: #fdf0f0;
+    color: var(--spike-ink);
+  }
+  #summary-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+    gap: 8px;
+    margin: 14px 0;
+  }
+  .summary-card {
+    background: var(--panel);
+    border: 1px solid var(--line);
+    border-radius: 8px;
+    padding: 10px 12px;
+  }
+  .summary-card .label { color: var(--muted); font-size: 11px; text-transform: uppercase; letter-spacing: .04em; }
+  .summary-card .value { font-size: 18px; font-weight: 700; margin-top: 2px; }
+  .filters { margin: 10px 0; display: flex; align-items: center; gap: 8px; }
+  .table-wrap { overflow-x: auto; background: var(--panel); border: 1px solid var(--line); border-radius: 8px; }
+  table { border-collapse: collapse; width: 100%; min-width: 860px; }
+  th, td { text-align: left; padding: 7px 10px; border-bottom: 1px solid var(--line); white-space: nowrap; }
+  th { background: #f0f0ec; font-size: 12px; color: var(--muted); }
+  tr.row { cursor: pointer; }
+  tr.row:hover { background: #f2f5fa; }
+  tr.row.selected { background: #e4ecf7; outline: 2px solid var(--accent); outline-offset: -2px; }
+  .badge {
+    display: inline-block;
+    padding: 1px 8px;
+    border-radius: 999px;
+    font-size: 12px;
+    font-weight: 600;
+  }
+  .badge.stable { background: var(--stable-bg); color: var(--stable-ink); }
+  .badge.changed { background: var(--changed-bg); color: var(--changed-ink); }
+  .badge.unknown { background: var(--unknown-bg); color: var(--unknown-ink); }
+  .badge.missing { background: #f3f0dc; color: #6b5c12; }
+  .badge.spike { background: var(--spike-bg); color: var(--spike-ink); }
+  .num { font-variant-numeric: tabular-nums; }
+  #request-detail {
+    background: var(--panel);
+    border: 1px solid var(--line);
+    border-radius: 8px;
+    padding: 12px 14px;
+    margin-top: 12px;
+  }
+  #request-detail dl { display: grid; grid-template-columns: max-content 1fr; gap: 4px 16px; margin: 8px 0; }
+  #request-detail dt { color: var(--muted); }
+  #request-detail dd { margin: 0; }
+  #request-detail ul { margin: 4px 0 8px; padding-left: 20px; }
+  .detail-section { margin-top: 10px; }
+  .detail-section h3 { font-size: 13px; margin: 0 0 4px; }
+  .muted { color: var(--muted); }
+  .charts { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
+  canvas {
+    width: 100%;
+    height: 220px;
+    background: var(--panel);
+    border: 1px solid var(--line);
+    border-radius: 8px;
+  }
+  .chart-note { color: var(--muted); font-size: 12px; margin-top: 4px; }
+  @media (max-width: 760px) {
+    .charts { grid-template-columns: 1fr; }
+    body { padding: 10px; }
+  }
+</style>
+</head>
+<body>
+<header>
+  <h1>DeepSeek Cache Probe</h1>
+  <div id="run-status">no report yet</div>
+  <div id="last-updated"></div>
+</header>
+<div id="error-banner" hidden></div>
+
+<section id="summary-grid"></section>
+
+<div class="filters">
+  <label for="sequence-filter">Sequence:</label>
+  <select id="sequence-filter">
+    <option value="all">all</option>
+  </select>
+</div>
+
+<div class="table-wrap">
+  <table id="request-table">
+    <thead>
+      <tr>
+        <th>#</th>
+        <th>Seq</th>
+        <th>Model</th>
+        <th>Prefix</th>
+        <th>Usage</th>
+        <th>Spike</th>
+        <th>Tools</th>
+        <th>Appended B</th>
+        <th>Cache hit</th>
+        <th>New cache</th>
+        <th>Non-hit</th>
+        <th>Duration</th>
+      </tr>
+    </thead>
+    <tbody></tbody>
+  </table>
+</div>
+
+<section id="request-detail">
+  <p class="muted">Select a request row to see its details.</p>
+</section>
+
+<section>
+  <h2>Cache trend</h2>
+  <canvas id="cache-chart" aria-label="Cache hit and non-hit tokens by request"></canvas>
+  <p class="chart-note">Cache-hit and non-hit tokens per request for the selected sequence.</p>
+</section>
+
+<section>
+  <h2>Per-tool non-hit variance</h2>
+  <canvas id="tool-chart" aria-label="Average non-hit tokens and variance by tool"></canvas>
+  <p class="chart-note">Average non-hit tokens and variance grouped by tool name.</p>
+</section>
+
+<script>
+"use strict";
+(function () {
+  var report = null;
+  var selectedId = null;
+  var timer = null;
+
+  var IDS = [
+    "run-status", "summary-grid", "sequence-filter", "request-table",
+    "request-detail", "cache-chart", "tool-chart", "last-updated",
+    "error-banner"
+  ];
+
+  function el(id) {
+    return document.getElementById(id);
+  }
+
+  function clearNode(node) {
+    while (node.firstChild) {
+      node.removeChild(node.firstChild);
+    }
+  }
+
+  function textNode(text) {
+    return document.createTextNode(String(text));
+  }
+
+  function fmt(value) {
+    if (value === null || value === undefined) {
+      return "\u2014";
+    }
+    if (typeof value === "number") {
+      return value.toLocaleString("en-US");
+    }
+    return String(value);
+  }
+
+  function badge(text, kind) {
+    var span = document.createElement("span");
+    span.className = "badge " + kind;
+    span.appendChild(textNode(text));
+    return span;
+  }
+
+  function renderSummary() {
+    var grid = el("summary-grid");
+    clearNode(grid);
+    var s = report.summary;
+    var cards = [
+      ["Requests", fmt(s.request_count)],
+      ["Sequences", fmt(s.sequence_count)],
+      ["Stable rate", s.stable_prefix_rate === null ? "\u2014" : (s.stable_prefix_rate * 100).toFixed(1) + "%"],
+      ["Stable", fmt(s.stable_prefix_count)],
+      ["Changed", fmt(s.changed_prefix_count)],
+      ["Unknown", fmt(s.unknown_prefix_count)],
+      ["Cache hit", fmt(s.cache_hit_tokens)],
+      ["New cache", fmt(s.new_cache_tokens)],
+      ["Non-hit", fmt(s.non_hit_tokens)],
+      ["Missing usage", fmt(s.missing_usage_count)],
+      ["Spikes", fmt(s.numeric_spike_count)]
+    ];
+    cards.forEach(function (pair) {
+      var card = document.createElement("div");
+      card.className = "summary-card";
+      var label = document.createElement("div");
+      label.className = "label";
+      label.appendChild(textNode(pair[0]));
+      var value = document.createElement("div");
+      value.className = "value";
+      value.appendChild(textNode(pair[1]));
+      card.appendChild(label);
+      card.appendChild(value);
+      grid.appendChild(card);
+    });
+  }
+
+  function renderFilter() {
+    var select = el("sequence-filter");
+    var current = select.value || "all";
+    clearNode(select);
+    var all = document.createElement("option");
+    all.value = "all";
+    all.appendChild(textNode("all"));
+    select.appendChild(all);
+    report.sequences.forEach(function (seq) {
+      var option = document.createElement("option");
+      option.value = seq.sequence_id;
+      option.appendChild(textNode(seq.sequence_id));
+      select.appendChild(option);
+    });
+    select.value = current;
+  }
+
+  function filteredRequests() {
+    var filter = el("sequence-filter").value;
+    var list = report.requests.slice();
+    if (filter !== "all") {
+      list = list.filter(function (r) {
+        return r.sequence_id === filter;
+      });
+    }
+    return list;
+  }
+
+  function prefixBadge(request) {
+    return badge(request.prefix_status, request.prefix_status);
+  }
+
+  function usageBadge(request) {
+    if (request.usage_status === "missing") {
+      return badge("missing usage", "missing");
+    }
+    return badge("ok", "stable");
+  }
+
+  function spikeBadge(request) {
+    if (request.spike) {
+      return badge("spike", "spike");
+    }
+    return badge("no", "unknown");
+  }
+
+  function toolsText(request) {
+    if (!request.tools || request.tools.length === 0) {
+      return "\u2014";
+    }
+    return request.tools.join(", ");
+  }
+
+  function renderTable() {
+    var tbody = document.querySelector("#request-table tbody");
+    clearNode(tbody);
+    var requests = filteredRequests();
+    requests.forEach(function (request) {
+      var tr = document.createElement("tr");
+      tr.className = "row";
+      if (String(request.request_id) === String(selectedId)) {
+        tr.classList.add("selected");
+      }
+      tr.addEventListener("click", function () {
+        selectedId = request.request_id;
+        renderTable();
+        renderDetail();
+      });
+      var derived = request.derived || {};
+      var increment = request.increment || {};
+      var cells = [
+        String(request.request_id),
+        request.sequence_id,
+        request.model === null ? "\u2014" : String(request.model),
+        null,
+        null,
+        null,
+        toolsText(request),
+        fmt(increment.canonical_bytes),
+        fmt(derived.cache_hit_tokens),
+        fmt(derived.new_cache_tokens),
+        fmt(derived.non_hit_tokens),
+        fmt(request.duration_ms)
+      ];
+      cells.forEach(function (cell, index) {
+        var td = document.createElement("td");
+        if (index === 3) {
+          td.appendChild(prefixBadge(request));
+        } else if (index === 4) {
+          td.appendChild(usageBadge(request));
+        } else if (index === 5) {
+          td.appendChild(spikeBadge(request));
+        } else {
+          td.className = index >= 7 ? "num" : "";
+          td.appendChild(textNode(cell));
+        }
+        tr.appendChild(td);
+      });
+      tbody.appendChild(tr);
+    });
+  }
+
+  function kvRow(dt, dd) {
+    var dtEl = document.createElement("dt");
+    dtEl.appendChild(textNode(dt));
+    var ddEl = document.createElement("dd");
+    ddEl.appendChild(dd instanceof Node ? dd : textNode(dd));
+    return [dtEl, ddEl];
+  }
+
+  function renderDetail() {
+    var panel = el("request-detail");
+    clearNode(panel);
+    var request = null;
+    report.requests.forEach(function (r) {
+      if (String(r.request_id) === String(selectedId)) {
+        request = r;
+      }
+    });
+    if (!request) {
+      var hint = document.createElement("p");
+      hint.className = "muted";
+      hint.appendChild(textNode("Select a request row to see its details."));
+      panel.appendChild(hint);
+      return;
+    }
+
+    var title = document.createElement("h2");
+    title.appendChild(textNode("Request " + request.request_id));
+    panel.appendChild(title);
+
+    var dl = document.createElement("dl");
+    var derived = request.derived || {};
+    var forward = request.forward || {};
+    var rows = [
+      ["Sequence", request.sequence_id + " (position " + request.sequence_position + ")"],
+      ["Predecessor", request.predecessor_id === null ? "\u2014" : String(request.predecessor_id) + " (" + request.predecessor_kind + ")"],
+      ["Prefix status", request.prefix_status],
+      ["First changed path", request.first_changed_path === null ? "\u2014" : String(request.first_changed_path)],
+      ["Common prefix length", fmt(request.common_prefix_length)],
+      ["Model", request.model === null ? "\u2014" : String(request.model)],
+      ["User id", request.user_id === null ? "\u2014" : String(request.user_id)],
+      ["Duration", fmt(request.duration_ms) + " ms"],
+      ["Usage status", request.usage_status],
+      ["Cache hit", fmt(derived.cache_hit_tokens)],
+      ["New cache", fmt(derived.new_cache_tokens)],
+      ["Non-hit", fmt(derived.non_hit_tokens)],
+      ["Observed input", fmt(derived.observed_input_tokens)],
+      ["Spike", request.spike ? "yes" : "no"],
+      ["Hash", String(request.hash).slice(0, 16) + "\u2026"],
+      ["Predecessor hash", request.predecessor_hash === null ? "\u2014" : String(request.predecessor_hash).slice(0, 16) + "\u2026"],
+      ["Request file", request.request_path],
+      ["Forward status", forward.status === null || forward.status === undefined ? "\u2014" : String(forward.status)],
+      ["Forward bytes", fmt(forward.bytes)],
+      ["Forward error", forward.error === null || forward.error === undefined ? "\u2014" : String(forward.error)]
+    ];
+    rows.forEach(function (pair) {
+      var cells = kvRow(pair[0], pair[1]);
+      dl.appendChild(cells[0]);
+      dl.appendChild(cells[1]);
+    });
+    panel.appendChild(dl);
+
+    if (request.changed_paths && request.changed_paths.length > 0) {
+      var section = document.createElement("div");
+      section.className = "detail-section";
+      var heading = document.createElement("h3");
+      heading.appendChild(textNode("Changed paths (" + request.changed_paths.length + ")"));
+      section.appendChild(heading);
+      var list = document.createElement("ul");
+      request.changed_paths.forEach(function (path) {
+        var item = document.createElement("li");
+        item.appendChild(textNode(path));
+        list.appendChild(item);
+      });
+      section.appendChild(list);
+      panel.appendChild(section);
+    }
+
+    var increment = request.increment;
+    if (increment) {
+      var incSection = document.createElement("div");
+      incSection.className = "detail-section";
+      var incHeading = document.createElement("h3");
+      incHeading.appendChild(textNode("Appended increment"));
+      incSection.appendChild(incHeading);
+      var incDl = document.createElement("dl");
+      var blockParts = [];
+      Object.keys(increment.blocks || {}).sort().forEach(function (kind) {
+        blockParts.push(kind + ": " + increment.blocks[kind]);
+      });
+      [
+        ["Appended messages", fmt(increment.appended_messages)],
+        ["Canonical bytes", fmt(increment.canonical_bytes)],
+        ["Blocks", blockParts.length ? blockParts.join(", ") : "\u2014"],
+        ["User text bytes", fmt(increment.user_text_bytes)],
+        ["Assistant text bytes", fmt(increment.assistant_text_bytes)],
+        ["Thinking bytes", fmt(increment.thinking_bytes)],
+        ["Tool uses", increment.tool_uses.length ? increment.tool_uses.map(function (t) {
+          return String(t.id) + " (" + t.name + ")";
+        }).join(", ") : "\u2014"],
+        ["Tool results", increment.tool_results.length ? increment.tool_results.map(function (t) {
+          return String(t.id) + " (" + t.bytes + " B)";
+        }).join(", ") : "\u2014"],
+        ["Attributed tools", request.tools.length ? request.tools.join(", ") : "\u2014"]
+      ].forEach(function (pair) {
+        var cells = kvRow(pair[0], pair[1]);
+        incDl.appendChild(cells[0]);
+        incDl.appendChild(cells[1]);
+      });
+      incSection.appendChild(incDl);
+      panel.appendChild(incSection);
+    }
+
+    if (request.usage) {
+      var usageSection = document.createElement("div");
+      usageSection.className = "detail-section";
+      var usageHeading = document.createElement("h3");
+      usageHeading.appendChild(textNode("Raw usage"));
+      usageSection.appendChild(usageHeading);
+      var usageDl = document.createElement("dl");
+      Object.keys(request.usage).sort().forEach(function (key) {
+        var cells = kvRow(key, fmt(request.usage[key]));
+        usageDl.appendChild(cells[0]);
+        usageDl.appendChild(cells[1]);
+      });
+      usageSection.appendChild(usageDl);
+      panel.appendChild(usageSection);
+    }
+
+    var stats = request.stats;
+    if (stats) {
+      var statsSection = document.createElement("div");
+      statsSection.className = "detail-section";
+      var statsHeading = document.createElement("h3");
+      statsHeading.appendChild(textNode("Sequence statistics (running)"));
+      statsSection.appendChild(statsHeading);
+      var statsDl = document.createElement("dl");
+      [
+        ["Samples", fmt(stats.n)],
+        ["Mean non-hit", fmt(stats.mean === null ? null : Number(stats.mean).toFixed(1))],
+        ["Variance", fmt(stats.variance === null ? null : Number(stats.variance).toFixed(1))],
+        ["Stdev", fmt(stats.stdev === null ? null : Number(stats.stdev).toFixed(1))]
+      ].forEach(function (pair) {
+        var cells = kvRow(pair[0], pair[1]);
+        statsDl.appendChild(cells[0]);
+        statsDl.appendChild(cells[1]);
+      });
+      statsSection.appendChild(statsDl);
+      panel.appendChild(statsSection);
+    }
+
+    var warnings = report.warnings.filter(function (w) {
+      return w.request_id === request.request_id;
+    });
+    if (warnings.length > 0) {
+      var warnSection = document.createElement("div");
+      warnSection.className = "detail-section";
+      var warnHeading = document.createElement("h3");
+      warnHeading.appendChild(textNode("Warnings"));
+      warnSection.appendChild(warnHeading);
+      var warnList = document.createElement("ul");
+      warnings.forEach(function (w) {
+        var item = document.createElement("li");
+        item.appendChild(textNode(w.message));
+        warnList.appendChild(item);
+      });
+      warnSection.appendChild(warnList);
+      panel.appendChild(warnSection);
+    }
+  }
+
+  function drawCacheChart() {
+    var canvas = el("cache-chart");
+    var requests = filteredRequests();
+    var dpr = window.devicePixelRatio || 1;
+    var width = canvas.clientWidth || 600;
+    var height = canvas.clientHeight || 220;
+    canvas.width = Math.round(width * dpr);
+    canvas.height = Math.round(height * dpr);
+    var ctx = canvas.getContext("2d");
+    ctx.scale(dpr, dpr);
+    ctx.clearRect(0, 0, width, height);
+
+    var padL = 64;
+    var padR = 12;
+    var padT = 10;
+    var padB = 24;
+
+    function series(key) {
+      return requests.map(function (r) {
+        var derived = r.derived || {};
+        return { x: r.request_id, y: derived[key] === null || derived[key] === undefined ? null : Number(derived[key]) };
+      });
+    }
+    var hit = series("cache_hit_tokens");
+    var nonHit = series("non_hit_tokens");
+    var allPoints = hit.concat(nonHit).filter(function (p) { return p.y !== null; });
+    if (allPoints.length === 0) {
+      ctx.fillStyle = "#6b6b66";
+      ctx.font = "13px system-ui, sans-serif";
+      ctx.fillText("no usage data to chart", padL, (height + 14) / 2);
+      return;
+    }
+    var maxY = 0;
+    allPoints.forEach(function (p) { if (p.y > maxY) { maxY = p.y; } });
+    var minX = Infinity;
+    var maxX = -Infinity;
+    allPoints.forEach(function (p) {
+      if (p.x < minX) { minX = p.x; }
+      if (p.x > maxX) { maxX = p.x; }
+    });
+    if (minX === maxX) { maxX = minX + 1; }
+
+    function px(p) {
+      return [
+        padL + (p.x - minX) / (maxX - minX) * (width - padL - padR),
+        height - padB - p.y / maxY * (height - padT - padB)
+      ];
+    }
+
+    ctx.strokeStyle = "#dcdcd6";
+    ctx.beginPath();
+    ctx.moveTo(padL, padT);
+    ctx.lineTo(padL, height - padB);
+    ctx.lineTo(width - padR, height - padB);
+    ctx.stroke();
+
+    ctx.fillStyle = "#6b6b66";
+    ctx.font = "10px system-ui, sans-serif";
+    ctx.fillText("0", 6, height - padB + 4);
+    ctx.fillText(String(maxY), 6, padT + 4);
+
+    function drawLine(points, color) {
+      ctx.strokeStyle = color;
+      ctx.lineWidth = 2;
+      ctx.beginPath();
+      var started = false;
+      points.forEach(function (p) {
+        if (p.y === null) {
+          started = false;
+          return;
+        }
+        var coords = px(p);
+        if (!started) {
+          ctx.moveTo(coords[0], coords[1]);
+          started = true;
+        } else {
+          ctx.lineTo(coords[0], coords[1]);
+        }
+      });
+      ctx.stroke();
+    }
+    drawLine(nonHit, "#c05621");
+    drawLine(hit, "#1e7a34");
+
+    ctx.font = "11px system-ui, sans-serif";
+    ctx.fillStyle = "#c05621";
+    ctx.fillText("\u2014 non-hit", padL, padT + 10);
+    ctx.fillStyle = "#1e7a34";
+    ctx.fillText("\u2014 cache hit", padL + 90, padT + 10);
+  }
+
+  function drawToolChart() {
+    var canvas = el("tool-chart");
+    var tools = report.tool_summary;
+    var dpr = window.devicePixelRatio || 1;
+    var width = canvas.clientWidth || 600;
+    var height = canvas.clientHeight || 220;
+    canvas.width = Math.round(width * dpr);
+    canvas.height = Math.round(height * dpr);
+    var ctx = canvas.getContext("2d");
+    ctx.scale(dpr, dpr);
+    ctx.clearRect(0, 0, width, height);
+
+    var padL = 64;
+    var padR = 12;
+    var padT = 10;
+    var padB = 30;
+
+    if (!tools || tools.length === 0) {
+      ctx.fillStyle = "#6b6b66";
+      ctx.font = "13px system-ui, sans-serif";
+      ctx.fillText("no tool attribution data", padL, (height + 14) / 2);
+      return;
+    }
+
+    var maxV = 0;
+    tools.forEach(function (t) {
+      var a = t.average_non_hit_tokens === null ? 0 : Number(t.average_non_hit_tokens);
+      var v = t.variance === null ? 0 : Number(t.variance);
+      if (a > maxV) { maxV = a; }
+      if (v > maxV) { maxV = v; }
+    });
+    if (maxV === 0) { maxV = 1; }
+
+    var slot = (width - padL - padR) / tools.length;
+    var barW = Math.max(4, Math.min(24, slot * 0.32));
+
+    ctx.strokeStyle = "#dcdcd6";
+    ctx.beginPath();
+    ctx.moveTo(padL, padT);
+    ctx.lineTo(padL, height - padB);
+    ctx.lineTo(width - padR, height - padB);
+    ctx.stroke();
+    ctx.fillStyle = "#6b6b66";
+    ctx.font = "10px system-ui, sans-serif";
+    ctx.fillText("0", 6, height - padB + 4);
+    ctx.fillText(String(maxV), 6, padT + 4);
+
+    tools.forEach(function (t, index) {
+      var centerX = padL + slot * index + slot / 2;
+      var avg = t.average_non_hit_tokens === null ? 0 : Number(t.average_non_hit_tokens);
+      var variance = t.variance === null ? 0 : Number(t.variance);
+      var avgH = avg / maxV * (height - padT - padB);
+      var varH = variance / maxV * (height - padT - padB);
+
+      ctx.fillStyle = "#c05621";
+      ctx.fillRect(centerX - barW - 2, height - padB - avgH, barW, avgH);
+      ctx.fillStyle = "#2f5fa8";
+      ctx.fillRect(centerX + 2, height - padB - varH, barW, varH);
+
+      ctx.fillStyle = "#1c1c1a";
+      ctx.font = "10px system-ui, sans-serif";
+      var label = String(t.tool);
+      if (label.length > 14) { label = label.slice(0, 13) + "\u2026"; }
+      ctx.fillText(label, centerX - barW, height - padB + 14);
+    });
+
+    ctx.font = "11px system-ui, sans-serif";
+    ctx.fillStyle = "#c05621";
+    ctx.fillText("\u2588 avg non-hit", padL, padT + 10);
+    ctx.fillStyle = "#2f5fa8";
+    ctx.fillText("\u2588 variance", padL + 110, padT + 10);
+  }
+
+  function render() {
+    if (!report) {
+      return;
+    }
+    el("run-status").textContent = "run " + report.run.id;
+    el("last-updated").textContent = "updated " + new Date().toLocaleTimeString("en-US");
+    renderSummary();
+    renderFilter();
+    renderTable();
+    renderDetail();
+    drawCacheChart();
+    drawToolChart();
+  }
+
+  function showError(message) {
+    var banner = el("error-banner");
+    banner.hidden = false;
+    clearNode(banner);
+    banner.appendChild(textNode(message));
+  }
+
+  function poll() {
+    fetch("/report.json", { cache: "no-store" })
+      .then(function (response) {
+        if (!response.ok) {
+          throw new Error("report fetch failed: " + response.status);
+        }
+        return response.json();
+      })
+      .then(function (data) {
+        el("error-banner").hidden = true;
+        report = data;
+        render();
+      })
+      .catch(function (error) {
+        showError("Report unavailable: " + error.message + ". Showing the last valid report.");
+      });
+  }
+
+  el("sequence-filter").addEventListener("change", function () {
+    renderTable();
+    renderDetail();
+    drawCacheChart();
+  });
+
+  document.addEventListener("visibilitychange", function () {
+    if (document.hidden) {
+      if (timer !== null) {
+        clearInterval(timer);
+        timer = null;
+      }
+    } else {
+      poll();
+      if (timer === null) {
+        timer = setInterval(poll, 1000);
+      }
+    }
+  });
+
+  poll();
+  timer = setInterval(poll, 1000);
+})();
+</script>
+</body>
+</html>
