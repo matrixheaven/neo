@@ -71,19 +71,18 @@ schema/list projection, inline and artifact-backed TaskOutput pages,
 multi-page journal continuity, artifact cursor continuity with JSON-escaped
 content, UTF-8-safe summaries, final-result artifact promotion, configuration
 limit alignment, TUI human summaries, and the built-in authoring skill.
-`rustfmt --check --edition 2024`, the touched-file diff check, and
-`cargo build -p neo-agent --bin neo` passed. Repository-wide `git diff --check`
-still reports a trailing space in the unrelated user edit
-`docs/en/configuration/config-files.md`.
+`rustfmt --check --edition 2024`, `git diff --check`, and
+`cargo build -p neo-agent --bin neo` passed at that checkpoint.
 
 ## 2026-08-01 update: provider-safe child output
 
 The Workflow AI usability repair landed (design
-`docs/aegis/specs/2026-08-01-workflow-ai-usability-repair-design.md`; commits
-`c4051804`, `3ade380c`, `b6dfb8bc`, `9ef9a7b`, `ea7d7b8`, and this docs
-commit `docs(workflow): record provider-safe child output`). It corrects the
-earlier assumption that the `openai` compatible wire could serialize a native
-JSON Schema response hint (ADR-0008 amendment, 2026-08-01).
+`docs/aegis/specs/2026-08-01-workflow-ai-usability-repair-design.md`;
+implementation and correction commits `c4051804`, `3ade380c`, `b6dfb8bc`,
+`9ef9a7bc`, `ea7d7b83`, `55fde213`, `23f32ea4`, `bc27a324`, `b2a3b72f`,
+`1b618bb0`, `0942a06f`, `361147ac`, and `d0e70a77`). It corrects the earlier
+assumption that the `openai` compatible wire could serialize a native JSON
+Schema response hint (ADR-0008 amendment, 2026-08-01).
 
 Landed behavior added by the repair:
 
@@ -113,7 +112,7 @@ Exact focused verification (each names one package, one target, one filter):
 
 - `cargo nextest run -p neo-ai --lib response_format_is_omitted_for_compatible_chat_endpoints` — passed
 - `cargo nextest run -p neo-ai --lib response_format_maps_json_schema_for_responses_api` — passed
-- `cargo nextest run -p neo-agent-core --test workflow_schema workflow_delegate_failure_skips_schema_repair_and_preserves_error` — passed
+- `cargo nextest run -p neo-agent-core --test workflow_schema workflow_delegate_runtime_failure_skips_schema_repair_and_preserves_events` — passed
 - `cargo nextest run -p neo-agent-core --test workflow_schema workflow_swarm_failure_skips_schema_repair_and_preserves_error` — passed
 - `cargo nextest run -p neo-agent-core --test workflow_schema child_schema_invalid_output_gets_exactly_one_tools_disabled_repair` — passed
 - `cargo nextest run -p neo-agent-core --test workflow_schema workflow_swarm_invalid_output_gets_exactly_one_tools_disabled_repair` — passed

@@ -349,6 +349,7 @@ is deletion of the `response_format` assignment in `request_body`.
 
 **Files**
 
+- Modify: `crates/neo-agent-core/src/multi_agent/runtime.rs`
 - Modify: `crates/neo-agent-core/src/tools/delegate.rs`
 - Modify: `crates/neo-agent-core/src/workflow/runtime.rs`
 - Modify: `crates/neo-agent-core/tests/workflow_schema.rs`
@@ -360,24 +361,28 @@ causing a second request and replacing the real reason.
 
 **Change Necessity**
 
-The minimum repair is an early return at each existing schema-acceptance
-consumer. The schema validator remains unchanged and continues to own only
-successful assistant text.
+The minimum repair is to preserve accumulated child events when a non-model
+runtime error ends the stream, then return early at each existing
+schema-acceptance consumer. The schema validator remains unchanged and
+continues to own only successful assistant text.
 
 **Repair Track**
 
-- Root cause: missing successful-turn precondition.
-- Owners: `apply_child_output_schema` and
+- Root causes: missing successful-turn precondition, plus
+  `run_agent_snapshot` discarding accumulated events when the event stream
+  returns a non-model runtime error.
+- Owners: `run_agent_snapshot`, `apply_child_output_schema`, and
   `child_run_to_outcome_with_schema`.
-- Repair: bypass compilation/validation/repair when the ordinary child outcome
-  is not successful.
+- Repair: normalize a child stream error into the existing `AgentEvent::Error`
+  while retaining prior events, then bypass compilation/validation/repair when
+  the ordinary child outcome is not successful.
 - Boundary: preserve actual usage, child details, state, and original summary.
 
 **Retirement Track**
 
-- A provider error must no longer appear in `first_raw` or `repair_raw` as a
-  schema failure.
-- No schema-repair journal event may be written for a failed model turn.
+- A provider or runtime error must no longer appear in `first_raw` or
+  `repair_raw` as a schema failure.
+- No schema-repair journal event may be written for a failed child turn.
 - Do not add a new error type or fallback.
 
 **Steps**
@@ -412,46 +417,54 @@ successful assistant text.
    Do not compile the schema, write schema-repair journal events, or start a
    second model request.
 
-3. Add integration regression
-   `workflow_delegate_protocol_failure_skips_schema_repair_and_preserves_error`.
-   Use `FakeHarness::from_result_turns` with `AiError::Protocol`, set
-   `max_retries = 0`, and exercise the foreground Delegate path through its
-   normal workflow dispatch. Assert:
-
-   - exactly one child request;
-   - workflow child outcome is failed;
-   - summary contains the original protocol error;
-   - no `SchemaRepairStarted` or `SchemaRepairFinished` journal record;
-   - no `schema_error` or `strict_json_failed` replacement;
-   - observed usage and child reference fields remain truthful.
+3. In `run_agent_snapshot`, when the child event stream returns an error after
+   emitting `RunFinished(Error)`, append the existing `AgentEvent::Error` with
+   the original message and retain all prior events. Persist and project that
+   event, then finish through the normal child outcome path.
 
 4. Add integration regression
-   `workflow_swarm_protocol_failure_skips_schema_repair_and_preserves_error`.
-   Exercise `child_run_to_outcome_with_schema` through a direct workflow swarm
-   with a required item `output_schema`. Assert the same one-request,
-   original-error, zero-repair, usage, and child-detail behavior. Do not call
+   `workflow_delegate_runtime_failure_skips_schema_repair_and_preserves_events`.
+   Use two `TodoList` turns with usage and a test-only asynchronous pre-tool
+   hook that removes an empty temporary workspace after the first tool context
+   is created. The second tool context must then fail through the real
+   non-model runtime-error path. Exercise the foreground Delegate path through
+   normal workflow dispatch. Assert:
+
+   - exactly two child requests and no repair request;
+   - workflow child outcome is failed;
+   - summary contains the original runtime error;
+   - no `SchemaRepairStarted` or `SchemaRepairFinished` journal record;
+   - no `schema_error` or `strict_json_failed` replacement;
+   - usage from both requests and child reference fields remain truthful.
+
+5. Add integration regression
+   `workflow_swarm_failure_skips_schema_repair_and_preserves_error`. Use a
+   provider-reported `MessageEnd(Error)` with usage and exercise
+   `child_run_to_outcome_with_schema` through a direct workflow swarm with a
+   required item `output_schema`. Assert one request, original error,
+   zero repair, usage, and child-detail behavior. Do not call
    `accept_child_structured_output_with_repair` directly in either regression;
    that would bypass the guards being proved.
 
-5. Keep the existing successful-invalid-text repair regression unchanged except
+6. Keep the existing successful-invalid-text repair regression unchanged except
    for provider-wire expectations owned by Task 1. It must still prove exactly
    two requests and one tools-disabled repair.
 
-6. Run:
+7. Run:
 
    ```bash
-   rtk cargo nextest run -p neo-agent-core --test workflow_schema workflow_delegate_protocol_failure_skips_schema_repair_and_preserves_error
-   rtk cargo nextest run -p neo-agent-core --test workflow_schema workflow_swarm_protocol_failure_skips_schema_repair_and_preserves_error
+   rtk cargo nextest run -p neo-agent-core --test workflow_schema workflow_delegate_runtime_failure_skips_schema_repair_and_preserves_events
+   rtk cargo nextest run -p neo-agent-core --test workflow_schema workflow_swarm_failure_skips_schema_repair_and_preserves_error
    rtk cargo nextest run -p neo-agent-core --test workflow_schema child_schema_invalid_output_gets_exactly_one_tools_disabled_repair
-   rtk proxy rustfmt --check --edition 2024 crates/neo-agent-core/src/tools/delegate.rs crates/neo-agent-core/src/workflow/runtime.rs crates/neo-agent-core/tests/workflow_schema.rs
+   rtk proxy rustfmt --check --edition 2024 crates/neo-agent-core/src/multi_agent/runtime.rs crates/neo-agent-core/src/tools/delegate.rs crates/neo-agent-core/src/workflow/runtime.rs crates/neo-agent-core/tests/workflow_schema.rs
    rtk git diff --check
    ```
 
-7. View only Task 2 paths, stage, and commit:
+8. View only Task 2 paths, stage, and commit:
 
    ```bash
-   rtk git diff -- crates/neo-agent-core/src/tools/delegate.rs crates/neo-agent-core/src/workflow/runtime.rs crates/neo-agent-core/tests/workflow_schema.rs
-   rtk git add crates/neo-agent-core/src/tools/delegate.rs crates/neo-agent-core/src/workflow/runtime.rs crates/neo-agent-core/tests/workflow_schema.rs
+   rtk git diff -- crates/neo-agent-core/src/multi_agent/runtime.rs crates/neo-agent-core/src/tools/delegate.rs crates/neo-agent-core/src/workflow/runtime.rs crates/neo-agent-core/tests/workflow_schema.rs
+   rtk git add crates/neo-agent-core/src/multi_agent/runtime.rs crates/neo-agent-core/src/tools/delegate.rs crates/neo-agent-core/src/workflow/runtime.rs crates/neo-agent-core/tests/workflow_schema.rs
    rtk git commit -m "fix(workflow): preserve failed child errors"
    ```
 
