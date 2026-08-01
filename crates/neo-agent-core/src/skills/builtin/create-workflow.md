@@ -103,20 +103,21 @@ APIs that are not listed below. Do not launch workflows from workflows.
 - Read and wait for workflow task IDs with `TaskOutput`. Never pass a
   workflow ID to `WaitDelegate`.
 
-## Workflow tool arguments (for the definition fields)
+## Workflow tool arguments
 
-`validate_inline`, `validate_saved`, `save`, `run_inline`, and `run_saved` all
-take the same definition fields the host validates canonically:
-
-- `name`, `description`, ordered `phases` (`{id, description}`), exact Lua
-  `script`, `input_schema` (object, **required**), and `output_schema` (object,
-  **required**). For a workflow with no arguments use
+- `validate_inline` takes `name`, `description`, ordered `phases`
+  (`{id, description}`), exact Lua `script`, `input_schema` (object,
+  **required**), and `output_schema` (object, **required**).
+- `save` takes the same definition fields, additionally requires `scope`
+  (`user` | `project`), and accepts `replace` (default `false`).
+- `run_inline` takes the same definition fields and accepts `args` (object,
+  default `{}`).
+- `validate_saved` accepts only `name`.
+- `run_saved` accepts `name` and optional `args` (object, default `{}`).
+- For a workflow with no arguments use
   `{"type":"object","additionalProperties":false}`. For a required argument
   use, for example,
   `{"type":"object","additionalProperties":false,"required":["text"],"properties":{"text":{"type":"string"}}}`.
-- `save` additionally requires `scope` (`user` | `project`) and accepts
-  `replace` (default `false`).
-- Run actions accept `args` (object, default `{}`).
 - Every `neo.phase("id")` call must use an `id` listed in `phases`.
 
 ## Example: read-only fan-out → assemble

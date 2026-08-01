@@ -331,6 +331,8 @@ mod tests {
             "returns no value",
             "TaskOutput",
             "WaitDelegate",
+            "`validate_saved` accepts only `name`",
+            "`run_saved` accepts `name` and optional `args`",
         ] {
             assert!(
                 body_flat.contains(anchor),
@@ -342,6 +344,7 @@ mod tests {
             "may omit `input_schema` for inline",
             "catchable `neo.fail`",
             "serialize to strings",
+            "`validate_inline`, `validate_saved`, `save`, `run_inline`, and `run_saved` all take the same definition fields",
         ] {
             assert!(
                 !body_flat.contains(retired),

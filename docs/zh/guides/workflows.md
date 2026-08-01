@@ -93,8 +93,8 @@ assistant 通过 `Workflow(save)` 保存。builtin scope 不可写。
 
 ## Assistant-native workflow 路径
 
-需要 inline 编写、新建已保存定义或一次性测试/评测时，assistant 激活
-需要编写指导时可激活 `create-workflow`。对于已知的已保存 workflow，可直接使用
+需要 inline 编写、新建已保存定义或一次性测试/评测时，assistant 可在需要编写
+指导时激活 `create-workflow`。对于已知的已保存 workflow，可直接使用
 `Workflow(list|show|run_saved)`
 发现或运行。全部生命周期 action 仍由 `Workflow` 统一拥有：`list`、
 `show`、`validate_inline`、`validate_saved`、`save`、`run_inline`、
