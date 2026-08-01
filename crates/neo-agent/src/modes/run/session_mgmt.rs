@@ -3,7 +3,7 @@ use std::path::{Path, PathBuf};
 use anyhow::Context;
 use futures::StreamExt;
 use neo_agent_core::session::{SessionMetadataStore, main_agent_wire_path};
-use neo_ai::{ChatMessage, ContentPart, RequestOptions};
+use neo_ai::{ChatMessage, ChatRequest, ContentPart, ModelSpec, RequestOptions};
 
 use crate::config::{AppConfig, workspace_sessions_dir};
 
@@ -130,7 +130,7 @@ pub(super) async fn record_initial_session_title(
     else {
         return;
     };
-    if record.name.is_some() || record.title_model.is_some() {
+    if record.name.is_some() || record.title_updated_at.is_some() {
         return;
     }
 
@@ -138,7 +138,22 @@ pub(super) async fn record_initial_session_title(
     let (title, model_label) =
         match generate_session_title(config, prompt, &turn.assistant_text).await {
             Ok((title, model_label)) if !title.is_empty() => (title, Some(model_label)),
-            _ => (fallback, None),
+            Ok((_, _)) => {
+                tracing::warn!(
+                    "session {}: title generation returned an empty title; \
+                     using a prompt truncation fallback",
+                    turn.session_id
+                );
+                (fallback, None)
+            }
+            Err(error) => {
+                tracing::warn!(
+                    error = ?error,
+                    "session {}: title generation failed; using a prompt truncation fallback",
+                    turn.session_id
+                );
+                (fallback, None)
+            }
         };
     let _ = store.record_title(
         &turn.session_id,
@@ -148,15 +163,8 @@ pub(super) async fn record_initial_session_title(
     );
 }
 
-async fn generate_session_title(
-    config: &AppConfig,
-    prompt: &str,
-    assistant_text: &str,
-) -> anyhow::Result<(String, String)> {
-    let model = super::runtime::resolve_model(config)?;
-    let client = super::runtime::resolve_model_client(config, &model)?;
-    let model_label = format!("{}/{}", model.provider.0, model.model);
-    let request = neo_ai::ChatRequest {
+fn title_request(model: ModelSpec, prompt: &str, assistant_text: &str) -> ChatRequest {
+    ChatRequest {
         model,
         messages: vec![
             ChatMessage::System {
@@ -177,11 +185,23 @@ async fn generate_session_title(
         ],
         tools: Vec::new(),
         options: RequestOptions {
-            max_tokens: Some(32),
+            max_tokens: Some(512),
             temperature: Some(0.2),
+            disable_reasoning: true,
             ..RequestOptions::default()
         },
-    };
+    }
+}
+
+async fn generate_session_title(
+    config: &AppConfig,
+    prompt: &str,
+    assistant_text: &str,
+) -> anyhow::Result<(String, String)> {
+    let model = super::runtime::resolve_model(config)?;
+    let client = super::runtime::resolve_model_client(config, &model)?;
+    let model_label = format!("{}/{}", model.provider.0, model.model);
+    let request = title_request(model, prompt, assistant_text);
     let events = client.stream_chat(request).collect::<Vec<_>>().await;
     let mut title = String::new();
     for event in events {
@@ -206,4 +226,70 @@ fn one_line(text: &str, max_chars: usize) -> String {
         line.push('…');
     }
     line
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use neo_ai::types::ApiKind;
+    use neo_ai::{ModelCapabilities, ProviderId};
+
+    fn spec() -> ModelSpec {
+        ModelSpec {
+            provider: ProviderId("deepseek".to_owned()),
+            model: "deepseek-test".to_owned(),
+            api: ApiKind::AnthropicMessages,
+            capabilities: ModelCapabilities::tool_chat(),
+        }
+    }
+
+    fn text_of(message: &ChatMessage) -> String {
+        let content = match message {
+            ChatMessage::System { content } | ChatMessage::User { content } => content,
+            _ => return String::new(),
+        };
+        content
+            .iter()
+            .filter_map(|part| match part {
+                ContentPart::Text { text } => Some(text.clone()),
+                _ => None,
+            })
+            .collect::<Vec<_>>()
+            .join("")
+    }
+
+    #[test]
+    fn title_request_is_fast_and_deterministic() {
+        let request = title_request(
+            spec(),
+            "read the handoff and complete it",
+            "I completed the handoff.",
+        );
+
+        assert_eq!(request.options.max_tokens, Some(512));
+        assert_eq!(request.options.temperature, Some(0.2));
+        assert!(
+            request.options.disable_reasoning,
+            "title requests must not trigger provider reasoning"
+        );
+        assert!(request.tools.is_empty(), "title requests carry no tools");
+
+        let mut system = String::new();
+        let mut user = String::new();
+        for message in &request.messages {
+            match message {
+                ChatMessage::System { .. } => system = text_of(message),
+                ChatMessage::User { .. } => user = text_of(message),
+                _ => {}
+            }
+        }
+        assert_eq!(
+            system,
+            "Generate a concise session title. Return only the title, no quotes."
+        );
+        assert_eq!(
+            user,
+            "User prompt:\nread the handoff and complete it\n\nAssistant response:\nI completed the handoff."
+        );
+    }
 }
