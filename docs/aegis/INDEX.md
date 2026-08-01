@@ -5,6 +5,8 @@ Entries are workspace records, not authoritative runtime decisions.
 
 | Date | Kind | Path | Title |
 | --- | --- | --- | --- |
+| 2026-08-02 | spec | docs/aegis/specs/2026-08-02-session-title-generation-fix-design.md | Session Title Generation Fix Design |
+| 2026-08-02 | plan | docs/aegis/plans/2026-08-02-session-title-generation-fix.md | Session Title Generation Fix Implementation Plan |
 | 2026-08-01 | handoff | docs/aegis/handoffs/2026-08-01-workflow-ai-usability-repair.md | Implement Workflow AI Usability Repair Handoff Prompt |
 | 2026-08-01 | handoff | docs/aegis/handoffs/2026-08-01-deepseek-cache-probe.md | Implement DeepSeek Anthropic Cache Probe Handoff Prompt |
 | 2026-08-01 | plan | docs/aegis/plans/2026-08-01-workflow-ai-usability-repair.md | Neo Workflow AI Usability Repair Implementation Plan |
