@@ -45,6 +45,9 @@ from urllib.parse import urlsplit
 MAX_REQUEST_BYTES = 64 * 1024 * 1024
 MAX_DIFF_PATHS = 100
 MAX_STREAM_CHUNK = 16_384
+MAX_SSE_EVENT_BYTES = 1024 * 1024
+MAX_RESPONSE_TOOL_USES = 64
+PREVIEW_CHARS = 240
 
 HOP_BY_HOP_HEADERS = {
     "connection",
@@ -66,8 +69,8 @@ USAGE_FIELDS = (
 
 DERIVED_FIELDS = (
     "cache_hit_tokens",
-    "new_cache_tokens",
-    "non_hit_tokens",
+    "cache_creation_tokens",
+    "uncached_input_tokens",
     "observed_input_tokens",
 )
 
@@ -125,6 +128,19 @@ def json_hash(value: object) -> str:
     return hashlib.sha256(canonical_bytes(value)).hexdigest()
 
 
+def normalize_for_comparison(value: object) -> object:
+    """Remove DeepSeek-ignored cache markers from a comparison-only copy."""
+    if isinstance(value, dict):
+        return {
+            key: normalize_for_comparison(child)
+            for key, child in value.items()
+            if key != "cache_control"
+        }
+    if isinstance(value, list):
+        return [normalize_for_comparison(child) for child in value]
+    return value
+
+
 def identity_key(body: dict[str, object], route: str) -> tuple[object, ...]:
     metadata = body.get("metadata")
     user_id = metadata.get("user_id") if isinstance(metadata, dict) else None
@@ -135,13 +151,15 @@ def first_message_anchor(body: dict[str, object]) -> Optional[bytes]:
     messages = body.get("messages")
     if not isinstance(messages, list) or not messages:
         return None
-    return canonical_bytes(messages[0])
+    return canonical_bytes(normalize_for_comparison(messages[0]))
 
 
 def common_message_prefix_length(left: list[object], right: list[object]) -> int:
     length = 0
     for a, b in zip(left, right):
-        if canonical_bytes(a) != canonical_bytes(b):
+        if canonical_bytes(normalize_for_comparison(a)) != canonical_bytes(
+            normalize_for_comparison(b)
+        ):
             break
         length += 1
     return length
@@ -170,7 +188,7 @@ def select_predecessor(
     3. When no exact prefix exists, allow a mutation candidate only when
        exactly one established sequence under the same identity has the same
        non-null first-message anchor.
-    4. Otherwise return (None, None): a new sequence with unknown prefix.
+    4. Otherwise return (None, None): the first request of a new sequence.
 
     Returns (predecessor_record, kind) where kind is "exact", "mutation", or
     None.
@@ -318,6 +336,15 @@ def summarize_increment(
     user_text_bytes = 0
     assistant_text_bytes = 0
     thinking_bytes = 0
+    assistant_text_parts: list[str] = []
+    thinking_parts: list[str] = []
+
+    def preview(value: object) -> str:
+        if isinstance(value, str):
+            text = value
+        else:
+            text = canonical_bytes(value).decode("utf-8", "replace")
+        return text[:PREVIEW_CHARS]
 
     for message in tail:
         if not isinstance(message, dict):
@@ -330,6 +357,7 @@ def summarize_increment(
                 user_text_bytes += len(content.encode("utf-8"))
             else:
                 assistant_text_bytes += len(content.encode("utf-8"))
+                assistant_text_parts.append(content)
         elif isinstance(content, list):
             for block in content:
                 if not isinstance(block, dict):
@@ -343,13 +371,26 @@ def summarize_increment(
                             user_text_bytes += len(text.encode("utf-8"))
                         else:
                             assistant_text_bytes += len(text.encode("utf-8"))
+                            assistant_text_parts.append(text)
                 elif block_type == "thinking":
                     thinking = block.get("thinking")
                     if isinstance(thinking, str):
                         thinking_bytes += len(thinking.encode("utf-8"))
+                        thinking_parts.append(thinking)
                 elif block_type == "tool_use":
+                    tool_input = block.get("input")
+                    input_bytes = (
+                        canonical_bytes(tool_input) if tool_input is not None else b""
+                    )
                     tool_uses.append(
-                        {"id": block.get("id"), "name": block.get("name")}
+                        {
+                            "id": block.get("id"),
+                            "name": block.get("name"),
+                            "input_bytes": len(input_bytes),
+                            "input_summary": preview(tool_input)
+                            if tool_input is not None
+                            else "",
+                        }
                     )
                 elif block_type == "tool_result":
                     result_content = block.get("content")
@@ -357,7 +398,13 @@ def summarize_increment(
                     if result_content is not None:
                         size = len(canonical_bytes(result_content))
                     tool_results.append(
-                        {"id": block.get("tool_use_id"), "bytes": size}
+                        {
+                            "id": block.get("tool_use_id"),
+                            "bytes": size,
+                            "summary": preview(result_content)
+                            if result_content is not None
+                            else "",
+                        }
                     )
 
     return {
@@ -366,7 +413,9 @@ def summarize_increment(
         "blocks": blocks,
         "user_text_bytes": user_text_bytes,
         "assistant_text_bytes": assistant_text_bytes,
+        "assistant_text_preview": "".join(assistant_text_parts)[:PREVIEW_CHARS],
         "thinking_bytes": thinking_bytes,
+        "thinking_preview": "".join(thinking_parts)[:PREVIEW_CHARS],
         "tool_uses": tool_uses,
         "tool_results": tool_results,
     }
@@ -438,8 +487,12 @@ def merge_usage_event(
     return result
 
 
+def has_usage_data(usage: Optional[dict[str, object]]) -> bool:
+    return bool(usage) and any(usage.get(field) is not None for field in USAGE_FIELDS)
+
+
 def derive_usage(usage: Optional[dict[str, object]]) -> dict[str, Optional[object]]:
-    """Derive the four approved values from raw usage fields.
+    """Derive the DeepSeek usage values from raw usage fields.
 
     Missing raw fields leave the derived value null; zero values are never
     invented.
@@ -447,20 +500,23 @@ def derive_usage(usage: Optional[dict[str, object]]) -> dict[str, Optional[objec
     if not usage:
         return {field: None for field in DERIVED_FIELDS}
 
-    def add(a: object, b: object) -> Optional[object]:
-        if a is None or b is None:
-            return None
-        return a + b
+    def number(field: str) -> Optional[object]:
+        value = usage.get(field)
+        return value if isinstance(value, (int, float)) and not isinstance(value, bool) else None
 
+    input_tokens = number("input_tokens")
+    cache_read = number("cache_read_input_tokens")
+    cache_creation = number("cache_creation_input_tokens")
     return {
-        "cache_hit_tokens": usage.get("cache_read_input_tokens"),
-        "new_cache_tokens": usage.get("cache_creation_input_tokens"),
-        "non_hit_tokens": add(
-            usage.get("input_tokens"), usage.get("cache_creation_input_tokens")
-        ),
-        "observed_input_tokens": add(
-            add(usage.get("input_tokens"), usage.get("cache_read_input_tokens")),
-            usage.get("cache_creation_input_tokens"),
+        "cache_hit_tokens": cache_read,
+        "cache_creation_tokens": cache_creation,
+        "uncached_input_tokens": input_tokens,
+        "observed_input_tokens": (
+            input_tokens + cache_read + cache_creation
+            if input_tokens is not None
+            and cache_read is not None
+            and cache_creation is not None
+            else None
         ),
     }
 
@@ -519,7 +575,7 @@ def analyze_request(
         "sequence_position": sequence_position,
         "predecessor_id": None,
         "predecessor_kind": None,
-        "prefix_status": "unknown",
+        "prefix_status": "first-req",
         "first_changed_path": None,
         "changed_paths": [],
         "common_prefix_length": None,
@@ -544,7 +600,10 @@ def analyze_request(
 
     if kind == "exact":
         truncated = truncate_to_predecessor(body, len(pred_messages))
-        equal, first, paths = diff_json_paths(predecessor["body"], truncated)
+        equal, first, paths = diff_json_paths(
+            normalize_for_comparison(predecessor["body"]),
+            normalize_for_comparison(truncated),
+        )
         result["prefix_status"] = "stable" if equal else "changed"
         result["first_changed_path"] = first
         result["changed_paths"] = paths
@@ -555,7 +614,10 @@ def analyze_request(
     else:
         # Mutation candidate: the historical messages were rewritten, so no
         # safe tail increment exists. Compare the complete current body.
-        equal, first, paths = diff_json_paths(predecessor["body"], body)
+        equal, first, paths = diff_json_paths(
+            normalize_for_comparison(predecessor["body"]),
+            normalize_for_comparison(body),
+        )
         result["prefix_status"] = "changed"
         result["first_changed_path"] = first
         result["changed_paths"] = paths
@@ -654,6 +716,7 @@ class RunStore:
                 "predecessor_hash": analysis["predecessor_hash"],
                 "increment": analysis["increment"],
                 "tools": analysis["tools"],
+                "response_activity": None,
                 "model": analysis["model"],
                 "user_id": analysis["user_id"],
                 "request_path": str(request_path),
@@ -697,14 +760,16 @@ class RunStore:
         request_id: int,
         usage: Optional[dict[str, object]],
         forward: Optional[dict[str, object]],
+        response_activity: Optional[dict[str, object]] = None,
     ) -> None:
         """Finalize one request: merge usage, compute per-sequence statistics
         and spike state, then rewrite the report atomically."""
         with self._lock:
             record = self.requests[request_id]
             record["usage"] = usage
-            record["usage_status"] = "ok" if usage is not None else "missing"
+            record["usage_status"] = "ok" if has_usage_data(usage) else "missing"
             record["derived"] = derive_usage(usage)
+            record["response_activity"] = response_activity
             record["forward"] = forward
             record["finished_at"] = now_iso()
             started = datetime.fromisoformat(str(record["started_at"]))
@@ -737,8 +802,11 @@ class RunStore:
                 continue
             derived = record.get("derived")
             current: Optional[float] = None
-            if isinstance(derived, dict) and derived.get("non_hit_tokens") is not None:
-                current = float(derived["non_hit_tokens"])
+            if (
+                isinstance(derived, dict)
+                and derived.get("uncached_input_tokens") is not None
+            ):
+                current = float(derived["uncached_input_tokens"])
             samples = prior_samples + ([current] if current is not None else [])
             record["stats"] = population_stats(samples)
             record["spike"] = (
@@ -796,7 +864,9 @@ class RunStore:
         comparable = [r for r in requests if r["predecessor_id"] is not None]
         stable = sum(1 for r in requests if r["prefix_status"] == "stable")
         changed = sum(1 for r in requests if r["prefix_status"] == "changed")
-        unknown = sum(1 for r in requests if r["prefix_status"] == "unknown")
+        first_requests = sum(
+            1 for r in requests if r["prefix_status"] == "first-req"
+        )
         missing_usage = sum(1 for r in requests if r["usage_status"] == "missing")
         spikes = sum(1 for r in requests if r["spike"])
 
@@ -816,15 +886,15 @@ class RunStore:
             "comparable_count": len(comparable),
             "stable_prefix_count": stable,
             "changed_prefix_count": changed,
-            "unknown_prefix_count": unknown,
+            "first_request_count": first_requests,
             "stable_prefix_rate": (
                 round(stable / len(comparable), 4) if comparable else None
             ),
             "missing_usage_count": missing_usage,
             "numeric_spike_count": spikes,
             "cache_hit_tokens": total("cache_hit_tokens"),
-            "new_cache_tokens": total("new_cache_tokens"),
-            "non_hit_tokens": total("non_hit_tokens"),
+            "cache_creation_tokens": total("cache_creation_tokens"),
+            "uncached_input_tokens": total("uncached_input_tokens"),
             "observed_input_tokens": total("observed_input_tokens"),
         }
 
@@ -835,29 +905,29 @@ class RunStore:
             if not isinstance(tools, list) or not tools:
                 continue
             derived = request.get("derived")
-            non_hit: Optional[float] = None
+            uncached_input: Optional[float] = None
             if isinstance(derived, dict):
-                value = derived.get("non_hit_tokens")
+                value = derived.get("uncached_input_tokens")
                 if value is not None:
-                    non_hit = float(value)
+                    uncached_input = float(value)
             for tool in tools:
                 group = groups.setdefault(
                     str(tool),
                     {
                         "tool": str(tool),
                         "request_count": 0,
-                        "non_hit_samples": [],
-                        "total_new_cache_tokens": 0.0,
+                        "uncached_input_samples": [],
+                        "total_cache_creation_tokens": 0.0,
                         "total_cache_hit_tokens": 0.0,
                     },
                 )
                 group["request_count"] = int(group["request_count"]) + 1
-                if non_hit is not None:
-                    group["non_hit_samples"].append(non_hit)
+                if uncached_input is not None:
+                    group["uncached_input_samples"].append(uncached_input)
                 if isinstance(derived, dict):
-                    new_cache = derived.get("new_cache_tokens")
-                    if new_cache is not None:
-                        group["total_new_cache_tokens"] += float(new_cache)
+                    cache_creation = derived.get("cache_creation_tokens")
+                    if cache_creation is not None:
+                        group["total_cache_creation_tokens"] += float(cache_creation)
                     cache_hit = derived.get("cache_hit_tokens")
                     if cache_hit is not None:
                         group["total_cache_hit_tokens"] += float(cache_hit)
@@ -865,18 +935,20 @@ class RunStore:
         result: list[dict[str, object]] = []
         for tool in sorted(groups):
             group = groups[tool]
-            samples = group.pop("non_hit_samples")
+            samples = group.pop("uncached_input_samples")
             stats = population_stats([float(s) for s in samples])
             result.append(
                 {
                     "tool": group["tool"],
                     "request_count": group["request_count"],
                     "total_cache_hit_tokens": group["total_cache_hit_tokens"],
-                    "total_new_cache_tokens": group["total_new_cache_tokens"],
-                    "total_non_hit_tokens": stats["mean"] * stats["n"]
+                    "total_cache_creation_tokens": group[
+                        "total_cache_creation_tokens"
+                    ],
+                    "total_uncached_input_tokens": stats["mean"] * stats["n"]
                     if stats["mean"] is not None
                     else None,
-                    "average_non_hit_tokens": stats["mean"],
+                    "average_uncached_input_tokens": stats["mean"],
                     "variance": stats["variance"],
                     "stdev": stats["stdev"],
                 }
@@ -926,14 +998,50 @@ class StreamEventParser:
         self._buffer = b""
         self._event_name: Optional[str] = None
         self._data_lines: list[bytes] = []
+        self._event_bytes = 0
+        self._discard_event = False
         self.usage: Optional[dict[str, object]] = None
         self.malformed_events = 0
+        self._blocks: dict[int, dict[str, object]] = {}
+        self.activity: dict[str, object] = {
+            "tool_uses": [],
+            "tool_use_count": 0,
+            "tool_uses_omitted": 0,
+            "thinking_bytes": 0,
+            "thinking_preview": "",
+            "assistant_text_bytes": 0,
+            "assistant_text_preview": "",
+        }
+
+    def activity_summary(self) -> Optional[dict[str, object]]:
+        if (
+            self.activity["tool_uses"]
+            or self.activity["thinking_bytes"]
+            or self.activity["assistant_text_bytes"]
+        ):
+            return self.activity
+        return None
+
+    def _append_text(self, kind: str, text: object) -> None:
+        if not isinstance(text, str):
+            return
+        bytes_key = f"{kind}_bytes"
+        preview_key = f"{kind}_preview"
+        self.activity[bytes_key] = int(self.activity[bytes_key]) + len(
+            text.encode("utf-8")
+        )
+        remaining = PREVIEW_CHARS - len(str(self.activity[preview_key]))
+        if remaining > 0:
+            self.activity[preview_key] = str(self.activity[preview_key]) + text[:remaining]
 
     def feed(self, chunk: bytes) -> None:
         self._buffer += chunk
         while True:
             index = self._buffer.find(b"\n")
             if index == -1:
+                if len(self._buffer) > MAX_SSE_EVENT_BYTES:
+                    self._mark_oversized_event()
+                    self._buffer = b""
                 break
             line = self._buffer[:index]
             self._buffer = self._buffer[index + 1:]
@@ -952,13 +1060,19 @@ class StreamEventParser:
         if line == b"":
             self._dispatch()
             return
+        if self._discard_event:
+            return
+        self._event_bytes += len(line) + 1
+        if self._event_bytes > MAX_SSE_EVENT_BYTES:
+            self._mark_oversized_event()
+            return
         if line.startswith(b"event:"):
             self._event_name = line[len(b"event:"):].strip().decode("utf-8", "replace")
         elif line.startswith(b"data:"):
             self._data_lines.append(line[len(b"data:"):].strip())
 
     def _dispatch(self) -> None:
-        if self._event_name is not None and self._data_lines:
+        if not self._discard_event and self._event_name is not None and self._data_lines:
             raw = b"\n".join(self._data_lines)
             try:
                 payload = json.loads(raw.decode("utf-8"))
@@ -974,10 +1088,28 @@ class StreamEventParser:
                 self._handle_payload(self._event_name, payload)
         self._event_name = None
         self._data_lines = []
+        self._event_bytes = 0
+        self._discard_event = False
+
+    def _mark_oversized_event(self) -> None:
+        if self._discard_event:
+            return
+        self._discard_event = True
+        self._data_lines = []
+        self.store.add_warning(
+            f"streamed event exceeded {MAX_SSE_EVENT_BYTES} side-copy bytes for "
+            f"request {self.request_id}; forwarded unchanged and omitted from the summary",
+            request_id=self.request_id,
+        )
 
     def _handle_payload(self, event_name: str, payload: object) -> None:
         if not isinstance(payload, dict):
             return
+        if event_name == "content_block_start":
+            self._handle_content_block_start(payload)
+        elif event_name == "content_block_delta":
+            self._handle_content_block_delta(payload)
+
         usage: Optional[object] = None
         if event_name == "message_start":
             message = payload.get("message")
@@ -996,6 +1128,58 @@ class StreamEventParser:
                 "time": now_iso(),
             }
         )
+
+    def _handle_content_block_start(self, payload: dict[str, object]) -> None:
+        index = payload.get("index")
+        block = payload.get("content_block")
+        if not isinstance(index, int) or not isinstance(block, dict):
+            return
+        block_type = block.get("type")
+        if block_type == "text":
+            self._append_text("assistant_text", block.get("text"))
+        elif block_type == "thinking":
+            self._append_text("thinking", block.get("thinking"))
+        elif block_type == "tool_use":
+            self.activity["tool_use_count"] = int(self.activity["tool_use_count"]) + 1
+            if len(self.activity["tool_uses"]) >= MAX_RESPONSE_TOOL_USES:
+                self.activity["tool_uses_omitted"] = (
+                    int(self.activity["tool_uses_omitted"]) + 1
+                )
+                return
+            tool_input = block.get("input")
+            input_bytes = canonical_bytes(tool_input) if tool_input not in (None, {}) else b""
+            tool_id = block.get("id")
+            tool_name = block.get("name")
+            tool = {
+                "id": tool_id[:PREVIEW_CHARS] if isinstance(tool_id, str) else None,
+                "name": tool_name[:PREVIEW_CHARS] if isinstance(tool_name, str) else None,
+                "input_bytes": len(input_bytes),
+                "input_summary": input_bytes.decode("utf-8", "replace")[:PREVIEW_CHARS],
+            }
+            self._blocks[index] = tool
+            self.activity["tool_uses"].append(tool)
+
+    def _handle_content_block_delta(self, payload: dict[str, object]) -> None:
+        delta = payload.get("delta")
+        if not isinstance(delta, dict):
+            return
+        delta_type = delta.get("type")
+        if delta_type == "text_delta":
+            self._append_text("assistant_text", delta.get("text"))
+        elif delta_type == "thinking_delta":
+            self._append_text("thinking", delta.get("thinking"))
+        elif delta_type == "input_json_delta":
+            index = payload.get("index")
+            partial = delta.get("partial_json")
+            tool = self._blocks.get(index) if isinstance(index, int) else None
+            if not isinstance(tool, dict) or not isinstance(partial, str):
+                return
+            tool["input_bytes"] = int(tool["input_bytes"]) + len(
+                partial.encode("utf-8")
+            )
+            remaining = PREVIEW_CHARS - len(str(tool["input_summary"]))
+            if remaining > 0:
+                tool["input_summary"] = str(tool["input_summary"]) + partial[:remaining]
 
 
 class ProbeServer(ThreadingHTTPServer):
@@ -1208,7 +1392,9 @@ class ProbeHandler(BaseHTTPRequestHandler):
                 f"request {request_id}; forwarded unchanged",
                 request_id=request_id,
             )
-        store.finish_request(request_id, parser.usage, forward)
+        store.finish_request(
+            request_id, parser.usage, forward, parser.activity_summary()
+        )
         if stream_error is not None:
             store.append_event(
                 {
@@ -1297,6 +1483,13 @@ def _analysis_self_test() -> None:
         canonical_bytes({"s": "aé"}) == canonical_bytes({"s": "aé"}),
         "unicode bytes must round-trip",
     )
+    _check(
+        normalize_for_comparison(
+            {"outer": [{"cache_control": {"type": "ephemeral"}, "text": "x"}]}
+        )
+        == {"outer": [{"text": "x"}]},
+        "cache_control is recursively removed only from comparison data",
+    )
 
     print("self-test: append-only stability")
     base = {
@@ -1337,9 +1530,44 @@ def _analysis_self_test() -> None:
     _check(increment["appended_messages"] == 1, "one appended message")
     _check(increment["user_text_bytes"] == len("more".encode("utf-8")), "user text bytes")
 
+    cached_base = json.loads(json.dumps(base))
+    cached_base["messages"][1]["content"][0]["cache_control"] = {
+        "type": "ephemeral"
+    }
+    cached_candidates = [dict(candidates[0], body=cached_base)]
+    pred, kind = select_predecessor(cached_candidates, appended, "/messages")
+    _check(pred is not None and kind == "exact", "cache marker does not break lineage")
+    analysis = analyze_request(appended, "/messages", pred, kind, "seq-1", 1)
+    _check(analysis["prefix_status"] == "stable", "cache marker is ignored in comparison")
+
     print("self-test: system and tools changes")
     changed_system = dict(appended)
     changed_system["system"] = [{"type": "text", "text": "sys2"}]
+    changed_system["messages"] = base["messages"] + [
+        {
+            "role": "assistant",
+            "content": [
+                {"type": "thinking", "thinking": "plan"},
+                {"type": "text", "text": "answer"},
+                {
+                    "type": "tool_use",
+                    "id": "tu-system",
+                    "name": "read",
+                    "input": {"path": "x.rs"},
+                },
+            ],
+        },
+        {
+            "role": "user",
+            "content": [
+                {
+                    "type": "tool_result",
+                    "tool_use_id": "tu-system",
+                    "content": "result",
+                }
+            ],
+        },
+    ]
     pred, kind = select_predecessor(candidates, changed_system, "/messages")
     _check(pred is not None and kind == "exact", "system change keeps exact match")
     analysis = analyze_request(changed_system, "/messages", pred, kind, "seq-1", 2)
@@ -1349,6 +1577,12 @@ def _analysis_self_test() -> None:
         "first changed path is the system text block",
     )
     _check("$.system[0].text" in analysis["changed_paths"], "changed paths include system")
+    system_increment = analysis["increment"]
+    assert isinstance(system_increment, dict)
+    _check(len(system_increment["tool_uses"]) == 1, "system change keeps tool activity")
+    _check(len(system_increment["tool_results"]) == 1, "system change keeps tool result")
+    _check(system_increment["thinking_bytes"] == 4, "system change keeps thinking")
+    _check(system_increment["assistant_text_bytes"] == 6, "system change keeps text")
 
     changed_tools = dict(appended)
     changed_tools["tools"] = [{"name": "write", "input_schema": {"type": "object"}}]
@@ -1415,7 +1649,7 @@ def _analysis_self_test() -> None:
     _check(pred is not None and int(pred["request_id"]) == 2, "other_next matches seq-2")
     _check(kind == "exact", "other_next exact match")
 
-    print("self-test: ambiguous identical anchors stay unknown")
+    print("self-test: ambiguous identical anchors start a new sequence")
     seq_a = {
         "model": "deepseek-chat",
         "messages": [
@@ -1447,12 +1681,12 @@ def _analysis_self_test() -> None:
          "hash": json_hash(seq_b), "status": "finished"},
     ]
     pred, kind = select_predecessor(two_anchors, ambiguous, "/messages")
-    _check(pred is None and kind is None, "two identical anchors must stay unknown")
+    _check(pred is None and kind is None, "two identical anchors have no safe predecessor")
 
     print("self-test: in-flight requests cannot establish lineage")
     inflight = dict(candidates[0], status="started")
     pred, kind = select_predecessor([inflight], appended, "/messages")
-    _check(pred is None and kind is None, "in-flight predecessor must stay unknown")
+    _check(pred is None and kind is None, "in-flight request cannot be a predecessor")
 
     print("self-test: upstream URL safety and path joining")
     _check(
@@ -1509,19 +1743,34 @@ def _analysis_self_test() -> None:
     _check(usage["output_tokens"] == 7, "output tokens merged")
     derived = derive_usage(usage)
     _check(derived["cache_hit_tokens"] == 5, "cache hit derived")
-    _check(derived["new_cache_tokens"] == 3, "new cache derived")
-    _check(derived["non_hit_tokens"] == 13, "non-hit derived")
-    _check(derived["observed_input_tokens"] == 18, "observed input derived")
+    _check(derived["cache_creation_tokens"] == 3, "provider cache creation derived")
+    _check(derived["uncached_input_tokens"] == 10, "uncached input is input_tokens")
+    _check(
+        derived["observed_input_tokens"] == 18,
+        "observed input includes uncached, cache-read, and cache-creation tokens",
+    )
 
     usage_only_output = merge_usage_event(None, {"output_tokens": 7})
     derived_partial = derive_usage(usage_only_output)
     _check(
         derived_partial["cache_hit_tokens"] is None
-        and derived_partial["new_cache_tokens"] is None,
+        and derived_partial["cache_creation_tokens"] is None,
         "missing cache fields keep derived values null",
     )
-    _check(derived_partial["non_hit_tokens"] is None, "missing inputs keep non-hit null")
+    _check(
+        derived_partial["uncached_input_tokens"] is None,
+        "missing input keeps uncached input null",
+    )
+    _check(
+        derived_partial["observed_input_tokens"] is None,
+        "incomplete input usage keeps observed input null",
+    )
     _check(derive_usage(None)["cache_hit_tokens"] is None, "no usage keeps null")
+    _check(has_usage_data({}) is False, "empty usage is missing")
+    _check(
+        has_usage_data({"output_tokens": 0}) is True,
+        "zero-valued provider usage is still present",
+    )
 
     print("self-test: five-sample spike threshold")
     _check(detect_spike(100.0, [10.0, 10.0, 10.0, 10.0]) is False, "four samples: no spike")
@@ -1540,6 +1789,7 @@ def _analysis_self_test() -> None:
     _check(initial_report["run"]["id"] == "analysis-test", "initial report run id")
     _check(initial_report["summary"]["request_count"] == 0, "initial report is empty")
     first = store.begin_request("/messages", base)
+    _check(first["prefix_status"] == "first-req", "sequence first request is explicit")
     store.finish_request(first["request_id"], usage, {"status": 200})
     second = store.begin_request("/messages", appended)
     store.finish_request(second["request_id"], usage, {"status": 200})
@@ -1557,6 +1807,38 @@ def _analysis_self_test() -> None:
         store.report_path.with_suffix(".json.tmp").exists() is False,
         "temporary report file replaced",
     )
+
+    print("self-test: streamed response summary is bounded")
+    parser = StreamEventParser(store, int(first["request_id"]))
+    for index in range(MAX_RESPONSE_TOOL_USES + 2):
+        parser._handle_payload(
+            "content_block_start",
+            {
+                "index": index,
+                "content_block": {
+                    "type": "tool_use",
+                    "id": f"tool-{index}",
+                    "name": "x" * (PREVIEW_CHARS + 1),
+                    "input": {},
+                },
+            },
+        )
+    activity = parser.activity_summary()
+    assert activity is not None
+    _check(len(activity["tool_uses"]) == MAX_RESPONSE_TOOL_USES, "tool summaries capped")
+    _check(activity["tool_uses_omitted"] == 2, "omitted tool summaries counted")
+    _check(
+        len(activity["tool_uses"][0]["name"]) == PREVIEW_CHARS,
+        "streamed tool names capped",
+    )
+
+    oversized = StreamEventParser(store, int(first["request_id"]))
+    oversized.feed(b"event: content_block_delta\n")
+    oversized.feed(b"data: " + b"x" * (MAX_SSE_EVENT_BYTES + 1))
+    _check(oversized._discard_event, "oversized side-copy event discarded")
+    _check(oversized._buffer == b"", "oversized side-copy buffer released")
+    oversized.feed(b"\n\n")
+    _check(not oversized._discard_event, "parser resumes after oversized event")
 
     print("self-test: out-of-order completions recompute sequence statistics")
     ordering_store = _fresh_store(root, "ordering-test")
@@ -1633,8 +1915,17 @@ class FixtureHandler(BaseHTTPRequestHandler):
         b'data: {"type":"message_start","message":{"usage":'
         b'{"input_tokens":10,"cache_read_input_tokens":5,'
         b'"cache_creation_input_tokens":3}}}\n\n'
+        b"event: content_block_start\n"
+        b'data: {"type":"content_block_start","index":0,"content_block":'
+        b'{"type":"tool_use","id":"tool-1","name":"read","input":{}}}\n\n'
         b"event: content_block_delta\n"
-        b'data: {"type":"content_block_delta","delta":'
+        b'data: {"type":"content_block_delta","index":0,"delta":'
+        b'{"type":"input_json_delta","partial_json":"{\\"path\\":\\"a.rs\\"}"}}\n\n'
+        b"event: content_block_delta\n"
+        b'data: {"type":"content_block_delta","index":1,"delta":'
+        b'{"type":"thinking_delta","thinking":"consider"}}\n\n'
+        b"event: content_block_delta\n"
+        b'data: {"type":"content_block_delta","index":2,"delta":'
         b'{"type":"text_delta","text":"hi"}}\n\n'
         b"event: message_delta\n"
         b'data: {"type":"message_delta","usage":{"output_tokens":7}}\n'
@@ -1798,9 +2089,30 @@ def _proxy_self_test() -> None:
         )
         derived = first_record["derived"]
         assert isinstance(derived, dict)
-        _check(derived["non_hit_tokens"] == 13, "non-hit derived from merged usage")
+        _check(
+            derived["uncached_input_tokens"] == 10,
+            "uncached input derived from DeepSeek input_tokens",
+        )
         _check(derived["cache_hit_tokens"] == 5, "cache-hit derived from merged usage")
+        _check(derived["cache_creation_tokens"] == 3, "cache creation derived")
         _check(derived["observed_input_tokens"] == 18, "observed input derived")
+        response_activity = first_record["response_activity"]
+        assert isinstance(response_activity, dict)
+        _check(
+            response_activity["assistant_text_preview"] == "hi",
+            "streamed assistant text summarized",
+        )
+        _check(
+            response_activity["thinking_preview"] == "consider",
+            "streamed thinking summarized",
+        )
+        response_tools = response_activity["tool_uses"]
+        _check(
+            len(response_tools) == 1
+            and response_tools[0]["name"] == "read"
+            and response_tools[0]["input_summary"] == '{"path":"a.rs"}',
+            "streamed tool name and arguments summarized",
+        )
         _check(
             first_record["forward"]["status"] == 200,
             "forward result recorded",
@@ -1888,7 +2200,7 @@ def _fresh_store(root: Path, run_id: str, upstream_base: Optional[str] = None) -
 
 def _populate_fixture(store: RunStore) -> None:
     """Deterministic multi-sequence population for the dashboard: two
-    sequences, stable and changed requests, an unknown first request, tool
+    sequences, stable and changed requests, explicit first requests, tool
     attribution, merged usage, and one numeric spike."""
     system = [{"type": "text", "text": "fixture system"}]
     tools = [{"name": "read", "input_schema": {"type": "object"}}]
@@ -1905,7 +2217,7 @@ def _populate_fixture(store: RunStore) -> None:
         "output_tokens": 8,
     }
     usage_spike = {
-        "input_tokens": 100,
+        "input_tokens": 5000,
         "cache_read_input_tokens": 0,
         "cache_creation_input_tokens": 5000,
         "output_tokens": 8,
@@ -1926,7 +2238,7 @@ def _populate_fixture(store: RunStore) -> None:
         record = store.begin_request("/messages", body)
         store.finish_request(record["request_id"], usage, {"status": 200})
 
-    # Sequence 1: unknown, then four stable, one tool-active, then a spike.
+    # Sequence 1: first request, then stable requests including one spike.
     request(
         [{"role": "user", "content": [{"type": "text", "text": "alpha first"}]}],
         usage_a,
@@ -1972,7 +2284,7 @@ def _populate_fixture(store: RunStore) -> None:
     ]
     request(messages, usage_spike)
 
-    # Sequence 2: unknown, then a system change reported as changed.
+    # Sequence 2: first request, then a system change reported as changed.
     request(
         [{"role": "user", "content": [{"type": "text", "text": "beta first"}]}],
         usage_a,
@@ -2039,6 +2351,7 @@ def _page_self_test() -> None:
         re.search(r"<link[^>]+stylesheet", page) is None,
         "no stylesheet links",
     )
+    _check("!report.run" in page, "missing run data is handled before rendering")
 
     print("self-test: fixture report contents")
     report = json.loads(report_bytes.decode("utf-8"))
@@ -2046,7 +2359,14 @@ def _page_self_test() -> None:
     statuses = {r["prefix_status"] for r in report["requests"]}
     _check("stable" in statuses, "one stable request")
     _check("changed" in statuses, "one changed request")
-    _check("unknown" in statuses, "one unknown request")
+    _check("first-req" in statuses, "first request status present")
+    _check(report["summary"]["first_request_count"] == 2, "two first requests")
+    _check("unknown_prefix_count" not in report["summary"], "old status count removed")
+    _check(
+        "new_cache_tokens" not in report["summary"]
+        and "non_hit_tokens" not in report["summary"],
+        "old usage fields removed",
+    )
     _check(len(report["tool_summary"]) >= 1, "tool summary data present")
     tool_names = {t["tool"] for t in report["tool_summary"]}
     _check("read" in tool_names, "tool attribution names the read tool")
@@ -2065,6 +2385,15 @@ def _page_self_test() -> None:
     )
     tool_active = [r for r in report["requests"] if r["tools"] == ["read"]]
     _check(len(tool_active) == 1, "tool-active request is attributed")
+    activity = tool_active[0]["increment"]
+    _check(
+        activity["tool_uses"][0]["input_summary"] == '{"path":"x"}',
+        "page report includes tool arguments",
+    )
+    _check(
+        activity["tool_results"][0]["summary"],
+        "page report includes tool result summary",
+    )
 
     print("self-test: page carries no request content or credential")
     _check(b"alpha turn 2" not in html, "no request content in the page")

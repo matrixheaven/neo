@@ -15,8 +15,8 @@
     --stable-ink: #1e5c24;
     --changed-bg: #fdeede;
     --changed-ink: #8a4b0f;
-    --unknown-bg: #ececea;
-    --unknown-ink: #4d4d48;
+    --neutral-bg: #ececea;
+    --neutral-ink: #4d4d48;
     --spike-bg: #fde3e3;
     --spike-ink: #9c2222;
     --accent: #2f5fa8;
@@ -73,7 +73,8 @@
   }
   .badge.stable { background: var(--stable-bg); color: var(--stable-ink); }
   .badge.changed { background: var(--changed-bg); color: var(--changed-ink); }
-  .badge.unknown { background: var(--unknown-bg); color: var(--unknown-ink); }
+  .badge.neutral { background: var(--neutral-bg); color: var(--neutral-ink); }
+  .badge.first-req { background: var(--neutral-bg); color: var(--neutral-ink); }
   .badge.missing { background: #f3f0dc; color: #6b5c12; }
   .badge.spike { background: var(--spike-bg); color: var(--spike-ink); }
   .num { font-variant-numeric: tabular-nums; }
@@ -136,8 +137,8 @@
         <th>Tools</th>
         <th>Appended B</th>
         <th>Cache hit</th>
-        <th>New cache</th>
-        <th>Non-hit</th>
+        <th>Provider cache creation</th>
+        <th>Uncached input</th>
         <th>Duration</th>
       </tr>
     </thead>
@@ -151,14 +152,14 @@
 
 <section>
   <h2>Cache trend</h2>
-  <canvas id="cache-chart" aria-label="Cache hit and non-hit tokens by request"></canvas>
-  <p class="chart-note">Cache-hit and non-hit tokens per request for the selected sequence.</p>
+  <canvas id="cache-chart" aria-label="Cache hit and uncached input tokens by request"></canvas>
+  <p class="chart-note">Cache-hit and uncached input tokens per request for the selected sequence.</p>
 </section>
 
 <section>
-  <h2>Per-tool non-hit variance</h2>
-  <canvas id="tool-chart" aria-label="Average non-hit tokens and variance by tool"></canvas>
-  <p class="chart-note">Average non-hit tokens and variance grouped by tool name.</p>
+  <h2>Per-tool uncached input variance</h2>
+  <canvas id="tool-chart" aria-label="Average uncached input tokens and variance by tool"></canvas>
+  <p class="chart-note">Average uncached input tokens and variance grouped by tool name.</p>
 </section>
 
 <script>
@@ -215,11 +216,12 @@
       ["Stable rate", s.stable_prefix_rate === null ? "\u2014" : (s.stable_prefix_rate * 100).toFixed(1) + "%"],
       ["Stable", fmt(s.stable_prefix_count)],
       ["Changed", fmt(s.changed_prefix_count)],
-      ["Unknown", fmt(s.unknown_prefix_count)],
+      ["First requests", fmt(s.first_request_count)],
       ["Cache hit", fmt(s.cache_hit_tokens)],
-      ["New cache", fmt(s.new_cache_tokens)],
-      ["Non-hit", fmt(s.non_hit_tokens)],
-      ["Missing usage", fmt(s.missing_usage_count)],
+      ["Provider cache creation", fmt(s.cache_creation_tokens)],
+      ["Uncached input", fmt(s.uncached_input_tokens)],
+      ["Total observed input", fmt(s.observed_input_tokens)],
+      ["Requests without usage data", fmt(s.missing_usage_count)],
       ["Spikes", fmt(s.numeric_spike_count)]
     ];
     cards.forEach(function (pair) {
@@ -271,7 +273,7 @@
 
   function usageBadge(request) {
     if (request.usage_status === "missing") {
-      return badge("missing usage", "missing");
+      return badge("no usage data", "missing");
     }
     return badge("ok", "stable");
   }
@@ -280,7 +282,7 @@
     if (request.spike) {
       return badge("spike", "spike");
     }
-    return badge("no", "unknown");
+    return badge("no", "neutral");
   }
 
   function toolsText(request) {
@@ -317,8 +319,8 @@
         toolsText(request),
         fmt(increment.canonical_bytes),
         fmt(derived.cache_hit_tokens),
-        fmt(derived.new_cache_tokens),
-        fmt(derived.non_hit_tokens),
+        fmt(derived.cache_creation_tokens),
+        fmt(derived.uncached_input_tokens),
         fmt(request.duration_ms)
       ];
       cells.forEach(function (cell, index) {
@@ -382,9 +384,9 @@
       ["Duration", fmt(request.duration_ms) + " ms"],
       ["Usage status", request.usage_status],
       ["Cache hit", fmt(derived.cache_hit_tokens)],
-      ["New cache", fmt(derived.new_cache_tokens)],
-      ["Non-hit", fmt(derived.non_hit_tokens)],
-      ["Observed input", fmt(derived.observed_input_tokens)],
+      ["Provider cache creation", fmt(derived.cache_creation_tokens)],
+      ["Uncached input", fmt(derived.uncached_input_tokens)],
+      ["Total observed input", fmt(derived.observed_input_tokens)],
       ["Spike", request.spike ? "yes" : "no"],
       ["Hash", String(request.hash).slice(0, 16) + "\u2026"],
       ["Predecessor hash", request.predecessor_hash === null ? "\u2014" : String(request.predecessor_hash).slice(0, 16) + "\u2026"],
@@ -433,13 +435,13 @@
         ["Canonical bytes", fmt(increment.canonical_bytes)],
         ["Blocks", blockParts.length ? blockParts.join(", ") : "\u2014"],
         ["User text bytes", fmt(increment.user_text_bytes)],
-        ["Assistant text bytes", fmt(increment.assistant_text_bytes)],
-        ["Thinking bytes", fmt(increment.thinking_bytes)],
+        ["Thinking", fmt(increment.thinking_bytes) + " B; " + (increment.thinking_preview || "\u2014")],
+        ["Assistant text", fmt(increment.assistant_text_bytes) + " B; " + (increment.assistant_text_preview || "\u2014")],
         ["Tool uses", increment.tool_uses.length ? increment.tool_uses.map(function (t) {
-          return String(t.id) + " (" + t.name + ")";
+          return String(t.name) + " " + (t.input_summary || "\u2014") + " (" + fmt(t.input_bytes) + " B)";
         }).join(", ") : "\u2014"],
         ["Tool results", increment.tool_results.length ? increment.tool_results.map(function (t) {
-          return String(t.id) + " (" + t.bytes + " B)";
+          return String(t.id) + " " + (t.summary || "\u2014") + " (" + t.bytes + " B)";
         }).join(", ") : "\u2014"],
         ["Attributed tools", request.tools.length ? request.tools.join(", ") : "\u2014"]
       ].forEach(function (pair) {
@@ -449,6 +451,30 @@
       });
       incSection.appendChild(incDl);
       panel.appendChild(incSection);
+    }
+
+    var responseActivity = request.response_activity;
+    if (responseActivity) {
+      var responseSection = document.createElement("div");
+      responseSection.className = "detail-section";
+      var responseHeading = document.createElement("h3");
+      responseHeading.appendChild(textNode("Streamed response activity"));
+      responseSection.appendChild(responseHeading);
+      var responseDl = document.createElement("dl");
+      [
+        ["Thinking", fmt(responseActivity.thinking_bytes) + " B; " + (responseActivity.thinking_preview || "\u2014")],
+        ["Assistant text", fmt(responseActivity.assistant_text_bytes) + " B; " + (responseActivity.assistant_text_preview || "\u2014")],
+        ["Tool uses", responseActivity.tool_uses.length ? responseActivity.tool_uses.map(function (t) {
+          return String(t.name) + " " + (t.input_summary || "\u2014") + " (" + fmt(t.input_bytes) + " B)";
+        }).join(", ") : "\u2014"],
+        ["Tool calls omitted", fmt(responseActivity.tool_uses_omitted)]
+      ].forEach(function (pair) {
+        var cells = kvRow(pair[0], pair[1]);
+        responseDl.appendChild(cells[0]);
+        responseDl.appendChild(cells[1]);
+      });
+      responseSection.appendChild(responseDl);
+      panel.appendChild(responseSection);
     }
 
     if (request.usage) {
@@ -477,7 +503,7 @@
       var statsDl = document.createElement("dl");
       [
         ["Samples", fmt(stats.n)],
-        ["Mean non-hit", fmt(stats.mean === null ? null : Number(stats.mean).toFixed(1))],
+        ["Mean uncached input", fmt(stats.mean === null ? null : Number(stats.mean).toFixed(1))],
         ["Variance", fmt(stats.variance === null ? null : Number(stats.variance).toFixed(1))],
         ["Stdev", fmt(stats.stdev === null ? null : Number(stats.stdev).toFixed(1))]
       ].forEach(function (pair) {
@@ -533,8 +559,8 @@
       });
     }
     var hit = series("cache_hit_tokens");
-    var nonHit = series("non_hit_tokens");
-    var allPoints = hit.concat(nonHit).filter(function (p) { return p.y !== null; });
+    var uncached = series("uncached_input_tokens");
+    var allPoints = hit.concat(uncached).filter(function (p) { return p.y !== null; });
     if (allPoints.length === 0) {
       ctx.fillStyle = "#6b6b66";
       ctx.font = "13px system-ui, sans-serif";
@@ -590,12 +616,12 @@
       });
       ctx.stroke();
     }
-    drawLine(nonHit, "#c05621");
+    drawLine(uncached, "#c05621");
     drawLine(hit, "#1e7a34");
 
     ctx.font = "11px system-ui, sans-serif";
     ctx.fillStyle = "#c05621";
-    ctx.fillText("\u2014 non-hit", padL, padT + 10);
+    ctx.fillText("\u2014 uncached input", padL, padT + 10);
     ctx.fillStyle = "#1e7a34";
     ctx.fillText("\u2014 cache hit", padL + 90, padT + 10);
   }
@@ -626,7 +652,7 @@
 
     var maxV = 0;
     tools.forEach(function (t) {
-      var a = t.average_non_hit_tokens === null ? 0 : Number(t.average_non_hit_tokens);
+      var a = t.average_uncached_input_tokens === null ? 0 : Number(t.average_uncached_input_tokens);
       var v = t.variance === null ? 0 : Number(t.variance);
       if (a > maxV) { maxV = a; }
       if (v > maxV) { maxV = v; }
@@ -649,7 +675,7 @@
 
     tools.forEach(function (t, index) {
       var centerX = padL + slot * index + slot / 2;
-      var avg = t.average_non_hit_tokens === null ? 0 : Number(t.average_non_hit_tokens);
+      var avg = t.average_uncached_input_tokens === null ? 0 : Number(t.average_uncached_input_tokens);
       var variance = t.variance === null ? 0 : Number(t.variance);
       var avgH = avg / maxV * (height - padT - padB);
       var varH = variance / maxV * (height - padT - padB);
@@ -668,13 +694,16 @@
 
     ctx.font = "11px system-ui, sans-serif";
     ctx.fillStyle = "#c05621";
-    ctx.fillText("\u2588 avg non-hit", padL, padT + 10);
+    ctx.fillText("\u2588 avg uncached", padL, padT + 10);
     ctx.fillStyle = "#2f5fa8";
     ctx.fillText("\u2588 variance", padL + 110, padT + 10);
   }
 
   function render() {
-    if (!report) {
+    if (!report || !report.run || !report.summary ||
+        !Array.isArray(report.sequences) || !Array.isArray(report.requests) ||
+        !Array.isArray(report.tool_summary) || !Array.isArray(report.warnings)) {
+      showError("Report is not ready yet.");
       return;
     }
     el("run-status").textContent = "run " + report.run.id;

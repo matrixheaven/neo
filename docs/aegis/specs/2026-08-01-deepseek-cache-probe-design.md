@@ -74,8 +74,8 @@ Current Neo behavior relevant to the probe:
 - Cache-prefix claims require request-shape evidence and provider-usage
   evidence to remain separate.
 - Authentication material must never be persisted.
-- Ambiguous request relationships must remain unknown rather than being
-  guessed.
+- Ambiguous request relationships must start an independent sequence rather
+  than being guessed.
 
 ### Smallest sufficient path
 
@@ -177,8 +177,13 @@ Candidate requests must have the same:
 - model;
 - `metadata.user_id`, including both being absent.
 
+Before lineage or prefix comparison, recursively remove every `cache_control`
+field from comparison-only copies. DeepSeek ignores these Anthropic markers;
+the persisted request body and its raw hash remain unchanged.
+
 Among candidates, the preferred predecessor is the most recent request whose
-entire `messages` array is an exact prefix of the current `messages` array.
+normalized entire `messages` array is an exact prefix of the normalized current
+`messages` array.
 When more than one candidate matches, choose the candidate with the longest
 messages array, then the most recent candidate.
 
@@ -204,7 +209,8 @@ sequence rather than being incorrectly reported as stable.
 ## 9. Prefix Comparison
 
 JSON objects are canonicalized by sorting object keys. Arrays and string bytes
-retain their original order and content.
+retain their original order and content. Recursive `cache_control` removal is
+the only comparison normalization and never rewrites stored evidence.
 
 For a matched predecessor:
 
@@ -214,17 +220,18 @@ For a matched predecessor:
 4. Compare the complete canonicalized current body with the canonicalized
    predecessor body.
 
-This comparison includes:
+After comparison normalization, this comparison includes:
 
 - model;
-- system content and cache markers;
+- system content;
 - complete tool definitions and order;
 - historical messages and content blocks;
 - thinking settings;
 - metadata and provider options;
 - all other request fields.
 
-No field is silently ignored. A changed value produces:
+No field other than DeepSeek-ignored `cache_control` is silently ignored. A
+changed value produces:
 
 - `prefix_status: changed`;
 - the first changed JSON path;
@@ -232,24 +239,27 @@ No field is silently ignored. A changed value produces:
 - predecessor and current canonical hashes.
 
 Successful equality produces `prefix_status: stable`. The first request in a
-sequence produces `prefix_status: unknown`.
+sequence produces `prefix_status: first-req` and is excluded from the stable
+rate denominator.
 
 `stable` means Neo preserved the observable Anthropic request prefix. It does
 not prove that DeepSeek internally selected the same cache entry.
 
 ## 10. Increment And Tool Attribution
 
-For a matched predecessor, the appended increment is the current messages tail
-after the predecessor's message count.
+For a matched predecessor, the appended increment is always the current
+messages tail after the predecessor's message count. Non-message changes such
+as `system` or tool definitions may mark the prefix changed, but must not hide
+the independently computed message activity.
 
 Record:
 
 - appended message count;
 - canonical serialized byte count;
 - content-block counts by type;
-- tool-use names and identifiers;
-- tool-result identifiers and byte counts;
-- assistant text and thinking byte counts;
+- tool-use names, identifiers, argument byte counts, and bounded summaries;
+- tool-result identifiers, byte counts, and bounded summaries;
+- assistant text and thinking byte counts and bounded previews;
 - user text byte count.
 
 Tool-result identifiers are resolved to tool names from tool-use blocks already
@@ -259,6 +269,12 @@ and are not assigned to a guessed tool.
 If one increment contains multiple tool calls, list every tool. Do not divide
 provider token usage among them because the response does not provide that
 resolution.
+
+The side-copy stream parser also records bounded response activity summaries
+while forwarding bytes unchanged. It counts and previews tool arguments,
+thinking, and assistant text without buffering the complete response. Request
+history remains the primary activity evidence; the response summary covers the
+latest response before it can appear in a later request history.
 
 ## 11. DeepSeek Usage Semantics
 
@@ -278,8 +294,8 @@ Derived values for this target are:
 
 ```text
 cache_hit_tokens = cache_read_input_tokens
-new_cache_tokens = cache_creation_input_tokens
-non_hit_tokens = input_tokens + cache_creation_input_tokens
+cache_creation_tokens = cache_creation_input_tokens
+uncached_input_tokens = input_tokens
 observed_input_tokens = input_tokens
                       + cache_read_input_tokens
                       + cache_creation_input_tokens
@@ -296,8 +312,8 @@ agents.
 
 For each usable request, report:
 
-- `new_cache_tokens`;
-- `non_hit_tokens`;
+- `cache_creation_tokens`;
+- `uncached_input_tokens`;
 - running mean;
 - population variance;
 - population standard deviation.
@@ -306,7 +322,7 @@ A numeric spike is reported only when at least five earlier usable samples
 exist in the same sequence and:
 
 ```text
-current non_hit_tokens > previous mean + 3 * previous standard deviation
+current uncached_input_tokens > previous mean + 3 * previous standard deviation
 ```
 
 When the previous standard deviation is zero, any value greater than the
@@ -317,7 +333,7 @@ Structural status and numeric status remain independent:
 - stable prefix with expected new input;
 - stable prefix with numeric spike;
 - changed prefix with or without a numeric spike;
-- unknown prefix when no safe predecessor exists.
+- `first-req` for each independently identified sequence.
 
 ## 13. Report Format
 
@@ -368,8 +384,9 @@ The first view contains:
 - sequence count;
 - stable-prefix rate among comparable requests;
 - cache-hit tokens;
-- new-cache tokens;
-- non-hit tokens;
+- provider cache-creation tokens;
+- uncached input tokens;
+- total observed input tokens;
 - structural-change count;
 - numeric-spike count.
 
@@ -382,8 +399,8 @@ The request table contains:
 - attributed tools;
 - appended bytes;
 - cache-hit tokens;
-- new-cache tokens;
-- non-hit tokens;
+- provider cache-creation tokens;
+- uncached input tokens;
 - spike status;
 - duration.
 
@@ -392,8 +409,8 @@ canonical hashes, warnings, and the request file path.
 
 Two native canvas charts are sufficient:
 
-- cache-hit and non-hit tokens by request within a selected sequence;
-- average non-hit tokens and variance grouped by tool name.
+- cache-hit and uncached input tokens by request within a selected sequence;
+- average uncached input tokens and variance grouped by tool name.
 
 The page contains no independent comparison or statistics code beyond display
 formatting. All analyzed values come from `report.json`.
@@ -443,7 +460,8 @@ formatting. All analyzed values come from `report.json`.
   predecessors when an exact predecessor exists.
 - A non-anchor historical-message mutation is reported as changed when the
   first-message anchor identifies exactly one established sequence.
-- A request with no safe predecessor is reported as unknown, never stable.
+- A request with no safe predecessor starts an independent sequence and is
+  reported as `first-req`, never stable.
 
 ### Usage and attribution
 
@@ -530,7 +548,7 @@ small.
 - Scope check: only DeepSeek's Anthropic-compatible path is complete.
 - Ownership check: the script is the only analysis owner; the page presents
   report values.
-- Ambiguity check: stable, changed, unknown, usage missing, and numeric spike
+- Ambiguity check: stable, changed, first request, usage missing, and numeric spike
   have explicit meanings.
 - Privacy check: headers and credentials are never persisted; request bodies
   are explicitly local and sensitive.
