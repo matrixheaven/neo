@@ -723,6 +723,10 @@ fn render_delegate_family_terminal(
         };
         (fact_child_rank(entry, fact), activity_index)
     });
+    if matches!(entry, TranscriptEntry::Delegate { .. }) {
+        let first_visible = tool_facts.len().saturating_sub(super::MAX_CHILD_TOOL_ROWS);
+        tool_facts.drain(..first_visible);
+    }
 
     for fact in &terminal_facts {
         let rendered = render_progressive_fact(fact, options.width, options.theme);

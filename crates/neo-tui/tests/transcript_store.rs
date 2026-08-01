@@ -908,15 +908,18 @@ fn instruction_epoch_replaces_deferred_placeholders_at_earliest_position() {
 }
 
 #[test]
-fn delegate_family_captures_terminal_facts_before_activity_trimming() {
+fn delegate_terminal_history_keeps_latest_four_tools_after_activity_trimming() {
     let mut pane = TranscriptPane::new(100, 24);
     let mut running = agent_snapshot("delegate-a", AgentLifecycleState::Running);
     running.activity = vec![
         tool_activity("read-1", "Read", "one.rs", AgentToolActivityPhase::Done),
         tool_activity("bash-1", "Bash", "make", AgentToolActivityPhase::Failed),
-        tool_activity("grep-1", "Grep", "pattern", AgentToolActivityPhase::Ongoing),
+        tool_activity("grep-1", "Grep", "pattern", AgentToolActivityPhase::Done),
+        tool_activity("find-1", "Find", "src", AgentToolActivityPhase::Done),
+        tool_activity("edit-1", "Edit", "two.rs", AgentToolActivityPhase::Done),
+        tool_activity("write-1", "Write", "three.rs", AgentToolActivityPhase::Done),
     ];
-    running.tool_count = 2;
+    running.tool_count = 6;
     pane.transcript_mut().upsert_delegate(1, running);
 
     let update = pane.render_terminal_update(100, 24);
@@ -938,7 +941,11 @@ fn delegate_family_captures_terminal_facts_before_activity_trimming() {
         history.is_empty(),
         "running facts entered history:\n{history}"
     );
-    assert!(live.contains("Grep"), "live:\n{live}");
+    assert!(!live.contains("Used Read"), "live:\n{live}");
+    assert!(!live.contains("Failed Bash"), "live:\n{live}");
+    for tool in ["Used Grep", "Used Find", "Used Edit", "Used Write"] {
+        assert!(live.contains(tool), "missing {tool}:\n{live}");
+    }
 
     // A later snapshot trims the completed tools away. The captured facts
     // were taken at update time and must survive the trimming.
@@ -958,7 +965,7 @@ fn delegate_family_captures_terminal_facts_before_activity_trimming() {
     );
 
     let mut completed = agent_snapshot("delegate-a", AgentLifecycleState::Completed);
-    completed.tool_count = 2;
+    completed.tool_count = 6;
     completed.outcome = Some(AgentTerminalOutcome {
         summary: "delegate result".to_owned(),
         is_error: false,
@@ -974,11 +981,15 @@ fn delegate_family_captures_terminal_facts_before_activity_trimming() {
         .collect::<Vec<_>>()
         .join("\n");
     let header = history.find("delegate-a").expect("parent header");
-    let read = history.find("Used Read").expect("retained Read fact");
-    let bash = history.find("Failed Bash").expect("retained Bash fact");
+    let grep = history.find("Used Grep").expect("retained Grep fact");
+    let find = history.find("Used Find").expect("retained Find fact");
+    let edit = history.find("Used Edit").expect("retained Edit fact");
+    let write = history.find("Used Write").expect("retained Write fact");
     let result = history.find("delegate result").expect("terminal result");
+    assert!(!history.contains("Used Read"), "history:\n{history}");
+    assert!(!history.contains("Failed Bash"), "history:\n{history}");
     assert!(
-        header < read && read < bash && bash < result,
+        header < grep && grep < find && find < edit && edit < write && write < result,
         "history:\n{history}"
     );
 
