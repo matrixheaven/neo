@@ -2,7 +2,7 @@
 
 Status: `recorded-from-work`
 Date: `2026-07-28`
-Updated: `2026-07-31`
+Updated: `2026-08-01`
 
 ## Context
 
@@ -115,6 +115,36 @@ Only terminal runs older than the configured minimum age are eligible.
 - Treat a completed child lifecycle as a successful requested result. Rejected:
   lifecycle completion does not prove that the declared structured result was
   accepted.
+
+## Amendment (2026-08-01): deterministic provider-safe child output
+
+Report 004 and the Workflow AI usability repair implementation disproved the
+earlier assumption that the `openai` compatible wire could serialize a native
+JSON Schema response hint. The provider type cannot distinguish official Chat
+Completions JSON Schema support from arbitrary compatible endpoints, so the
+ambiguous wire now has one deterministic request shape:
+
+| Provider type | Wire behavior |
+| --- | --- |
+| `openai_response` | Map the internal hint to native `text.format` JSON Schema. |
+| `openai` | Omit the internal hint from the compatible request body. |
+| `anthropic` / `google` | Omit the internal hint (unchanged). |
+
+The child prompt still carries the exact schema and JSON-only rules, and all
+returned text still passes the single strict host parser and JSON Schema
+validator with at most one tools-disabled content-repair turn. A child turn
+that failed at the provider, authentication, rate-limit, cancellation, or
+runtime level never enters schema parsing or repair; the original actionable
+error and observed usage are preserved. Failed swarm summaries expose
+`failed <failed>/<total>` plus the first bounded child error. Final-result
+schema failures include the instance path and a bounded Unicode-safe preview
+of the failing node; validation remains terminal and never starts model
+repair.
+
+Rejected alternatives: error-text matching, HTTP-400 retry, provider capability
+settings, endpoint allowlists, probes, automatic protocol fallback, optional
+inline schemas, flat tool aliases, catchable terminal failure, and second
+parsers/validators/prompt owners. None of these paths exist in the codebase.
 
 ## Consequences
 
