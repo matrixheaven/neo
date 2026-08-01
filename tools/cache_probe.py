@@ -593,6 +593,7 @@ class RunStore:
         self.append_event(
             {"event": "run_start", "run_id": self.run_id, "time": self.started_at}
         )
+        self.write_report()
 
     def append_event(self, event: dict[str, object]) -> None:
         with self._lock:
@@ -1535,6 +1536,9 @@ def _analysis_self_test() -> None:
     print("self-test: atomic report and top-level keys")
     root = Path("target/cache-probe/self-test")
     store = _fresh_store(root, "analysis-test", upstream_base="https://fixture.invalid")
+    initial_report = json.loads(store.report_path.read_text(encoding="utf-8"))
+    _check(initial_report["run"]["id"] == "analysis-test", "initial report run id")
+    _check(initial_report["summary"]["request_count"] == 0, "initial report is empty")
     first = store.begin_request("/messages", base)
     store.finish_request(first["request_id"], usage, {"status": 200})
     second = store.begin_request("/messages", appended)
