@@ -1421,28 +1421,28 @@ class ProbeHandler(BaseHTTPRequestHandler):
             self._respond(502, "upstream read failed")
             return
 
-        # Relay the upstream status and end-to-end response headers.
-        self.send_response(response.status)
-        content_type = None
-        for name, value in response.getheaders():
-            lowered = name.lower()
-            if lowered in HOP_BY_HOP_HEADERS or lowered in (
-                "content-length",
-                "connection",
-            ):
-                continue
-            self.send_header(name, value)
-            if lowered == "content-type":
-                content_type = value
-        # Downstream connection close carries the unknown stream length; the
-        # complete response is never buffered to invent a Content-Length.
-        self.send_header("Connection", "close")
-        self.end_headers()
-
         parser = StreamEventParser(store, request_id)
         total_bytes = 0
+        content_type = None
         stream_error: Optional[str] = None
         try:
+            # Relay the upstream status and end-to-end response headers.
+            self.send_response(response.status)
+            for name, value in response.getheaders():
+                lowered = name.lower()
+                if lowered in HOP_BY_HOP_HEADERS or lowered in (
+                    "content-length",
+                    "connection",
+                ):
+                    continue
+                self.send_header(name, value)
+                if lowered == "content-type":
+                    content_type = value
+            # Downstream connection close carries the unknown stream length;
+            # the response is never buffered to invent a Content-Length.
+            self.send_header("Connection", "close")
+            self.end_headers()
+
             while True:
                 # read1 returns available bytes without waiting for a full
                 # buffer, so the first streamed bytes are relayed immediately.
@@ -1541,16 +1541,20 @@ class ProbeHandler(BaseHTTPRequestHandler):
         payload: bytes,
         no_store: bool = False,
     ) -> None:
-        self.send_response(status)
-        self.send_header("Content-Type", content_type)
-        self.send_header("Content-Length", str(len(payload)))
-        if no_store:
-            self.send_header("Cache-Control", "no-store")
-        self.send_header("Connection", "close")
-        self.end_headers()
-        self.wfile.write(payload)
-        self.wfile.flush()
-        self.close_connection = True
+        try:
+            self.send_response(status)
+            self.send_header("Content-Type", content_type)
+            self.send_header("Content-Length", str(len(payload)))
+            if no_store:
+                self.send_header("Cache-Control", "no-store")
+            self.send_header("Connection", "close")
+            self.end_headers()
+            self.wfile.write(payload)
+            self.wfile.flush()
+        except (ConnectionError, OSError):
+            pass
+        finally:
+            self.close_connection = True
 
 
 # ---------------------------------------------------------------------------
@@ -2239,6 +2243,47 @@ def _proxy_self_test() -> None:
         _check(
             second_record["forward"]["status"] == 503,
             "forward failure recorded in the report",
+        )
+
+    print("self-test: client disconnect during response headers")
+    original_end_headers = ProbeHandler.end_headers
+    header_write_attempted = threading.Event()
+
+    def disconnected_end_headers(handler: ProbeHandler) -> None:
+        if handler.command == "POST":
+            header_write_attempted.set()
+            raise BrokenPipeError("self-test downstream disconnect")
+        original_end_headers(handler)
+
+    ProbeHandler.end_headers = disconnected_end_headers
+    disconnect_connection = http.client.HTTPConnection("127.0.0.1", probe_port)
+    try:
+        disconnect_connection.request(
+            "POST",
+            "/messages",
+            body=json.dumps(fail_body),
+            headers={"Content-Type": "application/json", "x-api-key": auth_header},
+        )
+        try:
+            disconnect_connection.getresponse()
+        except (ConnectionError, OSError):
+            pass
+    finally:
+        disconnect_connection.close()
+        ProbeHandler.end_headers = original_end_headers
+
+    _check(header_write_attempted.is_set(), "response header write was attempted")
+    with store._lock:
+        disconnected_record = store.requests[3]
+        _check(
+            disconnected_record["status"] == "finished",
+            "client disconnect still finalizes the request",
+        )
+        _check(
+            str(disconnected_record["forward"]["error"]).startswith(
+                "downstream disconnect:"
+            ),
+            "client disconnect is recorded without escaping the handler",
         )
 
     print("self-test: credential redaction")
