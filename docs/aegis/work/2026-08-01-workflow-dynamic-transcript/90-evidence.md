@@ -81,3 +81,11 @@ Focused evidence is recorded below.
 - Source: second unified review; six exact Rust tests; cargo fmt --all --check; git diff --check; retired-symbol negative search
 - Summary: Older progress is rejected at the shared merge owner before it can clear a newer terminal outcome. The direct regression, workflow-origin event round-trip, JSONL replay grouping, Swarm terminal order, zero-budget Workflow barrier, and permission picker width regression all pass.
 - Verifier: root
+
+## EvidenceBundleDraft
+
+- Artifact key: delegate-family-terminal-child-grouping
+- Type: focused-test
+- Source: exact DelegateGroup, DelegateSwarm, and single-Delegate terminal history tests
+- Summary: Parent history commits once; each child header is followed by its own tools and result before the next child, while live card rendering and the single-Delegate order remain unchanged.
+- Verifier: root

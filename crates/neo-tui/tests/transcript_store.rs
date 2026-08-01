@@ -1066,19 +1066,20 @@ fn delegate_to_group_replacement_preserves_progressive_fact_identity() {
     let first_agent = history.find("first-agent").expect("first child");
     let second_agent = history.find("second-agent").expect("second child");
     let tool = history.find("Used Read").expect("retained tool");
-    let result = history.find("first-agent result").expect("child result");
+    let first_result = history.find("first-agent result").expect("first result");
+    let second_result = history.find("second-agent result").expect("second result");
     assert!(
-        history.contains("second-agent result"),
-        "history:\n{history}"
-    );
-    assert!(
-        header < first_agent && first_agent < second_agent && second_agent < tool && tool < result,
+        header < first_agent
+            && first_agent < tool
+            && tool < first_result
+            && first_result < second_agent
+            && second_agent < second_result,
         "history:\n{history}"
     );
 }
 
 #[test]
-fn delegate_swarm_terminal_block_keeps_header_children_tools_and_results_order() {
+fn delegate_swarm_terminal_block_keeps_each_child_tools_and_result_together() {
     let mut pane = TranscriptPane::new(120, 24);
     let mut first = agent_snapshot("swarm-first", AgentLifecycleState::Running);
     let mut second = agent_snapshot("swarm-second", AgentLifecycleState::Running);
@@ -1142,10 +1143,10 @@ fn delegate_swarm_terminal_block_keeps_header_children_tools_and_results_order()
     let second_result = history.find("swarm second result").expect("second result");
     assert!(
         header < first
-            && first < second
+            && first < first_result
+            && first_result < second
             && second < tool
-            && tool < first_result
-            && first_result < second_result,
+            && tool < second_result,
         "history:\n{history}"
     );
 }

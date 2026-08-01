@@ -729,23 +729,41 @@ fn render_delegate_family_terminal(
     });
 
     for fact in &terminal_facts {
-        if let Some(line) = render_progressive_fact(fact, options.width, options.theme).first() {
-            lines.push(line.clone());
+        let rendered = render_progressive_fact(fact, options.width, options.theme);
+        lines.extend(rendered.first().cloned());
+        for tool in &tool_facts {
+            if facts_share_child_run(fact, tool) {
+                lines.extend(render_progressive_fact(tool, options.width, options.theme));
+            }
+        }
+        lines.extend(rendered.into_iter().skip(1));
+    }
+    for tool in &tool_facts {
+        if !terminal_facts
+            .iter()
+            .any(|fact| facts_share_child_run(fact, tool))
+        {
+            lines.extend(render_progressive_fact(tool, options.width, options.theme));
         }
     }
-    for fact in &tool_facts {
-        lines.extend(render_progressive_fact(fact, options.width, options.theme));
-    }
     lines.extend(summary.iter().skip(1).map(|line| line.to_ansi()));
-    for fact in &terminal_facts {
-        lines.extend(
-            render_progressive_fact(fact, options.width, options.theme)
-                .into_iter()
-                .skip(1),
-        );
-    }
     super::pane::trim_ansi_transcript_block(&mut lines);
     Some(lines)
+}
+
+fn facts_share_child_run(terminal: &super::ProgressiveFact, tool: &super::ProgressiveFact) -> bool {
+    let ProgressiveFactPayload::ChildTool(tool) = &tool.payload else {
+        return false;
+    };
+    match &terminal.payload {
+        ProgressiveFactPayload::ChildAgent(agent) => {
+            agent.agent_id == tool.agent_id && agent.run_count == tool.run_count
+        }
+        ProgressiveFactPayload::SwarmItem(item) => {
+            item.agent_id == tool.agent_id && item.run_count == tool.run_count
+        }
+        ProgressiveFactPayload::ChildTool(_) => false,
+    }
 }
 
 fn fact_child_rank(entry: &TranscriptEntry, fact: &super::ProgressiveFact) -> usize {

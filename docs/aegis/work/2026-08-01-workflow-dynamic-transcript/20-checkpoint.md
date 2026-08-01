@@ -143,3 +143,16 @@
 - New risk signals:
 - Native Windows and Linux terminal behavior and remote CI remain unverified.
 - Advisory decision: proceed to scoped commit.
+
+## Checkpoint Update
+
+- Current todo: commit the terminal Delegate-family ordering repair.
+- Active slice: final verification and scoped commit.
+- Completed todos:
+- Corrected the parent-owned terminal projection so each DelegateGroup and DelegateSwarm child is immediately followed by that child's tools and result.
+- Kept parent child order stable even when children finish out of order, and matched tools by typed agent id plus run count.
+- Preserved the existing single-Delegate terminal order and all live card rendering.
+- Evidence refs:
+- delegate-family-terminal-child-grouping
+- Blocked on: none for the scoped commit.
+- Next step: run final focused verification, store the resolved error, then stage and commit the four task files.
