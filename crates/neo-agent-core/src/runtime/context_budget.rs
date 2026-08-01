@@ -1,4 +1,4 @@
-use super::chat_request::{todo_context_message, workspace_context_message};
+use super::chat_request::workspace_context_message;
 use super::config::AgentConfig;
 use super::context::AgentContext;
 use super::tokens::{
@@ -127,8 +127,6 @@ fn fixed_overhead_tokens(config: &AgentConfig, context: &AgentContext) -> usize 
     let turn_system_tokens = config.turn_system_context.as_ref().map_or(0, |context| {
         estimate_message_tokens(&crate::AgentMessage::system_text(context.as_str()))
     });
-    let todo_tokens =
-        todo_context_message(context).map_or(0, |message| estimate_message_tokens(&message));
     let transform_tokens = config
         .context_append_transform
         .as_ref()
@@ -136,7 +134,7 @@ fn fixed_overhead_tokens(config: &AgentConfig, context: &AgentContext) -> usize 
             estimate_messages_tokens(&transform(context.messages()))
         });
 
-    system_tokens + workspace_tokens + turn_system_tokens + todo_tokens + transform_tokens
+    system_tokens + workspace_tokens + turn_system_tokens + transform_tokens
 }
 
 fn projected_effective_tokens(
@@ -239,7 +237,7 @@ mod tests {
     }
 
     #[test]
-    fn budget_includes_ephemeral_todo_snapshot() {
+    fn budget_ignores_runtime_todo_state() {
         let config = AgentConfig::for_model(fake_model());
         let empty = AgentContext::new();
         let context = AgentContext::from_replay(
@@ -258,7 +256,10 @@ mod tests {
         let todo_snapshot =
             ContextBudgetEstimator::snapshot(&config, &context, ProjectionPlan::disabled());
 
-        assert!(todo_snapshot.fixed_overhead_tokens > empty_snapshot.fixed_overhead_tokens);
+        assert_eq!(
+            todo_snapshot.fixed_overhead_tokens,
+            empty_snapshot.fixed_overhead_tokens
+        );
         assert_eq!(todo_snapshot.durable_tokens, empty_snapshot.durable_tokens);
     }
 
