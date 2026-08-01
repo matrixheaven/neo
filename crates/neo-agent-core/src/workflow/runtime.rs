@@ -2112,6 +2112,13 @@ impl WorkflowRuntime {
         output: &ChildRunOutput,
     ) -> Result<WorkflowInvocationOutcome, WorkflowError> {
         let mut outcome = child_run_to_outcome(output);
+        // A failed child turn (provider, auth, rate-limit, cancellation, or
+        // runtime) is returned unchanged with only observed usage. It never
+        // enters schema compilation, schema-repair journal events, or a second
+        // model request, so the original actionable error survives.
+        if !outcome.ok {
+            return Ok(outcome);
+        }
         let Some(schema_doc) = plan.output_schema.as_ref() else {
             return Ok(outcome);
         };

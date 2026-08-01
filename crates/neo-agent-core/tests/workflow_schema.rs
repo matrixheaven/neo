@@ -684,3 +684,239 @@ async fn crash_during_repair_never_repeats_model_effect() {
     assert_eq!(err.code(), WorkflowErrorCode::InterruptedHostExit);
     assert_eq!(harness.requests().len(), 1);
 }
+
+/// A child turn that fails at the provider level (protocol error) must never be
+/// parsed as assistant text and never start schema repair: exactly one request,
+/// the original error survives, and no schema-repair journal event is written.
+#[tokio::test]
+async fn workflow_delegate_protocol_failure_skips_schema_repair_and_preserves_error() {
+    use neo_agent_core::workflow::journal::{JournalPayload, collect_journal};
+    use neo_agent_core::workflow::{
+        WorkflowInvocationKind, WorkflowLaunchRequest, WorkflowOutcomeStatus,
+    };
+    use neo_ai::AiError;
+
+    let dir = tempfile::tempdir().unwrap();
+    let session_dir = dir.path();
+    let runtime = WorkflowRuntime::new(WorkflowLimits::default());
+    let handle = runtime
+        .create_run(
+            session_dir,
+            WorkflowLaunchRequest {
+                name: "delegate-protocol".to_owned(),
+                description: "delegate protocol failure".to_owned(),
+                phases: Vec::new(),
+                script: String::new(),
+                args: json!({}),
+                launch_source: "test".to_owned(),
+                output_schema: None,
+                display_name: None,
+                input_schema: None,
+                definition_origin: None,
+                inline_unsaved: false,
+            },
+        )
+        .await
+        .expect("create run");
+    handle
+        .enter_running_for_direct_execution()
+        .await
+        .expect("enter running");
+
+    let harness = FakeHarness::from_result_turns([vec![Err(AiError::Protocol {
+        message: "response_format unsupported on compatible endpoint".to_owned(),
+    })]]);
+    let mut config = neo_agent_core::AgentConfig::for_model(harness.model());
+    config.max_retries = 0;
+    config = config
+        .with_permission_mode(neo_agent_core::PermissionMode::Yolo)
+        .with_workflow_runtime(runtime);
+    // Foreground Delegate path through normal workflow dispatch: the tool runs
+    // the child turn and then applies the output schema.
+    let input = json!({
+        "task": "return structured ok",
+        "output_schema": child_schema_doc(),
+    });
+    let dispatch = WorkflowDispatchHandle {
+        config,
+        model_client: harness.client(),
+        registry: std::sync::Arc::new(ToolRegistry::with_builtin_tools()),
+        process_supervisor: ProcessSupervisor::default(),
+        context: AgentContext::new(),
+    };
+    let origin = handle.execution_origin(None).await;
+    let outcome = handle
+        .invoke(
+            0,
+            WorkflowInvocationKind::Delegate,
+            input.clone(),
+            true,
+            move |invocation| async move {
+                dispatch
+                    .run_one_with_origin(invocation, "Delegate", input, Some(origin))
+                    .await
+            },
+        )
+        .await
+        .expect("invoke");
+
+    assert!(!outcome.ok, "{outcome:?}");
+    assert_eq!(outcome.status, WorkflowOutcomeStatus::Failed, "{outcome:?}");
+    assert!(
+        outcome.summary.contains("response_format unsupported"),
+        "original protocol error must survive in summary: {}",
+        outcome.summary
+    );
+    assert_eq!(
+        harness.requests().len(),
+        1,
+        "failed child must not trigger a repair request: {:?}",
+        harness.requests()
+    );
+
+    let run_dir = neo_agent_core::workflow::run_dir(session_dir, &handle.run_id);
+    let envelopes = collect_journal(
+        &run_dir.join("journal.jsonl"),
+        Some(&handle.run_id),
+        WorkflowLimits::default().journal_record_bytes,
+        WorkflowLimits::default().journal_total_bytes,
+    )
+    .expect("journal");
+    let kinds: Vec<&str> = envelopes
+        .iter()
+        .map(|e| match &e.payload {
+            JournalPayload::SchemaRepairStarted { .. } => "schema_repair_started",
+            JournalPayload::SchemaRepairFinished { .. } => "schema_repair_finished",
+            _ => "other",
+        })
+        .collect();
+    assert!(
+        !kinds.contains(&"schema_repair_started") && !kinds.contains(&"schema_repair_finished"),
+        "failed child must write no schema-repair journal records: {kinds:?}"
+    );
+    let serialized = outcome.details.to_string();
+    assert!(
+        !serialized.contains("strict_json_failed") && !serialized.contains("schema_error"),
+        "no schema-failure replacement in details: {serialized}"
+    );
+    assert!(
+        !outcome.summary.contains("strict_json_failed"),
+        "no schema-failure replacement in summary: {}",
+        outcome.summary
+    );
+}
+
+/// A direct workflow swarm child that fails at the provider level must keep its
+/// original error and skip schema repair through the real swarm consumer.
+#[tokio::test]
+async fn workflow_swarm_protocol_failure_skips_schema_repair_and_preserves_error() {
+    use neo_agent_core::multi_agent::{
+        AgentRole, ChildPlan, ChildRuntimeDeps, ChildWorktreePolicy, DelegateContext,
+        MultiAgentRuntime,
+    };
+    use neo_agent_core::workflow::journal::{JournalPayload, collect_journal};
+    use neo_agent_core::workflow::{SwarmBatchRequest, WorkflowOutcomeStatus};
+    use neo_ai::AiError;
+
+    let dir = tempfile::tempdir().unwrap();
+    let session_dir = dir.path();
+    let handle = running_workflow_handle(session_dir).await;
+
+    let harness = FakeHarness::from_result_turns([vec![Err(AiError::Protocol {
+        message: "response_format unsupported on compatible endpoint".to_owned(),
+    })]]);
+    let mut config = neo_agent_core::AgentConfig::for_model(harness.model());
+    config.max_retries = 0;
+    config = config.with_permission_mode(neo_agent_core::PermissionMode::Yolo);
+    let multi = MultiAgentRuntime::new().with_session_directory(session_dir.to_path_buf());
+    let deps = ChildRuntimeDeps::new(
+        config
+            .with_workspace_root(session_dir.to_path_buf())
+            .expect("workspace"),
+        harness.client(),
+        std::sync::Arc::new(ToolRegistry::new()),
+    );
+
+    let plan = ChildPlan {
+        item_id: "item-a".to_owned(),
+        item_label: "a".to_owned(),
+        task: "return structured ok".to_owned(),
+        title: None,
+        resume: None,
+        role: None,
+        model: None,
+        provider: None,
+        context: DelegateContext::None,
+        worktree: ChildWorktreePolicy::Shared,
+        tool_allow: None,
+        output_schema: Some(child_schema_doc()),
+    };
+    let request = SwarmBatchRequest {
+        call_index: 0,
+        canonical_input: json!({
+            "description": "protocol failure swarm",
+            "items": [{
+                "task": "return structured ok",
+                "output_schema": child_schema_doc(),
+            }],
+        }),
+        description: "protocol failure swarm".to_owned(),
+        role: AgentRole::Coder,
+        max_concurrency: 1,
+        plans: vec![plan],
+    };
+    let outcome = handle
+        .invoke_swarm_batch(request, multi, deps)
+        .await
+        .expect("swarm batch");
+
+    assert!(!outcome.ok, "{outcome:?}");
+    assert_eq!(outcome.status, WorkflowOutcomeStatus::Failed, "{outcome:?}");
+    assert_eq!(
+        harness.requests().len(),
+        1,
+        "failed swarm child must not trigger a repair request: {:?}",
+        harness.requests()
+    );
+    let items = outcome
+        .details
+        .get("items")
+        .and_then(serde_json::Value::as_array)
+        .expect("ordered item details");
+    assert_eq!(items.len(), 1, "{items:?}");
+    let first = &items[0];
+    assert_eq!(first["item_id"], json!("item-a"));
+    assert_eq!(first["ok"], json!(false));
+    assert!(
+        first["summary"]
+            .as_str()
+            .is_some_and(|s| s.contains("response_format unsupported")),
+        "original protocol error must survive in item details: {first}"
+    );
+    let serialized = outcome.details.to_string();
+    assert!(
+        !serialized.contains("strict_json_failed") && !serialized.contains("schema_error"),
+        "no schema-failure replacement in details: {serialized}"
+    );
+
+    let run_dir = neo_agent_core::workflow::run_dir(session_dir, &handle.run_id);
+    let envelopes = collect_journal(
+        &run_dir.join("journal.jsonl"),
+        Some(&handle.run_id),
+        WorkflowLimits::default().journal_record_bytes,
+        WorkflowLimits::default().journal_total_bytes,
+    )
+    .expect("journal");
+    let kinds: Vec<&str> = envelopes
+        .iter()
+        .map(|e| match &e.payload {
+            JournalPayload::SchemaRepairStarted { .. } => "schema_repair_started",
+            JournalPayload::SchemaRepairFinished { .. } => "schema_repair_finished",
+            _ => "other",
+        })
+        .collect();
+    assert!(
+        !kinds.contains(&"schema_repair_started") && !kinds.contains(&"schema_repair_finished"),
+        "failed swarm child must write no schema-repair journal records: {kinds:?}"
+    );
+}

@@ -850,6 +850,24 @@ async fn apply_child_output_schema(
         }
         return Ok((output, extra));
     };
+    // A child turn that failed at provider, authentication, rate-limit,
+    // cancellation, or runtime level is not structured-output text: preserve
+    // the original output and observed usage; never enter schema parsing or
+    // the content-repair path.
+    let child_succeeded = output.snapshot.state == AgentLifecycleState::Completed
+        && !output
+            .snapshot
+            .outcome
+            .as_ref()
+            .is_some_and(|outcome| outcome.is_error);
+    if !child_succeeded {
+        let usage = accumulate_actual_usage(None, &output.events);
+        let mut extra = json!({});
+        if let Some(usage) = usage {
+            extra["actual_usage"] = json!(usage);
+        }
+        return Ok((output, extra));
+    }
     let schema = CompiledSchema::compile(schema_doc).map_err(|err| ToolError::InvalidInput {
         tool: "Delegate".to_owned(),
         message: format!("output_schema compile failed: {err}"),
