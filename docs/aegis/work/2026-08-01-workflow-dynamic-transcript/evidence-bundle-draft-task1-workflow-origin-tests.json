@@ -1,0 +1,8 @@
+{
+  "schemaVersion": "aegis.schema.v0",
+  "artifactKey": "task1-workflow-origin-tests",
+  "type": "test",
+  "source": "exact cargo tests for event JSON, stamp coverage, AskUser path, core runtime, TUI transcript, and neo-agent replay",
+  "summary": "Six exact tests passed; workflow origin stays live-only, stamps nine event variants without overwrite, crosses PendingQuestion, and affected downstream targets compile and pass.",
+  "verifier": "root"
+}

@@ -78,7 +78,7 @@ impl NeoTui {
             let mut lines = self
                 .render_transcript_browser_frame(width, height.saturating_sub(chrome.lines.len()))
                 .expect("transcript browser state exists");
-            let cursor = append_chrome(&mut lines, chrome);
+            let cursor = append_chrome(&mut lines, chrome, width, height);
             return (lines, cursor);
         }
         if let Some(mut lines) = render_full_screen_overlay_frame(&self.chrome, width, height) {
@@ -105,7 +105,7 @@ impl NeoTui {
             .transcript
             .render_frame(width, height)
             .unwrap_or_else(|| self.transcript.frame_ansi_lines());
-        let cursor = append_chrome(&mut lines, chrome_render);
+        let cursor = append_chrome(&mut lines, chrome_render, width, height);
         (lines, cursor)
     }
 
@@ -169,7 +169,7 @@ impl NeoTui {
                     height.saturating_sub(chrome_render.lines.len()),
                 )
                 .expect("transcript browser state exists");
-            let cursor = append_chrome(&mut lines, chrome_render);
+            let cursor = append_chrome(&mut lines, chrome_render, width, height);
             return TerminalFrame::with_surface(
                 Vec::new(),
                 lines,
@@ -185,10 +185,11 @@ impl NeoTui {
         for block in &mut update.history {
             apply_gutter(&mut block.lines);
         }
-        let cursor = append_chrome(&mut update.live, chrome_render);
-        if update.live.len() > height {
-            update.live.truncate(height);
-        }
+        debug_assert!(
+            update.live.len() + chrome_render.lines.len() <= height,
+            "transcript and fitted chrome must fit the terminal height"
+        );
+        let cursor = append_chrome(&mut update.live, chrome_render, width, height);
         TerminalFrame::with_surface(
             update.history,
             update.live,
@@ -275,14 +276,28 @@ fn render_chrome(app: &mut NeoChromeState, width: usize, height: usize) -> Chrom
     }
 }
 
-fn append_chrome(lines: &mut Vec<String>, chrome: ChromeRender) -> Option<CursorPos> {
+fn append_chrome(
+    lines: &mut Vec<String>,
+    chrome: ChromeRender,
+    width: usize,
+    height: usize,
+) -> Option<CursorPos> {
+    debug_assert!(
+        lines.len() + chrome.lines.len() <= height,
+        "transcript and fitted chrome must fit the terminal height"
+    );
     let body_len = lines.len();
     lines.extend(chrome.lines);
     apply_gutter(lines);
-    chrome.cursor.map(|cursor| CursorPos {
+    let cursor = chrome.cursor.map(|cursor| CursorPos {
         row: body_len + chrome.prompt_start_row + cursor.row,
         col: cursor.col + CHROME_GUTTER,
-    })
+    });
+    debug_assert!(
+        cursor.is_none_or(|cursor| cursor.row < height && cursor.col < width),
+        "terminal cursor must remain inside the rendered frame"
+    );
+    cursor
 }
 
 fn fit_chrome_to_height(mut chrome: ChromeRender, height: usize) -> ChromeRender {

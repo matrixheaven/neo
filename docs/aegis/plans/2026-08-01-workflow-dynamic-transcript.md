@@ -69,10 +69,15 @@ existing non-workflow paths remain unchanged.
 
 - preserve workflow scheduling, journal, recovery, result, task projection, and
   model-visible tool behavior;
-- preserve session JSONL shape; new Delegate-family origin fields are live-only
-  metadata and are skipped by serialization and schema generation;
-- preserve all non-workflow Delegate, DelegateGroup, and DelegateSwarm layouts,
-  expansion behavior, ordering, progressive facts, and transcript placement;
+- preserve session JSONL readability; new Delegate-family origin fields are
+  optional metadata so grouping survives resume, while old records continue to
+  deserialize without migration;
+- preserve all non-workflow Delegate, DelegateGroup, and DelegateSwarm layouts
+  and expansion behavior; commit each complete card once so its header remains
+  before its child activity;
+- project a terminal non-workflow DelegateSwarm as its existing collapsed
+  header plus exactly one row per child; omit the duplicate scheduling and
+  completion rows while keeping full child activity available in review;
 - preserve ordinary non-workflow tool grouping and output expansion;
 - preserve approval and question entries as independent blocking input owners;
 - preserve explicit `Ctrl+O` review and Task Browser alternate-screen behavior;
@@ -170,7 +175,7 @@ terminal geometry.
 ### Ripple Signal Triage
 
 - `AgentEvent` constructors, session compaction match arms, and the question
-  stream adapter must accept the new live-only provenance fields.
+  stream adapter must accept the new provenance fields.
 - TUI replay must continue to read historical events whose Delegate-family
   variants contain no provenance.
 - Tool queue and shell updates that do not carry provenance must resolve their
@@ -298,20 +303,20 @@ terminal geometry.
 - Lingering-reference check: removed symbols and tail truncation are absent.
 - Negative check: no queued/running/phase history line or workflow-origin
   top-level child card can be produced.
-- Boundary check: live-only origin fields do not appear in serialized events and
-  non-workflow cards retain their current snapshots and layout.
+- Boundary check: optional origin fields round-trip through serialized events
+  and non-workflow cards retain their current snapshots and layout.
 
 ## File Map
 
 ### `neo-agent-core`
 
-- `crates/neo-agent-core/src/events.rs`: add live-only workflow provenance to
+- `crates/neo-agent-core/src/events.rs`: add workflow provenance to
   Delegate-family and question events.
 - `crates/neo-agent-core/src/runtime/tool_dispatch.rs`: stamp all tool,
   Delegate-family, approval, and supported question events emitted by one
   workflow-hosted invocation.
-- `crates/neo-agent-core/src/session/event_persistence.rs`: preserve existing
-  persisted event shape while accepting the new fields.
+- `crates/neo-agent-core/src/session/event_persistence.rs`: preserve workflow
+  provenance while compacting child progress events.
 
 ### `neo-tui`
 
@@ -336,7 +341,7 @@ terminal geometry.
   `crates/neo-tui/src/shell/event_router.rs`: retain question provenance across
   the existing stream adapter.
 - `crates/neo-tui/src/transcript/entry/mod.rs` and
-  `crates/neo-tui/src/transcript/pane.rs`: retain live-only provenance on the
+  `crates/neo-tui/src/transcript/pane.rs`: retain provenance on the
   independent question entry without changing its rendering.
 - `crates/neo-tui/src/transcript/presentation.rs`: emit one logical workflow
   group, include separators in live cost, and commit one terminal group.
@@ -403,7 +408,8 @@ terminal geometry.
 Ordinary tool execution already carries `WorkflowExecutionOrigin`, but
 Delegate-family snapshots lose it at the event boundary. Event order, turn,
 name, and title are ambiguous when workflows run concurrently. The minimum
-repair is live-only typed provenance on the existing events.
+repair is typed provenance on the existing events and their persisted
+transcript projection.
 
 ### Repair Track
 
@@ -412,24 +418,25 @@ repair is live-only typed provenance on the existing events.
    `DelegateFinished`, `DelegateSwarmStarted`, `DelegateSwarmUpdated`,
    `DelegateSwarmProgressUpdated`, `DelegateSwarmFinished`, and
    `QuestionRequested`.
-2. Mark each field `#[serde(skip)]` and `#[schemars(skip)]`. Deserialization must
-   produce `None`; serialized JSON must remain byte-for-byte free of the field.
+2. Serialize each field only when present and default it to `None` when absent.
+   Old records remain readable without migration.
 3. Update every constructor and compact-progress reconstruction to initialize
    the field with `None` outside workflow forwarding.
 4. Extend `stamp_workflow_origin` to fill these variants only when their field
    is empty. Preserve any already-stamped value.
 5. Keep the existing `run_id`, `phase_id`, and `invocation_id`; do not add a
    second lineage type or correlate through a queue.
-6. Add unit coverage for all stamped variants and for live-only JSON behavior.
+6. Add unit coverage for stamped variants and JSON round-trip behavior.
 
 ### Retirement Track
 
 - Retire turn/name/order inference before it is introduced.
-- Do not persist the new fields and do not add a session migration.
+- Do not add a session migration or infer missing provenance from text or order.
 
 ### Impact And Compatibility
 
-- Rust constructors and pattern matches change; wire JSON does not.
+- Rust constructors and pattern matches change; wire JSON gains optional source
+  metadata only for workflow-origin child events.
 - Non-workflow event construction remains `workflow_origin: None`.
 
 ### Verification
@@ -500,7 +507,10 @@ snapshots on the existing workflow entry.
 - Delete mutable workflow history facts completely.
 - Delete the workflow-origin top-level tool/child normal path rather than hide a
   duplicate card after rendering.
-- Preserve Delegate-family progressive facts only for non-workflow entries.
+- Keep typed terminal child facts captured before snapshots trim them, but do
+  not emit them as standalone history. At terminalization, compose the parent
+  header, captured child/tool rows, and terminal result into one parent-owned
+  block and commit it once.
 
 ### Impact And Compatibility
 
@@ -680,7 +690,7 @@ logical workflow group.
    leaves it retryable.
 5. Remove the live group in the same presentation update that offers the final
    block, so live and final forms are never simultaneously visible.
-6. Carry the question event's live-only origin through `StreamUpdate` into
+6. Carry the question event's origin through `StreamUpdate` into
    `QuestionPromptData`. Keep approval origin in its existing `ApprovalRequest`.
    Neither entry is absorbed into the workflow group or changes visible wording.
 7. Keep approvals and questions as independent barrier entries. The earliest
@@ -800,7 +810,7 @@ behavior so future work does not restore the defect.
    `append_chrome`.
 3. Confirm `delegate_card.rs`, `delegate_group.rs`, and `swarm_card.rs` have no
    layout changes unless a focused failure proved a shared helper correction.
-4. Amend ADR-0010 with the one-main-plus-two-sibling projection, live-only
+4. Amend ADR-0010 with the one-main-plus-two-sibling projection, typed
    workflow provenance, terminal-only history rule, and exact final-frame cost.
 5. Amend the baseline to supersede accepted-transition history with one terminal
    workflow group and reference the implementation commits and focused evidence.
@@ -836,8 +846,8 @@ git commit -m "docs(tui): record workflow transcript presentation"
 
 ## Risks And Stop Conditions
 
-- If Delegate-family provenance cannot remain live-only without changing
-  historical JSON, stop before changing persistence.
+- If old records cannot remain readable after adding optional source metadata,
+  stop before changing persistence.
 - If a workflow child must be correlated by event order, title, turn, or name,
   stop and repair the typed origin at the producer.
 - If direct tool activity must exist in both a workflow entry and a top-level

@@ -12,10 +12,6 @@ use crate::transcript::{
 use super::entry::{
     ApprovalPromptData, RetryPhase, RetryStatusData, ThinkingPhase, TranscriptEntry,
 };
-use super::progressive::{
-    ChildAgentFact, ChildToolFact, ProgressiveFact, ProgressiveFactId, ProgressiveFactPayload,
-    SwarmItemFact, WorkflowTransitionFact,
-};
 use neo_agent_core::instructions::{
     IgnoredInstructionBundle, InstructionBundleMetadata, InstructionEpochData,
     InstructionEpochOutcome, InstructionFailure, InstructionReplacement, InstructionScopeData,
@@ -25,7 +21,18 @@ use neo_agent_core::multi_agent::{
     SwarmChildProgress, SwarmChildSnapshot, SwarmSnapshot, apply_agent_progress,
     apply_swarm_child_progress,
 };
-use neo_agent_core::workflow::WorkflowSnapshot;
+use neo_agent_core::workflow::{WorkflowExecutionOrigin, WorkflowSnapshot};
+
+use super::progressive::{
+    ChildAgentFact, ChildToolFact, ProgressiveFact, ProgressiveFactId, ProgressiveFactPayload,
+    SwarmItemFact,
+};
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum WorkflowActivityRouteError {
+    MissingWorkflow,
+    ConflictingOrigin { tool_id: String },
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct TranscriptSelection {
@@ -187,9 +194,6 @@ pub struct TranscriptStore {
     /// needs re-rendering (new, mutated, or width changed).
     render_cache: Vec<Option<CachedRender>>,
     first_dirty_entry: Option<usize>,
-    /// Captured immutable progressive facts in canonical arrival order. They
-    /// are retained until their terminal write is acknowledged so source
-    /// snapshot trimming or replacement can never remove them first.
     progressive_facts: Vec<ProgressiveFact>,
 }
 
@@ -208,35 +212,39 @@ impl TranscriptStore {
         self.append_entry(entry);
     }
 
-    /// Capture one immutable progressive fact in canonical arrival order.
-    /// Duplicate identities are ignored so a fact is never captured twice.
     pub(crate) fn capture_progressive_fact(&mut self, fact: ProgressiveFact) -> bool {
-        if self
+        if let Some(existing) = self
             .progressive_facts
-            .iter()
-            .any(|existing| existing.id == fact.id)
+            .iter_mut()
+            .find(|existing| existing.id == fact.id)
         {
-            return false;
+            let mut fact = fact;
+            if let (
+                ProgressiveFactPayload::ChildTool(current),
+                ProgressiveFactPayload::ChildTool(incoming),
+            ) = (&existing.payload, &mut fact.payload)
+            {
+                incoming.activity_index = current.activity_index;
+            }
+            if *existing == fact {
+                return false;
+            }
+            *existing = fact;
+            return true;
         }
         self.progressive_facts.push(fact);
         true
     }
 
-    /// All captured progressive facts in canonical arrival order.
     #[must_use]
     pub(crate) fn progressive_facts(&self) -> &[ProgressiveFact] {
         &self.progressive_facts
     }
 
-    /// Drop acknowledged fact payloads while keeping unacknowledged ones.
     pub(crate) fn retain_progressive_facts(&mut self, keep: impl FnMut(&ProgressiveFact) -> bool) {
         self.progressive_facts.retain(keep);
     }
 
-    /// Capture the typed-stable facts of one delegate snapshot: completed
-    /// (`Done`/`Failed`) child tool rows always; the per-agent terminal fact
-    /// only in group context, where the card stays live after the agent
-    /// finishes and the entry-level terminal status cannot cover it.
     fn capture_delegate_snapshot_facts(
         &mut self,
         entry: TranscriptEntryId,
@@ -262,8 +270,6 @@ impl TranscriptStore {
         self.capture_terminal_tool_facts(entry, &agent_id, run_count, snapshot);
     }
 
-    /// Capture the typed-stable facts of a swarm snapshot: terminal child
-    /// items plus their completed tool rows.
     fn capture_swarm_snapshot_facts(&mut self, entry: TranscriptEntryId, snapshot: &SwarmSnapshot) {
         for child in &snapshot.children {
             let agent_id = child.agent.id.as_str().to_owned();
@@ -290,9 +296,6 @@ impl TranscriptStore {
         }
     }
 
-    /// Capture every completed child tool row of one agent snapshot. Only the
-    /// typed `Done`/`Failed` phases are stable; queued/ongoing tools stay in
-    /// the live projection.
     fn capture_terminal_tool_facts(
         &mut self,
         entry: TranscriptEntryId,
@@ -300,7 +303,7 @@ impl TranscriptStore {
         run_count: u32,
         snapshot: &AgentSnapshot,
     ) {
-        for activity in &snapshot.activity {
+        for (activity_index, activity) in snapshot.activity.iter().enumerate() {
             let AgentActivityKind::Tool {
                 id,
                 name,
@@ -316,6 +319,7 @@ impl TranscriptStore {
                 agent_id: agent_id.to_owned(),
                 run_count,
                 tool_id: id.clone(),
+                activity_index,
                 name: name.clone(),
                 summary: summary.clone(),
                 phase: *phase,
@@ -626,6 +630,9 @@ impl TranscriptStore {
     pub fn tool(&self, id: &str) -> Option<&ToolCallComponent> {
         self.entries.iter().find_map(|entry| match entry {
             TranscriptEntry::ToolRun { component } if component.id() == id => Some(component),
+            TranscriptEntry::Workflow { component } => {
+                component.direct_tools().iter().find(|tool| tool.id() == id)
+            }
             _ => None,
         })
     }
@@ -635,14 +642,19 @@ impl TranscriptStore {
         id: &str,
         mutate: impl FnOnce(&mut ToolCallComponent) -> bool,
     ) -> bool {
-        let index = self.entries.iter().position(
-            |entry| matches!(entry, TranscriptEntry::ToolRun { component } if component.id() == id),
-        );
+        let index = self.entries.iter().position(|entry| match entry {
+            TranscriptEntry::ToolRun { component } => component.id() == id,
+            TranscriptEntry::Workflow { component } => {
+                component.direct_tools().iter().any(|tool| tool.id() == id)
+            }
+            _ => false,
+        });
         let Some(index) = index else {
             return false;
         };
         self.mutate_entry(index, |entry| match entry {
             TranscriptEntry::ToolRun { component } => mutate(component),
+            TranscriptEntry::Workflow { component } => component.mutate_direct_tool(id, mutate),
             _ => false,
         })
     }
@@ -798,9 +810,7 @@ impl TranscriptStore {
 
     #[must_use]
     pub fn has_tool(&self, id: &str) -> bool {
-        self.entries.iter().any(
-            |entry| matches!(entry, TranscriptEntry::ToolRun { component } if component.id() == id),
-        )
+        self.tool(id).is_some()
     }
 
     #[must_use]
@@ -842,8 +852,6 @@ impl TranscriptStore {
                 };
                 component.upsert(snapshot)
             });
-            // Capture after the merge so terminal precedence (Cancelled over
-            // late Completed) is respected, and from the effective snapshot.
             if let Some(effective) = match &self.entries[index] {
                 TranscriptEntry::DelegateGroup { component } => component.snapshot(&id).cloned(),
                 _ => None,
@@ -926,8 +934,6 @@ impl TranscriptStore {
                 TranscriptEntry::Delegate { component } => component.snapshot().clone(),
                 _ => return,
             };
-            // The entry identity survives the Delegate-to-Group replacement;
-            // capture both snapshots against the same entry id.
             self.capture_delegate_snapshot_facts(self.entry_ids[index], &existing, true);
             self.capture_delegate_snapshot_facts(self.entry_ids[index], &snapshot, true);
             self.mutate_entry(index, |entry| {
@@ -1091,74 +1097,239 @@ impl TranscriptStore {
                 };
                 component.update(snapshot.clone())
             });
-            // Capture the accepted transition before the newest snapshot
-            // overwrites the prior one.
-            self.capture_workflow_transition(self.entry_ids[index], &snapshot);
             return;
         }
         self.push(TranscriptEntry::Workflow {
-            component: WorkflowCardComponent::new(snapshot.clone()),
+            component: WorkflowCardComponent::new(snapshot),
         });
-        self.capture_workflow_transition(self.entry_ids[self.entries.len() - 1], &snapshot);
     }
 
-    /// Capture one accepted workflow snapshot transition keyed by typed
-    /// projection sequence. Duplicate or older sequences are ignored, and a
-    /// transition with unchanged state/phase/reason adds no duplicate row.
-    /// The terminal outcome is not captured here: it projects once as the
-    /// entry's final status so history never repeats the same state line.
-    fn capture_workflow_transition(
+    pub(crate) fn upsert_workflow_tool(
         &mut self,
-        entry: TranscriptEntryId,
-        snapshot: &WorkflowSnapshot,
-    ) {
-        let Some(projection_sequence) = snapshot.projection_sequence else {
-            return;
+        workflow_origin: WorkflowExecutionOrigin,
+        state: ToolCallState,
+    ) -> Result<bool, WorkflowActivityRouteError> {
+        if self.is_tool_run_suppressed(&state.id) {
+            return Ok(false);
         };
-        if snapshot.state.is_terminal() {
-            return;
-        }
-        let identity = ProgressiveFactId::WorkflowTransition {
-            entry,
-            projection_sequence,
-        };
-        if self
-            .progressive_facts
+        let index = self
+            .entries
             .iter()
-            .any(|fact| fact.id == identity)
-        {
-            return;
-        }
-        if let Some(previous) =
-            self.progressive_facts
-                .iter()
-                .rev()
-                .find_map(|fact| match (&fact.id, &fact.payload) {
-                    (
-                        ProgressiveFactId::WorkflowTransition {
-                            entry: previous_entry,
-                            ..
-                        },
-                        ProgressiveFactPayload::WorkflowTransition(previous),
-                    ) if *previous_entry == entry => Some(previous),
-                    _ => None,
-                })
-            && previous.state == snapshot.state
-            && previous.current_phase == snapshot.current_phase
-            && previous.terminal_reason == snapshot.terminal_reason
-        {
-            return;
-        }
-        self.capture_progressive_fact(ProgressiveFact {
-            id: identity,
-            payload: ProgressiveFactPayload::WorkflowTransition(WorkflowTransitionFact {
-                projection_sequence,
-                title: snapshot.title.clone(),
-                state: snapshot.state,
-                current_phase: snapshot.current_phase.clone(),
-                terminal_reason: snapshot.terminal_reason.clone(),
-            }),
+            .position(|entry| {
+                matches!(entry, TranscriptEntry::Workflow { component }
+                    if component.direct_tools().iter().any(|tool| tool.id() == state.id))
+            })
+            .or_else(|| self.workflow_index(&workflow_origin.run_id.0));
+        let Some(index) = index else {
+            return Err(WorkflowActivityRouteError::MissingWorkflow);
+        };
+        let tool_id = state.id.clone();
+        let mut result = Ok(false);
+        self.mutate_entry(index, |entry| {
+            let TranscriptEntry::Workflow { component } = entry else {
+                return false;
+            };
+            result = component.upsert_direct_tool(state, workflow_origin);
+            result.as_ref().is_ok_and(|changed| *changed)
         });
+        result.map_err(|()| WorkflowActivityRouteError::ConflictingOrigin { tool_id })
+    }
+
+    pub(crate) fn upsert_workflow_delegate(
+        &mut self,
+        workflow_origin: &WorkflowExecutionOrigin,
+        snapshot: AgentSnapshot,
+    ) -> Result<bool, WorkflowActivityRouteError> {
+        let Some(index) = self.workflow_index(&workflow_origin.run_id.0) else {
+            return Err(WorkflowActivityRouteError::MissingWorkflow);
+        };
+        let agent_id = snapshot.id.clone();
+        let mut absorbed_parent = false;
+        let mut result = Ok(false);
+        self.mutate_entry(index, |entry| {
+            let TranscriptEntry::Workflow { component } = entry else {
+                return false;
+            };
+            let has_parent = workflow_origin
+                .invocation_id
+                .as_deref()
+                .is_some_and(|id| component.direct_tools().iter().any(|tool| tool.id() == id));
+            let has_delegate = component
+                .delegates()
+                .iter()
+                .any(|current| current.id == agent_id);
+            if !has_parent && !has_delegate {
+                return false;
+            }
+            result = component
+                .absorb_direct_tool(workflow_origin)
+                .map(|absorbed| {
+                    absorbed_parent = absorbed;
+                    component.upsert_delegate(snapshot) | absorbed
+                });
+            result.as_ref().is_ok_and(|changed| *changed)
+        });
+        if absorbed_parent && let Some(invocation_id) = workflow_origin.invocation_id.as_deref() {
+            self.suppress_tool_run(invocation_id);
+        }
+        result.map_err(|()| WorkflowActivityRouteError::ConflictingOrigin {
+            tool_id: workflow_origin.invocation_id.clone().unwrap_or_default(),
+        })
+    }
+
+    pub(crate) fn upsert_workflow_delegate_progress(
+        &mut self,
+        workflow_origin: &WorkflowExecutionOrigin,
+        progress: &AgentProgressSnapshot,
+    ) -> Result<bool, WorkflowActivityRouteError> {
+        let Some(index) = self.workflow_index(&workflow_origin.run_id.0) else {
+            return Err(WorkflowActivityRouteError::MissingWorkflow);
+        };
+        let mut absorbed_parent = false;
+        let mut result = Ok(false);
+        self.mutate_entry(index, |entry| {
+            let TranscriptEntry::Workflow { component } = entry else {
+                return false;
+            };
+            if !component.delegates().iter().any(|snapshot| {
+                snapshot.id == progress.agent_id && snapshot.run_count == progress.run_count
+            }) {
+                return false;
+            }
+            result = component
+                .validate_direct_tool_origin(workflow_origin)
+                .and_then(|()| {
+                    let changed = component.upsert_delegate_progress(progress);
+                    component
+                        .absorb_direct_tool(workflow_origin)
+                        .map(|absorbed| {
+                            absorbed_parent = absorbed;
+                            changed | absorbed
+                        })
+                });
+            result.as_ref().is_ok_and(|changed| *changed)
+        });
+        if absorbed_parent && let Some(invocation_id) = workflow_origin.invocation_id.as_deref() {
+            self.suppress_tool_run(invocation_id);
+        }
+        result.map_err(|()| WorkflowActivityRouteError::ConflictingOrigin {
+            tool_id: workflow_origin.invocation_id.clone().unwrap_or_default(),
+        })
+    }
+
+    pub(crate) fn upsert_workflow_swarm(
+        &mut self,
+        workflow_origin: &WorkflowExecutionOrigin,
+        snapshot: SwarmSnapshot,
+    ) -> Result<bool, WorkflowActivityRouteError> {
+        let Some(index) = self.workflow_index(&workflow_origin.run_id.0) else {
+            return Err(WorkflowActivityRouteError::MissingWorkflow);
+        };
+        let swarm_id = snapshot.swarm_id.clone();
+        let mut absorbed_parent = false;
+        let mut result = Ok(false);
+        self.mutate_entry(index, |entry| {
+            let TranscriptEntry::Workflow { component } = entry else {
+                return false;
+            };
+            let has_parent = workflow_origin
+                .invocation_id
+                .as_deref()
+                .is_some_and(|id| component.direct_tools().iter().any(|tool| tool.id() == id));
+            let has_swarm = component
+                .swarms()
+                .iter()
+                .any(|current| current.swarm_id == swarm_id);
+            if !has_parent && !has_swarm {
+                return false;
+            }
+            result = component
+                .absorb_direct_tool(workflow_origin)
+                .map(|absorbed| {
+                    absorbed_parent = absorbed;
+                    component.upsert_swarm(snapshot) | absorbed
+                });
+            result.as_ref().is_ok_and(|changed| *changed)
+        });
+        if absorbed_parent && let Some(invocation_id) = workflow_origin.invocation_id.as_deref() {
+            self.suppress_tool_run(invocation_id);
+        }
+        result.map_err(|()| WorkflowActivityRouteError::ConflictingOrigin {
+            tool_id: workflow_origin.invocation_id.clone().unwrap_or_default(),
+        })
+    }
+
+    pub(crate) fn upsert_workflow_swarm_progress(
+        &mut self,
+        workflow_origin: &WorkflowExecutionOrigin,
+        swarm_id: &str,
+        state: AgentLifecycleState,
+        aggregate: SwarmAggregate,
+        child_progress: &SwarmChildProgress,
+    ) -> Result<bool, WorkflowActivityRouteError> {
+        let Some(index) = self.workflow_index(&workflow_origin.run_id.0) else {
+            return Err(WorkflowActivityRouteError::MissingWorkflow);
+        };
+        let mut absorbed_parent = false;
+        let mut result = Ok(false);
+        self.mutate_entry(index, |entry| {
+            let TranscriptEntry::Workflow { component } = entry else {
+                return false;
+            };
+            if !component
+                .swarms()
+                .iter()
+                .any(|snapshot| snapshot.swarm_id == swarm_id)
+            {
+                return false;
+            }
+            result = component
+                .validate_direct_tool_origin(workflow_origin)
+                .and_then(|()| {
+                    let changed =
+                        component.upsert_swarm_progress(swarm_id, state, aggregate, child_progress);
+                    component
+                        .absorb_direct_tool(workflow_origin)
+                        .map(|absorbed| {
+                            absorbed_parent = absorbed;
+                            changed | absorbed
+                        })
+                });
+            result.as_ref().is_ok_and(|changed| *changed)
+        });
+        if absorbed_parent && let Some(invocation_id) = workflow_origin.invocation_id.as_deref() {
+            self.suppress_tool_run(invocation_id);
+        }
+        result.map_err(|()| WorkflowActivityRouteError::ConflictingOrigin {
+            tool_id: workflow_origin.invocation_id.clone().unwrap_or_default(),
+        })
+    }
+
+    pub(crate) fn record_workflow_activity_route_error(
+        &mut self,
+        error: &WorkflowActivityRouteError,
+    ) -> bool {
+        let WorkflowActivityRouteError::ConflictingOrigin { tool_id } = error else {
+            return false;
+        };
+        let Some(index) = self.entries.iter().position(|entry| {
+            matches!(entry, TranscriptEntry::Workflow { component }
+                if component.direct_tools().iter().any(|tool| tool.id() == tool_id))
+        }) else {
+            return false;
+        };
+        self.mutate_entry(index, |entry| {
+            let TranscriptEntry::Workflow { component } = entry else {
+                return false;
+            };
+            component.mutate_direct_tool(tool_id, |tool| tool.set_workflow_activity_route_error())
+        })
+    }
+
+    fn workflow_index(&self, run_id: &str) -> Option<usize> {
+        self.entries.iter().position(|entry| {
+            matches!(entry, TranscriptEntry::Workflow { component } if component.id() == run_id)
+        })
     }
 
     #[must_use]
@@ -1641,10 +1812,18 @@ fn run_count_u32(run_count: usize) -> u32 {
 /// terminal precedence. A stale `Completed` snapshot arriving after a
 /// `Cancelled` snapshot must not regress the card — Cancelled always
 /// wins over Completed for the same run, regardless of timestamp.
-fn merge_delegate_snapshot(current: &AgentSnapshot, incoming: AgentSnapshot) -> AgentSnapshot {
+pub(super) fn merge_delegate_snapshot(
+    current: &AgentSnapshot,
+    incoming: AgentSnapshot,
+) -> AgentSnapshot {
     // Different agents — just take the incoming.
     if current.id != incoming.id {
         return incoming;
+    }
+    match incoming.run_count.cmp(&current.run_count) {
+        std::cmp::Ordering::Greater => return incoming,
+        std::cmp::Ordering::Less => return current.clone(),
+        std::cmp::Ordering::Equal => {}
     }
     if current.state.is_terminal() && !incoming.state.is_terminal() {
         return current.clone();
@@ -1665,14 +1844,13 @@ fn merge_delegate_snapshot(current: &AgentSnapshot, incoming: AgentSnapshot) -> 
     incoming
 }
 
-fn merge_swarm_snapshot(current: &SwarmSnapshot, incoming: SwarmSnapshot) -> SwarmSnapshot {
+pub(super) fn merge_swarm_snapshot(
+    current: &SwarmSnapshot,
+    incoming: SwarmSnapshot,
+) -> SwarmSnapshot {
     if current.swarm_id != incoming.swarm_id {
         return incoming;
     }
-    if swarm_snapshot_is_terminal(current) && !swarm_snapshot_is_terminal(&incoming) {
-        return current.clone();
-    }
-
     let mut children = incoming
         .children
         .into_iter()
@@ -1708,7 +1886,7 @@ fn merge_swarm_snapshot(current: &SwarmSnapshot, incoming: SwarmSnapshot) -> Swa
     }
 }
 
-fn swarm_snapshot_is_terminal(snapshot: &SwarmSnapshot) -> bool {
+pub(super) fn swarm_snapshot_is_terminal(snapshot: &SwarmSnapshot) -> bool {
     snapshot
         .children
         .iter()
@@ -1719,6 +1897,16 @@ fn merge_swarm_child(
     current: &SwarmChildSnapshot,
     incoming: SwarmChildSnapshot,
 ) -> SwarmChildSnapshot {
+    let merged_agent = merge_delegate_snapshot(&current.agent, incoming.agent.clone());
+    if merged_agent == current.agent && incoming.agent != current.agent {
+        return current.clone();
+    }
+    if merged_agent.run_count != current.agent.run_count {
+        return SwarmChildSnapshot {
+            agent: merged_agent,
+            ..incoming
+        };
+    }
     // Cancelled always beats a late Completed for the same child.
     if current.agent.state == AgentLifecycleState::Cancelled
         && incoming.agent.state == AgentLifecycleState::Completed
@@ -1753,6 +1941,412 @@ fn child_progress_rank(state: AgentLifecycleState) -> u8 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn workflow_snapshot_for_route_test() -> WorkflowSnapshot {
+        WorkflowSnapshot {
+            id: neo_agent_core::workflow::WorkflowId("workflow".to_owned()),
+            title: "workflow".to_owned(),
+            state: neo_agent_core::workflow::WorkflowState::Running,
+            current_phase: None,
+            projection_sequence: Some(1),
+            recovery_failure: false,
+            started_at_ms: None,
+            updated_at_ms: None,
+            invocation_count: 0,
+            failure_count: 0,
+            actual_usage: None,
+            latest_log_summary: None,
+            latest_report_summary: None,
+            terminal_reason: None,
+            display_name: "workflow".to_owned(),
+            purpose: String::new(),
+        }
+    }
+
+    fn workflow_origin_for_route_test(invocation_id: &str) -> WorkflowExecutionOrigin {
+        WorkflowExecutionOrigin {
+            run_id: neo_agent_core::workflow::WorkflowId("workflow".to_owned()),
+            human_handle: None,
+            definition_name: "workflow".to_owned(),
+            definition_revision: None,
+            phase_id: None,
+            invocation_id: Some(invocation_id.to_owned()),
+            swarm_item_id: None,
+        }
+    }
+
+    fn insert_failed_workflow_placeholder(store: &mut TranscriptStore, id: &str, name: &str) {
+        store
+            .upsert_workflow_tool(
+                workflow_origin_for_route_test(id),
+                ToolCallState {
+                    id: id.to_owned(),
+                    name: name.to_owned(),
+                    arguments: None,
+                    result: Some("failed before child start".to_owned()),
+                    details: None,
+                    status: ToolStatusKind::Failed,
+                    exit_code: None,
+                },
+            )
+            .expect("workflow placeholder");
+    }
+
+    fn running_workflow_tool(id: &str, name: &str) -> ToolCallState {
+        ToolCallState {
+            id: id.to_owned(),
+            name: name.to_owned(),
+            arguments: None,
+            result: None,
+            details: None,
+            status: ToolStatusKind::Running,
+            exit_code: None,
+        }
+    }
+
+    fn delegate_snapshot_for_merge_test() -> AgentSnapshot {
+        neo_agent_core::multi_agent::MultiAgentRuntime::new()
+            .start_foreground_delegate_for_test("merge run counts")
+    }
+
+    fn swarm_snapshot_for_merge_test(agent: AgentSnapshot) -> SwarmSnapshot {
+        let children = vec![SwarmChildSnapshot {
+            item_index: 0,
+            item: "merge child run counts".to_owned(),
+            agent,
+        }];
+        let aggregate = SwarmAggregate::from_states(children.iter().map(|child| child.agent.state));
+        SwarmSnapshot {
+            swarm_id: "merge-swarm".to_owned(),
+            description: "merge run counts".to_owned(),
+            role: neo_agent_core::multi_agent::AgentRole::Coder,
+            mode: neo_agent_core::multi_agent::AgentRunMode::Foreground,
+            state: aggregate.status(),
+            max_concurrency: 1,
+            aggregate,
+            children,
+        }
+    }
+
+    #[test]
+    fn delegate_and_swarm_merges_prefer_the_newest_run_count() {
+        let mut old_terminal = delegate_snapshot_for_merge_test();
+        old_terminal.state = AgentLifecycleState::Completed;
+        old_terminal.run_count = 1;
+        old_terminal.updated_at_ms = 10;
+        old_terminal.terminal_at_ms = Some(10);
+        old_terminal.latest_text = Some("old terminal run".to_owned());
+
+        let new_running = AgentSnapshot {
+            state: AgentLifecycleState::Running,
+            run_count: 2,
+            updated_at_ms: 20,
+            terminal_at_ms: None,
+            latest_text: Some("new running run".to_owned()),
+            outcome: None,
+            ..old_terminal.clone()
+        };
+
+        assert_eq!(
+            merge_delegate_snapshot(&old_terminal, new_running.clone()),
+            new_running
+        );
+        assert_eq!(
+            merge_delegate_snapshot(&new_running, old_terminal.clone()),
+            new_running
+        );
+
+        let merged_swarm = merge_swarm_snapshot(
+            &swarm_snapshot_for_merge_test(old_terminal.clone()),
+            swarm_snapshot_for_merge_test(new_running.clone()),
+        );
+        assert_eq!(merged_swarm.children[0].agent, new_running);
+
+        let stale_swarm = merge_swarm_snapshot(
+            &swarm_snapshot_for_merge_test(new_running.clone()),
+            swarm_snapshot_for_merge_test(old_terminal),
+        );
+        assert_eq!(stale_swarm.children[0].agent, new_running);
+    }
+
+    #[test]
+    fn workflow_children_require_parent_placeholder_and_existing_children_can_update() {
+        let mut store = TranscriptStore::new();
+        store.upsert_workflow(workflow_snapshot_for_route_test());
+
+        let delegate_origin = workflow_origin_for_route_test("delegate-call");
+        let delegate = delegate_snapshot_for_merge_test();
+        store.clear_dirty_entries();
+        let before_delegate = store.entries()[0].clone();
+        let before_delegate_revision = store.entry_revisions()[0];
+
+        assert_eq!(
+            store.upsert_workflow_delegate(&delegate_origin, delegate.clone()),
+            Ok(false)
+        );
+        assert_eq!(store.entries()[0], before_delegate);
+        assert_eq!(store.entry_revisions()[0], before_delegate_revision);
+        assert_eq!(store.first_dirty_entry(), None);
+        assert!(!store.is_tool_run_suppressed("delegate-call"));
+
+        assert_eq!(
+            store.upsert_workflow_tool(
+                delegate_origin.clone(),
+                running_workflow_tool("delegate-call", "Delegate"),
+            ),
+            Ok(true)
+        );
+        assert!(store.tool("delegate-call").is_some());
+        assert_eq!(
+            store.upsert_workflow_delegate(&delegate_origin, delegate.clone()),
+            Ok(true)
+        );
+        assert!(store.is_tool_run_suppressed("delegate-call"));
+
+        let updated_delegate = AgentSnapshot {
+            latest_text: Some("updated delegate".to_owned()),
+            updated_at_ms: delegate.updated_at_ms.saturating_add(1),
+            ..delegate
+        };
+        assert_eq!(
+            store.upsert_workflow_delegate(&delegate_origin, updated_delegate),
+            Ok(true)
+        );
+        let TranscriptEntry::Workflow { component } = &store.entries()[0] else {
+            panic!("workflow entry")
+        };
+        assert_eq!(
+            component.delegates()[0].latest_text.as_deref(),
+            Some("updated delegate")
+        );
+
+        let swarm_origin = workflow_origin_for_route_test("swarm-call");
+        let swarm = swarm_snapshot_for_merge_test(delegate_snapshot_for_merge_test());
+        store.clear_dirty_entries();
+        let before_swarm = store.entries()[0].clone();
+        let before_swarm_revision = store.entry_revisions()[0];
+
+        assert_eq!(
+            store.upsert_workflow_swarm(&swarm_origin, swarm.clone()),
+            Ok(false)
+        );
+        assert_eq!(store.entries()[0], before_swarm);
+        assert_eq!(store.entry_revisions()[0], before_swarm_revision);
+        assert_eq!(store.first_dirty_entry(), None);
+        assert!(!store.is_tool_run_suppressed("swarm-call"));
+
+        assert_eq!(
+            store.upsert_workflow_tool(
+                swarm_origin.clone(),
+                running_workflow_tool("swarm-call", "DelegateSwarm"),
+            ),
+            Ok(true)
+        );
+        assert!(store.tool("swarm-call").is_some());
+        assert_eq!(
+            store.upsert_workflow_swarm(&swarm_origin, swarm.clone()),
+            Ok(true)
+        );
+        assert!(store.is_tool_run_suppressed("swarm-call"));
+
+        let mut updated_swarm = swarm;
+        updated_swarm.description = "updated swarm".to_owned();
+        updated_swarm.children[0].agent.latest_text = Some("updated child".to_owned());
+        assert_eq!(
+            store.upsert_workflow_swarm(&swarm_origin, updated_swarm),
+            Ok(true)
+        );
+        let TranscriptEntry::Workflow { component } = &store.entries()[0] else {
+            panic!("workflow entry")
+        };
+        assert_eq!(component.swarms()[0].description, "updated swarm");
+        assert_eq!(
+            component.swarms()[0].children[0]
+                .agent
+                .latest_text
+                .as_deref(),
+            Some("updated child")
+        );
+    }
+
+    #[test]
+    fn workflow_child_progress_suppresses_only_an_absorbed_parent_placeholder() {
+        let mut store = TranscriptStore::new();
+        store.upsert_workflow(workflow_snapshot_for_route_test());
+
+        let delegate_origin = workflow_origin_for_route_test("delegate-progress-call");
+        let delegate = delegate_snapshot_for_merge_test();
+        store
+            .upsert_workflow_tool(
+                delegate_origin.clone(),
+                running_workflow_tool("delegate-progress-call", "Delegate"),
+            )
+            .expect("delegate parent");
+        store
+            .upsert_workflow_delegate(&delegate_origin, delegate.clone())
+            .expect("delegate child");
+        store.unsuppress_tool_run("delegate-progress-call");
+        store.push_tool_run("delegate-progress-call", "Delegate", None);
+        let mut delegate_progress = AgentProgressSnapshot::from_agent(&delegate);
+        delegate_progress.updated_at_ms = delegate_progress.updated_at_ms.saturating_add(1);
+        delegate_progress.latest_text = Some("progress without parent".to_owned());
+
+        assert_eq!(
+            store.upsert_workflow_delegate_progress(&delegate_origin, &delegate_progress),
+            Ok(true)
+        );
+        assert!(
+            !store.is_tool_run_suppressed("delegate-progress-call"),
+            "an unrelated top-level placeholder must remain visible"
+        );
+
+        store
+            .upsert_workflow_tool(
+                delegate_origin.clone(),
+                running_workflow_tool("delegate-progress-call", "Delegate"),
+            )
+            .expect("recreated delegate parent");
+        assert_eq!(
+            store.upsert_workflow_delegate_progress(&delegate_origin, &delegate_progress),
+            Ok(true),
+            "an unchanged child still absorbs its recreated parent"
+        );
+        assert!(store.is_tool_run_suppressed("delegate-progress-call"));
+
+        let swarm_origin = workflow_origin_for_route_test("swarm-progress-call");
+        let swarm = swarm_snapshot_for_merge_test(delegate_snapshot_for_merge_test());
+        store
+            .upsert_workflow_tool(
+                swarm_origin.clone(),
+                running_workflow_tool("swarm-progress-call", "DelegateSwarm"),
+            )
+            .expect("swarm parent");
+        store
+            .upsert_workflow_swarm(&swarm_origin, swarm.clone())
+            .expect("swarm child");
+        store.unsuppress_tool_run("swarm-progress-call");
+        store.push_tool_run("swarm-progress-call", "DelegateSwarm", None);
+        let mut swarm_progress = AgentProgressSnapshot::from_agent(&swarm.children[0].agent);
+        swarm_progress.updated_at_ms = swarm_progress.updated_at_ms.saturating_add(1);
+        swarm_progress.latest_text = Some("swarm progress without parent".to_owned());
+        let child_progress = SwarmChildProgress {
+            item_index: 0,
+            progress: swarm_progress,
+        };
+
+        assert_eq!(
+            store.upsert_workflow_swarm_progress(
+                &swarm_origin,
+                &swarm.swarm_id,
+                swarm.state,
+                swarm.aggregate,
+                &child_progress,
+            ),
+            Ok(true)
+        );
+        assert!(
+            !store.is_tool_run_suppressed("swarm-progress-call"),
+            "an unrelated top-level swarm placeholder must remain visible"
+        );
+    }
+
+    #[test]
+    fn workflow_delegate_origin_conflict_is_atomic() {
+        let mut store = TranscriptStore::new();
+        store.upsert_workflow(workflow_snapshot_for_route_test());
+        store
+            .upsert_workflow_tool(
+                workflow_origin_for_route_test("different-invocation"),
+                ToolCallState {
+                    id: "delegate-call".to_owned(),
+                    name: "Delegate".to_owned(),
+                    arguments: None,
+                    result: None,
+                    details: None,
+                    status: ToolStatusKind::Running,
+                    exit_code: None,
+                },
+            )
+            .expect("workflow tool");
+        store.clear_dirty_entries();
+        let before_entry = store.entries()[0].clone();
+        let before_revision = store.entry_revisions()[0];
+        let before_cache = store.render_cache[0].is_some();
+        let agent = neo_agent_core::multi_agent::MultiAgentRuntime::new()
+            .start_foreground_delegate_for_test("task");
+
+        let result =
+            store.upsert_workflow_delegate(&workflow_origin_for_route_test("delegate-call"), agent);
+
+        assert_eq!(
+            result,
+            Err(WorkflowActivityRouteError::ConflictingOrigin {
+                tool_id: "delegate-call".to_owned(),
+            })
+        );
+        assert_eq!(store.entries()[0], before_entry);
+        assert_eq!(store.entry_revisions()[0], before_revision);
+        assert_eq!(store.render_cache[0].is_some(), before_cache);
+        assert_eq!(store.first_dirty_entry(), None);
+    }
+
+    #[test]
+    fn workflow_delegate_progress_without_snapshot_keeps_failed_placeholder() {
+        let mut store = TranscriptStore::new();
+        store.upsert_workflow(workflow_snapshot_for_route_test());
+        insert_failed_workflow_placeholder(&mut store, "delegate-call", "Delegate");
+        store.clear_dirty_entries();
+        let revision = store.entry_revisions()[0];
+        let agent = neo_agent_core::multi_agent::MultiAgentRuntime::new()
+            .start_foreground_delegate_for_test("task");
+        let progress = agent.progress_snapshot();
+
+        let result = store.upsert_workflow_delegate_progress(
+            &workflow_origin_for_route_test("delegate-call"),
+            &progress,
+        );
+
+        assert_eq!(result, Ok(false));
+        assert_eq!(store.entry_revisions()[0], revision);
+        assert_eq!(store.first_dirty_entry(), None);
+        assert!(!store.is_tool_run_suppressed("delegate-call"));
+        let tool = store.tool("delegate-call").expect("failed placeholder");
+        assert_eq!(tool.status(), ToolStatusKind::Failed);
+        assert_eq!(tool.result(), Some("failed before child start"));
+    }
+
+    #[test]
+    fn workflow_swarm_progress_without_snapshot_keeps_failed_placeholder() {
+        let mut store = TranscriptStore::new();
+        store.upsert_workflow(workflow_snapshot_for_route_test());
+        insert_failed_workflow_placeholder(&mut store, "swarm-call", "DelegateSwarm");
+        store.clear_dirty_entries();
+        let revision = store.entry_revisions()[0];
+        let agent = neo_agent_core::multi_agent::MultiAgentRuntime::new()
+            .start_foreground_delegate_for_test("task");
+        let progress = agent.progress_snapshot();
+        let child_progress = SwarmChildProgress {
+            item_index: 0,
+            progress,
+        };
+        let aggregate = SwarmAggregate::from_states([child_progress.progress.state]);
+
+        let result = store.upsert_workflow_swarm_progress(
+            &workflow_origin_for_route_test("swarm-call"),
+            "missing-swarm",
+            child_progress.progress.state,
+            aggregate,
+            &child_progress,
+        );
+
+        assert_eq!(result, Ok(false));
+        assert_eq!(store.entry_revisions()[0], revision);
+        assert_eq!(store.first_dirty_entry(), None);
+        assert!(!store.is_tool_run_suppressed("swarm-call"));
+        let tool = store.tool("swarm-call").expect("failed placeholder");
+        assert_eq!(tool.status(), ToolStatusKind::Failed);
+        assert_eq!(tool.result(), Some("failed before child start"));
+    }
 
     #[test]
     fn render_entry_ansi_cached_stores_final_ansi_rows() {

@@ -1,0 +1,15 @@
+{
+  "schemaVersion": "aegis.schema.v0",
+  "taskId": "2026-08-01-workflow-dynamic-transcript",
+  "taskIntentRef": "docs/aegis/work/2026-08-01-workflow-dynamic-transcript/task-intent-draft.json",
+  "baselineRefs": [
+    "docs/aegis/specs/2026-08-01-workflow-dynamic-transcript-design.md"
+  ],
+  "scopeStatus": "Task 2 aligned after review repairs; terminal_scrollback assertion changed only to retire the obsolete transition-history expectation.",
+  "compatStatus": "Session persistence and origin-free Delegate-family paths remain unchanged; shell events now update only existing model tool entries.",
+  "retirementStatus": "WorkflowTransition and its capture/render paths remain deleted; no queue, origin inference, compatibility renderer, or second activity store was added.",
+  "newRiskSignals": [
+    "Task 2 proof is deterministic local Rust coverage; native terminal and cross-platform behavior remain for later tasks."
+  ],
+  "decision": "continue"
+}

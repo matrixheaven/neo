@@ -1,0 +1,18 @@
+{
+  "schemaVersion": "aegis.schema.v0",
+  "taskId": "2026-08-01-workflow-dynamic-transcript",
+  "lastCheckpointRef": "docs/aegis/work/2026-08-01-workflow-dynamic-transcript/todo-checkpoint-draft.json",
+  "resumeInstruction": "Resume from commit after Task 2. Do not repeat per-task reviews for Tasks 3-7; implement concurrently, then review once.",
+  "knownPartialWork": [
+    "Task 1: live workflow provenance",
+    "Task 2: one workflow entry owns typed activity"
+  ],
+  "mustReadBeforeContinuing": [
+    "docs/aegis/work/2026-08-01-workflow-dynamic-transcript/10-intent.md",
+    "docs/aegis/work/2026-08-01-workflow-dynamic-transcript/20-checkpoint.md",
+    "docs/aegis/work/2026-08-01-workflow-dynamic-transcript/todo-checkpoint-draft.json"
+  ],
+  "unsafeToAssume": [
+    "Do not assume native Windows/Linux terminal verification or remote CI has run."
+  ]
+}

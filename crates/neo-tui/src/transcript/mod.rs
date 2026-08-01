@@ -24,6 +24,9 @@ pub mod tool_call;
 pub mod tool_group;
 pub mod tool_renderers;
 mod workflow_card;
+mod workflow_delegate_card;
+pub(crate) mod workflow_group;
+mod workflow_swarm_card;
 mod workflow_tool_presentation;
 mod write_tool_presentation;
 

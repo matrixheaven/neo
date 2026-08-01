@@ -459,6 +459,7 @@ async fn restored_running_delegate_is_reported_lost_with_resume_hint() {
         [AgentEvent::DelegateStarted {
             turn: 1,
             agent: running,
+            workflow_origin: None,
         }]
         .iter(),
     );

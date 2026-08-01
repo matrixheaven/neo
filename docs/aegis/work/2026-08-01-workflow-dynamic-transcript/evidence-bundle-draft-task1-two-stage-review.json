@@ -1,0 +1,8 @@
+{
+  "schemaVersion": "aegis.schema.v0",
+  "artifactKey": "task1-two-stage-review",
+  "type": "review",
+  "source": "task1_spec_review and task1_quality_review subagents",
+  "summary": "Specification review passed after constructor fixes. Quality review found real PendingQuestion provenance loss and downstream target compile gaps; both were repaired. Final remaining issue was formatting, now confirmed clean by cargo fmt --all --check and git diff --check.",
+  "verifier": "root"
+}

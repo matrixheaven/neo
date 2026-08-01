@@ -14,6 +14,7 @@ use crate::transcript::ShellRunComponent;
 use crate::transcript::SwarmCardComponent;
 use crate::transcript::ToolCallComponent;
 use crate::transcript::WorkflowCardComponent;
+use neo_agent_core::workflow::WorkflowExecutionOrigin;
 use neo_agent_core::{
     ApprovalAction, ApprovalPresentation, ApprovalRequest, ApprovalResolution,
     SkillInvocationOutcome, SkillInvocationSource,
@@ -57,6 +58,7 @@ pub enum QuestionPromptState {
 pub struct QuestionPromptData {
     pub id: String,
     pub state: QuestionPromptState,
+    pub workflow_origin: Option<WorkflowExecutionOrigin>,
     /// Static question text and options borrowed from the runtime machine.
     pub display: QuestionDisplayData,
     /// Synced display clone of the runtime [`QuestionStateMachine`].

@@ -1,4 +1,5 @@
 use neo_agent_core::StopReason;
+use neo_agent_core::workflow::WorkflowExecutionOrigin;
 
 use crate::dialogs::QuestionDisplayData;
 use crate::widgets::TodoDisplayItem;
@@ -48,6 +49,7 @@ pub enum StreamUpdate {
     QuestionRequested {
         id: String,
         questions: Vec<QuestionDisplayData>,
+        workflow_origin: Option<WorkflowExecutionOrigin>,
     },
 }
 

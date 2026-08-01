@@ -6,8 +6,8 @@ use neo_agent_core::instructions::{
 };
 use neo_agent_core::multi_agent::{
     AgentActivityEntry, AgentActivityKind, AgentDisplayName, AgentId, AgentLifecycleState,
-    AgentPath, AgentRole, AgentRunMode, AgentSnapshot, AgentToolActivityPhase, DelegateContext,
-    SwarmAggregate, SwarmChildSnapshot, SwarmSnapshot,
+    AgentPath, AgentRole, AgentRunMode, AgentSnapshot, AgentTerminalOutcome,
+    AgentToolActivityPhase, DelegateContext, SwarmAggregate, SwarmChildSnapshot, SwarmSnapshot,
 };
 use neo_agent_core::workflow::{WorkflowId, WorkflowSnapshot, WorkflowState};
 use neo_agent_core::{
@@ -934,10 +934,10 @@ fn delegate_family_captures_terminal_facts_before_activity_trimming() {
         .collect::<Vec<_>>()
         .join("\n");
 
-    // Only typed Done/Failed tools are stable facts; Ongoing stays live.
-    assert!(history.contains("Used Read"), "history:\n{history}");
-    assert!(history.contains("Failed Bash"), "history:\n{history}");
-    assert!(!history.contains("Grep"), "history:\n{history}");
+    assert!(
+        history.is_empty(),
+        "running facts entered history:\n{history}"
+    );
     assert!(live.contains("Grep"), "live:\n{live}");
 
     // A later snapshot trims the completed tools away. The captured facts
@@ -952,21 +952,38 @@ fn delegate_family_captures_terminal_facts_before_activity_trimming() {
     pane.transcript_mut().upsert_delegate(1, trimmed);
 
     let after_trim = pane.render_terminal_update(100, 24);
-    let history = after_trim
+    assert!(
+        after_trim.history.is_empty(),
+        "trimmed running card entered history"
+    );
+
+    let mut completed = agent_snapshot("delegate-a", AgentLifecycleState::Completed);
+    completed.tool_count = 2;
+    completed.outcome = Some(AgentTerminalOutcome {
+        summary: "delegate result".to_owned(),
+        is_error: false,
+    });
+    pane.transcript_mut().upsert_delegate(1, completed);
+    let terminal = pane.render_terminal_update(100, 24);
+    assert_eq!(terminal.history.len(), 1, "one complete parent card");
+    let history = terminal
         .history
         .iter()
         .flat_map(|block| block.lines.iter())
         .map(|line| strip_ansi(line))
         .collect::<Vec<_>>()
         .join("\n");
+    let header = history.find("delegate-a").expect("parent header");
+    let read = history.find("Used Read").expect("retained Read fact");
+    let bash = history.find("Failed Bash").expect("retained Bash fact");
+    let result = history.find("delegate result").expect("terminal result");
     assert!(
-        history.contains("Used Read"),
-        "facts lost after trim:\n{history}"
+        header < read && read < bash && bash < result,
+        "history:\n{history}"
     );
-    assert!(
-        history.contains("Failed Bash"),
-        "facts lost after trim:\n{history}"
-    );
+
+    pane.acknowledge_history(&terminal.history);
+    assert!(pane.render_terminal_update(100, 24).history.is_empty());
 }
 
 #[test]
@@ -980,7 +997,7 @@ fn delegate_to_group_replacement_preserves_progressive_fact_identity() {
         AgentToolActivityPhase::Done,
     )];
     first.tool_count = 1;
-    pane.transcript_mut().upsert_delegate(7, first);
+    pane.transcript_mut().upsert_delegate(7, first.clone());
 
     let update = pane.render_terminal_update(120, 24);
     let history = update
@@ -990,26 +1007,23 @@ fn delegate_to_group_replacement_preserves_progressive_fact_identity() {
         .map(|line| strip_ansi(line))
         .collect::<Vec<_>>()
         .join("\n");
-    assert!(history.contains("Used Read"), "history:\n{history}");
-    pane.acknowledge_history(&update.history);
+    assert!(
+        history.is_empty(),
+        "running fact entered history:\n{history}"
+    );
 
     // A second root delegate replaces the card with a DelegateGroup in place;
     // the entry identity (and therefore the fact identity) is preserved.
-    pane.transcript_mut().upsert_delegate(
-        7,
-        agent_snapshot("second-agent", AgentLifecycleState::Running),
-    );
+    let second = agent_snapshot("second-agent", AgentLifecycleState::Running);
+    pane.transcript_mut().upsert_delegate(7, second.clone());
     assert!(matches!(
         pane.transcript().entries()[0],
         TranscriptEntry::DelegateGroup { .. }
     ));
 
-    let after = pane.render_terminal_update(120, 24);
-    assert!(
-        after.history.is_empty(),
-        "acknowledged fact must not replay after group replacement"
-    );
-    let live = after
+    let running = pane.render_terminal_update(120, 24);
+    assert!(running.history.is_empty());
+    let live = running
         .live
         .iter()
         .map(|line| strip_ansi(line))
@@ -1017,4 +1031,114 @@ fn delegate_to_group_replacement_preserves_progressive_fact_identity() {
         .join("\n");
     assert!(live.contains("first-agent"), "live:\n{live}");
     assert!(live.contains("second-agent"), "live:\n{live}");
+
+    let mut second_completed = second;
+    second_completed.state = AgentLifecycleState::Completed;
+    second_completed.terminal_at_ms = Some(3);
+    second_completed.updated_at_ms = 3;
+    pane.transcript_mut()
+        .upsert_delegate(7, second_completed.clone());
+    second_completed.updated_at_ms = 4;
+    second_completed.outcome = Some(AgentTerminalOutcome {
+        summary: "second-agent result".to_owned(),
+        is_error: false,
+    });
+    pane.transcript_mut().upsert_delegate(7, second_completed);
+
+    let mut first_completed = first;
+    first_completed.state = AgentLifecycleState::Completed;
+    first_completed.terminal_at_ms = Some(5);
+    first_completed.updated_at_ms = 5;
+    first_completed.outcome = Some(AgentTerminalOutcome {
+        summary: "first-agent result".to_owned(),
+        is_error: false,
+    });
+    pane.transcript_mut().upsert_delegate(7, first_completed);
+    let terminal = pane.render_terminal_update(120, 24);
+    assert_eq!(terminal.history.len(), 1);
+    let history = terminal.history[0]
+        .lines
+        .iter()
+        .map(|line| strip_ansi(line))
+        .collect::<Vec<_>>()
+        .join("\n");
+    let header = history.find("2 agents finished").expect("parent header");
+    let first_agent = history.find("first-agent").expect("first child");
+    let second_agent = history.find("second-agent").expect("second child");
+    let tool = history.find("Used Read").expect("retained tool");
+    let first_result = history.find("first-agent result").expect("first result");
+    let second_result = history.find("second-agent result").expect("second result");
+    assert!(
+        header < first_agent
+            && first_agent < tool
+            && tool < first_result
+            && first_result < second_agent
+            && second_agent < second_result,
+        "history:\n{history}"
+    );
+}
+
+#[test]
+fn delegate_swarm_terminal_block_uses_one_row_per_child() {
+    let mut pane = TranscriptPane::new(120, 24);
+    let mut first = agent_snapshot("swarm-first", AgentLifecycleState::Running);
+    let mut second = agent_snapshot("swarm-second", AgentLifecycleState::Running);
+    second.activity = vec![tool_activity(
+        "bash-1",
+        "Bash",
+        "cargo test",
+        AgentToolActivityPhase::Done,
+    )];
+    second.tool_count = 1;
+    pane.transcript_mut().upsert_delegate_swarm(swarm_snapshot(
+        "swarm-a",
+        vec![first.clone(), second.clone()],
+    ));
+    assert!(pane.render_terminal_update(120, 24).history.is_empty());
+
+    second.activity.clear();
+    pane.transcript_mut().upsert_delegate_swarm(swarm_snapshot(
+        "swarm-a",
+        vec![first.clone(), second.clone()],
+    ));
+    second.state = AgentLifecycleState::Completed;
+    second.terminal_at_ms = Some(3);
+    second.updated_at_ms = 3;
+    pane.transcript_mut().upsert_delegate_swarm(swarm_snapshot(
+        "swarm-a",
+        vec![first.clone(), second.clone()],
+    ));
+    second.updated_at_ms = 4;
+    second.outcome = Some(AgentTerminalOutcome {
+        summary: "swarm second result".to_owned(),
+        is_error: false,
+    });
+    pane.transcript_mut().upsert_delegate_swarm(swarm_snapshot(
+        "swarm-a",
+        vec![first.clone(), second.clone()],
+    ));
+    first.state = AgentLifecycleState::Completed;
+    first.terminal_at_ms = Some(5);
+    first.updated_at_ms = 5;
+    first.outcome = Some(AgentTerminalOutcome {
+        summary: "swarm first result".to_owned(),
+        is_error: false,
+    });
+    pane.transcript_mut()
+        .upsert_delegate_swarm(swarm_snapshot("swarm-a", vec![first, second]));
+
+    let terminal = pane.render_terminal_update(120, 24);
+    assert_eq!(terminal.history.len(), 1);
+    let history = terminal.history[0]
+        .lines
+        .iter()
+        .map(|line| strip_ansi(line))
+        .collect::<Vec<_>>();
+    assert_eq!(history.len(), 3, "history:\n{}", history.join("\n"));
+    assert!(history[0].contains("DelegateSwarm"), "{history:#?}");
+    assert!(history[1].contains("swarm-first"), "{history:#?}");
+    assert!(history[1].contains("swarm first result"), "{history:#?}");
+    assert!(history[2].contains("swarm-second"), "{history:#?}");
+    assert!(history[2].contains("swarm second result"), "{history:#?}");
+    assert!(!history.iter().any(|line| line.contains("Used Bash")));
 }

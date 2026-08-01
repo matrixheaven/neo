@@ -255,6 +255,7 @@ pub struct ToolContext {
     pub shell_runtime: ShellRuntime,
     pub workflow_runtime: crate::workflow::WorkflowRuntime,
     pub workflow_definitions: crate::workflow::WorkflowDefinitionRegistry,
+    pub workflow_origin: Option<crate::workflow::WorkflowExecutionOrigin>,
     /// Shared multi-agent runtime for Delegate and `DelegateSwarm` tools.
     pub multi_agent: MultiAgentRuntime,
     /// Parent runtime config used to construct real child `AgentRuntime` instances.
@@ -302,6 +303,7 @@ impl std::fmt::Debug for ToolContext {
             .field("shell_runtime", &self.shell_runtime)
             .field("workflow_runtime", &"_")
             .field("workflow_definitions", &"_")
+            .field("workflow_origin", &self.workflow_origin)
             .field("multi_agent", &self.multi_agent)
             .field("child_config", &self.child_config.is_some())
             .field("child_model", &self.child_model.is_some())
@@ -341,6 +343,7 @@ impl ToolContext {
                 crate::workflow::WorkflowLimits::default(),
             ),
             workflow_definitions: crate::workflow::WorkflowDefinitionRegistry::empty(),
+            workflow_origin: None,
             multi_agent: MultiAgentRuntime::new(),
             child_config: None,
             child_model: None,
@@ -415,6 +418,15 @@ impl ToolContext {
         definitions: crate::workflow::WorkflowDefinitionRegistry,
     ) -> Self {
         self.workflow_definitions = definitions;
+        self
+    }
+
+    #[must_use]
+    pub fn with_workflow_origin(
+        mut self,
+        origin: Option<crate::workflow::WorkflowExecutionOrigin>,
+    ) -> Self {
+        self.workflow_origin = origin;
         self
     }
 

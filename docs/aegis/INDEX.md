@@ -319,3 +319,20 @@ Entries are workspace records, not authoritative runtime decisions.
 | 2026-07-30 | artifact | docs/aegis/work/2026-07-30-workflow-intent-slash/resume-state-hint.json | 2026-07-30-workflow-intent-slash resume state hint |
 | 2026-07-30 | spec | docs/aegis/specs/2026-07-30-workflow-model-visible-results-design.md | Workflow Model-Visible Results And Recoverable Failures Design |
 | 2026-08-01 | spec | docs/aegis/specs/2026-08-01-workflow-dynamic-transcript-design.md | Workflow Dynamic Transcript Presentation Design |
+| 2026-08-01 | work | docs/aegis/work/2026-08-01-workflow-dynamic-transcript/10-intent.md | Workflow Dynamic Transcript Execution intent |
+| 2026-08-01 | work | docs/aegis/work/2026-08-01-workflow-dynamic-transcript/20-checkpoint.md | Workflow Dynamic Transcript Execution checkpoint |
+| 2026-08-01 | work | docs/aegis/work/2026-08-01-workflow-dynamic-transcript/90-evidence.md | Workflow Dynamic Transcript Execution evidence |
+| 2026-08-01 | work | docs/aegis/work/2026-08-01-workflow-dynamic-transcript/99-reflection.md | Workflow Dynamic Transcript Execution reflection |
+| 2026-08-01 | artifact | docs/aegis/work/2026-08-01-workflow-dynamic-transcript/task-intent-draft.json | Workflow Dynamic Transcript Execution task intent draft |
+| 2026-08-01 | artifact | docs/aegis/work/2026-08-01-workflow-dynamic-transcript/baseline-read-set-hint.json | Workflow Dynamic Transcript Execution baseline read-set hint |
+| 2026-08-01 | artifact | docs/aegis/work/2026-08-01-workflow-dynamic-transcript/baseline-usage-draft.json | Workflow Dynamic Transcript Execution baseline usage draft |
+| 2026-08-01 | artifact | docs/aegis/work/2026-08-01-workflow-dynamic-transcript/impact-statement-draft.json | Workflow Dynamic Transcript Execution impact statement draft |
+| 2026-08-01 | artifact | docs/aegis/work/2026-08-01-workflow-dynamic-transcript/todo-checkpoint-draft.json | Workflow Dynamic Transcript Execution todo checkpoint draft |
+| 2026-08-01 | artifact | docs/aegis/work/2026-08-01-workflow-dynamic-transcript/drift-check-draft.json | Workflow Dynamic Transcript Execution drift check draft |
+| 2026-08-01 | artifact | docs/aegis/work/2026-08-01-workflow-dynamic-transcript/resume-state-hint.json | 2026-08-01-workflow-dynamic-transcript resume state hint |
+| 2026-08-01 | artifact | docs/aegis/work/2026-08-01-workflow-dynamic-transcript/evidence-bundle-draft-baseline-question-event-serialization.json | 2026-08-01-workflow-dynamic-transcript evidence baseline-question-event-serialization |
+| 2026-08-01 | artifact | docs/aegis/work/2026-08-01-workflow-dynamic-transcript/evidence-bundle-draft-task1-workflow-origin-tests.json | 2026-08-01-workflow-dynamic-transcript evidence task1-workflow-origin-tests |
+| 2026-08-01 | artifact | docs/aegis/work/2026-08-01-workflow-dynamic-transcript/evidence-bundle-draft-task1-two-stage-review.json | 2026-08-01-workflow-dynamic-transcript evidence task1-two-stage-review |
+| 2026-08-01 | artifact | docs/aegis/work/2026-08-01-workflow-dynamic-transcript/evidence-bundle-draft-task2-typed-workflow-activity.json | 2026-08-01-workflow-dynamic-transcript evidence task2-typed-workflow-activity |
+| 2026-08-01 | artifact | docs/aegis/work/2026-08-01-workflow-dynamic-transcript/gate-input-pack.json | 2026-08-01-workflow-dynamic-transcript gate input pack |
+| 2026-08-01 | work | docs/aegis/work/2026-08-01-workflow-dynamic-transcript/proof-bundle.md | 2026-08-01-workflow-dynamic-transcript proof bundle |

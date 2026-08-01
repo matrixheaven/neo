@@ -1358,14 +1358,15 @@ fn delegate_workflow_approval_live_content_stays_on_normal_screen_without_captur
         "delegate terminal status missing: {retained:#?}"
     );
 
-    // The workflow transition and terminal outcome each appear once.
+    // Non-terminal workflow states stay live; only the terminal group enters
+    // native scrollback.
     assert_eq!(
         retained
             .iter()
             .filter(|row| row.contains("delegate workflow") && row.contains("running"))
             .count(),
-        1,
-        "workflow transition must appear once: {retained:#?}"
+        0,
+        "non-terminal workflow state must not enter history: {retained:#?}"
     );
     assert_eq!(
         retained
@@ -1391,4 +1392,746 @@ fn delegate_workflow_approval_live_content_stays_on_normal_screen_without_captur
             .all(|row| !row.contains("earlier rows omitted")),
         "no presentation-level omission: {retained:#?}"
     );
+}
+
+#[test]
+fn workflow_group_progress_preserves_bottom_region_and_native_history() {
+    use neo_agent_core::multi_agent::AgentLifecycleState;
+    use neo_agent_core::workflow::WorkflowState;
+    use neo_agent_core::{
+        ApprovalAction, ApprovalOption, ApprovalPresentation, ApprovalRequest, ApprovalResolution,
+        PermissionOperation,
+    };
+    use neo_tui::dialogs::{QuestionDisplayData, QuestionDisplayOption};
+    use neo_tui::shell::StreamUpdate;
+    use neo_tui::transcript::{BlockingEntryKind, TranscriptBlockId};
+    use neo_tui::widgets::{TodoDisplayItem, TodoDisplayStatus};
+
+    let sizes = [(72u16, 18u16), (96, 22), (120, 26)];
+    let (initial_width, initial_height) = sizes[0];
+    let mut screen = vt100::Parser::new(initial_height, initial_width, 1024);
+    screen.process(b"workflow-shell-sentinel\r\n");
+    let mut inline =
+        InlineTerminal::for_test_with_cursor(initial_width, initial_height, 0, initial_height - 1);
+    let mut output = Vec::new();
+
+    let mut chrome = NeoChromeState::new("neo", "session", "model", ".");
+    chrome.set_todo_items(vec![TodoDisplayItem::new(
+        "todo-sentinel",
+        TodoDisplayStatus::InProgress,
+    )]);
+    chrome.set_custom_working_label(Some("footer-sentinel".to_owned()));
+    chrome.prompt_mut().text = "composer-sentinel".to_owned();
+    chrome.prompt_mut().cursor = chrome.prompt().text.chars().count();
+    let transcript = TranscriptPane::new(usize::from(initial_width), usize::from(initial_height));
+    let mut tui = NeoTui::new(chrome, transcript);
+
+    tui.transcript_mut()
+        .apply_agent_event(AgentEvent::WorkflowStarted {
+            turn: 1,
+            workflow: scrollback_workflow_snapshot(WorkflowState::Running, 1),
+        });
+
+    let read_origin = scrollback_workflow_origin("read-call");
+    tui.transcript_mut()
+        .apply_agent_event(AgentEvent::ToolExecutionStarted {
+            turn: 1,
+            id: "read-call".to_owned(),
+            name: "Read".to_owned(),
+            arguments: serde_json::json!({"path": "workflow-source-sentinel.rs"}),
+            workflow_origin: Some(read_origin.clone()),
+        });
+    tui.transcript_mut()
+        .apply_agent_event(AgentEvent::ToolExecutionUpdate {
+            turn: 1,
+            id: "read-call".to_owned(),
+            name: "Read".to_owned(),
+            partial_result: ToolResult::ok("workflow-tool-progress-sentinel"),
+            workflow_origin: Some(read_origin.clone()),
+        });
+    tui.transcript_mut()
+        .apply_agent_event(AgentEvent::ToolExecutionFinished {
+            turn: 1,
+            id: "read-call".to_owned(),
+            name: "Read".to_owned(),
+            result: ToolResult::ok("workflow-tool-final-sentinel"),
+            workflow_origin: Some(read_origin),
+        });
+
+    let delegate_origin = scrollback_workflow_origin("delegate-call");
+    tui.transcript_mut()
+        .apply_agent_event(AgentEvent::ToolExecutionStarted {
+            turn: 1,
+            id: "delegate-call".to_owned(),
+            name: "Delegate".to_owned(),
+            arguments: serde_json::json!({"task": "delegate-sentinel"}),
+            workflow_origin: Some(delegate_origin.clone()),
+        });
+    let delegate = scrollback_agent_snapshot("delegate-sentinel");
+    tui.transcript_mut()
+        .apply_agent_event(AgentEvent::DelegateStarted {
+            turn: 1,
+            agent: delegate.clone(),
+            workflow_origin: Some(delegate_origin.clone()),
+        });
+
+    let swarm_origin = scrollback_workflow_origin("swarm-call");
+    tui.transcript_mut()
+        .apply_agent_event(AgentEvent::ToolExecutionStarted {
+            turn: 1,
+            id: "swarm-call".to_owned(),
+            name: "DelegateSwarm".to_owned(),
+            arguments: serde_json::json!({"tasks": ["swarm-child-sentinel"]}),
+            workflow_origin: Some(swarm_origin.clone()),
+        });
+    let swarm = scrollback_swarm_snapshot(
+        "swarm-sentinel",
+        scrollback_agent_snapshot("swarm-child-sentinel"),
+    );
+    tui.transcript_mut()
+        .apply_agent_event(AgentEvent::DelegateSwarmStarted {
+            turn: 1,
+            swarm: swarm.clone(),
+            workflow_origin: Some(swarm_origin.clone()),
+        });
+    tui.transcript_mut()
+        .push_status("unrelated-history-sentinel");
+
+    for (index, (width, height)) in sizes.into_iter().enumerate() {
+        let mut updated_delegate = delegate.clone();
+        updated_delegate.updated_at_ms = 10 + index as u64;
+        updated_delegate.latest_text = Some(format!("delegate-progress-{index}"));
+        tui.transcript_mut()
+            .apply_agent_event(AgentEvent::DelegateUpdated {
+                turn: 1,
+                agent: updated_delegate,
+                workflow_origin: Some(delegate_origin.clone()),
+            });
+
+        let mut updated_swarm = swarm.clone();
+        updated_swarm.children[0].agent.updated_at_ms = 10 + index as u64;
+        updated_swarm.children[0].agent.latest_text = Some(format!("swarm-progress-{index}"));
+        tui.transcript_mut()
+            .apply_agent_event(AgentEvent::DelegateSwarmUpdated {
+                turn: 1,
+                swarm: updated_swarm,
+                workflow_origin: Some(swarm_origin.clone()),
+            });
+        tui.transcript_mut()
+            .apply_agent_event(AgentEvent::WorkflowUpdated {
+                turn: 1,
+                workflow: scrollback_workflow_snapshot(
+                    WorkflowState::Running,
+                    u64::try_from(index).expect("small index") + 2,
+                ),
+            });
+
+        screen.screen_mut().set_size(height, width);
+        inline.resize_for_test(width, height);
+        let frame = tui.render_terminal_frame(usize::from(width), usize::from(height));
+        assert_workflow_frame_geometry(&frame, usize::from(width), usize::from(height));
+        let live = frame
+            .live
+            .iter()
+            .map(|line| strip_ansi(line))
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(
+            live.contains("workflow-frame-sentinel"),
+            "workflow group missing at {width}x{height}: {live}"
+        );
+        assert!(
+            frame
+                .history
+                .iter()
+                .all(|block| !matches!(block.id, TranscriptBlockId::Workflow { .. })),
+            "non-terminal workflow entered history"
+        );
+        if index == 0 {
+            assert!(frame.history.iter().any(|block| {
+                block
+                    .lines
+                    .iter()
+                    .any(|line| strip_ansi(line).contains("unrelated-history-sentinel"))
+            }));
+        }
+        render_and_process(&mut inline, &mut screen, &frame, &mut output);
+        tui.acknowledge_history(&frame);
+    }
+
+    let approval_origin = scrollback_workflow_origin("approval-call");
+    tui.transcript_mut()
+        .apply_agent_event(AgentEvent::ApprovalRequested {
+            request: ApprovalRequest {
+                turn: 1,
+                id: "approval-sentinel".to_owned(),
+                operation: PermissionOperation::Shell,
+                presentation: ApprovalPresentation::Tool {
+                    title: "approval-input-sentinel".to_owned(),
+                    details: vec!["cargo test".to_owned()],
+                },
+                options: vec![ApprovalOption {
+                    action: ApprovalAction::PermitOnce,
+                    label: "Allow once".to_owned(),
+                    description: None,
+                }],
+                workflow_origin: Some(approval_origin),
+            },
+        });
+    let question_origin = scrollback_workflow_origin("question-call");
+    tui.transcript_mut()
+        .apply_question_stream_update(StreamUpdate::QuestionRequested {
+            id: "question-sentinel".to_owned(),
+            questions: vec![QuestionDisplayData {
+                question: "question-input-sentinel".to_owned(),
+                header: None,
+                body: None,
+                options: vec![QuestionDisplayOption {
+                    label: "Continue".to_owned(),
+                    description: Some(String::new()),
+                }],
+                multi_select: false,
+            }],
+            workflow_origin: Some(question_origin.clone()),
+        });
+    assert!(matches!(
+        tui.transcript().earliest_blocking_entry(),
+        Some(BlockingEntryKind::Approval(id)) if id == "approval-sentinel"
+    ));
+    assert!(tui.transcript().transcript().entries().iter().any(
+        |entry| matches!(entry, TranscriptEntry::QuestionPrompt(data)
+            if data.workflow_origin.as_ref() == Some(&question_origin))
+    ));
+
+    let (barrier_width, barrier_height) = sizes[1];
+    screen.screen_mut().set_size(barrier_height, barrier_width);
+    inline.resize_for_test(barrier_width, barrier_height);
+    let approval_frame =
+        tui.render_terminal_frame(usize::from(barrier_width), usize::from(barrier_height));
+    assert_workflow_frame_geometry(
+        &approval_frame,
+        usize::from(barrier_width),
+        usize::from(barrier_height),
+    );
+    render_and_process(&mut inline, &mut screen, &approval_frame, &mut output);
+    tui.acknowledge_history(&approval_frame);
+
+    tui.transcript_mut().resolve_approval(
+        "approval-sentinel",
+        &ApprovalResolution::Selected {
+            action: ApprovalAction::PermitOnce,
+            label: "Allow once".to_owned(),
+            feedback: None,
+        },
+    );
+    assert!(matches!(
+        tui.transcript().earliest_blocking_entry(),
+        Some(BlockingEntryKind::Question(id)) if id == "question-sentinel"
+    ));
+
+    let (final_width, final_height) = sizes[2];
+    screen.screen_mut().set_size(final_height, final_width);
+    inline.resize_for_test(final_width, final_height);
+    let question_frame =
+        tui.render_terminal_frame(usize::from(final_width), usize::from(final_height));
+    let bottom_offsets = assert_workflow_frame_geometry(
+        &question_frame,
+        usize::from(final_width),
+        usize::from(final_height),
+    );
+    render_and_process(&mut inline, &mut screen, &question_frame, &mut output);
+    tui.acknowledge_history(&question_frame);
+
+    let completed_delegate = scrollback_completed_agent(delegate, "delegate-final-sentinel");
+    tui.transcript_mut()
+        .apply_agent_event(AgentEvent::DelegateFinished {
+            turn: 1,
+            agent: completed_delegate,
+            workflow_origin: Some(delegate_origin),
+        });
+    let mut completed_swarm = swarm;
+    completed_swarm.children[0].agent = scrollback_completed_agent(
+        completed_swarm.children[0].agent.clone(),
+        "swarm-final-sentinel",
+    );
+    completed_swarm.state = AgentLifecycleState::Completed;
+    completed_swarm.aggregate =
+        neo_agent_core::multi_agent::SwarmAggregate::from_states([AgentLifecycleState::Completed]);
+    tui.transcript_mut()
+        .apply_agent_event(AgentEvent::DelegateSwarmFinished {
+            turn: 1,
+            swarm: completed_swarm,
+            workflow_origin: Some(swarm_origin),
+        });
+    tui.transcript_mut()
+        .apply_agent_event(AgentEvent::WorkflowFinished {
+            turn: 1,
+            workflow: scrollback_workflow_snapshot(WorkflowState::Completed, 99),
+        });
+
+    let final_frame =
+        tui.render_terminal_frame(usize::from(final_width), usize::from(final_height));
+    assert_eq!(
+        assert_workflow_frame_geometry(
+            &final_frame,
+            usize::from(final_width),
+            usize::from(final_height),
+        ),
+        bottom_offsets,
+        "bottom region moved when the workflow committed"
+    );
+    let workflow_blocks = final_frame
+        .history
+        .iter()
+        .filter(|block| matches!(block.id, TranscriptBlockId::Workflow { .. }))
+        .collect::<Vec<_>>();
+    assert_eq!(workflow_blocks.len(), 1, "one terminal workflow group");
+    let terminal_group = workflow_blocks[0]
+        .lines
+        .iter()
+        .map(|line| strip_ansi(line))
+        .collect::<Vec<_>>()
+        .join("\n");
+    for sentinel in [
+        "workflow-frame-sentinel",
+        "workflow-source-sentinel.rs",
+        "delegate-sentinel",
+        "swarm-child-sentinel",
+    ] {
+        assert!(
+            terminal_group.contains(sentinel),
+            "terminal group missing {sentinel}: {terminal_group}"
+        );
+    }
+    assert!(
+        final_frame
+            .live
+            .iter()
+            .all(|line| !strip_ansi(line).contains("workflow-frame-sentinel")),
+        "workflow remained live while final group was offered"
+    );
+    render_and_process(&mut inline, &mut screen, &final_frame, &mut output);
+    tui.acknowledge_history(&final_frame);
+
+    let retry = tui.render_terminal_frame(usize::from(final_width), usize::from(final_height));
+    assert!(
+        retry
+            .history
+            .iter()
+            .all(|block| !matches!(block.id, TranscriptBlockId::Workflow { .. })),
+        "acknowledged workflow group replayed"
+    );
+    assert_eq!(
+        assert_workflow_frame_geometry(&retry, usize::from(final_width), usize::from(final_height),),
+        bottom_offsets
+    );
+
+    let retained = all_terminal_rows(&mut screen);
+    let unrelated = retained
+        .iter()
+        .position(|row| row.contains("unrelated-history-sentinel"))
+        .expect("unrelated history present");
+    let workflow = retained
+        .iter()
+        .position(|row| row.contains("workflow-frame-sentinel"))
+        .expect("terminal workflow present");
+    assert!(
+        unrelated < workflow,
+        "terminal history order: {retained:#?}"
+    );
+    assert_eq!(
+        retained
+            .iter()
+            .filter(|row| row.contains("workflow-frame-sentinel"))
+            .count(),
+        1,
+        "terminal workflow group duplicated: {retained:#?}"
+    );
+    let output_text = String::from_utf8_lossy(&output);
+    assert!(!output_text.contains("?1049h") && !output_text.contains("?1049l"));
+    assert!(!output_text.contains("?1000h") && !output_text.contains("?1002h"));
+    assert!(!output_text.contains("\x1b[2J") && !output_text.contains("\x1b[3J"));
+}
+
+#[test]
+fn restored_terminal_workflow_history_is_bounded_before_final_assistant_message() {
+    use neo_agent_core::workflow::WorkflowState;
+    use neo_tui::transcript::TranscriptBlockId;
+
+    let width = 88usize;
+    let height = 12usize;
+    let mut pane = TranscriptPane::new(width, height);
+    pane.set_live_chrome_height(0);
+    pane.apply_agent_event(AgentEvent::WorkflowStarted {
+        turn: 1,
+        workflow: scrollback_workflow_snapshot(WorkflowState::Running, 1),
+    });
+
+    for index in 0..24 {
+        let id = format!("restored-bash-{index}");
+        let origin = scrollback_workflow_origin(&id);
+        pane.apply_agent_event(AgentEvent::ToolExecutionStarted {
+            turn: 1,
+            id: id.clone(),
+            name: "Bash".to_owned(),
+            arguments: serde_json::json!({
+                "command": format!("cargo test restored-terminal-tool-{index}")
+            }),
+            workflow_origin: Some(origin.clone()),
+        });
+        pane.apply_agent_event(AgentEvent::ToolExecutionFinished {
+            turn: 1,
+            id,
+            name: "Bash".to_owned(),
+            result: ToolResult::ok(format!("restored-terminal-tool-{index}-done")),
+            workflow_origin: Some(origin),
+        });
+    }
+
+    for index in 0..16 {
+        let call_id = format!("restored-delegate-call-{index}");
+        let origin = scrollback_workflow_origin(&call_id);
+        pane.apply_agent_event(AgentEvent::ToolExecutionStarted {
+            turn: 1,
+            id: call_id,
+            name: "Delegate".to_owned(),
+            arguments: serde_json::json!({"task": format!("restored-delegate-{index}")}),
+            workflow_origin: Some(origin.clone()),
+        });
+        let agent = scrollback_agent_snapshot(&format!("restored-delegate-{index}"));
+        pane.apply_agent_event(AgentEvent::DelegateStarted {
+            turn: 1,
+            agent: agent.clone(),
+            workflow_origin: Some(origin.clone()),
+        });
+        pane.apply_agent_event(AgentEvent::DelegateFinished {
+            turn: 1,
+            agent: scrollback_completed_agent(agent, "restored delegate complete"),
+            workflow_origin: Some(origin),
+        });
+    }
+
+    pane.apply_agent_event(AgentEvent::WorkflowFinished {
+        turn: 1,
+        workflow: scrollback_workflow_snapshot(WorkflowState::Completed, 99),
+    });
+    pane.replay_assistant_message("restored-final-assistant-sentinel");
+
+    let full_workflow = pane
+        .transcript()
+        .entries()
+        .iter()
+        .find_map(|entry| match entry {
+            TranscriptEntry::Workflow { component } => {
+                Some(component.render_with_theme(width, &Default::default()))
+            }
+            _ => None,
+        })
+        .expect("restored workflow entry");
+    let full_workflow_text = full_workflow
+        .iter()
+        .map(|line| line.text())
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(
+        full_workflow.len() > height,
+        "full workflow view must remain larger than the ordinary history budget"
+    );
+    assert!(
+        full_workflow_text.matches("Used Bash").count() == 24
+            && full_workflow_text.contains("restored-delegate-15"),
+        "full workflow view lost terminal activity: {full_workflow_text}"
+    );
+
+    let update = pane.render_terminal_update(width, height);
+    let workflow_index = update
+        .history
+        .iter()
+        .position(|block| matches!(block.id, TranscriptBlockId::Workflow { .. }))
+        .expect("restored terminal workflow history");
+    let assistant_index = update
+        .history
+        .iter()
+        .position(|block| {
+            block
+                .lines
+                .iter()
+                .any(|line| strip_ansi(line).contains("restored-final-assistant-sentinel"))
+        })
+        .expect("restored final assistant history");
+    assert!(
+        workflow_index < assistant_index,
+        "restored history order: {:#?}",
+        update.history
+    );
+    let workflow = &update.history[workflow_index];
+    assert!(
+        workflow.lines.len() + usize::from(workflow.separator_before) <= height,
+        "terminal workflow history exceeded the ordinary terminal budget: {workflow:#?}"
+    );
+    let workflow_text = workflow
+        .lines
+        .iter()
+        .map(|line| strip_ansi(line))
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(
+        workflow_text.contains("direct tools omitted"),
+        "large terminal tool history was not summarized: {workflow_text}"
+    );
+    assert!(
+        workflow_text.contains("agents omitted"),
+        "large terminal delegate history was not summarized: {workflow_text}"
+    );
+
+    let mut screen = vt100::Parser::new(
+        u16::try_from(height).expect("test height fits u16"),
+        u16::try_from(width).expect("test width fits u16"),
+        512,
+    );
+    let mut inline = InlineTerminal::for_test(
+        u16::try_from(width).expect("test width fits u16"),
+        u16::try_from(height).expect("test height fits u16"),
+    );
+    let mut output = Vec::new();
+    render_and_process(
+        &mut inline,
+        &mut screen,
+        &TerminalFrame::new(update.history, update.live, None),
+        &mut output,
+    );
+    let rows = all_terminal_rows(&mut screen);
+    let workflow_row = rows
+        .iter()
+        .position(|row| row.contains("workflow-frame-sentinel"))
+        .expect("workflow row in native history");
+    let assistant_row = rows
+        .iter()
+        .position(|row| row.contains("restored-final-assistant-sentinel"))
+        .expect("final assistant row in native history");
+    assert!(
+        workflow_row < assistant_row,
+        "restored workflow rows appeared below the final assistant message: {rows:#?}"
+    );
+    assert!(
+        rows.iter().skip(assistant_row + 1).all(|row| {
+            !row.contains("workflow-frame-sentinel")
+                && !row.contains("restored-terminal-tool")
+                && !row.contains("restored-delegate")
+        }),
+        "restored workflow projection appeared after the final assistant message: {rows:#?}"
+    );
+}
+
+#[test]
+fn terminal_workflow_waits_for_nonzero_history_budget_before_commit() {
+    use neo_agent_core::workflow::WorkflowState;
+    use neo_tui::transcript::TranscriptBlockId;
+
+    let mut pane = TranscriptPane::new(80, 8);
+    pane.apply_agent_event(AgentEvent::WorkflowStarted {
+        turn: 1,
+        workflow: scrollback_workflow_snapshot(WorkflowState::Running, 1),
+    });
+    pane.apply_agent_event(AgentEvent::WorkflowFinished {
+        turn: 1,
+        workflow: scrollback_workflow_snapshot(WorkflowState::Completed, 2),
+    });
+    pane.replay_assistant_message("assistant-after-workflow");
+
+    pane.set_live_chrome_height(8);
+    let zero_budget = pane.render_terminal_update(80, 8);
+    assert!(zero_budget.history.is_empty());
+    assert!(zero_budget.live.is_empty());
+    pane.acknowledge_history(&zero_budget.history);
+
+    pane.set_live_chrome_height(0);
+    let visible = pane.render_terminal_update(80, 8);
+    let workflow_blocks = visible
+        .history
+        .iter()
+        .filter(|block| matches!(block.id, TranscriptBlockId::Workflow { .. }))
+        .collect::<Vec<_>>();
+    assert_eq!(workflow_blocks.len(), 1);
+    assert!(!workflow_blocks[0].lines.is_empty());
+    let workflow_index = visible
+        .history
+        .iter()
+        .position(|block| matches!(block.id, TranscriptBlockId::Workflow { .. }))
+        .expect("workflow block");
+    let assistant_index = visible
+        .history
+        .iter()
+        .position(|block| matches!(block.id, TranscriptBlockId::AssistantSegment { .. }))
+        .expect("assistant block");
+    assert!(
+        workflow_index < assistant_index,
+        "history order: {visible:#?}"
+    );
+
+    pane.acknowledge_history(&visible.history);
+    assert!(pane.render_terminal_update(80, 8).history.is_empty());
+}
+
+fn assert_workflow_frame_geometry(
+    frame: &TerminalFrame,
+    width: usize,
+    height: usize,
+) -> Vec<usize> {
+    use neo_tui::primitive::visible_width;
+
+    assert!(
+        !frame.review_surface,
+        "workflow progress left the normal screen"
+    );
+    assert!(!frame.mouse_capture, "workflow progress captured the mouse");
+    assert!(
+        frame.live.len() <= height,
+        "frame height: {}",
+        frame.live.len()
+    );
+    assert!(
+        frame.live.iter().all(|line| visible_width(line) <= width),
+        "frame width overflow: {:?}",
+        frame.live
+    );
+    let cursor = frame.cursor.expect("composer cursor remains visible");
+    assert!(cursor.row < frame.live.len() && cursor.row < height);
+    assert!(cursor.col < width);
+
+    let plain = frame
+        .live
+        .iter()
+        .map(|line| strip_ansi(line))
+        .collect::<Vec<_>>();
+    ["todo-sentinel", "composer-sentinel", "footer-sentinel"]
+        .into_iter()
+        .map(|sentinel| {
+            let positions = plain
+                .iter()
+                .enumerate()
+                .filter_map(|(index, line)| line.contains(sentinel).then_some(index))
+                .collect::<Vec<_>>();
+            assert_eq!(positions.len(), 1, "bottom sentinel {sentinel}: {plain:#?}");
+            plain.len() - positions[0]
+        })
+        .collect()
+}
+
+fn scrollback_workflow_snapshot(
+    state: neo_agent_core::workflow::WorkflowState,
+    sequence: u64,
+) -> neo_agent_core::workflow::WorkflowSnapshot {
+    neo_agent_core::workflow::WorkflowSnapshot {
+        id: neo_agent_core::workflow::WorkflowId("workflow-frame".to_owned()),
+        title: "workflow-frame-sentinel".to_owned(),
+        state,
+        current_phase: Some(format!("phase-{sequence}")),
+        projection_sequence: Some(sequence),
+        recovery_failure: false,
+        started_at_ms: Some(1_000),
+        updated_at_ms: Some(1_000 + sequence),
+        invocation_count: 3,
+        failure_count: 0,
+        actual_usage: None,
+        latest_log_summary: Some(format!("workflow-log-{sequence}")),
+        latest_report_summary: Some(format!("workflow-report-{sequence}")),
+        terminal_reason: state.is_terminal().then(|| "workflow complete".to_owned()),
+        display_name: "workflow-frame-sentinel".to_owned(),
+        purpose: "terminal geometry regression".to_owned(),
+    }
+}
+
+fn scrollback_workflow_origin(
+    invocation_id: &str,
+) -> neo_agent_core::workflow::WorkflowExecutionOrigin {
+    neo_agent_core::workflow::WorkflowExecutionOrigin {
+        run_id: neo_agent_core::workflow::WorkflowId("workflow-frame".to_owned()),
+        human_handle: None,
+        definition_name: "workflow-frame".to_owned(),
+        definition_revision: None,
+        phase_id: Some("verify".to_owned()),
+        invocation_id: Some(invocation_id.to_owned()),
+        swarm_item_id: None,
+    }
+}
+
+fn scrollback_agent_snapshot(id: &str) -> neo_agent_core::multi_agent::AgentSnapshot {
+    use neo_agent_core::multi_agent::{
+        AgentDisplayName, AgentId, AgentLifecycleState, AgentPath, AgentRole, AgentRunMode,
+        DelegateContext,
+    };
+
+    let display_name = AgentDisplayName::new(id);
+    neo_agent_core::multi_agent::AgentSnapshot {
+        id: AgentId::from_suffix_for_test(id),
+        display_name: display_name.clone(),
+        path: AgentPath::root_child(&display_name),
+        role: AgentRole::Coder,
+        mode: AgentRunMode::Foreground,
+        context: DelegateContext::Inherit,
+        state: AgentLifecycleState::Running,
+        task: id.to_owned(),
+        task_title: id.to_owned(),
+        created_at_ms: 1,
+        updated_at_ms: 2,
+        started_at_ms: Some(1),
+        terminal_at_ms: None,
+        detached_from_foreground: false,
+        terminal_reason: None,
+        run_count: 1,
+        live_messages_received: 0,
+        previous_status: None,
+        terminal_status_history: Vec::new(),
+        resumed_from: None,
+        tool_count: 0,
+        token_count: 0,
+        cache_read_token_count: 0,
+        cache_write_token_count: 0,
+        elapsed: std::time::Duration::ZERO,
+        latest_text: Some(format!("{id}-progress")),
+        activity: Vec::new(),
+        prior_messages: Vec::new(),
+        outcome: None,
+    }
+}
+
+fn scrollback_completed_agent(
+    mut agent: neo_agent_core::multi_agent::AgentSnapshot,
+    summary: &str,
+) -> neo_agent_core::multi_agent::AgentSnapshot {
+    agent.state = neo_agent_core::multi_agent::AgentLifecycleState::Completed;
+    agent.updated_at_ms += 100;
+    agent.terminal_at_ms = Some(agent.updated_at_ms);
+    agent.outcome = Some(neo_agent_core::multi_agent::AgentTerminalOutcome {
+        summary: summary.to_owned(),
+        is_error: false,
+    });
+    agent
+}
+
+fn scrollback_swarm_snapshot(
+    id: &str,
+    agent: neo_agent_core::multi_agent::AgentSnapshot,
+) -> neo_agent_core::multi_agent::SwarmSnapshot {
+    use neo_agent_core::multi_agent::{
+        AgentRole, AgentRunMode, SwarmAggregate, SwarmChildSnapshot, SwarmSnapshot,
+    };
+
+    let children = vec![SwarmChildSnapshot {
+        item_index: 0,
+        item: "swarm-child-sentinel".to_owned(),
+        agent,
+    }];
+    let aggregate = SwarmAggregate::from_states(children.iter().map(|child| child.agent.state));
+    SwarmSnapshot {
+        swarm_id: id.to_owned(),
+        description: "swarm-sentinel".to_owned(),
+        role: AgentRole::Coder,
+        mode: AgentRunMode::Foreground,
+        state: aggregate.status(),
+        max_concurrency: 1,
+        aggregate,
+        children,
+    }
 }

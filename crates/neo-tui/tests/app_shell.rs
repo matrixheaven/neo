@@ -160,7 +160,11 @@ fn live_delegate_keeps_animation_deadline_when_live_surface_is_hidden() {
     let runtime = neo_agent_core::multi_agent::MultiAgentRuntime::new();
     let agent = runtime.start_foreground_delegate_for_test("live task");
     let mut transcript = TranscriptPane::new(80, 1);
-    transcript.apply_agent_event(neo_agent_core::AgentEvent::DelegateStarted { turn: 1, agent });
+    transcript.apply_agent_event(neo_agent_core::AgentEvent::DelegateStarted {
+        turn: 1,
+        agent,
+        workflow_origin: None,
+    });
     let mut tui = neo_tui::NeoTui::new(chrome, transcript);
 
     let frame = tui.render_terminal_frame_at(80, 1, Instant::now());

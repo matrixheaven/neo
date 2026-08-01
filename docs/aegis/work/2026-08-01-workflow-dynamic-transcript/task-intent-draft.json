@@ -1,0 +1,13 @@
+{
+  "schemaVersion": "aegis.schema.v0",
+  "requestedOutcome": "Implement approved workflow dynamic transcript plan with per-task review",
+  "goal": "Implement approved workflow dynamic transcript plan with per-task review",
+  "successEvidence": [],
+  "stopCondition": "Stop when success evidence is satisfied or a blocker/risk requires pause.",
+  "nonGoals": [],
+  "scope": "neo-agent-core event provenance and neo-tui workflow transcript grouping, child summaries, frame geometry, focused regressions",
+  "changeKinds": [
+    "architecture"
+  ],
+  "riskHints": []
+}

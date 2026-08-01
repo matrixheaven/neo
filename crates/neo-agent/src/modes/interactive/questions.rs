@@ -3,8 +3,9 @@
 
 use anyhow::Result;
 
-use neo_agent_core::{AgentEvent, Content, MessageOrigin, PendingQuestion, QuestionResponse};
+use neo_agent_core::{Content, MessageOrigin, PendingQuestion, QuestionResponse};
 use neo_tui::dialogs::{QuestionDisplayData, QuestionDisplayOption};
+use neo_tui::shell::StreamUpdate;
 
 use super::InteractiveController;
 
@@ -19,16 +20,6 @@ impl InteractiveController {
     pub(super) fn register_pending_question(&mut self, pending: PendingQuestion) {
         let id = pending.id.clone();
         let questions = pending.questions.clone();
-        // Synthesize a QuestionRequested event for the TUI to display the dialog.
-        // The TUI's apply_agent_event will push a question overlay (implemented by
-        // the TUI subagent).
-        self.tui
-            .chrome_mut()
-            .apply_agent_event(AgentEvent::QuestionRequested {
-                turn: 0,
-                id: id.clone(),
-                questions: questions.clone(),
-            });
         let display = questions
             .iter()
             .map(|question| QuestionDisplayData {
@@ -45,12 +36,18 @@ impl InteractiveController {
                     .collect(),
                 multi_select: question.multi_select,
             })
-            .collect();
+            .collect::<Vec<_>>();
+        let update = StreamUpdate::QuestionRequested {
+            id: id.clone(),
+            questions: display,
+            workflow_origin: pending.workflow_origin.clone(),
+        };
+        self.tui.chrome_mut().apply_stream_update(update.clone());
         // The transcript card is the single visible owner of the question;
         // the chrome overlay keeps the runtime selection state.
         self.tui
             .transcript_mut()
-            .upsert_question_prompt(&id, display);
+            .apply_question_stream_update(update);
         self.pending_questions
             .insert(id.clone(), pending.response_tx);
         self.pending_question_prompts.insert(id, questions);

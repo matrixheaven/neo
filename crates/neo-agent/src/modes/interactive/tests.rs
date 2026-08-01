@@ -1006,6 +1006,7 @@ async fn resolving_question_records_answered_terminal_fact_in_transcript() {
             multi_select: false,
         }],
         response_tx,
+        workflow_origin: None,
     });
 
     controller
@@ -1094,6 +1095,7 @@ async fn background_question_answer_starts_followup_turn() {
             multi_select: false,
         }],
         response_tx,
+        workflow_origin: None,
     });
 
     controller
@@ -1171,6 +1173,7 @@ fn task_stop_for_question_closes_pending_question_overlay() {
             multi_select: false,
         }],
         response_tx,
+        workflow_origin: None,
     });
     assert!(controller.chrome().question_dialog_is_focused());
 
@@ -1518,6 +1521,7 @@ async fn completed_turn_drains_pending_approval_and_question_channels() {
                         multi_select: false,
                     }],
                     response_tx: question_tx,
+                    workflow_origin: None,
                 })
                 .expect("question sent");
             *question_receiver.lock().expect("question receiver") = Some(question_rx);
@@ -1940,6 +1944,7 @@ fn blocking_dialog_events_request_an_immediate_frame() {
         turn: 1,
         id: "question-1".to_owned(),
         questions: Vec::new(),
+        workflow_origin: None,
     };
     let text = AgentEvent::TextDelta {
         turn: 1,
@@ -6764,6 +6769,7 @@ fn controller_with_pending_math_question() -> (
                         multi_select: false,
                     }],
                     response_tx,
+                    workflow_origin: None,
                 })
                 .expect("question sent");
             let response = response_rx.await.expect("question response");
@@ -6981,6 +6987,7 @@ fn controller_with_keyboard_routing_question() -> InteractiveController {
             },
         ],
         response_tx,
+        workflow_origin: None,
     });
     controller
 }
@@ -7080,6 +7087,7 @@ async fn question_dialog_prioritizes_real_keybindings_before_prompt_editing() {
             multi_select: false,
         }],
         response_tx,
+        workflow_origin: None,
     });
 
     controller
@@ -8770,6 +8778,7 @@ async fn load_session_transcript_preserves_delegate_events_for_replay() {
         .append(&AgentEvent::DelegateStarted {
             turn: 1,
             agent: snapshot,
+            workflow_origin: None,
         })
         .await
         .expect("append delegate");
@@ -8847,10 +8856,12 @@ fn interleaved_replay_prelude_events() -> Vec<AgentEvent> {
         AgentEvent::DelegateStarted {
             turn: 1,
             agent: running,
+            workflow_origin: None,
         },
         AgentEvent::DelegateFinished {
             turn: 1,
             agent: completed,
+            workflow_origin: None,
         },
     ]
 }
@@ -14922,6 +14933,7 @@ async fn question_up_down_does_not_recall_prompt_history() {
             multi_select: false,
         }],
         response_tx,
+        workflow_origin: None,
     });
 
     controller
@@ -18816,6 +18828,7 @@ async fn pending_approval_keeps_input_while_later_delegate_events_arrive() {
         .apply_agent_event(AgentEvent::DelegateStarted {
             turn: 1,
             agent: running,
+            workflow_origin: None,
         });
 
     // The earliest blocking entry is still the approval: selection keys
@@ -18896,6 +18909,7 @@ async fn pending_question_keeps_input_while_later_workflow_events_arrive() {
             multi_select: false,
         }],
         response_tx,
+        workflow_origin: None,
     });
 
     // Later workflow events arrive while the question is pending.
