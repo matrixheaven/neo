@@ -1013,6 +1013,26 @@ impl TranscriptPane {
                 is_error,
                 details_for_check.as_ref(),
             );
+            let successful_workflow_launch = tool_name == "Workflow"
+                && !is_error
+                && details_for_check.as_ref().is_some_and(|details| {
+                    matches!(
+                        details.get("action").and_then(serde_json::Value::as_str),
+                        Some("run_inline" | "run_saved")
+                    ) && details.get("status").and_then(serde_json::Value::as_str)
+                        == Some("started")
+                        && details
+                            .pointer("/task/kind")
+                            .and_then(serde_json::Value::as_str)
+                            == Some("workflow")
+                        && details
+                            .pointer("/task/task_id")
+                            .and_then(serde_json::Value::as_str)
+                            .is_some_and(|task_id| !task_id.is_empty())
+                });
+            if successful_workflow_launch {
+                self.transcript.suppress_tool_run(&id);
+            }
         }
         self.completed_tool_result_ids.push(id);
         if changed {

@@ -2155,8 +2155,24 @@ mod tests {
     }
 
     #[test]
-    fn stamp_workflow_origin_covers_delegate_families() {
+    fn stamp_workflow_origin_covers_tools_and_delegate_families() {
         let origin = workflow_origin("workflow-run");
+        let tool = AgentEvent::ToolExecutionStarted {
+            turn: 1,
+            id: "bash-call".into(),
+            name: "Bash".into(),
+            arguments: serde_json::json!({"command": "true"}),
+            workflow_origin: None,
+        };
+        let stamped = stamp_workflow_origin(tool, Some(&origin));
+        assert!(matches!(
+            stamped,
+            AgentEvent::ToolExecutionStarted {
+                workflow_origin: Some(ref stamped_origin),
+                ..
+            } if stamped_origin == &origin
+        ));
+
         for event in delegate_family_events() {
             let stamped = stamp_workflow_origin(event, Some(&origin));
             assert_eq!(workflow_origin_of(&stamped), Some(&origin));

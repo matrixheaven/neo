@@ -794,6 +794,89 @@ fn workflow_origin_routes_tools_and_children_into_one_entry() {
     assert!(!text.contains("internal-invocation-id"), "{text}");
 }
 
+#[test]
+fn successful_workflow_launch_replaces_the_generic_tool_card() {
+    let mut pane = neo_tui::transcript::TranscriptPane::new(120, 24);
+    pane.apply_agent_event(AgentEvent::ToolExecutionStarted {
+        turn: 1,
+        id: "workflow-launch".to_owned(),
+        name: "Workflow".to_owned(),
+        arguments: serde_json::json!({"action": "run_saved", "name": "review"}),
+        workflow_origin: None,
+    });
+    pane.apply_agent_event(AgentEvent::WorkflowStarted {
+        turn: 1,
+        workflow: snapshot(WorkflowState::Running),
+    });
+    pane.apply_agent_event(AgentEvent::ToolExecutionFinished {
+        turn: 1,
+        id: "workflow-launch".to_owned(),
+        name: "Workflow".to_owned(),
+        result: ToolResult {
+            content: "started".to_owned(),
+            is_error: false,
+            details: Some(serde_json::json!({
+                "action": "run_saved",
+                "status": "started",
+                "task": {
+                    "task_id": "wf-test",
+                    "kind": "workflow",
+                    "status": "started",
+                    "display_name": "Runtime audit and fix"
+                }
+            })),
+            terminate: false,
+        },
+        workflow_origin: None,
+    });
+
+    assert!(pane.transcript().is_tool_run_suppressed("workflow-launch"));
+    let update = pane.render_terminal_update(120, 24);
+    let rendered = format!(
+        "{}\n{}",
+        update
+            .history
+            .iter()
+            .flat_map(|block| block.lines.iter())
+            .map(|line| strip_ansi(line))
+            .collect::<Vec<_>>()
+            .join("\n"),
+        terminal_text(&update.live)
+    );
+    assert!(!rendered.contains("Used Workflow"), "{rendered}");
+    assert_eq!(rendered.matches("Workflow").count(), 1, "{rendered}");
+
+    let mut failed = neo_tui::transcript::TranscriptPane::new(120, 24);
+    failed.apply_agent_event(AgentEvent::ToolExecutionStarted {
+        turn: 1,
+        id: "workflow-preflight-failure".to_owned(),
+        name: "Workflow".to_owned(),
+        arguments: serde_json::json!({"action": "run_saved", "name": "missing"}),
+        workflow_origin: None,
+    });
+    failed.apply_agent_event(AgentEvent::ToolExecutionFinished {
+        turn: 1,
+        id: "workflow-preflight-failure".to_owned(),
+        name: "Workflow".to_owned(),
+        result: ToolResult {
+            content: "workflow not found".to_owned(),
+            is_error: true,
+            details: Some(serde_json::json!({
+                "action": "run_saved",
+                "status": "failed",
+                "error": {"message": "workflow not found"}
+            })),
+            terminate: false,
+        },
+        workflow_origin: None,
+    });
+    assert!(
+        !failed
+            .transcript()
+            .is_tool_run_suppressed("workflow-preflight-failure")
+    );
+}
+
 #[tokio::test]
 async fn jsonl_replay_preserves_workflow_question_tool_and_child_grouping() {
     let delegate_origin = origin("wf-test", "delegate-replay-call");
