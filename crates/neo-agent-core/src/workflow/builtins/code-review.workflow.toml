@@ -1,7 +1,7 @@
 name = "code-review"
 display_name = "Code Review"
 description = "Read-only multi-domain code review with structured findings-first output. Never modifies code."
-source_sha256 = "278f472507a87893ebf6020398ef9280419e69ccce91a41d38660ee1be257ca4"
+source_sha256 = "9d47bb1e9e4fa88ea269bbb83e8db0cb99f8c81480a1a75db92fd977839ad5b9"
 
 [[phases]]
 id = "scope"
@@ -30,14 +30,14 @@ type = "string"
 [output_schema]
 type = "object"
 additionalProperties = false
-required = ["findings", "ok", "scope", "criteria", "summary", "read_only"]
+required = ["findings", "status", "scope", "criteria", "summary", "read_only"]
 
 [output_schema.properties.findings]
 type = "array"
 items = { type = "object" }
 
-[output_schema.properties.ok]
-type = "boolean"
+[output_schema.properties.status]
+type = "string"
 
 [output_schema.properties.scope]
 type = "string"

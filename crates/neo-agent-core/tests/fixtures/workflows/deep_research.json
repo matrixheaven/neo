@@ -64,7 +64,7 @@
         "mode": "foreground",
         "agent_id": "fixture_verify",
         "structured_output": {
-          "ok": true,
+          "verified": true,
           "contradictions": [],
           "gaps": []
         }

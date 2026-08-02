@@ -1421,56 +1421,12 @@ pub struct ChildRunOutput {
     pub messages: Vec<AgentMessage>,
 }
 
-/// Result of a single non-executing schema-repair model turn on an existing child session.
-#[derive(Debug, Clone)]
-pub struct SchemaRepairTurnResult {
-    pub events: Vec<AgentEvent>,
-    pub messages: Vec<AgentMessage>,
-    pub tool_attempted: bool,
-    pub latest_text: Option<String>,
-}
-
 /// Final assistant text from a completed child turn (strict host JSON candidate).
 #[must_use]
 pub fn child_final_assistant_text(output: &ChildRunOutput) -> String {
     latest_assistant_text(&output.events)
         .or_else(|| output.snapshot.latest_text.clone())
         .unwrap_or_default()
-}
-
-/// True when repair-turn events show any tool-call attempt.
-#[must_use]
-pub fn schema_repair_tool_attempted(events: &[AgentEvent]) -> bool {
-    events.iter().any(|event| match event {
-        AgentEvent::ToolCallStarted { .. }
-        | AgentEvent::ToolCallFinished { .. }
-        | AgentEvent::ToolExecutionStarted { .. }
-        | AgentEvent::ToolExecutionFinished { .. }
-        | AgentEvent::MessageFinished {
-            stop_reason: StopReason::ToolUse,
-            ..
-        }
-        | AgentEvent::TurnFinished {
-            stop_reason: StopReason::ToolUse,
-            ..
-        } => true,
-        AgentEvent::MessageAppended {
-            message: AgentMessage::Assistant { tool_calls, .. },
-        } => !tool_calls.is_empty(),
-        _ => false,
-    })
-}
-
-/// Build the deterministic correction prompt for a schema-repair turn.
-#[must_use]
-pub fn schema_repair_correction_prompt(
-    validation_error: &str,
-    schema: &serde_json::Value,
-) -> String {
-    format!(
-        "Your previous response did not match the required output schema.\n\nValidation error: {validation_error}\n\nRequired JSON Schema:\n{}\n\nReply with exactly one JSON value matching the schema. Every required field must be present. Do not use a Markdown fence or add prose before or after the JSON. Do not call any tool.",
-        schema
-    )
 }
 
 /// Outcome of an atomic live-steer delivery attempt.
@@ -1981,104 +1937,6 @@ impl MultiAgentRuntime {
         drop(live_steer);
         drop(live_cancel);
         self.finish_child_run(&snapshot, started_at, run)
-    }
-
-    /// Continue an existing child session for schema repair without executing tools.
-    ///
-    /// This is an additional model effect on the same session, not a re-execution of the
-    /// original child task. External tools are advertised but never executed; a tool-call
-    /// attempt is reported via [`SchemaRepairTurnResult::tool_attempted`].
-    pub async fn run_schema_repair_turn(
-        &self,
-        mut deps: ChildRuntimeDeps,
-        agent_id: &AgentId,
-        validation_error: &str,
-        schema: &serde_json::Value,
-    ) -> Result<SchemaRepairTurnResult, String> {
-        let snapshot = self
-            .agent_snapshot(agent_id.as_str())
-            .ok_or_else(|| format!("schema repair: unknown agent {}", agent_id.as_str()))?;
-        // Preserve advertised schemas, but attach no registry so a tool-call
-        // attempt cannot execute external effects. Host still flags the
-        // attempt as schema_repair_tool_forbidden.
-        set_child_response_format(&mut deps.config, Some(schema));
-        let prior_context = self.replay_child_context(&snapshot).await?;
-        let prompt = schema_repair_correction_prompt(validation_error, schema);
-        let live_cancel = self.register_live_cancel(agent_id.as_str(), &deps.cancel_token);
-        let cancel_token = live_cancel.token();
-        if deps.cancel_token.is_cancelled() {
-            cancel_token.cancel();
-        }
-        let live_steer = self.register_live_steer(agent_id.as_str());
-        let child_wire_path = self.child_wire_path(agent_id.as_str());
-        let child_config =
-            child_config(deps.config, deps.role).with_agent_id(agent_id.as_str().to_owned());
-        let mut writer = if let Some(path) = child_wire_path {
-            if let Some(parent) = path.parent() {
-                tokio::fs::create_dir_all(parent)
-                    .await
-                    .map_err(|err| err.to_string())?;
-            }
-            Some(
-                crate::session::JsonlSessionWriter::open_append(path)
-                    .await
-                    .map_err(|err| err.to_string())?,
-            )
-        } else {
-            None
-        };
-        let mut persistence = crate::session::SessionEventPersistence::default();
-        let mut context = prior_context;
-        // No tool registry: AgentRuntime::new leaves tools=None.
-        let child_runtime =
-            AgentRuntime::new(child_config, deps.model).with_steer_input(live_steer.handle());
-        let mut events = Vec::new();
-        let mut stream = child_runtime.run_turn_with_cancel(
-            &mut context,
-            AgentMessage::user_text(prompt),
-            cancel_token.clone(),
-        );
-        while let Some(event) = stream.next().await {
-            let event = match event {
-                Ok(event) => event,
-                Err(err) => {
-                    let _ = flush_child_writer(&mut writer).await;
-                    cancel_token.cancel();
-                    return Err(err.to_string());
-                }
-            };
-            if let Some(child_writer) = writer.as_mut() {
-                for persisted in persistence.persisted_events(&event) {
-                    child_writer
-                        .append_event(&persisted)
-                        .await
-                        .map_err(|err| err.to_string())?;
-                }
-            }
-            events.push(event);
-        }
-        flush_child_writer(&mut writer).await?;
-        cancel_token.cancel();
-        drop(stream);
-        drop(live_steer);
-        drop(live_cancel);
-        let messages = context.messages().to_vec();
-        {
-            let mut state = self.state.lock().expect("multi-agent state poisoned");
-            if let Some(agent) = state.agents.get_mut(agent_id.as_str()) {
-                agent.prior_messages = messages.clone();
-                if let Some(text) = latest_assistant_text(&events) {
-                    agent.latest_text = Some(bounded_latest_text(&text));
-                }
-                agent.updated_at_ms = now_ms();
-            }
-        }
-        Ok(SchemaRepairTurnResult {
-            tool_attempted: schema_repair_tool_attempted(&events),
-            latest_text: latest_assistant_text(&events),
-            events,
-            messages,
-        })
     }
 
     pub async fn run_swarm_child_turn(

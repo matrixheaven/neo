@@ -1,7 +1,7 @@
 name = "large-refactor"
 display_name = "Large Refactor"
 description = "Partition approved refactor work into isolated-worktree slices, preserve verification artifacts, and await explicit human merge/retirement decisions. Never auto-merges or deletes worktrees."
-source_sha256 = "7d27def32c1cd889ccdc9f22f6d1e40460a68cfdb53f6f4887968459cefb2ab6"
+source_sha256 = "20361c4c05f20fc95560dc767c8481ec682aa95b0c54533b89be558319194b13"
 
 [[phases]]
 id = "intake"
@@ -35,7 +35,7 @@ type = "string"
 type = "object"
 additionalProperties = false
 required = [
-  "ok",
+  "status",
   "spec",
   "plan",
   "lineage",
@@ -46,8 +46,8 @@ required = [
   "commits",
 ]
 
-[output_schema.properties.ok]
-type = "boolean"
+[output_schema.properties.status]
+type = "string"
 
 [output_schema.properties.spec]
 type = "string"

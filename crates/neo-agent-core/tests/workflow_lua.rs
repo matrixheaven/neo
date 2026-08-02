@@ -446,14 +446,14 @@ async fn neo_fail_is_terminal_even_when_pcall_catches_it() {
 }
 
 #[tokio::test]
-async fn neo_verify_failure_returns_an_immutable_outcome() {
+async fn verify_false_is_completed_data() {
     let fixture = make_runner().await;
     let result = fixture
         .runner
         .execute(
             r#"
             local ok, outcome = pcall(function()
-                return neo.verify(false, "should have passed")
+                return neo.verify(false, "evidence incomplete")
             end)
             local top_mutable = pcall(function() outcome.status = "completed" end)
             local nested_mutable = pcall(function() outcome.details.message = "changed" end)
@@ -462,18 +462,20 @@ async fn neo_verify_failure_returns_an_immutable_outcome() {
                 status = outcome.status,
                 summary = outcome.summary,
                 detail = outcome.details.message,
+                verified = outcome.details.verified,
                 immutable = not top_mutable and not nested_mutable,
             }
             "#,
             serde_json::json!({}),
         )
         .await
-        .expect("verification failure should be catchable");
+        .expect("verification false is completed result data");
 
     assert_eq!(result["caught"], false);
-    assert_eq!(result["status"], "failed");
-    assert_eq!(result["summary"], "should have passed");
-    assert_eq!(result["detail"], "should have passed");
+    assert_eq!(result["status"], "completed");
+    assert_eq!(result["summary"], "verification failed");
+    assert_eq!(result["detail"], "evidence incomplete");
+    assert_eq!(result["verified"], false);
     assert_eq!(result["immutable"], true);
 }
 
@@ -487,10 +489,9 @@ async fn denied_neo_tool_returns_failed_outcome_without_aborting() {
             local denied = neo.tool({ name = "Workflow", input = {} })
             local continued = neo.verify(true, "continued")
             return {
-                ok = denied.ok,
                 status = denied.status,
                 code = denied.details.code,
-                continued = continued.ok,
+                continued = continued.status,
             }
             "#,
             serde_json::json!({}),
@@ -498,10 +499,9 @@ async fn denied_neo_tool_returns_failed_outcome_without_aborting() {
         .await
         .expect("denied generic tool remains catchable");
 
-    assert_eq!(result["ok"], false, "{result}");
     assert_eq!(result["status"], "failed", "{result}");
     assert_eq!(result["code"], "tool_not_workflow_eligible", "{result}");
-    assert_eq!(result["continued"], true, "{result}");
+    assert_eq!(result["continued"], "completed", "{result}");
 }
 
 #[tokio::test]
@@ -514,10 +514,9 @@ async fn unknown_neo_tool_returns_failed_outcome_without_aborting() {
             local unknown = neo.tool({ name = "MissingTool", input = {} })
             local continued = neo.verify(true, "continued")
             return {
-                ok = unknown.ok,
                 status = unknown.status,
                 code = unknown.details.code,
-                continued = continued.ok,
+                continued = continued.status,
             }
             "#,
             serde_json::json!({}),
@@ -525,10 +524,9 @@ async fn unknown_neo_tool_returns_failed_outcome_without_aborting() {
         .await
         .expect("unknown tool should be a failed outcome");
 
-    assert_eq!(result["ok"], false, "{result}");
     assert_eq!(result["status"], "failed", "{result}");
     assert_eq!(result["code"], "unknown_tool", "{result}");
-    assert_eq!(result["continued"], true, "{result}");
+    assert_eq!(result["continued"], "completed", "{result}");
 }
 
 #[tokio::test]
@@ -599,7 +597,6 @@ async fn child_failure_outcome_returns_normally() {
             local usage = pcall(function() outcome.actual_usage.input_tokens = 0 end)
             local details = pcall(function() outcome.details.kind = "changed" end)
             return {
-                ok = outcome.ok,
                 status = outcome.status,
                 agent_id = outcome.agent_id,
                 input_tokens = outcome.actual_usage.input_tokens,
@@ -611,7 +608,6 @@ async fn child_failure_outcome_returns_normally() {
         .await
         .expect("child failure is a normal host result");
 
-    assert_eq!(result["ok"], false);
     assert_eq!(result["status"], "failed");
     assert_eq!(result["agent_id"], "agent_test");
     assert_eq!(result["input_tokens"], 11);
@@ -1020,7 +1016,7 @@ async fn workflow_swarm_failure_summary_includes_first_bounded_error() {
         .await
         .expect("swarm batch");
 
-    assert!(!outcome.ok, "{outcome:?}");
+    assert!(!outcome.is_completed(), "{outcome:?}");
     assert_eq!(outcome.status, WorkflowOutcomeStatus::Failed, "{outcome:?}");
     assert!(
         outcome.summary.contains("failed 2/2"),
@@ -1046,8 +1042,8 @@ async fn workflow_swarm_failure_summary_includes_first_bounded_error() {
     assert_eq!(items.len(), 2, "{items:?}");
     assert_eq!(items[0]["item_id"], serde_json::json!("item-a"));
     assert_eq!(items[1]["item_id"], serde_json::json!("item-b"));
-    assert_eq!(items[0]["ok"], serde_json::json!(false));
-    assert_eq!(items[1]["ok"], serde_json::json!(false));
+    assert_eq!(items[0]["status"], serde_json::json!("failed"));
+    assert_eq!(items[1]["status"], serde_json::json!("failed"));
     assert!(
         items[0]["summary"]
             .as_str()
@@ -1129,7 +1125,7 @@ async fn workflow_swarm_pause_and_cancellation_are_not_reported_as_failure() {
             .await
             .expect("swarm batch");
 
-        assert!(!outcome.ok, "{outcome:?}");
+        assert!(!outcome.is_completed(), "{outcome:?}");
         assert_eq!(outcome.status, expected_status, "{outcome:?}");
         assert!(outcome.summary.contains(expected_summary), "{outcome:?}");
         assert!(!outcome.summary.contains("failed"), "{outcome:?}");

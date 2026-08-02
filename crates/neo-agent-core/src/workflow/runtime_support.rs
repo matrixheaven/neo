@@ -90,7 +90,6 @@ pub(super) struct ReplayEntry {
 
 pub(super) fn interrupted_outcome(invocation: &IncompleteInvocation) -> WorkflowInvocationOutcome {
     WorkflowInvocationOutcome {
-        ok: false,
         status: WorkflowOutcomeStatus::Interrupted,
         summary: "interrupted by host exit".to_owned(),
         interruption: None,
@@ -110,7 +109,6 @@ pub(super) fn bounded_resource_limited_outcome(
     original: &WorkflowInvocationOutcome,
 ) -> WorkflowInvocationOutcome {
     WorkflowInvocationOutcome {
-        ok: false,
         status: WorkflowOutcomeStatus::ResourceLimited,
         summary: reason.to_owned(),
         interruption: None,
@@ -132,7 +130,9 @@ pub(super) fn add_usage(total: Option<AgentTokenUsage>, usage: AgentTokenUsage) 
 
 pub(super) fn latest_log_summary(entries: &[ReplayEntry]) -> Option<String> {
     entries.iter().rev().find_map(|entry| {
-        if entry.kind != WorkflowInvocationKind::Log || !entry.outcome.ok {
+        if entry.kind != WorkflowInvocationKind::Log
+            || entry.outcome.status != WorkflowOutcomeStatus::Completed
+        {
             return None;
         }
         entry
@@ -281,11 +281,15 @@ pub(super) fn recovered_phase(envelopes: &[JournalEnvelope]) -> Option<String> {
         .iter()
         .rev()
         .find_map(|envelope| match &envelope.payload {
-            JournalPayload::InvocationFinished { outcome, .. } if outcome.ok => outcome
-                .details
-                .get("phase")
-                .and_then(serde_json::Value::as_str)
-                .map(str::to_owned),
+            JournalPayload::InvocationFinished { outcome, .. }
+                if outcome.status == WorkflowOutcomeStatus::Completed =>
+            {
+                outcome
+                    .details
+                    .get("phase")
+                    .and_then(serde_json::Value::as_str)
+                    .map(str::to_owned)
+            }
             _ => None,
         })
 }
@@ -294,7 +298,9 @@ pub(super) fn recovered_reports(envelopes: &[JournalEnvelope]) -> Vec<serde_json
     envelopes
         .iter()
         .filter_map(|envelope| match &envelope.payload {
-            JournalPayload::InvocationFinished { outcome, .. } if outcome.ok => {
+            JournalPayload::InvocationFinished { outcome, .. }
+                if outcome.status == WorkflowOutcomeStatus::Completed =>
+            {
                 outcome.details.get("report").cloned()
             }
             _ => None,
@@ -307,7 +313,9 @@ pub(super) fn latest_report_summary(envelopes: &[JournalEnvelope]) -> Option<Str
         .iter()
         .rev()
         .find_map(|envelope| match &envelope.payload {
-            JournalPayload::InvocationFinished { outcome, .. } if outcome.ok => {
+            JournalPayload::InvocationFinished { outcome, .. }
+                if outcome.status == WorkflowOutcomeStatus::Completed =>
+            {
                 outcome.details.get("report").and_then(report_summary)
             }
             _ => None,
@@ -336,7 +344,8 @@ pub(super) fn failure_count(envelopes: &[JournalEnvelope]) -> u64 {
         .filter(|e| {
             matches!(
                 &e.payload,
-                JournalPayload::InvocationFinished { outcome, .. } if !outcome.ok
+                JournalPayload::InvocationFinished { outcome, .. }
+                    if outcome.status != WorkflowOutcomeStatus::Completed
             )
         })
         .count()

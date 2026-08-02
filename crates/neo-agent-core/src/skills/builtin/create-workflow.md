@@ -64,12 +64,17 @@ not apply.
 ## Authoring checklist
 
 1. Choose the `Workflow` action before writing its arguments.
-2. Declare both `input_schema` and `output_schema` for every inline definition.
-3. Make Lua return exactly the result declared by `output_schema`.
-4. Check every host outcome's `ok` field before using its result.
-5. Call `neo.fail` with the preserved summary when a required outcome fails.
+2. Declare `input_schema` for every inline definition; `output_schema` is
+   optional projection metadata.
+3. Return the final value directly; it is persisted exactly as returned, and
+   `output_schema` only enables a best-effort structured projection.
+4. Check every host outcome's `status` field before using its result.
+5. Call `neo.fail` with the preserved summary only when a required execution
+   actually fails or explicit policy demands it -- never for a missing
+   projection or negative evidence.
 6. Call `neo.tool` with `{ name = "ToolName", input = { ... } }`.
-7. Put an `output_schema` on every heterogeneous `neo.swarm` item.
+7. Put an `output_schema` on heterogeneous `neo.swarm` items only when a
+   structured projection is wanted (optional).
 8. Use `neo.json_array` and `neo.json_object` only as Lua table type markers.
 
 Before authoring, gather the goal, fan-out, required checks, final structured
@@ -90,8 +95,8 @@ APIs that are not listed below. Do not launch workflows from workflows.
   `{"type":"object","additionalProperties":false}`.
 - Call `neo.tool` only as
   `{ name = "ToolName", input = { ... } }`. A call-shape decode error aborts
-  the host operation; an executed tool failure returns `ok = false` and may
-  be branched on.
+  the host operation; an executed tool failure returns a failed outcome
+  (`status = "failed"`) and may be branched on.
 - `neo.json_array(table)` and `neo.json_object(table)` return marked Lua
   tables. They do not serialize values, and `nil` is invalid.
 - `neo.fail(message)` is terminal. `pcall` cannot undo or recover that run
@@ -166,11 +171,11 @@ local security = neo.delegate({
   output_schema = finding_schema,
 })
 local security_check = neo.verify(
-  security.ok,
+  security.status == "completed",
   "security failed: " .. tostring(security.summary)
 )
-if not security_check.ok then
-  neo.fail(security_check.summary)
+if not security_check.details.verified then
+  neo.fail(security_check.details.message)
 end
 
 local correctness = neo.delegate({
@@ -183,11 +188,11 @@ local correctness = neo.delegate({
   output_schema = finding_schema,
 })
 local correctness_check = neo.verify(
-  correctness.ok,
+  correctness.status == "completed",
   "correctness failed: " .. tostring(correctness.summary)
 )
-if not correctness_check.ok then
-  neo.fail(correctness_check.summary)
+if not correctness_check.details.verified then
+  neo.fail(correctness_check.details.message)
 end
 
 local findings = {}
@@ -214,15 +219,16 @@ append(correctness)
 neo.phase("finalize")
 findings = neo.json_array(findings)
 return {
-  ok = true,
+  status = "verified",
   summary = "review complete for " .. scope,
   findings = findings,
 }
 ```
 
 Matching definition fields for the tool call: phases `scope` / `review` /
-`finalize`, required `args.scope` in `input_schema`, and an `output_schema`
-matching the return table.
+`finalize`, required `args.scope` in `input_schema`, and an optional
+`output_schema` describing the return table when a structured projection is
+wanted.
 
 ## The dialect
 
@@ -237,10 +243,12 @@ matching the return table.
 - `neo.args` is **read-only**. Host outcomes are **read-only**.
 - Unknown fields on host input tables are rejected (`deny_unknown_fields`).
 - Single chunk; final result is the **return value** (one table / scalar).
-  Zero returns or a single `nil` become JSON `null` (usually fails schema).
-  Multiple return values fail.
-- Exactly one non-executing schema repair is allowed for child structured
-  output; still require strong schemas and fail closed on evidence gates.
+  Zero returns or a single `nil` become JSON `null` (no structured
+  projection). Multiple return values fail.
+- Declared `output_schema`s are optional best-effort structured projections.
+  A projection mismatch never fails a child or the Workflow and never starts
+  a repair turn: the completed child and its original text/result are
+  preserved, with a bounded projection diagnostic in details.
 
 ## Host API
 
@@ -256,8 +264,8 @@ matching the return table.
 | `neo.phase(id)` | Select phase `id` declared in `phases`. Unknown id fails. |
 | `neo.log(message)` | Non-empty progress line for the user/dashboard. |
 | `neo.report(value)` | Record a JSON-compatible intermediate report and return no value; use it only as a statement. |
-| `neo.fail(message)` | Terminal run decision; subsequent host calls fail. `pcall` cannot undo or recover it. |
-| `neo.verify(condition, message)` | Returns an immutable outcome. Check `outcome.ok`; false is an ordinary failed result, while `neo.fail` is terminal. |
+| `neo.fail(message)` | Terminal run decision; subsequent host calls fail. `pcall` cannot undo or recover it. Reserved for actual required execution failures or explicit user/script policy -- never for a missing projection or negative evidence. |
+| `neo.verify(condition, message)` | Returns a **completed** host outcome; `details.verified` is the condition (true/false) and `details.message` is the message. It never aborts the script; only `neo.fail` is terminal. |
 | `neo.json_array(t)` / `neo.json_object(t)` | Require a Lua table, return a marked table (never a string); `nil` is invalid. |
 
 ### Children
@@ -265,7 +273,7 @@ matching the return table.
 | Call | Behavior |
 |------|----------|
 | `neo.delegate({...})` | One child agent. Returns outcome table. |
-| `neo.swarm({...})` | Fan-out through direct child specs with one schema per item. |
+| `neo.swarm({...})` | Fan-out through direct child specs with an optional per-item `output_schema`. |
 
 **`neo.delegate` fields** (new child):
 
@@ -279,7 +287,9 @@ matching the return table.
   auto-merge or delete worktrees in script policy.
 - `tool_allow`: optional array of exact tool names; may only **reduce** parent
   tools (e.g. read-only ceiling).
-- `output_schema`: **required** for workflow-origin children (JSON Schema object).
+- `output_schema`: optional (JSON Schema object). When supplied, the host
+  makes one best-effort structured projection attempt; a mismatch is data, not
+  failure, and never starts a repair turn.
 
 **Resume union:** when `resume` is set, only `resume`, `task`, and
 `output_schema` are allowed.
@@ -289,11 +299,13 @@ matching the return table.
 - `description` (required)
 - `items` (required, non-empty)
 - Direct form only: every item uses delegate-like fields with **required**
-  `task` and **required** `output_schema`; optional `title`, `resume`, `role`,
+  `task`; `output_schema` is optional (same projection semantics as
+  `neo.delegate`); optional `title`, `resume`, `role`,
   `model`, `provider`, `context`, `worktree`, and `tool_allow` follow the
   `neo.delegate` rules above.
 - Even when every child performs the same kind of work, emit direct items with
-  per-item `task` and `output_schema`. Do not use `title`/`value`,
+  per-item `task` (and `output_schema` only when a structured projection is
+  wanted). Do not use `title`/`value`,
   `prompt_template`, `resume_agent_ids`, or a top-level `output_schema`; those
   belong to the separate model-facing `DelegateSwarm` adapter, not the workflow
   DSL.
@@ -305,7 +317,7 @@ matching the return table.
 
 | Call | Behavior |
 |------|----------|
-| `neo.tool({ name, input })` | Canonical `ToolRegistry` tool; only `{ name, input }` is accepted. A call-shape decode error aborts the host operation, while an executed tool failure returns `ok = false` and may be branched on. `input` must be a JSON object. |
+| `neo.tool({ name, input })` | Canonical `ToolRegistry` tool; only `{ name, input }` is accepted. A call-shape decode error aborts the host operation, while an executed tool failure returns a failed outcome and may be branched on. `input` must be a JSON object. |
 | `neo.verify_command({ command, cwd?, failure_message? })` | Runs via `Bash` and returns an immutable outcome for both success and ordinary failure. |
 | `neo.await_user({...})` | Durable human (or policy-allowed) gate; returns the raw read-only answer value, not an outcome table. |
 
@@ -316,7 +328,7 @@ matching the return table.
 `TodoList`, `ListDelegates`, `WaitDelegate`, `InterruptDelegate`,
 `MessageDelegate`.  
 `TaskOutput` cannot target the **current** workflow run id. Unknown names return a
-failed outcome. Check `outcome.ok` before using details; ordinary failures do not
+failed outcome. Check `outcome.status` before using details; ordinary failures do not
 require `pcall`. Ordinary registered tools are eligible by default.
 
 **`neo.await_user` fields:**
@@ -330,19 +342,27 @@ require `pcall`. Ordinary registered tools are eligible by default.
 
 ### Outcome shape
 
-Successful/failed host effects that return outcomes expose a read-only table:
+Host effects that return outcomes expose a read-only table:
 
-- `ok` (boolean)
 - `status`: `completed` \| `failed` \| `denied` \| `cancelled` \|
   `resource_limited` \| `interrupted`
 - `summary` (string)
-- `details` (JSON value); schema-valid child JSON is at
-  `details.structured_output`
+- `details` (JSON value); a successful structured projection of child JSON is at
+  `details.structured_output`; `neo.verify` records `details.verified` and
+  `details.message`
 - `actual_usage` (optional)
 - `agent_id` / `swarm_id` / `task_id` when child refs are present
 
-Treat missing, failed, or unusable verification as **unverified**, not success.
-Evidence gates must fail closed (`neo.verify` / `neo.fail`).
+### Execution status vs workflow data
+
+An outcome's `status` is **host execution state** only: `completed` means the
+host actually ran the effect. `verified`, `supported`, `partial`,
+contradictions, and gaps are **Workflow-owned result data** inside `details`
+or the final return value -- the host never derives an execution verdict from
+them. A missing or failed structured projection and a false `neo.verify` are
+data, not execution failure: the child stays `completed` and the Workflow
+continues. Only an actual execution failure (or an explicit `neo.fail`) is
+terminal.
 
 ## Determinism, durability, resume
 
@@ -367,10 +387,12 @@ Evidence gates must fail closed (`neo.verify` / `neo.fail`).
   `worktree = "shared"`.
 - **Mutation slices:** `worktree = "isolated"`, then `neo.await_user` for
   merge/retire. Never auto-merge.
-- **Direct `neo.swarm`:** one complete child spec and schema per item, including
-  uniform shards.
+- **Direct `neo.swarm`:** one complete child spec per item (with an optional
+  `output_schema` when a structured projection is wanted), including uniform
+  shards.
 - **Adversarial verify:** independent reviewer children prompted to refute;
-  require concrete evidence fields in schema.
+  prompt for concrete evidence fields and use an optional schema to guide the
+  projection.
 - **Show builtins through the tool:** `Workflow(show)` on `code-review`,
   `deep-research`, or `large-refactor` returns their paired sources. Prefer
   adapting those patterns over inventing new host APIs.
@@ -385,12 +407,13 @@ Evidence gates must fail closed (`neo.verify` / `neo.fail`).
   `Workflow` tool only.
 - **Hand-computed manifests.** `source_sha256` and the `.workflow.toml` pair
   are host-owned by `Workflow(save)`; never author them yourself.
-- **Missing `output_schema`.** The final definition schema and every workflow
-  child require it. Heterogeneous swarm items must set per-item
-  `output_schema`.
+- **Missing `output_schema`.** Not a definition error: the child and Workflow
+  still run, and the structured projection is simply unavailable. Declare one
+  only when a caller wants a best-effort structured projection.
 - **Terse child prompts.** Cold children return empty structured shells without
   tools. Tell children to use tools and define what a valid empty answer requires.
-- **Unguarded outcomes.** Always check `outcome.ok` before trusting `details`.
+- **Unguarded outcomes.** Always check `outcome.status` before trusting
+  `details`, and treat `details.verified` and other business fields as data.
   Ordinary verification and tool failures are values, so do not wrap them in
   `pcall`; reserve `pcall` for catchable Lua errors.
 - **Phase id typos.** `neo.phase` only accepts ids declared in `phases`.

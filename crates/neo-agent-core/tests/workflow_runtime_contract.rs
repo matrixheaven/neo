@@ -132,7 +132,6 @@ fn launch_request() -> WorkflowLaunchRequest {
 
 fn completed(summary: &str) -> WorkflowInvocationOutcome {
     WorkflowInvocationOutcome {
-        ok: true,
         status: WorkflowOutcomeStatus::Completed,
         summary: summary.to_owned(),
         interruption: None,

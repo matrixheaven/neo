@@ -1,7 +1,7 @@
 name = "deep-research"
 display_name = "Deep Research"
 description = "Plan, fan out heterogeneous research children, verify gaps, and synthesize a structured report with durable artifacts."
-source_sha256 = "01c8b0f122a9327928b1732f6596f61b8a936d62d50285f5b8c104b796e2e8cb"
+source_sha256 = "7d4915e5ed5fd374ec2b398ddfac5f346c1312870cca2efec772207dae52442d"
 
 [[phases]]
 id = "plan"
@@ -37,10 +37,10 @@ type = "boolean"
 [output_schema]
 type = "object"
 additionalProperties = false
-required = ["ok", "question", "report", "confidence", "findings", "plan", "artifacts"]
+required = ["status", "question", "report", "confidence", "findings", "plan", "artifacts"]
 
-[output_schema.properties.ok]
-type = "boolean"
+[output_schema.properties.status]
+type = "string"
 
 [output_schema.properties.question]
 type = "string"

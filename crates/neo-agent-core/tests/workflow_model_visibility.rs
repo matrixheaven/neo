@@ -17,17 +17,15 @@ local unknown = neo.tool({ name = "MissingTool", input = {} })
 local forbidden = neo.tool({ name = "Workflow", input = {} })
     return {
         verified = {
-            ok = verified.ok,
             status = verified.status,
+            verified = verified.details.verified,
             message = verified.details.message,
         },
     unknown = {
-        ok = unknown.ok,
         status = unknown.status,
         code = unknown.details.code,
     },
     forbidden = {
-        ok = forbidden.ok,
         status = forbidden.status,
         code = forbidden.details.code,
     },
@@ -43,19 +41,18 @@ fn output_schema() -> Value {
             "verified": {
                 "type": "object",
                 "additionalProperties": false,
-                "required": ["ok", "status", "message"],
+                "required": ["status", "verified", "message"],
                 "properties": {
-                    "ok": {"type": "boolean"},
                     "status": {"type": "string"},
+                    "verified": {"type": "boolean"},
                     "message": {"type": "string"},
                 },
             },
             "unknown": {
                 "type": "object",
                 "additionalProperties": false,
-                "required": ["ok", "status", "code"],
+                "required": ["status", "code"],
                 "properties": {
-                    "ok": {"type": "boolean"},
                     "status": {"type": "string"},
                     "code": {"type": "string"},
                 },
@@ -63,9 +60,8 @@ fn output_schema() -> Value {
             "forbidden": {
                 "type": "object",
                 "additionalProperties": false,
-                "required": ["ok", "status", "code"],
+                "required": ["status", "code"],
                 "properties": {
-                    "ok": {"type": "boolean"},
                     "status": {"type": "string"},
                     "code": {"type": "string"},
                 },
@@ -297,13 +293,11 @@ async fn production_workflow_result_reaches_the_next_model_request() {
     let task_content: Value = serde_json::from_str(&task_result.content).expect("TaskOutput JSON");
     assert_eq!(task_content["status"], "completed");
     let final_value = &task_content["result"]["body"]["inline"]["value"];
-    assert_eq!(final_value["verified"]["ok"], false);
-    assert_eq!(final_value["verified"]["status"], "failed");
+    assert_eq!(final_value["verified"]["status"], "completed");
+    assert_eq!(final_value["verified"]["verified"], false);
     assert_eq!(final_value["verified"]["message"], "verification failed");
-    assert_eq!(final_value["unknown"]["ok"], false);
     assert_eq!(final_value["unknown"]["status"], "failed");
     assert_eq!(final_value["unknown"]["code"], "unknown_tool");
-    assert_eq!(final_value["forbidden"]["ok"], false);
     assert_eq!(final_value["forbidden"]["status"], "failed");
     assert_eq!(
         final_value["forbidden"]["code"],
@@ -328,4 +322,149 @@ async fn production_workflow_result_reaches_the_next_model_request() {
         next_model_json["result"]["body"]["inline"]["value"],
         *final_value
     );
+}
+
+const VERIFY_SCRIPT: &str = r#"
+neo.phase("run")
+local verified = neo.verify(false, "evidence incomplete")
+return {
+    verified = {
+        status = verified.status,
+        verified = verified.details.verified,
+        message = verified.details.message,
+    },
+}
+"#;
+
+fn verify_workflow_input() -> Value {
+    json!({
+        "action": "run_inline",
+        "name": "verify-as-data",
+        "description": "Return false verification as completed data",
+        "phases": [{"id": "run", "description": "Run the verification"}],
+        "script": VERIFY_SCRIPT,
+        "input_schema": {
+            "type": "object",
+            "additionalProperties": false
+        },
+        "output_schema": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["verified"],
+            "properties": {
+                "verified": {
+                    "type": "object",
+                    "additionalProperties": false,
+                    "required": ["status", "verified", "message"],
+                    "properties": {
+                        "status": {"type": "string"},
+                        "verified": {"type": "boolean"},
+                        "message": {"type": "string"},
+                    },
+                },
+            },
+        },
+    })
+}
+
+/// `neo.verify(false, ...)` is completed business data: the workflow stays
+/// `completed`, the final value exposes host execution `status` separately from
+/// `details.verified = false`, and no abort or repair turn occurs.
+#[tokio::test]
+async fn workflow_result_exposes_status_and_business_data() {
+    let workspace = tempfile::tempdir().expect("workspace");
+    let session = tempfile::tempdir().expect("session");
+    let resolver = WorkflowDispatchResolver::default();
+    let workflow_runtime = WorkflowRuntime::default();
+    let harness = FakeHarness::from_turns([
+        tool_call_turn(
+            "workflow-call",
+            "Workflow",
+            verify_workflow_input(),
+            "message-1",
+        ),
+        done_turn("message-2", "workflow started"),
+    ]);
+    let config = AgentConfig::for_model(harness.model())
+        .with_permission_mode(PermissionMode::Yolo)
+        .with_workspace_root(workspace.path())
+        .expect("workspace root")
+        .with_session_directory(session.path())
+        .with_agent_id("main")
+        .with_workflow_runtime(workflow_runtime)
+        .with_workflow_dispatch_resolver(resolver.clone());
+    let runtime = AgentRuntime::with_tools(
+        config.clone(),
+        harness.client(),
+        ToolRegistry::with_builtin_tools(),
+    );
+    let mut context = AgentContext::new();
+    let events = run_turn(
+        &runtime,
+        &mut context,
+        AgentMessage::user_text("run the workflow"),
+    )
+    .await;
+
+    let launch = tool_result(&events, "Workflow");
+    assert!(!launch.is_error, "{}", launch.content);
+    let launch_content: Value = serde_json::from_str(&launch.content).expect("launch JSON");
+    let task_id = launch_content["task"]["task_id"]
+        .as_str()
+        .expect("workflow task id")
+        .to_owned();
+
+    // The workflow must complete; verify(false, ...) is data, not an abort.
+    let handle = config
+        .background_tasks
+        .workflow_handle(&task_id)
+        .await
+        .expect("workflow task handle");
+    tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            let snapshot = handle.snapshot().await;
+            if snapshot.state.is_terminal() {
+                assert_eq!(
+                    snapshot.state,
+                    neo_agent_core::workflow::WorkflowState::Completed,
+                    "workflow snapshot: {snapshot:?}"
+                );
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("workflow completes");
+
+    // The persisted final value exposes execution status and business data.
+    let second_harness = FakeHarness::from_turns([
+        tool_call_turn(
+            "task-output-call",
+            "TaskOutput",
+            json!({"task_id": task_id, "view": "result", "block": true}),
+            "message-3",
+        ),
+        done_turn("message-4", "result received"),
+    ]);
+    let second_runtime = AgentRuntime::with_tools(
+        config,
+        second_harness.client(),
+        ToolRegistry::with_builtin_tools(),
+    );
+    let second_events = run_turn(
+        &second_runtime,
+        &mut context,
+        AgentMessage::user_text("read the workflow result"),
+    )
+    .await;
+
+    let task_result = tool_result(&second_events, "TaskOutput");
+    assert!(!task_result.is_error, "{}", task_result.content);
+    let task_content: Value = serde_json::from_str(&task_result.content).expect("TaskOutput JSON");
+    assert_eq!(task_content["status"], "completed");
+    let final_value = &task_content["result"]["body"]["inline"]["value"];
+    assert_eq!(final_value["verified"]["status"], "completed");
+    assert_eq!(final_value["verified"]["verified"], false);
+    assert_eq!(final_value["verified"]["message"], "evidence incomplete");
 }

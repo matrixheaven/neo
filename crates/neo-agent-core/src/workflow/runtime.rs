@@ -36,8 +36,8 @@ use super::user_input::{AwaitUserInput, PendingUserInput, request_id_for_call_in
 use super::{RetentionOutcome, perform_retention};
 use crate::AgentTokenUsage;
 use crate::multi_agent::{
-    AgentId, AgentRole, AgentRunMode, ChildPlan, ChildRunOutput, ChildRuntimeDeps,
-    MultiAgentRuntime, child_final_assistant_text,
+    AgentRole, AgentRunMode, ChildPlan, ChildRunOutput, ChildRuntimeDeps, MultiAgentRuntime,
+    child_final_assistant_text,
 };
 use crate::runtime::{WorkflowNotification, WorkflowNotificationQueue};
 
@@ -75,27 +75,26 @@ pub enum WorkflowProjectionStage {
     Finished,
 }
 
-/// Host acceptance of a child structured output with at most one non-executing repair.
+/// Best-effort structured projection of a completed child's assistant text.
+///
+/// The projection is optional host data: when a schema is supplied and the text
+/// parses and validates, `value` is `Some`. Any mismatch only makes the
+/// projection unavailable — the child lifecycle, original text, and observed
+/// usage are preserved unchanged.
 #[derive(Debug, Clone)]
-pub struct ChildSchemaAcceptResult {
-    pub ok: bool,
+pub struct ChildStructuredProjection {
     pub value: Option<serde_json::Value>,
-    pub error_code: Option<WorkflowErrorCode>,
+    /// Bounded diagnostic describing the projection outcome.
     pub summary: String,
-    pub repair_attempted: bool,
-    pub repair_id: Option<String>,
     pub first_raw: String,
-    pub repair_raw: Option<String>,
     pub actual_usage: Option<AgentTokenUsage>,
 }
 
-/// Inputs for child structured-output validation plus one non-executing repair.
-#[derive(Debug, Clone, Copy)]
-pub struct ChildSchemaRepairRequest<'a> {
-    pub invocation_id: &'a str,
-    pub agent_id: &'a AgentId,
-    pub schema: &'a CompiledSchema,
-    pub first_output: &'a ChildRunOutput,
+impl ChildStructuredProjection {
+    #[must_use]
+    pub fn is_available(&self) -> bool {
+        self.value.is_some()
+    }
 }
 
 /// Heterogeneous swarm batch parameters (durable per-item journal records).
@@ -1429,10 +1428,12 @@ impl WorkflowRuntime {
         )
     }
 
-    /// Validate (optional) final output schema then persist the Lua return.
+    /// Persist the final Lua return exactly as returned.
     ///
-    /// Schema failures are typed `schema_invalid` with message prefix
-    /// `schema_invalid_final_result` and never trigger a model call or repair turn.
+    /// A declared output schema is optional projection metadata: a mismatch can
+    /// never reject the value, veto persistence, or turn a completed Workflow
+    /// into a schema failure. Malformed schema documents are still rejected at
+    /// the local definition boundary before provider work.
     pub async fn accept_final_lua_result(
         &self,
         run_id: &WorkflowId,
@@ -1440,125 +1441,13 @@ impl WorkflowRuntime {
         schema: Option<&CompiledSchema>,
         schema_revision: Option<WorkflowRevision>,
     ) -> Result<CanonicalFinalResult, WorkflowError> {
+        // Compute the projection diagnostic when a schema is declared; the
+        // outcome is data only and never gates persistence.
         if let Some(schema) = schema {
-            validate_final_lua_result(schema, &value).map_err(|err| {
-                WorkflowError::coded(WorkflowErrorCode::SchemaInvalid, err.message)
-            })?;
+            let _diagnostic = validate_final_lua_result(schema, &value).err();
         }
         self.persist_canonical_final_result(run_id, value, schema_revision)
             .await
-    }
-
-    /// Append `SchemaRepairStarted` before a non-executing corrective model call.
-    ///
-    /// Returns the durable `repair_id`. Callers must not dispatch the repair model
-    /// effect until this append has synced. A second start for the same
-    /// `invocation_id` is rejected so crash recovery never repeats the model effect.
-    pub async fn start_schema_repair(
-        &self,
-        run_id: &WorkflowId,
-        invocation_id: &str,
-    ) -> Result<String, WorkflowError> {
-        if self
-            .schema_repair_already_started(run_id, invocation_id)
-            .await?
-        {
-            return Err(WorkflowError::coded(
-                WorkflowErrorCode::InterruptedHostExit,
-                format!(
-                    "schema repair already started for invocation {invocation_id}; not repeating model effect"
-                ),
-            ));
-        }
-        let state = self.run_state(run_id).await?;
-        let (journal, run_id_owned) = {
-            let guard = state.lock().await;
-            (
-                guard.journal.clone().ok_or_else(|| {
-                    WorkflowError::Journal("workflow journal is unavailable".to_owned())
-                })?,
-                guard.metadata.run_id.clone(),
-            )
-        };
-        let repair_id = format!("repair_{}", uuid::Uuid::new_v4().as_simple());
-        let timestamp_ms = current_timestamp_ms();
-        let envelope = {
-            let writer = journal
-                .lock()
-                .map_err(|_| WorkflowError::Host("workflow journal lock poisoned".to_owned()))?;
-            JournalEnvelope::new(
-                writer.next_seq(),
-                timestamp_ms,
-                run_id_owned,
-                JournalPayload::SchemaRepairStarted {
-                    repair_id: repair_id.clone(),
-                    invocation_id: invocation_id.to_owned(),
-                },
-            )
-        };
-        let sequence =
-            self.journal_io(&journal, |writer| writer.append(&envelope, &self.limits))?;
-        let mut guard = state.lock().await;
-        guard.projection_sequence = Some(sequence);
-        guard.updated_at_ms = Some(timestamp_ms);
-        self.emit_projection(&guard, WorkflowProjectionStage::Updated);
-        Ok(repair_id)
-    }
-
-    /// Append `SchemaRepairFinished` after the single corrective attempt settles.
-    pub async fn finish_schema_repair(
-        &self,
-        run_id: &WorkflowId,
-        repair_id: &str,
-        ok: bool,
-        summary: impl Into<String>,
-    ) -> Result<(), WorkflowError> {
-        let summary = summary.into();
-        let state = self.run_state(run_id).await?;
-        let (journal, run_id_owned) = {
-            let guard = state.lock().await;
-            (
-                guard.journal.clone().ok_or_else(|| {
-                    WorkflowError::Journal("workflow journal is unavailable".to_owned())
-                })?,
-                guard.metadata.run_id.clone(),
-            )
-        };
-        let timestamp_ms = current_timestamp_ms();
-        let envelope = {
-            let writer = journal
-                .lock()
-                .map_err(|_| WorkflowError::Host("workflow journal lock poisoned".to_owned()))?;
-            if !writer.index().open_schema_repairs.contains(repair_id) {
-                return Err(WorkflowError::coded(
-                    WorkflowErrorCode::JournalCorrupt,
-                    format!("schema_repair_finished without start for {repair_id}"),
-                ));
-            }
-            if writer.index().finished_schema_repairs.contains(repair_id) {
-                return Err(WorkflowError::coded(
-                    WorkflowErrorCode::JournalCorrupt,
-                    format!("duplicate schema_repair_finished for {repair_id}"),
-                ));
-            }
-            JournalEnvelope::new(
-                writer.next_seq(),
-                timestamp_ms,
-                run_id_owned,
-                JournalPayload::SchemaRepairFinished {
-                    repair_id: repair_id.to_owned(),
-                    ok,
-                    summary: summary.clone(),
-                },
-            )
-        };
-        let sequence =
-            self.journal_io(&journal, |writer| writer.append(&envelope, &self.limits))?;
-        let mut guard = state.lock().await;
-        guard.projection_sequence = Some(sequence);
-        guard.updated_at_ms = Some(timestamp_ms);
-        self.emit_projection(&guard, WorkflowProjectionStage::Updated);
-        Ok(())
     }
 
     /// Durable heterogeneous swarm batch: one outer Swarm invocation plus one
@@ -1612,7 +1501,6 @@ impl WorkflowRuntime {
                     {
                         Ok(outcome) => outcome,
                         Err(error) => WorkflowInvocationOutcome {
-                            ok: false,
                             status: WorkflowOutcomeStatus::Failed,
                             summary: error.to_string(),
                             details: serde_json::json!({"error": error.to_string()}),
@@ -1801,7 +1689,6 @@ impl WorkflowRuntime {
                     Err(error) => {
                         // Fail before child start: durable item finish with isolation error.
                         let outcome = WorkflowInvocationOutcome {
-                            ok: false,
                             status: WorkflowOutcomeStatus::Failed,
                             summary: error.to_string(),
                             interruption: None,
@@ -1835,7 +1722,7 @@ impl WorkflowRuntime {
                                 status: outcome.status,
                                 summary: outcome.summary.clone(),
                                 actual_usage: outcome.actual_usage,
-                                error: (!outcome.ok).then(|| outcome.summary.clone()),
+                                error: (!outcome.is_completed()).then(|| outcome.summary.clone()),
                             },
                         )
                         .await?;
@@ -1874,7 +1761,7 @@ impl WorkflowRuntime {
                         status: outcome.status,
                         summary: outcome.summary.clone(),
                         actual_usage: outcome.actual_usage,
-                        error: (!outcome.ok).then(|| outcome.summary.clone()),
+                        error: (!outcome.is_completed()).then(|| outcome.summary.clone()),
                     },
                 )
                 .await?;
@@ -1902,7 +1789,6 @@ impl WorkflowRuntime {
                         )
                         .await
                         .unwrap_or_else(|error| WorkflowInvocationOutcome {
-                            ok: false,
                             status: WorkflowOutcomeStatus::Failed,
                             summary: error.to_string(),
                             details: serde_json::json!({"error": error.to_string()}),
@@ -1922,7 +1808,7 @@ impl WorkflowRuntime {
                                 status: outcome.status,
                                 summary: outcome.summary.clone(),
                                 actual_usage: outcome.actual_usage,
-                                error: (!outcome.ok).then(|| outcome.summary.clone()),
+                                error: (!outcome.is_completed()).then(|| outcome.summary.clone()),
                             },
                         )
                         .await;
@@ -1950,7 +1836,6 @@ impl WorkflowRuntime {
                         )
                         .await
                         .unwrap_or_else(|error| WorkflowInvocationOutcome {
-                            ok: false,
                             status: WorkflowOutcomeStatus::Failed,
                             summary: error.to_string(),
                             details: serde_json::json!({"error": error.to_string()}),
@@ -1970,7 +1855,7 @@ impl WorkflowRuntime {
                                 status: outcome.status,
                                 summary: outcome.summary.clone(),
                                 actual_usage: outcome.actual_usage,
-                                error: (!outcome.ok).then(|| outcome.summary.clone()),
+                                error: (!outcome.is_completed()).then(|| outcome.summary.clone()),
                             },
                         )
                         .await;
@@ -2002,7 +1887,6 @@ impl WorkflowRuntime {
                     "paused before start"
                 };
                 let outcome = WorkflowInvocationOutcome {
-                    ok: false,
                     status,
                     summary: summary.to_owned(),
                     details: serde_json::json!({"not_started": true}),
@@ -2054,25 +1938,25 @@ impl WorkflowRuntime {
                 }
                 let mut item = serde_json::json!({
                     "item_id": plan.item_id,
-                    "ok": outcome.ok,
                     "status": outcome.status,
                     "summary": outcome.summary,
                 });
                 if let Some(structured_output) = outcome.details.get("structured_output") {
                     item["structured_output"] = structured_output.clone();
                 }
+                if let Some(projection_error) = outcome.details.get("projection_error") {
+                    item["projection_error"] = projection_error.clone();
+                }
                 ordered.push(item);
             } else if finished.contains(&plan.item_id) {
                 ordered.push(serde_json::json!({
                     "item_id": plan.item_id,
-                    "ok": true,
                     "status": "completed",
                     "summary": "already finished; not replayed",
                 }));
             } else {
                 ordered.push(serde_json::json!({
                     "item_id": plan.item_id,
-                    "ok": false,
                     "status": "queued",
                     "summary": "not started",
                 }));
@@ -2088,7 +1972,10 @@ impl WorkflowRuntime {
                 .actual_usage
                 .map_or(total, |usage| Some(add_usage(total, usage)))
         });
-        let all_succeeded = all_terminal && item_outcomes.iter().all(|(_, outcome)| outcome.ok);
+        let all_succeeded = all_terminal
+            && item_outcomes
+                .iter()
+                .all(|(_, outcome)| outcome.is_completed());
         let status = if all_succeeded {
             WorkflowOutcomeStatus::Completed
         } else if failed_count > 0 {
@@ -2124,7 +2011,6 @@ impl WorkflowRuntime {
             )
         };
         Ok(WorkflowInvocationOutcome {
-            ok: all_succeeded,
             status,
             summary: bounded_summary(&summary),
             details: serde_json::json!({
@@ -2141,19 +2027,18 @@ impl WorkflowRuntime {
 
     async fn child_run_to_outcome_with_schema(
         &self,
-        run_id: &WorkflowId,
-        multi_agent: &MultiAgentRuntime,
-        deps: ChildRuntimeDeps,
+        _run_id: &WorkflowId,
+        _multi_agent: &MultiAgentRuntime,
+        _deps: ChildRuntimeDeps,
         plan: &ChildPlan,
-        invocation_id: &str,
+        _invocation_id: &str,
         output: &ChildRunOutput,
     ) -> Result<WorkflowInvocationOutcome, WorkflowError> {
         let mut outcome = child_run_to_outcome(output);
         // A failed child turn (provider, auth, rate-limit, cancellation, or
-        // runtime) is returned unchanged with only observed usage. It never
-        // enters schema compilation, schema-repair journal events, or a second
-        // model request, so the original actionable error survives.
-        if !outcome.ok {
+        // runtime) is returned unchanged with only observed usage: the original
+        // actionable error survives and no projection is attempted.
+        if !outcome.is_completed() {
             return Ok(outcome);
         }
         let Some(schema_doc) = plan.output_schema.as_ref() else {
@@ -2165,51 +2050,22 @@ impl WorkflowRuntime {
                 plan.item_id
             ))
         })?;
-        let accepted = self
-            .accept_child_structured_output_with_repair(
-                run_id,
-                multi_agent,
-                deps,
-                ChildSchemaRepairRequest {
-                    invocation_id,
-                    agent_id: &output.snapshot.id,
-                    schema: &schema,
-                    first_output: output,
-                },
-            )
-            .await?;
+        // Optional structured projection: a mismatch can make only the
+        // projection unavailable — never the completed child. The child's
+        // summary, status, original text, and usage stay unchanged.
+        let projection = project_child_structured_output(&schema, output);
         let details = outcome.details.as_object_mut().ok_or_else(|| {
             WorkflowError::Host("child outcome details must be an object".to_owned())
         })?;
-        details.insert(
-            "schema_repair_attempted".to_owned(),
-            serde_json::json!(accepted.repair_attempted),
-        );
-        if let Some(repair_id) = accepted.repair_id {
-            details.insert("repair_id".to_owned(), serde_json::json!(repair_id));
-        }
-        if accepted.ok {
-            details.insert(
-                "structured_output".to_owned(),
-                accepted.value.unwrap_or(serde_json::Value::Null),
-            );
-            outcome.actual_usage = accepted.actual_usage;
+        if let Some(value) = projection.value {
+            details.insert("structured_output".to_owned(), value);
         } else {
-            outcome.ok = false;
-            outcome.status = WorkflowOutcomeStatus::Failed;
-            outcome.summary = accepted.summary.clone();
             details.insert(
-                "schema_error".to_owned(),
-                serde_json::json!(accepted.summary),
+                "projection_error".to_owned(),
+                serde_json::json!(projection.summary),
             );
-            if let Some(code) = accepted.error_code {
-                details.insert(
-                    "schema_error_code".to_owned(),
-                    serde_json::json!(code.as_str()),
-                );
-            }
-            outcome.actual_usage = accepted.actual_usage;
         }
+        outcome.actual_usage = projection.actual_usage;
         Ok(outcome)
     }
 
@@ -2326,186 +2182,6 @@ impl WorkflowRuntime {
         };
         let guard = state.lock().await;
         guard.control.stop_token.is_cancelled()
-    }
-
-    /// Validate a child output against `schema`, with exactly one non-executing repair.
-    ///
-    /// Ordering:
-    /// 1. validate first provider-native/assistant value;
-    /// 2. on failure, append `SchemaRepairStarted` before any corrective model call;
-    /// 3. continue the same child session without allowing tool execution;
-    /// 4. reject repair tool attempts as `schema_repair_tool_forbidden`;
-    /// 5. append `SchemaRepairFinished` and aggregate both attempts' actual usage.
-    ///
-    /// Crash after start and before finish never re-dispatches the corrective model
-    /// effect: recovery finishes the open repair as interrupted without a model call.
-    pub async fn accept_child_structured_output_with_repair(
-        &self,
-        run_id: &WorkflowId,
-        multi_agent: &MultiAgentRuntime,
-        deps: ChildRuntimeDeps,
-        request: ChildSchemaRepairRequest<'_>,
-    ) -> Result<ChildSchemaAcceptResult, WorkflowError> {
-        let ChildSchemaRepairRequest {
-            invocation_id,
-            agent_id,
-            schema,
-            first_output,
-        } = request;
-        let first_raw = child_final_assistant_text(first_output);
-        let first_usage = accumulate_child_usage(None, &first_output.events);
-        let first_source = StructuredOutputSource::AssistantText(first_raw.clone());
-        match accept_structured_output(schema, first_source) {
-            Ok(value) => Ok(ChildSchemaAcceptResult {
-                ok: true,
-                value: Some(value),
-                error_code: None,
-                summary: "child output matched schema".to_owned(),
-                repair_attempted: false,
-                repair_id: None,
-                first_raw,
-                repair_raw: None,
-                actual_usage: first_usage,
-            }),
-            Err(first_err) => {
-                // If a repair was already journaled for this invocation (crash mid-repair),
-                // never repeat the corrective model effect.
-                if self
-                    .schema_repair_already_started(run_id, invocation_id)
-                    .await?
-                {
-                    return Ok(ChildSchemaAcceptResult {
-                        ok: false,
-                        value: None,
-                        error_code: Some(WorkflowErrorCode::InterruptedHostExit),
-                        summary: format!(
-                            "schema repair already started for {invocation_id}; not repeating model effect"
-                        ),
-                        repair_attempted: true,
-                        repair_id: None,
-                        first_raw,
-                        repair_raw: None,
-                        actual_usage: first_usage,
-                    });
-                }
-
-                let repair_id = self.start_schema_repair(run_id, invocation_id).await?;
-
-                let repair = multi_agent
-                    .run_schema_repair_turn(deps, agent_id, &first_err.to_string(), schema.schema())
-                    .await
-                    .map_err(|e| WorkflowError::Host(format!("schema repair turn failed: {e}")))?;
-
-                let repair_raw = repair.latest_text.clone().unwrap_or_default();
-                let repair_usage = accumulate_child_usage(first_usage, &repair.events);
-                let actual_usage = repair_usage;
-
-                if repair.tool_attempted {
-                    let summary = "schema_repair_tool_forbidden".to_owned();
-                    self.finish_schema_repair(run_id, &repair_id, false, &summary)
-                        .await?;
-                    return Ok(ChildSchemaAcceptResult {
-                        ok: false,
-                        value: None,
-                        error_code: Some(WorkflowErrorCode::SchemaRepairToolForbidden),
-                        summary,
-                        repair_attempted: true,
-                        repair_id: Some(repair_id),
-                        first_raw,
-                        repair_raw: Some(repair_raw),
-                        actual_usage,
-                    });
-                }
-
-                let second_source = StructuredOutputSource::AssistantText(repair_raw.clone());
-                match accept_structured_output(schema, second_source) {
-                    Ok(value) => {
-                        let summary = "child schema repaired".to_owned();
-                        self.finish_schema_repair(run_id, &repair_id, true, &summary)
-                            .await?;
-                        Ok(ChildSchemaAcceptResult {
-                            ok: true,
-                            value: Some(value),
-                            error_code: None,
-                            summary,
-                            repair_attempted: true,
-                            repair_id: Some(repair_id),
-                            first_raw,
-                            repair_raw: Some(repair_raw),
-                            actual_usage,
-                        })
-                    }
-                    Err(second_err) => {
-                        let summary = format!("schema_invalid after repair: {second_err}");
-                        self.finish_schema_repair(run_id, &repair_id, false, &summary)
-                            .await?;
-                        Ok(ChildSchemaAcceptResult {
-                            ok: false,
-                            value: None,
-                            error_code: Some(WorkflowErrorCode::SchemaInvalid),
-                            summary,
-                            repair_attempted: true,
-                            repair_id: Some(repair_id),
-                            first_raw,
-                            repair_raw: Some(repair_raw),
-                            actual_usage,
-                        })
-                    }
-                }
-            }
-        }
-    }
-
-    /// Whether a schema repair was already journaled for `invocation_id`.
-    pub async fn schema_repair_already_started(
-        &self,
-        run_id: &WorkflowId,
-        invocation_id: &str,
-    ) -> Result<bool, WorkflowError> {
-        let state = self.run_state(run_id).await?;
-        let guard = state.lock().await;
-        let Some(journal) = guard.journal.as_ref() else {
-            return Ok(false);
-        };
-        let writer = journal
-            .lock()
-            .map_err(|_| WorkflowError::Host("workflow journal lock poisoned".to_owned()))?;
-        // Index tracks repair_ids; scan path for invocation linkage.
-        drop(writer);
-        let path = guard.journal_path();
-        let run = guard.metadata.run_id.clone();
-        drop(guard);
-        let envelopes = journal::collect_journal(
-            &path,
-            Some(&run),
-            self.limits.journal_record_bytes,
-            self.limits.journal_total_bytes,
-        )?;
-        Ok(envelopes.iter().any(|env| {
-            matches!(
-                &env.payload,
-                JournalPayload::SchemaRepairStarted {
-                    invocation_id: inv,
-                    ..
-                } if inv == invocation_id
-            )
-        }))
-    }
-
-    /// Active (run_id, invocation_id) if exactly one run has a live invocation.
-    pub async fn find_active_invocation(&self) -> Option<(WorkflowId, String)> {
-        let runs = self.runs.lock().await;
-        let mut found = None;
-        for state in runs.values() {
-            let guard = state.lock().await;
-            if let Some(inv) = guard.current_invocation.clone() {
-                if found.is_some() {
-                    return None;
-                }
-                found = Some((guard.metadata.run_id.clone(), inv));
-            }
-        }
-        found
     }
 
     /// Transition `Queued -> Running` without spawning a supervised worker.
@@ -2663,18 +2339,6 @@ impl WorkflowRuntime {
                     run_dir,
                     metadata,
                     format!("recovery append failed: {error}"),
-                )
-                .await,
-            );
-            return Ok(());
-        }
-        // Open schema repairs never re-dispatch the corrective model effect.
-        if let Err(error) = self.reconcile_open_schema_repairs(&mut writer, &metadata) {
-            handles.push(
-                self.insert_failed_run(
-                    run_dir,
-                    metadata,
-                    format!("schema repair recovery failed: {error}"),
                 )
                 .await,
             );
@@ -3396,7 +3060,6 @@ impl WorkflowRuntime {
                     guard.metadata.run_id.clone()
                 };
                 let outcome = WorkflowInvocationOutcome {
-                    ok: false,
                     status: WorkflowOutcomeStatus::Interrupted,
                     summary: "workflow worker panicked".to_owned(),
                     interruption: None,
@@ -3783,36 +3446,6 @@ impl WorkflowRuntime {
         Ok(())
     }
 
-    /// Finish open schema repairs as interrupted without re-dispatching the model.
-    fn reconcile_open_schema_repairs(
-        &self,
-        writer: &mut JournalWriter,
-        metadata: &WorkflowRunMetadata,
-    ) -> Result<(), WorkflowError> {
-        let open: Vec<String> = writer
-            .index()
-            .open_schema_repairs
-            .iter()
-            .filter(|id| !writer.index().finished_schema_repairs.contains(*id))
-            .cloned()
-            .collect();
-        for repair_id in open {
-            let timestamp_ms = current_timestamp_ms();
-            let envelope = JournalEnvelope::new(
-                writer.next_seq(),
-                timestamp_ms,
-                metadata.run_id.clone(),
-                JournalPayload::SchemaRepairFinished {
-                    repair_id,
-                    ok: false,
-                    summary: "interrupted(host_exit); schema repair not repeated".to_owned(),
-                },
-            );
-            writer.append(&envelope, &self.limits)?;
-        }
-        Ok(())
-    }
-
     fn bound_recovery_resolver(&self) -> Result<Option<Arc<RecoveryResolver>>, WorkflowError> {
         self.recovery_resolver
             .read()
@@ -4096,23 +3729,6 @@ impl WorkflowHandle {
             .await
     }
 
-    pub async fn start_schema_repair(&self, invocation_id: &str) -> Result<String, WorkflowError> {
-        self.runtime
-            .start_schema_repair(&self.run_id, invocation_id)
-            .await
-    }
-
-    pub async fn finish_schema_repair(
-        &self,
-        repair_id: &str,
-        ok: bool,
-        summary: impl Into<String>,
-    ) -> Result<(), WorkflowError> {
-        self.runtime
-            .finish_schema_repair(&self.run_id, repair_id, ok, summary)
-            .await
-    }
-
     pub async fn await_user(
         &self,
         call_index: u64,
@@ -4151,26 +3767,6 @@ impl WorkflowHandle {
     ) -> Result<super::WorkflowChildPage, WorkflowError> {
         self.runtime
             .operator_child_page(&self.run_id, request)
-            .await
-    }
-
-    pub async fn accept_child_structured_output_with_repair(
-        &self,
-        multi_agent: &MultiAgentRuntime,
-        deps: ChildRuntimeDeps,
-        request: ChildSchemaRepairRequest<'_>,
-    ) -> Result<ChildSchemaAcceptResult, WorkflowError> {
-        self.runtime
-            .accept_child_structured_output_with_repair(&self.run_id, multi_agent, deps, request)
-            .await
-    }
-
-    pub async fn schema_repair_already_started(
-        &self,
-        invocation_id: &str,
-    ) -> Result<bool, WorkflowError> {
-        self.runtime
-            .schema_repair_already_started(&self.run_id, invocation_id)
             .await
     }
 
@@ -4267,6 +3863,34 @@ impl WorkflowHandle {
     }
 }
 
+/// Attempt one deterministic structured projection of a completed child's
+/// assistant text against `schema`.
+///
+/// This is projection-only: a mismatch makes the structured projection
+/// unavailable, never the child. The original text, lifecycle, and observed
+/// usage are preserved on every path, and no repair model turn is started.
+pub fn project_child_structured_output(
+    schema: &CompiledSchema,
+    first_output: &ChildRunOutput,
+) -> ChildStructuredProjection {
+    let first_raw = child_final_assistant_text(first_output);
+    let first_usage = accumulate_child_usage(None, &first_output.events);
+    let projection = accept_structured_output(
+        schema,
+        StructuredOutputSource::AssistantText(first_raw.clone()),
+    );
+    let (value, summary) = match projection {
+        Ok(value) => (Some(value), "child output matched schema".to_owned()),
+        Err(error) => (None, format!("structured projection unavailable: {error}")),
+    };
+    ChildStructuredProjection {
+        value,
+        summary,
+        first_raw,
+        actual_usage: first_usage,
+    }
+}
+
 fn child_run_to_outcome(output: &ChildRunOutput) -> WorkflowInvocationOutcome {
     let mut outcome = child_agent_to_outcome(&output.snapshot);
     outcome.actual_usage = accumulate_child_usage(None, &output.events);
@@ -4278,12 +3902,7 @@ fn child_agent_to_outcome(agent: &crate::multi_agent::AgentSnapshot) -> Workflow
         || agent.state.as_str().to_owned(),
         |outcome| outcome.summary.clone(),
     );
-    let is_error = agent.outcome.as_ref().map_or_else(
-        || agent.state != crate::multi_agent::AgentLifecycleState::Completed,
-        |outcome| outcome.is_error,
-    );
     WorkflowInvocationOutcome {
-        ok: !is_error && agent.state == crate::multi_agent::AgentLifecycleState::Completed,
         status: match agent.state {
             crate::multi_agent::AgentLifecycleState::Completed => WorkflowOutcomeStatus::Completed,
             crate::multi_agent::AgentLifecycleState::Cancelled => WorkflowOutcomeStatus::Cancelled,
@@ -4345,7 +3964,7 @@ fn append_child_finished(
             status: outcome.status,
             summary: summary.clone(),
             actual_usage: outcome.actual_usage,
-            error: (!outcome.ok).then_some(summary),
+            error: (!outcome.is_completed()).then_some(summary),
         },
     );
     writer.append(&envelope, limits)
@@ -4383,28 +4002,28 @@ fn observe_outcome(
     kind: WorkflowInvocationKind,
     outcome: &WorkflowInvocationOutcome,
 ) {
-    if !outcome.ok {
+    if !outcome.is_completed() {
         state.failure_count = state.failure_count.saturating_add(1);
     }
     if let Some(usage) = outcome.actual_usage {
         state.actual_usage = Some(add_usage(state.actual_usage, usage));
     }
     match kind {
-        WorkflowInvocationKind::Log if outcome.ok => {
+        WorkflowInvocationKind::Log if outcome.is_completed() => {
             state.latest_log_summary = outcome
                 .details
                 .get("message")
                 .and_then(serde_json::Value::as_str)
                 .map(bounded_summary);
         }
-        WorkflowInvocationKind::Phase if outcome.ok => {
+        WorkflowInvocationKind::Phase if outcome.is_completed() => {
             state.current_phase = outcome
                 .details
                 .get("phase")
                 .and_then(serde_json::Value::as_str)
                 .map(str::to_owned);
         }
-        WorkflowInvocationKind::Report if outcome.ok => {
+        WorkflowInvocationKind::Report if outcome.is_completed() => {
             if let Some(report) = outcome.details.get("report") {
                 state.latest_report_summary = report_summary(report);
                 state.reports.push(report.clone());

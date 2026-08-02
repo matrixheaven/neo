@@ -798,7 +798,6 @@ fn interrupted_outcome(
         );
     }
     WorkflowInvocationOutcome {
-        ok: false,
         status: WorkflowOutcomeStatus::Interrupted,
         summary: result.content,
         interruption: Some(WorkflowInterruptionReason::InstructionReplanRequired),
@@ -845,7 +844,6 @@ fn tool_result_to_outcome(
                 );
             }
             return WorkflowInvocationOutcome {
-                ok: false,
                 status: WorkflowOutcomeStatus::Failed,
                 summary: error,
                 interruption: None,
@@ -869,7 +867,6 @@ fn tool_result_to_outcome(
         },
     );
     WorkflowInvocationOutcome {
-        ok: status == WorkflowOutcomeStatus::Completed,
         status,
         summary: result.content,
         interruption: None,
@@ -1054,7 +1051,6 @@ fn canonical_child_status(
 
 fn failed_outcome(summary: String) -> WorkflowInvocationOutcome {
     WorkflowInvocationOutcome {
-        ok: false,
         status: WorkflowOutcomeStatus::Failed,
         summary,
         interruption: None,
@@ -1066,7 +1062,6 @@ fn failed_outcome(summary: String) -> WorkflowInvocationOutcome {
 
 fn cancelled_outcome() -> WorkflowInvocationOutcome {
     WorkflowInvocationOutcome {
-        ok: false,
         status: WorkflowOutcomeStatus::Cancelled,
         summary: "tool execution cancelled".to_owned(),
         interruption: None,

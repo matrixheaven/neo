@@ -4,6 +4,7 @@
 use std::sync::{Arc, Mutex};
 
 use neo_agent_core::harness::FakeHarness;
+use neo_agent_core::skills::builtin::builtin_skills;
 use neo_agent_core::tools::{
     Tool, ToolContext, ToolFuture, ToolRegistry, ToolResult, intersect_child_tool_allow,
     is_workflow_tool_denied, is_workflow_tool_eligible,
@@ -302,7 +303,10 @@ async fn workflow_provenance_is_typed_on_approval_and_events() {
         .await;
 
     // Rejected by permission — not executed, but provenance was required.
-    assert!(!outcome.ok, "rejected bash should not be ok: {outcome:?}");
+    assert!(
+        !outcome.is_completed(),
+        "rejected bash should not be ok: {outcome:?}"
+    );
 
     let events = events.lock().expect("events");
     let approval = events.iter().find_map(|event| match event {
@@ -339,5 +343,71 @@ async fn workflow_provenance_is_typed_on_approval_and_events() {
             }
             _ => {}
         }
+    }
+}
+
+/// The create-workflow skill describes output schemas as optional best-effort
+/// projections: a mismatch never fails a child or starts a repair turn,
+/// `neo.verify(false, ...)` is completed data, and `status` is host execution
+/// state while `verified`/`supported`/`partial` are Workflow-owned data.
+#[test]
+fn create_workflow_guidance_describes_optional_output_projection() {
+    let skills = builtin_skills().expect("built-ins load");
+    let create_workflow = skills
+        .iter()
+        .find(|skill| skill.name == "create-workflow")
+        .expect("create-workflow built-in");
+    let body = &create_workflow.body;
+
+    // output_schema is optional projection metadata, not an execution gate.
+    assert!(
+        body.contains("optional projection metadata"),
+        "output_schema must be optional projection metadata"
+    );
+    assert!(
+        body.contains("best-effort structured projection"),
+        "output_schema must enable a best-effort structured projection"
+    );
+    assert!(
+        body.contains("projection mismatch never fails a child or the Workflow"),
+        "a projection mismatch must never fail the child or the Workflow"
+    );
+
+    // A mismatch is data: no repair turn and no neo.fail for it.
+    assert!(
+        body.contains("never starts a repair turn"),
+        "guidance must promise no repair turn"
+    );
+    assert!(
+        body.contains("never for a missing projection or negative evidence"),
+        "neo.fail must be reserved for real execution failure or explicit policy"
+    );
+
+    // verify(false, ...) is completed data; status is execution state.
+    assert!(
+        body.contains("details.verified"),
+        "verify must expose details.verified"
+    );
+    assert!(
+        body.contains("never aborts the script"),
+        "verify must never abort the script"
+    );
+    assert!(
+        body.contains("host execution state") && body.contains("Workflow-owned result data"),
+        "status is host execution state; business fields are workflow-owned data"
+    );
+
+    // Retired strict/repair claims are gone from the guidance.
+    for retired in [
+        "Exactly one non-executing schema repair",
+        "fail closed on evidence gates",
+        "**required** for workflow-origin children",
+        "Check every host outcome's `ok` field",
+        "if not security_check.ok",
+    ] {
+        assert!(
+            !body.contains(retired),
+            "retired guidance must not remain: {retired:?}"
+        );
     }
 }

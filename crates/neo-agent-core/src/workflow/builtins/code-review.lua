@@ -58,7 +58,7 @@ local security = neo.delegate({
   tool_allow = READ_ONLY_TOOLS,
   output_schema = finding_schema,
 })
-if not security.ok then
+if security.status ~= "completed" then
   neo.fail(security.summary)
 end
 
@@ -70,7 +70,7 @@ local correctness = neo.delegate({
   tool_allow = READ_ONLY_TOOLS,
   output_schema = finding_schema,
 })
-if not correctness.ok then
+if correctness.status ~= "completed" then
   neo.fail(correctness.summary)
 end
 
@@ -82,21 +82,24 @@ local maintainability = neo.delegate({
   tool_allow = READ_ONLY_TOOLS,
   output_schema = finding_schema,
 })
-if not maintainability.ok then
+if maintainability.status ~= "completed" then
   neo.fail(maintainability.summary)
 end
 
 local findings = {}
 local seen = {}
+local projection_gaps = {}
 
-local function append_findings(outcome)
+local function append_findings(outcome, domain)
   local details = outcome.details
   if type(details) ~= "table" then
+    projection_gaps[#projection_gaps + 1] = domain
     return
   end
   local structured = details.structured_output
   local list = type(structured) == "table" and structured.findings or nil
   if type(list) ~= "table" then
+    projection_gaps[#projection_gaps + 1] = domain
     return
   end
   for i = 1, 64 do
@@ -121,9 +124,9 @@ local function append_findings(outcome)
   end
 end
 
-append_findings(security)
-append_findings(correctness)
-append_findings(maintainability)
+append_findings(security, "security")
+append_findings(correctness, "correctness")
+append_findings(maintainability, "maintainability")
 
 neo.phase("challenge")
 local challenge = neo.delegate({
@@ -134,22 +137,39 @@ local challenge = neo.delegate({
   tool_allow = READ_ONLY_TOOLS,
   output_schema = finding_schema,
 })
-if not challenge.ok then
+if challenge.status ~= "completed" then
   neo.fail(challenge.summary)
 end
-append_findings(challenge)
+append_findings(challenge, "challenge")
+
+-- A missing structured projection is business data: keep completed findings
+-- and report a deterministic partial result instead of failing the Workflow.
+local status = "verified"
+local gap_notes = {}
+if #projection_gaps > 0 then
+  status = "partial"
+  for i = 1, 32 do
+    local domain = projection_gaps[i]
+    if domain == nil then
+      break
+    end
+    gap_notes[#gap_notes + 1] = "structured findings unavailable for review domain " .. domain
+  end
+end
 
 neo.report({
   kind = "review_findings",
   scope = scope,
   findings_count = #findings,
+  status = status,
+  projection_gaps = neo.json_array(projection_gaps),
 })
 
 -- Findings-first final output (findings is the primary required field).
 findings = neo.json_array(findings)
 return {
   findings = findings,
-  ok = true,
+  status = status,
   scope = scope,
   criteria = criteria,
   summary = "code review complete for " .. scope,

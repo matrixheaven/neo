@@ -46,13 +46,10 @@ local slice_a = neo.delegate({
   worktree = "isolated",
   output_schema = slice_schema,
 })
-if not slice_a.ok then
+if slice_a.status ~= "completed" then
   neo.fail(slice_a.summary)
 end
 local slice_a_output = type(slice_a.details) == "table" and slice_a.details.structured_output or nil
-if type(slice_a_output) ~= "table" or slice_a_output.ok ~= true then
-  neo.fail("slice_a reported ok=false")
-end
 
 local slice_b = neo.delegate({
   title = "slice_b",
@@ -61,13 +58,10 @@ local slice_b = neo.delegate({
   worktree = "isolated",
   output_schema = slice_schema,
 })
-if not slice_b.ok then
+if slice_b.status ~= "completed" then
   neo.fail(slice_b.summary)
 end
 local slice_b_output = type(slice_b.details) == "table" and slice_b.details.structured_output or nil
-if type(slice_b_output) ~= "table" or slice_b_output.ok ~= true then
-  neo.fail("slice_b reported ok=false")
-end
 
 local review = neo.delegate({
   title = "slice_review",
@@ -86,13 +80,10 @@ local review = neo.delegate({
     },
   },
 })
-if not review.ok then
+if review.status ~= "completed" then
   neo.fail(review.summary)
 end
 local review_output = type(review.details) == "table" and review.details.structured_output or nil
-if type(review_output) ~= "table" or review_output.ok ~= true then
-  neo.fail("slice review reported ok=false")
-end
 
 neo.report({
   kind = "slice_results",
@@ -138,7 +129,31 @@ if decision.retire_worktrees ~= true then
   unresolved[#unresolved + 1] = "worktree retirement not approved; no auto-delete"
 end
 
-if type(review_output.risks) == "table" then
+-- Structured slice/review output is business data: a schema-valid negative
+-- verdict or a missing projection is a partial result, never an execution failure.
+local final_status = "verified"
+if type(slice_a_output) ~= "table" or slice_a_output.ok == false
+  or type(slice_b_output) ~= "table" or slice_b_output.ok == false
+  or type(review_output) ~= "table" or review_output.ok == false then
+  final_status = "partial"
+end
+if type(slice_a_output) ~= "table" then
+  unresolved[#unresolved + 1] = "slice_a structured result unavailable"
+elseif slice_a_output.ok == false then
+  unresolved[#unresolved + 1] = "slice_a reported ok=false: " .. tostring(slice_a_output.summary or "")
+end
+if type(slice_b_output) ~= "table" then
+  unresolved[#unresolved + 1] = "slice_b structured result unavailable"
+elseif slice_b_output.ok == false then
+  unresolved[#unresolved + 1] = "slice_b reported ok=false: " .. tostring(slice_b_output.summary or "")
+end
+if type(review_output) ~= "table" then
+  unresolved[#unresolved + 1] = "slice review structured result unavailable"
+elseif review_output.ok == false then
+  unresolved[#unresolved + 1] = "slice review reported ok=false: " .. tostring(review_output.summary or "")
+end
+
+if type(review_output) == "table" and type(review_output.risks) == "table" then
   for i = 1, 32 do
     local risk = review_output.risks[i]
     if risk == nil then
@@ -169,7 +184,7 @@ neo.report({
 
 unresolved = neo.json_array(unresolved)
 return {
-  ok = true,
+  status = final_status,
   spec = spec,
   plan = plan,
   lineage = lineage,

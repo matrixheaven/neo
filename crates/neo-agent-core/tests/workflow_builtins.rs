@@ -115,7 +115,7 @@ async fn required_child_failure_aborts_builtin_without_placeholder_result() {
             &json!({
                 "args": args,
                 "delegate_outcomes": [{"ok": false, "summary": "required child failed"}],
-                "expected_result": {"ok": true},
+                "expected_result": {"status": "verified"},
             })
             .to_string(),
         )
@@ -132,40 +132,351 @@ async fn required_child_failure_aborts_builtin_without_placeholder_result() {
     }
 }
 
+/// A verification child without a structured projection degrades to a partial
+/// report: completed findings are preserved and the Workflow still completes.
 #[tokio::test]
-async fn large_refactor_rejects_semantic_slice_failure() {
+async fn deep_research_projection_unavailable_is_partial() {
     let fixture = parse_fixture(
         &json!({
-            "args": {"spec": "workflow failure handling"},
-            "delegate_outcomes": [{
-                "ok": true,
-                "summary": "slice returned a structured failure",
-                "details": {
-                    "kind": "delegate",
-                    "status": "completed",
-                    "mode": "foreground",
-                    "agent_id": "fixture_slice_a",
-                    "structured_output": {
-                        "ok": false,
-                        "slice_id": "slice_a",
-                        "summary": "implementation failed",
-                        "commits": [],
-                        "verification": "tests failed"
+            "args": {"question": "workflow projection reliability"},
+            "delegate_outcomes": [
+                {
+                    "ok": true,
+                    "summary": "primary sources gathered",
+                    "details": {
+                        "kind": "delegate",
+                        "status": "completed",
+                        "mode": "foreground",
+                        "agent_id": "fixture_primary",
+                        "structured_output": {
+                            "findings": [
+                                {
+                                    "claim": "revision is SHA-256 of framed bytes",
+                                    "source": "definition.rs",
+                                    "evidence": "compute_definition_revision"
+                                }
+                            ]
+                        }
+                    }
+                },
+                {
+                    "ok": true,
+                    "summary": "counterpoints gathered",
+                    "details": {
+                        "kind": "delegate",
+                        "status": "completed",
+                        "mode": "foreground",
+                        "agent_id": "fixture_counter",
+                        "structured_output": {"findings": []}
+                    }
+                },
+                {
+                    "ok": true,
+                    "summary": "context gathered",
+                    "details": {
+                        "kind": "delegate",
+                        "status": "completed",
+                        "mode": "foreground",
+                        "agent_id": "fixture_context",
+                        "structured_output": {"findings": []}
+                    }
+                },
+                {
+                    "ok": true,
+                    "summary": "verification projection unavailable",
+                    "details": {
+                        "kind": "delegate",
+                        "status": "completed",
+                        "mode": "foreground",
+                        "agent_id": "fixture_verify"
                     }
                 }
-            }],
-            "expected_result": {"ok": true}
+            ]
         })
         .to_string(),
     )
-    .expect("semantic failure fixture");
+    .expect("projection-unavailable fixture");
+
+    let report = run_builtin_fixture("deep-research", &fixture, WorkflowLimits::default())
+        .await
+        .expect("run projection-unavailable fixture");
+
+    assert!(report.ok, "diagnostics: {:?}", report.diagnostics);
+    assert_eq!(report.state, "completed");
+    let result = report.final_result.expect("final result");
+    assert_eq!(result["status"], json!("partial"));
+    assert_eq!(
+        result["findings"][0]["claim"],
+        json!("revision is SHA-256 of framed bytes"),
+        "completed findings must be preserved in a partial result"
+    );
+    assert!(
+        result["report"]
+            .as_str()
+            .is_some_and(|s| s.contains("partial")),
+        "report must name the partial outcome: {:?}",
+        result["report"]
+    );
+}
+
+/// A schema-valid but false verification verdict is business data: the research
+/// completes as partial, never fails, and no repair records are written.
+#[tokio::test]
+async fn deep_research_verification_false_is_partial() {
+    let fixture = parse_fixture(
+        &json!({
+            "args": {"question": "workflow projection reliability"},
+            "delegate_outcomes": [
+                {
+                    "ok": true,
+                    "summary": "primary sources gathered",
+                    "details": {
+                        "kind": "delegate",
+                        "status": "completed",
+                        "mode": "foreground",
+                        "agent_id": "fixture_primary",
+                        "structured_output": {
+                            "findings": [
+                                {
+                                    "claim": "revision is SHA-256 of framed bytes",
+                                    "source": "definition.rs",
+                                    "evidence": "compute_definition_revision"
+                                }
+                            ]
+                        }
+                    }
+                },
+                {
+                    "ok": true,
+                    "summary": "counterpoints gathered",
+                    "details": {
+                        "kind": "delegate",
+                        "status": "completed",
+                        "mode": "foreground",
+                        "agent_id": "fixture_counter",
+                        "structured_output": {"findings": []}
+                    }
+                },
+                {
+                    "ok": true,
+                    "summary": "context gathered",
+                    "details": {
+                        "kind": "delegate",
+                        "status": "completed",
+                        "mode": "foreground",
+                        "agent_id": "fixture_context",
+                        "structured_output": {"findings": []}
+                    }
+                },
+                {
+                    "ok": true,
+                    "summary": "verification found contradictions",
+                    "details": {
+                        "kind": "delegate",
+                        "status": "completed",
+                        "mode": "foreground",
+                        "agent_id": "fixture_verify",
+                        "structured_output": {
+                            "verified": false,
+                            "contradictions": ["claims conflict on revision framing"],
+                            "gaps": ["missing provider usage evidence"]
+                        }
+                    }
+                }
+            ]
+        })
+        .to_string(),
+    )
+    .expect("false verification fixture");
+
+    let report = run_builtin_fixture("deep-research", &fixture, WorkflowLimits::default())
+        .await
+        .expect("run false verification fixture");
+
+    assert!(report.ok, "diagnostics: {:?}", report.diagnostics);
+    assert_eq!(report.state, "completed");
+    let result = report.final_result.expect("final result");
+    assert_eq!(result["status"], json!("partial"));
+    let report_text = result["report"].as_str().expect("report text");
+    assert!(
+        report_text.contains("contradiction"),
+        "report must name contradictions: {report_text}"
+    );
+    assert!(
+        report_text.contains("gap"),
+        "report must name gaps: {report_text}"
+    );
+}
+
+/// One review child without a structured projection keeps the healthy findings
+/// and degrades the whole review to a partial result.
+#[tokio::test]
+async fn code_review_child_projection_gap_is_partial() {
+    let fixture = parse_fixture(
+        &json!({
+            "args": {"scope": "crates/neo-agent-core/src/workflow"},
+            "delegate_outcomes": [
+                {
+                    "ok": true,
+                    "summary": "security findings unavailable",
+                    "details": {
+                        "kind": "delegate",
+                        "status": "completed",
+                        "mode": "foreground",
+                        "agent_id": "fixture_security"
+                    }
+                },
+                {
+                    "ok": true,
+                    "summary": "correctness findings",
+                    "details": {
+                        "kind": "delegate",
+                        "status": "completed",
+                        "mode": "foreground",
+                        "agent_id": "fixture_correctness",
+                        "structured_output": {
+                            "findings": [
+                                {
+                                    "severity": "medium",
+                                    "path": "lua.rs",
+                                    "line": 10,
+                                    "evidence": "edge case on empty table",
+                                    "test_gap": "empty fixture"
+                                }
+                            ]
+                        }
+                    }
+                },
+                {
+                    "ok": true,
+                    "summary": "maintainability findings",
+                    "details": {
+                        "kind": "delegate",
+                        "status": "completed",
+                        "mode": "foreground",
+                        "agent_id": "fixture_maintain",
+                        "structured_output": {"findings": []}
+                    }
+                },
+                {
+                    "ok": true,
+                    "summary": "challenge complete",
+                    "details": {
+                        "kind": "delegate",
+                        "status": "completed",
+                        "mode": "foreground",
+                        "agent_id": "fixture_challenge",
+                        "structured_output": {"findings": []}
+                    }
+                }
+            ]
+        })
+        .to_string(),
+    )
+    .expect("projection gap fixture");
+
+    let report = run_builtin_fixture("code-review", &fixture, WorkflowLimits::default())
+        .await
+        .expect("run projection gap fixture");
+
+    assert!(report.ok, "diagnostics: {:?}", report.diagnostics);
+    assert_eq!(report.state, "completed");
+    let result = report.final_result.expect("final result");
+    assert_eq!(result["status"], json!("partial"));
+    let findings = result["findings"].as_array().expect("findings array");
+    assert!(
+        findings.iter().any(|f| f["path"] == json!("lua.rs")),
+        "findings from healthy children must be preserved: {findings:?}"
+    );
+}
+
+#[tokio::test]
+async fn large_refactor_child_projection_gap_is_partial() {
+    let fixture = parse_fixture(
+        &json!({
+            "args": {"spec": "workflow projection reliability"},
+            "delegate_outcomes": [
+                {
+                    "ok": true,
+                    "summary": "slice_a implemented",
+                    "details": {
+                        "kind": "delegate",
+                        "status": "completed",
+                        "mode": "foreground",
+                        "agent_id": "fixture_slice_a"
+                    }
+                },
+                {
+                    "ok": true,
+                    "summary": "slice_b implemented",
+                    "details": {
+                        "kind": "delegate",
+                        "status": "completed",
+                        "mode": "foreground",
+                        "agent_id": "fixture_slice_b",
+                        "structured_output": {
+                            "ok": true,
+                            "slice_id": "slice_b",
+                            "summary": "tests moved",
+                            "commits": ["abc222"],
+                            "verification": "integration green",
+                            "risks": []
+                        }
+                    }
+                },
+                {
+                    "ok": true,
+                    "summary": "review complete",
+                    "details": {
+                        "kind": "delegate",
+                        "status": "completed",
+                        "mode": "foreground",
+                        "agent_id": "fixture_slice_review",
+                        "structured_output": {
+                            "ok": true,
+                            "summary": "review complete",
+                            "risks": []
+                        }
+                    }
+                }
+            ],
+            "awaited_answers": [
+                {
+                    "value": {
+                        "merge": false,
+                        "retire_worktrees": false,
+                        "notes": "hold isolated trees for manual inspection"
+                    }
+                }
+            ]
+        })
+        .to_string(),
+    )
+    .expect("slice projection gap fixture");
 
     let report = run_builtin_fixture("large-refactor", &fixture, WorkflowLimits::default())
         .await
-        .expect("run semantic failure fixture");
+        .expect("run slice projection gap fixture");
 
-    assert_eq!(report.state, "failed", "{:?}", report.diagnostics);
-    assert!(report.final_result.is_none());
+    assert!(report.ok, "diagnostics: {:?}", report.diagnostics);
+    assert_eq!(report.state, "completed");
+    let result = report.final_result.expect("final result");
+    assert_eq!(result["status"], json!("partial"));
+    let risks = result["unresolved_risks"]
+        .as_array()
+        .expect("unresolved_risks");
+    assert!(
+        risks
+            .iter()
+            .any(|r| r.as_str().is_some_and(|s| s.contains("slice_a"))),
+        "deterministic unresolved risk must name slice_a: {risks:?}"
+    );
+    assert!(
+        risks
+            .iter()
+            .any(|risk| risk == "merge not approved; isolated worktrees retained"),
+        "merge decision risks must survive partial status: {risks:?}"
+    );
 }
 
 /// Deep research exercises plan → heterogeneous children → verify → structured report.
@@ -192,7 +503,7 @@ async fn deep_research_builtin_fixture() {
     assert!(report.ok, "diagnostics: {:?}", report.diagnostics);
     assert_eq!(report.state, "completed");
     let result = report.final_result.expect("final result");
-    assert_eq!(result["ok"], json!(true));
+    assert_eq!(result["status"], json!("verified"));
     assert_eq!(
         result["question"],
         json!("How does Neo workflow revision hashing work?")
@@ -270,7 +581,7 @@ async fn code_review_builtin_is_read_only_and_findings_first() {
     // Findings-first object: findings present and non-empty from fixtures.
     let findings = result["findings"].as_array().expect("findings array");
     assert!(!findings.is_empty(), "expected fixture findings");
-    assert_eq!(result["ok"], json!(true));
+    assert_eq!(result["status"], json!("verified"));
     assert_eq!(result["read_only"], json!(true));
     assert_eq!(result["scope"], json!("crates/neo-agent-core/src/workflow"));
     // Structured finding fields.
@@ -319,7 +630,7 @@ async fn large_refactor_builtin_requires_explicit_merge_decision() {
     assert!(report.ok, "diagnostics: {:?}", report.diagnostics);
     assert_eq!(report.state, "completed");
     let result = report.final_result.expect("final");
-    assert_eq!(result["ok"], json!(true));
+    assert_eq!(result["status"], json!("verified"));
     // Explicit human decision from fixture: merge false, retire false.
     assert_eq!(result["merge"], json!(false));
     assert_eq!(result["retire_worktrees"], json!(false));

@@ -138,9 +138,10 @@ type = "string"
     assert_eq!(report.state, WorkflowState::Completed.as_str());
 }
 
-/// Child schema repair: exactly one non-executing corrective model turn.
+/// A projection mismatch preserves the completed child: no repair turn, no
+/// schema-repair journal records, and the verification sees completed data.
 #[tokio::test]
-async fn deterministic_fixture_records_one_non_executing_child_schema_repair() {
+async fn child_projection_mismatch_keeps_child_completed_without_repair() {
     let script = r#"
 local outcome = neo.delegate({
   task = "return structured ok",
@@ -151,17 +152,27 @@ local outcome = neo.delegate({
     additionalProperties = false,
   },
 })
-neo.verify(outcome.ok, "delegate must succeed after one repair")
+neo.verify(outcome.status == "completed", "projection mismatch must not fail the child")
 return { ok = true }
 "#;
     let definition = resolve_script(
-        "schema-repair",
-        "Schema Repair",
-        "one non-executing repair",
+        "schema-projection",
+        "Schema Projection",
+        "projection mismatch is data",
         script,
     );
-    let fixture =
-        load_fixture(&fixture_root().join("child_schema_repair.json")).expect("load fixture");
+    let fixture = parse_fixture(
+        &json!({
+            "model_turns": [{
+                "text": "{\"ok\":\"nope\"}",
+                "input_tokens": 10,
+                "output_tokens": 20
+            }],
+            "expected_result": {"ok": true},
+        })
+        .to_string(),
+    )
+    .expect("projection fixture");
 
     let (report, _session, _runtime) =
         run_fixture_retained(&definition, &fixture, WorkflowLimits::default())
@@ -169,10 +180,8 @@ return { ok = true }
             .expect("run fixture");
 
     assert!(report.ok, "fixture diagnostics: {:?}", report.diagnostics);
-    assert_eq!(
-        report.schema_repair_starts, 1,
-        "exactly one schema repair start"
-    );
+    assert_eq!(report.final_result, Some(json!({"ok": true})));
+    assert_eq!(report.state, WorkflowState::Completed.as_str());
     assert!(
         report.invocation_kinds.iter().any(|k| k == "delegate"),
         "{:?}",
@@ -190,14 +199,14 @@ return { ok = true }
         .iter()
         .filter(|e| matches!(e.payload, JournalPayload::SchemaRepairStarted { .. }))
         .count();
-    let repair_ok = envelopes.iter().any(|e| {
-        matches!(
-            &e.payload,
-            JournalPayload::SchemaRepairFinished { ok: true, .. }
-        )
-    });
-    assert_eq!(repair_starts, 1);
-    assert!(repair_ok, "repair must finish ok: {envelopes:?}");
+    assert_eq!(
+        repair_starts, 0,
+        "projection mismatch must not start a repair: {envelopes:?}"
+    );
+    let finished = envelopes
+        .iter()
+        .any(|e| matches!(&e.payload, JournalPayload::SchemaRepairFinished { .. }));
+    assert!(!finished, "no repair finish record: {envelopes:?}");
 }
 
 /// Await-user answer + real artifact commit survive completion (and rehydrate).

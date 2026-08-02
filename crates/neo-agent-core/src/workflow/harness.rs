@@ -81,12 +81,6 @@ pub struct FixtureDelegateOutcome {
     pub summary: String,
     #[serde(default)]
     pub details: Value,
-    /// Optional invalid first model text; pairs with `repair_raw` for one non-executing repair.
-    #[serde(default)]
-    pub first_raw: Option<String>,
-    /// Exactly one non-executing repair model text.
-    #[serde(default)]
-    pub repair_raw: Option<String>,
 }
 
 /// One swarm item outcome (homogeneous or heterogeneous batch).
@@ -215,7 +209,6 @@ pub struct FixtureRunReport {
     pub final_result: Option<Value>,
     pub diagnostics: Vec<Value>,
     pub invocation_kinds: Vec<String>,
-    pub schema_repair_starts: usize,
     pub journal_path: PathBuf,
     pub session_dir: PathBuf,
 }
@@ -428,11 +421,6 @@ pub async fn run_fixture_retained(
         })
         .collect();
 
-    let schema_repair_starts = envelopes
-        .iter()
-        .filter(|e| matches!(e.payload, JournalPayload::SchemaRepairStarted { .. }))
-        .count();
-
     let mut diagnostics = Vec::new();
     let final_result = output.final_result.as_ref().map(|meta| match &meta.body {
         FinalResultBody::Inline { value } => value.clone(),
@@ -513,45 +501,6 @@ pub async fn run_fixture_retained(
         }
     }
 
-    if use_real_delegate {
-        let requests = harness.requests();
-        if requests.len() >= 2 && requests[1].tools != requests[0].tools {
-            diagnostics.push(json!({
-                "severity": "error",
-                "code": "repair_tools_changed",
-                "message": format!(
-                    "repair turn changed advertised tools: {:?}",
-                    requests[1]
-                        .tools
-                        .iter()
-                        .map(|t| t.name.as_str())
-                        .collect::<Vec<_>>()
-                ),
-            }));
-        }
-        if fixture_expects_repair(fixture) {
-            if schema_repair_starts != 1 {
-                diagnostics.push(json!({
-                    "severity": "error",
-                    "code": "schema_repair_count",
-                    "message": format!(
-                        "expected exactly one schema repair start, got {schema_repair_starts}"
-                    ),
-                }));
-            }
-            if requests.len() < 2 {
-                diagnostics.push(json!({
-                    "severity": "error",
-                    "code": "schema_repair_model_turns",
-                    "message": format!(
-                        "expected original + one repair model turn, got {}",
-                        requests.len()
-                    ),
-                }));
-            }
-        }
-    }
-
     if output.state != WorkflowState::Completed && fixture.expected_result.is_some() {
         diagnostics.push(json!({
             "severity": "error",
@@ -569,7 +518,6 @@ pub async fn run_fixture_retained(
         final_result,
         diagnostics,
         invocation_kinds,
-        schema_repair_starts,
         journal_path,
         session_dir,
     };
@@ -578,42 +526,14 @@ pub async fn run_fixture_retained(
 
 fn fixture_uses_real_delegate(fixture: &WorkflowFixture) -> bool {
     !fixture.model_turns.is_empty()
-        || fixture
-            .delegate_outcomes
-            .iter()
-            .any(|d| d.first_raw.is_some() || d.repair_raw.is_some())
-}
-
-fn fixture_expects_repair(fixture: &WorkflowFixture) -> bool {
-    fixture.model_turns.len() >= 2
-        || fixture
-            .delegate_outcomes
-            .iter()
-            .any(|d| d.repair_raw.is_some())
 }
 
 fn model_turns_from_fixture(fixture: &WorkflowFixture) -> Vec<Vec<AiStreamEvent>> {
-    if !fixture.model_turns.is_empty() {
-        return fixture
-            .model_turns
-            .iter()
-            .map(|turn| text_turn(&turn.text, Some((turn.input_tokens, turn.output_tokens))))
-            .collect();
-    }
-    let mut turns = Vec::new();
-    if let Some(delegate) = fixture
-        .delegate_outcomes
+    fixture
+        .model_turns
         .iter()
-        .find(|d| d.first_raw.is_some() || d.repair_raw.is_some())
-    {
-        if let Some(first) = &delegate.first_raw {
-            turns.push(text_turn(first, Some((10, 20))));
-        }
-        if let Some(repair) = &delegate.repair_raw {
-            turns.push(text_turn(repair, Some((5, 7))));
-        }
-    }
-    turns
+        .map(|turn| text_turn(&turn.text, Some((turn.input_tokens, turn.output_tokens))))
+        .collect()
 }
 
 fn text_turn(text: &str, usage: Option<(u32, u32)>) -> Vec<AiStreamEvent> {

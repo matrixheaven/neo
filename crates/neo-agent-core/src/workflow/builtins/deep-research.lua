@@ -60,7 +60,7 @@ local primary = neo.delegate({
   tool_allow = { "Read", "List", "Grep", "Find", "Glob" },
   output_schema = finding_schema,
 })
-if not primary.ok then
+if primary.status ~= "completed" then
   neo.fail(primary.summary)
 end
 
@@ -72,7 +72,7 @@ local counterpoints = neo.delegate({
   tool_allow = { "Read", "List", "Grep", "Find", "Glob" },
   output_schema = finding_schema,
 })
-if not counterpoints.ok then
+if counterpoints.status ~= "completed" then
   neo.fail(counterpoints.summary)
 end
 
@@ -84,7 +84,7 @@ local context_child = neo.delegate({
   tool_allow = { "Read", "List", "Grep", "Find", "Glob" },
   output_schema = finding_schema,
 })
-if not context_child.ok then
+if context_child.status ~= "completed" then
   neo.fail(context_child.summary)
 end
 
@@ -128,21 +128,57 @@ local verification = neo.delegate({
   output_schema = {
     type = "object",
     additionalProperties = false,
-    required = { "ok", "contradictions", "gaps" },
+    required = { "verified", "contradictions", "gaps" },
     properties = {
-      ok = { type = "boolean" },
+      verified = { type = "boolean" },
       contradictions = { type = "array", items = { type = "string" } },
       gaps = { type = "array", items = { type = "string" } },
     },
   },
 })
-if not verification.ok then
+if verification.status ~= "completed" then
   neo.fail(verification.summary)
 end
+
+-- Verification output is business data, never execution state: a missing
+-- projection, an unconfirmed verdict, contradictions, or gaps make the
+-- synthesis partial instead of failing the Workflow.
 local verification_output = type(verification.details) == "table"
   and verification.details.structured_output
-if type(verification_output) ~= "table" or verification_output.ok ~= true then
-  neo.fail("verification child reported ok=false")
+local verified = type(verification_output) == "table" and verification_output.verified == true
+local contradictions = {}
+local gaps = {}
+if type(verification_output) == "table" then
+  if type(verification_output.contradictions) == "table" then
+    contradictions = verification_output.contradictions
+  end
+  if type(verification_output.gaps) == "table" then
+    gaps = verification_output.gaps
+  end
+end
+
+local final_status = "verified"
+local verification_notes = {}
+if not verified then
+  final_status = "partial"
+  verification_notes[#verification_notes + 1] = "verification outcome unavailable or unconfirmed"
+end
+for i = 1, 32 do
+  local contradiction = contradictions[i]
+  if contradiction == nil then
+    break
+  end
+  verification_notes[#verification_notes + 1] = "contradiction: " .. tostring(contradiction)
+end
+for i = 1, 32 do
+  local gap = gaps[i]
+  if gap == nil then
+    break
+  end
+  verification_notes[#verification_notes + 1] = "gap: " .. tostring(gap)
+end
+if #verification_notes > 0 then
+  final_status = "partial"
 end
 
 if args.clarify == true then
@@ -166,16 +202,20 @@ end
 
 neo.phase("synthesize")
 local report_text = "Synthesized research report for: " .. question
+if final_status == "partial" then
+  report_text = report_text .. " [partial: " .. table.concat(verification_notes, "; ") .. "]"
+end
 neo.report({
   kind = "final_research_report",
   question = question,
   findings_count = #findings,
+  status = final_status,
   report = report_text,
 })
 
 findings = neo.json_array(findings)
 return {
-  ok = true,
+  status = final_status,
   question = question,
   depth = depth,
   plan = plan,

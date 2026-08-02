@@ -7881,7 +7881,7 @@ impl Tool for InvokeStoredWorkflowDispatchHandleTool {
                     json!({}),
                 )
                 .await;
-            if outcome.ok {
+            if outcome.is_completed() {
                 Ok(ToolResult::ok(outcome.summary))
             } else {
                 Ok(ToolResult::error(outcome.summary))

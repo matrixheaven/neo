@@ -161,7 +161,6 @@ async fn test_fixture(
             "final_result": report.final_result,
             "diagnostics": report.diagnostics,
             "invocation_kinds": report.invocation_kinds,
-            "schema_repair_starts": report.schema_repair_starts,
         });
         Ok(format!("{}\n", serde_json::to_string_pretty(&body)?))
     } else if report.ok {

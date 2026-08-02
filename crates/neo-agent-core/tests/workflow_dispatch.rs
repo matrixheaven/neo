@@ -334,7 +334,7 @@ async fn failed_delegate_maps_to_failed_workflow_outcome_and_preserves_correlati
     .await;
 
     assert_eq!(outcome.status, WorkflowOutcomeStatus::Failed);
-    assert!(!outcome.ok);
+    assert!(!outcome.is_completed());
     assert_eq!(outcome.actual_usage.expect("usage").input_tokens, 11);
     assert_eq!(outcome.child_refs.len(), 2);
     assert_eq!(outcome.child_refs[0].id, "agent_failed");
@@ -359,7 +359,7 @@ async fn cancelled_delegate_maps_to_cancelled_workflow_outcome_and_preserves_cor
     .await;
 
     assert_eq!(outcome.status, WorkflowOutcomeStatus::Cancelled);
-    assert!(!outcome.ok);
+    assert!(!outcome.is_completed());
     assert_eq!(outcome.actual_usage.expect("usage").output_tokens, 3);
     assert_eq!(outcome.child_refs.len(), 1);
     assert_eq!(outcome.child_refs[0].id, "agent_cancelled");
@@ -543,7 +543,7 @@ async fn completed_swarm_error_maps_to_failed() {
     .await;
 
     assert_eq!(outcome.status, WorkflowOutcomeStatus::Failed);
-    assert!(!outcome.ok);
+    assert!(!outcome.is_completed());
 }
 
 #[tokio::test]
@@ -621,7 +621,7 @@ async fn bash_lifecycle_events_use_invocation_id() {
         )
         .await;
 
-    assert!(outcome.ok, "{}", outcome.summary);
+    assert!(outcome.is_completed(), "{}", outcome.summary);
     let events = events.lock().expect("events");
     assert!(events.iter().any(|event| matches!(
         event,
@@ -1097,7 +1097,7 @@ async fn idle_model_update_replaces_client_before_next_workflow_invocation() {
         )
         .await;
 
-    assert!(outcome.ok, "{}", outcome.summary);
+    assert!(outcome.is_completed(), "{}", outcome.summary);
     assert!(first.requests().is_empty(), "stale client must not be used");
     assert_eq!(second.requests().len(), 1);
     let snapshot = resolver.resolve().expect("updated snapshot");
@@ -1319,7 +1319,7 @@ async fn invalid_delegate_finishes_without_started_child() {
         .await
         .expect("invoke");
 
-    assert!(!outcome.ok);
+    assert!(!outcome.is_completed());
     let envelopes = collect_journal(
         &journal_path(dir.path(), &workflow.run_id),
         Some(&workflow.run_id),
@@ -1465,7 +1465,7 @@ async fn swarm_preserves_ids_terminal_children_and_aggregate_usage() {
         )
         .await;
 
-    assert!(outcome.ok, "{}", outcome.summary);
+    assert!(outcome.is_completed(), "{}", outcome.summary);
     assert_eq!(
         outcome.actual_usage,
         Some(AgentTokenUsage {
@@ -1521,7 +1521,7 @@ async fn delegate_and_swarm_forward_canonical_lifecycle_events() {
             json!({"task": "review dispatch", "context": "none"}),
         )
         .await;
-    assert!(delegate.ok, "{}", delegate.summary);
+    assert!(delegate.is_completed(), "{}", delegate.summary);
     let swarm = handle
         .run_one(
             invocation("inv_swarm"),
@@ -1533,7 +1533,7 @@ async fn delegate_and_swarm_forward_canonical_lifecycle_events() {
             }),
         )
         .await;
-    assert!(swarm.ok, "{}", swarm.summary);
+    assert!(swarm.is_completed(), "{}", swarm.summary);
 
     let events = events.lock().expect("events");
     assert!(
@@ -1586,7 +1586,7 @@ async fn workflow_delegate_and_swarm_use_live_yolo_after_handle_creation() {
             json!({"task": "review dispatch", "context": "none"}),
         )
         .await;
-    assert!(delegate.ok, "{}", delegate.summary);
+    assert!(delegate.is_completed(), "{}", delegate.summary);
     let swarm = handle
         .run_one(
             invocation("inv_live_swarm"),
@@ -1598,7 +1598,7 @@ async fn workflow_delegate_and_swarm_use_live_yolo_after_handle_creation() {
             }),
         )
         .await;
-    assert!(swarm.ok, "{}", swarm.summary);
+    assert!(swarm.is_completed(), "{}", swarm.summary);
 }
 
 struct BlockingTool {
@@ -1828,7 +1828,7 @@ async fn concurrent_workflow_calls_merge_context_events_without_last_writer_wins
             json!({"message": "second"}),
         ),
     );
-    assert!(first.ok && second.ok);
+    assert!(first.is_completed() && second.is_completed());
     assert_eq!(
         handle
             .resolver()

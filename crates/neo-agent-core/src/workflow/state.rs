@@ -605,9 +605,16 @@ pub struct WorkflowChildRef {
     pub id: String,
 }
 
+/// Host execution result of one workflow invocation.
+///
+/// `status` is the only host execution verdict. Business judgments such as
+/// `verified`, `supported`, contradictions, gaps, or `partial` belong in
+/// `details` or the Workflow's own result data and must never be read from the
+/// host status. Old serialized records may still carry a legacy `ok` field;
+/// serde ignores unknown fields, so historical sessions stay readable while new
+/// runs never write a second host boolean.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 pub struct WorkflowInvocationOutcome {
-    pub ok: bool,
     pub status: WorkflowOutcomeStatus,
     pub summary: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -618,6 +625,14 @@ pub struct WorkflowInvocationOutcome {
     pub actual_usage: Option<AgentTokenUsage>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub child_refs: Vec<WorkflowChildRef>,
+}
+
+impl WorkflowInvocationOutcome {
+    /// Host execution succeeded: the invocation reached a completed state.
+    #[must_use]
+    pub fn is_completed(&self) -> bool {
+        self.status == WorkflowOutcomeStatus::Completed
+    }
 }
 
 fn default_details() -> serde_json::Value {

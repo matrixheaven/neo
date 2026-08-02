@@ -152,7 +152,7 @@ async fn resolver_is_read_only_and_never_dispatches() {
     .await
     .expect("exactly one proven terminal result is adopted");
     assert_eq!(adopted.status, WorkflowOutcomeStatus::Completed);
-    assert!(adopted.ok);
+    assert!(adopted.is_completed());
     assert_eq!(
         adopted
             .details

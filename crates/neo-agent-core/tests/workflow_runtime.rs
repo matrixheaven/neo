@@ -66,7 +66,6 @@ async fn create_running_run(runtime: &WorkflowRuntime, session_dir: &Path) -> Wo
 
 fn completed(summary: &str) -> WorkflowInvocationOutcome {
     WorkflowInvocationOutcome {
-        ok: true,
         status: WorkflowOutcomeStatus::Completed,
         summary: summary.to_owned(),
         interruption: None,
@@ -99,6 +98,66 @@ async fn wait_for_state(handle: &WorkflowHandle, expected: WorkflowState) {
     })
     .await
     .expect("workflow reached expected state");
+}
+
+#[tokio::test]
+async fn invocation_status_uses_execution_state() {
+    let dir = tempfile::tempdir().unwrap();
+    let runtime = WorkflowRuntime::new(WorkflowLimits::default());
+    let handle = create_running_run(&runtime, dir.path()).await;
+
+    // Business data such as `verified = false` is completed execution data and
+    // must not count as a host failure.
+    let outcome = handle
+        .invoke(
+            0,
+            WorkflowInvocationKind::Verify,
+            serde_json::json!({"condition": false, "message": "evidence incomplete"}),
+            false,
+            |_| async {
+                WorkflowInvocationOutcome {
+                    status: WorkflowOutcomeStatus::Completed,
+                    summary: "verification failed".to_owned(),
+                    interruption: None,
+                    details: serde_json::json!({
+                        "message": "evidence incomplete",
+                        "verified": false,
+                    }),
+                    actual_usage: None,
+                    child_refs: Vec::new(),
+                }
+            },
+        )
+        .await
+        .unwrap();
+    assert!(outcome.is_completed());
+    assert_eq!(outcome.details["verified"], serde_json::json!(false));
+    assert_eq!(handle.snapshot().await.failure_count, 0);
+
+    // A real execution failure still increments the host failure count and
+    // stays terminal.
+    let failed = handle
+        .invoke(
+            1,
+            WorkflowInvocationKind::Delegate,
+            serde_json::json!({"task": "boom"}),
+            true,
+            |_| async {
+                WorkflowInvocationOutcome {
+                    status: WorkflowOutcomeStatus::Failed,
+                    summary: "provider error".to_owned(),
+                    interruption: None,
+                    details: serde_json::json!({"error": "provider error"}),
+                    actual_usage: None,
+                    child_refs: Vec::new(),
+                }
+            },
+        )
+        .await
+        .unwrap();
+    assert!(!failed.is_completed());
+    assert_eq!(failed.status, WorkflowOutcomeStatus::Failed);
+    assert_eq!(handle.snapshot().await.failure_count, 1);
 }
 
 #[tokio::test]
@@ -475,7 +534,7 @@ async fn invoke_persists_start_before_effect_and_finish_after_effect() {
         .await
         .unwrap();
 
-    assert!(outcome.ok);
+    assert!(outcome.is_completed());
     assert!(observed_queued_projection.load(Ordering::Acquire));
     let records = collect_journal(&path, None).unwrap();
     assert!(
@@ -525,7 +584,6 @@ async fn instruction_replan_interruption_durably_pauses_workflow() {
             false,
             |_| async {
                 WorkflowInvocationOutcome {
-                    ok: false,
                     status: WorkflowOutcomeStatus::Interrupted,
                     summary: "instructions changed".to_owned(),
                     interruption: Some(WorkflowInterruptionReason::InstructionReplanRequired),
@@ -573,7 +631,6 @@ async fn projected_instruction_reason_without_typed_interruption_does_not_pause(
             false,
             |_| async {
                 WorkflowInvocationOutcome {
-                    ok: false,
                     status: WorkflowOutcomeStatus::Interrupted,
                     summary: "spoofed projection".to_owned(),
                     interruption: None,
@@ -1057,7 +1114,6 @@ async fn stop_cancels_active_effect_and_terminalizes_after_finish_record() {
                                 allow_settlement.notified().await;
                                 effect_settled.store(true, Ordering::Release);
                                 WorkflowInvocationOutcome {
-                                    ok: false,
                                     status: WorkflowOutcomeStatus::Cancelled,
                                     summary: "canonical child cancelled".to_owned(),
                                     interruption: None,
@@ -1347,7 +1403,7 @@ async fn workflow_worker_panic_finishes_invocation_before_failed_state() {
 
     match &records[finished_idx].payload {
         JournalPayload::InvocationFinished { outcome, .. } => {
-            assert!(!outcome.ok);
+            assert!(!outcome.is_completed());
             assert_eq!(outcome.status, WorkflowOutcomeStatus::Interrupted);
             assert_eq!(
                 outcome.details.get("reason").and_then(|v| v.as_str()),

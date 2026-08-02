@@ -627,8 +627,7 @@ fn workflow_error_code(action: WorkflowAction, error: &WorkflowError) -> &'stati
         | WorkflowErrorCode::InvalidManifest
         | WorkflowErrorCode::InvalidSchema
         | WorkflowErrorCode::InputSchemaInvalid
-        | WorkflowErrorCode::LuaCompileFailed
-        | WorkflowErrorCode::SchemaInvalid => {
+        | WorkflowErrorCode::LuaCompileFailed => {
             if matches!(
                 action,
                 WorkflowAction::ValidateInline | WorkflowAction::ValidateSaved

@@ -228,12 +228,20 @@ mod tests {
                     .contains("findings = neo.json_array(findings)"),
             "create-workflow example must consume canonical child JSON and preserve empty arrays"
         );
-        for check in ["if not security_check.ok", "if not correctness_check.ok"] {
+        for check in [
+            "security.status == \"completed\"",
+            "correctness.status == \"completed\"",
+        ] {
             assert!(
                 create_workflow.body.contains(check),
-                "create-workflow evidence gates must fail closed: {check}"
+                "create-workflow evidence gates must use execution status: {check}"
             );
         }
+        assert!(
+            !create_workflow.body.contains("security_check.ok")
+                && !create_workflow.body.contains("correctness_check.ok"),
+            "create-workflow must not teach reading a host `ok` field"
+        );
 
         let (frontmatter, _) = crate::skills::split_frontmatter(CREATE_WORKFLOW)
             .expect("create-workflow must have raw frontmatter");
@@ -297,11 +305,11 @@ mod tests {
             "Do **not** ask the user to run `/workflow` first",
             "## Authoring checklist",
             "Choose the `Workflow` action",
-            "Declare both `input_schema` and `output_schema`",
-            "Check every host outcome's `ok` field",
+            "Declare `input_schema` for every inline definition; `output_schema` is\n   optional projection metadata",
+            "Check every host outcome's `status` field",
             "Call `neo.fail`",
             "Call `neo.tool` with `{ name = \"ToolName\", input = { ... } }`",
-            "Put an `output_schema` on every heterogeneous `neo.swarm` item",
+            "Put an `output_schema` on heterogeneous `neo.swarm` items only when a\n   structured projection is wanted (optional)",
             "Use `neo.json_array` and `neo.json_object` only as Lua table type markers",
             "{\"type\":\"object\",\"additionalProperties\":false}",
             "\"required\":[\"text\"]",

@@ -26,7 +26,6 @@ fn limits() -> WorkflowLimits {
 
 fn outcome_ok_with_usage_and_child() -> WorkflowInvocationOutcome {
     WorkflowInvocationOutcome {
-        ok: true,
         status: WorkflowOutcomeStatus::Completed,
         summary: "child done".to_owned(),
         interruption: None,

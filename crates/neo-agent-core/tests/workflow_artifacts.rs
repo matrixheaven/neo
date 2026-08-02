@@ -222,7 +222,6 @@ async fn oversized_final_result_uses_artifact_without_losing_usage() {
                         true,
                         |_| async {
                             WorkflowInvocationOutcome {
-                                ok: true,
                                 status: WorkflowOutcomeStatus::Completed,
                                 summary: "collected".to_owned(),
                                 interruption: None,
@@ -242,7 +241,7 @@ async fn oversized_final_result_uses_artifact_without_losing_usage() {
                     )
                     .await
                     .expect("invoke");
-                assert!(outcome.ok);
+                assert!(outcome.is_completed());
                 assert_eq!(outcome.actual_usage.unwrap().input_tokens, 41);
 
                 // Larger than task_output_page_bytes (64) and the 256-byte

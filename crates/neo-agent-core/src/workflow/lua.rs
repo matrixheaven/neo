@@ -291,12 +291,14 @@ impl SwarmInput {
                 .filter(|s| !s.is_empty())
                 .map(str::to_owned);
             let worktree = item.parse_worktree(index)?;
-            // Workflow children require output_schema (design: every child output_schema required).
-            let output_schema = item.output_schema.clone().ok_or_else(|| {
-                format!("items[{index}].output_schema is required for neo.swarm children")
-            })?;
-            CompiledSchema::compile(&output_schema)
-                .map_err(|error| format!("items[{index}].output_schema is invalid: {error}"))?;
+            // `output_schema` is optional projection metadata: when supplied and
+            // valid it is compiled at the local boundary; when omitted the child
+            // simply returns its ordinary result.
+            let output_schema = item.output_schema.clone();
+            if let Some(schema) = &output_schema {
+                CompiledSchema::compile(schema)
+                    .map_err(|error| format!("items[{index}].output_schema is invalid: {error}"))?;
+            }
             plans.push(ChildPlan {
                 item_id: format!("item-{index}"),
                 item_label: title.clone().unwrap_or_else(|| task.clone()),
@@ -309,7 +311,7 @@ impl SwarmInput {
                 context: item.context.unwrap_or(DelegateContext::None),
                 worktree,
                 tool_allow: item.tool_allow.clone(),
-                output_schema: Some(output_schema),
+                output_schema,
             });
         }
         Ok(plans)
@@ -761,11 +763,17 @@ impl LuaWorkflowRunner {
                 async move {
                     check_fatal(&fatal)?;
                     require_non_empty("verify message", &message)?;
-                    let outcome = if condition {
-                        completed_outcome("verification passed", json!({"message": message}))
-                    } else {
-                        failed_outcome(message.clone(), json!({"message": message}))
-                    };
+                    // Verification is business data, not host execution state: a
+                    // false condition returns a completed outcome whose details
+                    // carry `verified = false` and the message. It never aborts.
+                    let outcome = completed_outcome(
+                        if condition {
+                            "verification passed"
+                        } else {
+                            "verification failed"
+                        },
+                        json!({"message": message, "verified": condition}),
+                    );
                     let outcome = invoke_local(
                         &handle,
                         &call_index,
@@ -821,7 +829,7 @@ impl LuaWorkflowRunner {
                         move |invocation| async move {
                             let mut outcome =
                                 dispatch.run_one(invocation, "Bash", tool_input).await;
-                            if !outcome.ok
+                            if outcome.status != WorkflowOutcomeStatus::Completed
                                 && let Some(message) = failure_message
                             {
                                 outcome.summary = message;
@@ -1143,7 +1151,6 @@ fn completed_outcome(
     details: serde_json::Value,
 ) -> WorkflowInvocationOutcome {
     WorkflowInvocationOutcome {
-        ok: true,
         status: WorkflowOutcomeStatus::Completed,
         summary: summary.into(),
         interruption: None,
@@ -1158,7 +1165,6 @@ fn failed_outcome(
     details: serde_json::Value,
 ) -> WorkflowInvocationOutcome {
     WorkflowInvocationOutcome {
-        ok: false,
         status: WorkflowOutcomeStatus::Failed,
         summary: summary.into(),
         interruption: None,
@@ -1546,7 +1552,6 @@ fn conversion_error(message: &str) -> mlua::Error {
 
 fn outcome_to_lua_table(lua: &Lua, outcome: &WorkflowInvocationOutcome) -> mlua::Result<Value> {
     let table = lua.create_table()?;
-    table.set("ok", outcome.ok)?;
     table.set(
         "status",
         match outcome.status {

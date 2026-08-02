@@ -232,7 +232,6 @@ fn agent_to_outcome(agent: &AgentSnapshot) -> Option<WorkflowInvocationOutcome> 
         .filter(|s| !s.is_empty())
         .unwrap_or_else(|| format!("delegate {}", agent.state.as_str()));
     Some(WorkflowInvocationOutcome {
-        ok: status == WorkflowOutcomeStatus::Completed,
         status,
         summary,
         interruption: None,
@@ -279,7 +278,6 @@ fn swarm_to_outcome(swarm: &SwarmSnapshot) -> Option<WorkflowInvocationOutcome> 
         });
     }
     Some(WorkflowInvocationOutcome {
-        ok: status == WorkflowOutcomeStatus::Completed,
         status,
         summary: format!("swarm {}", swarm.state.as_str()),
         interruption: None,
@@ -316,7 +314,6 @@ fn outcomes_equivalent(
     right: &WorkflowInvocationOutcome,
 ) -> bool {
     left.status == right.status
-        && left.ok == right.ok
         && left.child_refs == right.child_refs
         && left.summary == right.summary
 }

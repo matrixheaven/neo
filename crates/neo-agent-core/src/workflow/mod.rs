@@ -99,11 +99,11 @@ pub use retention::{
     classify_subject, current_unix_ms, dir_byte_size, perform_retention, preview_mark_sweep,
 };
 pub use runtime::{
-    ChildIsolationRequest, ChildSchemaAcceptResult, ChildSchemaRepairRequest, ParentChildAuthority,
-    ResolvedChildContext, ResolvedChildIsolation, ResolvedWorktreeBinding, SwarmBatchRequest,
-    WorkflowHandle, WorkflowInvocationContext, WorkflowLaunchRequest, WorkflowOutput,
-    WorkflowProjectionStage, WorkflowRuntime, child_isolation_provenance,
-    cleanup_isolated_worktree, host_bounded_context_summary, permission_rank,
+    ChildIsolationRequest, ChildStructuredProjection, ParentChildAuthority, ResolvedChildContext,
+    ResolvedChildIsolation, ResolvedWorktreeBinding, SwarmBatchRequest, WorkflowHandle,
+    WorkflowInvocationContext, WorkflowLaunchRequest, WorkflowOutput, WorkflowProjectionStage,
+    WorkflowRuntime, child_isolation_provenance, cleanup_isolated_worktree,
+    host_bounded_context_summary, permission_rank, project_child_structured_output,
     resolve_child_context, resolve_child_isolation, resolve_child_model, resolve_child_permission,
     resolve_child_tool_ceiling, resolve_child_worktree,
 };
