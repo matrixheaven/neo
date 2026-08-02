@@ -353,3 +353,18 @@ Entries are workspace records, not authoritative runtime decisions.
 | 2026-08-01 | work | docs/aegis/work/2026-08-01-workflow-dynamic-transcript/proof-bundle.md | 2026-08-01-workflow-dynamic-transcript proof bundle |
 | 2026-08-01 | spec | docs/aegis/specs/2026-08-01-provider-model-refresh-brief.md | Provider Model Refresh Spec Brief |
 | 2026-08-01 | plan | docs/aegis/plans/2026-08-01-provider-model-refresh.md | Provider Model Refresh Implementation Plan |
+| 2026-08-03 | work | docs/aegis/work/2026-08-03-thinking-and-message-presentation/10-intent.md | Thinking and Message Presentation intent |
+| 2026-08-03 | work | docs/aegis/work/2026-08-03-thinking-and-message-presentation/20-checkpoint.md | Thinking and Message Presentation checkpoint |
+| 2026-08-03 | work | docs/aegis/work/2026-08-03-thinking-and-message-presentation/90-evidence.md | Thinking and Message Presentation evidence |
+| 2026-08-03 | work | docs/aegis/work/2026-08-03-thinking-and-message-presentation/99-reflection.md | Thinking and Message Presentation reflection |
+| 2026-08-03 | artifact | docs/aegis/work/2026-08-03-thinking-and-message-presentation/task-intent-draft.json | Thinking and Message Presentation task intent draft |
+| 2026-08-03 | artifact | docs/aegis/work/2026-08-03-thinking-and-message-presentation/baseline-read-set-hint.json | Thinking and Message Presentation baseline read-set hint |
+| 2026-08-03 | artifact | docs/aegis/work/2026-08-03-thinking-and-message-presentation/baseline-usage-draft.json | Thinking and Message Presentation baseline usage draft |
+| 2026-08-03 | artifact | docs/aegis/work/2026-08-03-thinking-and-message-presentation/impact-statement-draft.json | Thinking and Message Presentation impact statement draft |
+| 2026-08-03 | artifact | docs/aegis/work/2026-08-03-thinking-and-message-presentation/todo-checkpoint-draft.json | Thinking and Message Presentation todo checkpoint draft |
+| 2026-08-03 | artifact | docs/aegis/work/2026-08-03-thinking-and-message-presentation/drift-check-draft.json | Thinking and Message Presentation drift check draft |
+| 2026-08-03 | spec | docs/aegis/specs/2026-08-03-thinking-and-message-presentation-design.md | Thinking And Message Presentation Design |
+| 2026-08-03 | plan | docs/aegis/plans/2026-08-03-thinking-and-message-presentation.md | Thinking And Message Presentation Implementation Plan |
+| 2026-08-03 | handoff | docs/aegis/handoffs/2026-08-03-thinking-and-message-presentation.md | Thinking And Message Presentation Handoff |
+| 2026-08-03 | artifact | docs/aegis/work/2026-08-03-thinking-and-message-presentation/gate-input-pack.json | 2026-08-03-thinking-and-message-presentation gate input pack |
+| 2026-08-03 | work | docs/aegis/work/2026-08-03-thinking-and-message-presentation/proof-bundle.md | 2026-08-03-thinking-and-message-presentation proof bundle |

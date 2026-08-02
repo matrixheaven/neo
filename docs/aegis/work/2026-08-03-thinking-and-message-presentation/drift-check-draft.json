@@ -1,0 +1,15 @@
+{
+  "schemaVersion": "aegis.schema.v0",
+  "taskId": "2026-08-03-thinking-and-message-presentation",
+  "taskIntentRef": "docs/aegis/work/2026-08-03-thinking-and-message-presentation/task-intent-draft.json",
+  "baselineRefs": [
+    "docs/aegis/specs/2026-08-03-thinking-and-message-presentation-design.md"
+  ],
+  "scopeStatus": "documentation-only; source implementation pending",
+  "compatStatus": "existing ThinkingKind, legacy Unknown behavior, append-only session records, and Delegate-family cards preserved",
+  "retirementStatus": "title-only summary projection explicitly retired in future implementation; no source retirement in this slice",
+  "newRiskSignals": [
+    "provider message-phase availability is endpoint-dependent; emit Unknown when absent"
+  ],
+  "decision": "continue"
+}

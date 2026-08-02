@@ -1,0 +1,10 @@
+{
+  "schemaVersion": "aegis.schema.v0",
+  "candidateDocs": [
+    "AGENTS.md; crates/neo-ai/src/types.rs; crates/neo-ai/src/providers/openai/responses.rs; crates/neo-agent-core/src/runtime/stream_aggregator.rs; crates/neo-tui/src/transcript/entry/render_thinking.rs; .references/codex/codex-rs/tui/src/chatwidget/streaming.rs"
+  ],
+  "whyRelevant": "这些文件定义提供方事件、思考类型、转发层、当前摘要渲染和 Codex 参考行为",
+  "missingAuthority": [
+    "None for the documentation slice; provider phase availability must be verified at implementation time"
+  ]
+}

@@ -1,0 +1,19 @@
+{
+  "schemaVersion": "aegis.schema.v0",
+  "requestedOutcome": "固化 ThinkingKind、摘要正文、完整思考、过程回复和最终回复的统一设计，并交接给后续实现者",
+  "goal": "让后续实现严格区分提供方思考、过程回复和最终回答，且保留摘要正文",
+  "successEvidence": [
+    "设计规格、实施计划、交接说明、工作记录和索引均自洽，当前源代码未被本切片修改"
+  ],
+  "stopCondition": "文档通过自审、工作区结构检查和差异检查后提交；源代码实现留给后续计划",
+  "nonGoals": [
+    "本切片不改源代码、不增加新的思考枚举、不重写 provider runtime、不修改 Delegate-family 卡片"
+  ],
+  "scope": "neo-ai provider events, neo-agent-core normalized events, neo-tui transcript rendering, persistence and focused tests",
+  "changeKinds": [
+    "architecture, contract, documentation"
+  ],
+  "riskHints": [
+    "不要把 OpenAI 摘要当成隐藏思考；不要凭模型名称猜测类型；不要丢弃摘要正文；不要改变 Delegate-family 卡片"
+  ]
+}

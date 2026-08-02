@@ -1,0 +1,16 @@
+{
+  "schemaVersion": "aegis.schema.v0",
+  "affectedLayers": [
+    "provider normalization, agent events, transcript store, thinking renderer, assistant message renderer, focused regressions"
+  ],
+  "owners": [
+    "existing provider adapters, ModelTurnState, AgentEvent, TranscriptStore and TranscriptEntry rendering"
+  ],
+  "invariants": [
+    "原始事件和会话记录追加保留；显示层可去重但不得改写；最终回复不得与过程回复或思考块合并"
+  ],
+  "compatBoundary": "保留现有 ThinkingKind、旧 ThinkingStarted 序列化默认值、未知消息阶段的现有正文行为和 Delegate-family 卡片",
+  "nonGoals": [
+    "本切片不改源代码、不增加新的思考枚举、不重写 provider runtime、不修改 Delegate-family 卡片"
+  ]
+}

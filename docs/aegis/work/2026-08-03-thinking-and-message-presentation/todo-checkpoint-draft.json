@@ -1,0 +1,11 @@
+{
+  "schemaVersion": "aegis.schema.v0",
+  "taskId": "2026-08-03-thinking-and-message-presentation",
+  "currentTodo": "编写设计规格、实施计划和交接说明",
+  "completedTodos": [],
+  "activeSlice": "documentation handoff",
+  "evidenceRefs": [],
+  "blockedOn": null,
+  "nextStep": "写入 spec、plan、handoff 后进行索引和结构校验",
+  "updatedAt": "2026-08-03"
+}
