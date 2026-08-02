@@ -616,6 +616,71 @@ async fn list_delegates_paginates_with_cursor_without_repeating_rows() {
 }
 
 #[tokio::test]
+async fn list_delegates_treats_blank_cursor_as_first_page_but_rejects_zero() {
+    let dir = tempfile::tempdir().unwrap();
+    let ctx = ToolContext::new(dir.path())
+        .unwrap()
+        .with_access(ToolAccess::all());
+    let agent = ctx.multi_agent.start_delegate(
+        "blank cursor candidate",
+        None,
+        AgentRole::Coder,
+        AgentRunMode::Background,
+        neo_agent_core::multi_agent::DelegateContext::None,
+        neo_agent_core::multi_agent::AgentPathKind::Root,
+    );
+    ctx.background_tasks.start_delegate(agent).await;
+    let tools = ToolRegistry::with_builtin_tools();
+
+    for cursor in ["", "   "] {
+        let page = tools
+            .run(
+                "ListDelegates",
+                &ctx,
+                serde_json::json!({
+                    "kind": "agent",
+                    "include_completed": true,
+                    "limit": 1,
+                    "order": "newest",
+                    "cursor": cursor
+                }),
+            )
+            .await
+            .expect("blank cursor should select the first page");
+        let rows = page
+            .details
+            .as_ref()
+            .and_then(|details| details["delegates"].as_array())
+            .expect("delegate rows");
+        assert_eq!(
+            rows.len(),
+            1,
+            "cursor {cursor:?} should return the first page"
+        );
+    }
+
+    let error = tools
+        .run(
+            "ListDelegates",
+            &ctx,
+            serde_json::json!({
+                "kind": "agent",
+                "include_completed": true,
+                "limit": 1,
+                "order": "newest",
+                "cursor": "0"
+            }),
+        )
+        .await
+        .expect_err("a fabricated zero cursor must be rejected");
+    assert!(
+        error
+            .to_string()
+            .contains("cursor must be a ListDelegates next_cursor value")
+    );
+}
+
+#[tokio::test]
 async fn wait_delegate_times_out_without_completion() {
     use neo_agent_core::tools::ToolContext;
     let dir = tempfile::tempdir().unwrap();

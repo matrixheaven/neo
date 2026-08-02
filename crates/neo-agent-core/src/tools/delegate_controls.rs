@@ -127,7 +127,7 @@ struct ListDelegatesInput {
     limit: usize,
     #[serde(default)]
     #[schemars(
-        description = "Pagination cursor from a previous response's next_cursor. Omit for the first page."
+        description = "Opaque pagination cursor returned as next_cursor by a previous ListDelegates response. Omit this field for the first page; when continuing, pass that value unchanged. Do not pass an empty string, \"0\", or a self-constructed cursor."
     )]
     cursor: Option<String>,
     #[serde(default)]
@@ -268,7 +268,7 @@ fn parse_list_cursor(
     cursor: Option<&str>,
     expected_query: &DelegateListCursorQuery,
 ) -> Result<usize, ToolError> {
-    let Some(cursor) = cursor else {
+    let Some(cursor) = cursor.map(str::trim).filter(|cursor| !cursor.is_empty()) else {
         return Ok(0);
     };
     let bytes = base64::engine::general_purpose::URL_SAFE_NO_PAD
