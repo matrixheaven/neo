@@ -332,15 +332,9 @@ fn agent_activity(agent: &AgentSnapshot) -> Option<String> {
             AgentActivityKind::Tool {
                 name,
                 summary,
-                phase,
+                phase: AgentToolActivityPhase::Queued { .. } | AgentToolActivityPhase::Ongoing,
                 ..
-            } if matches!(
-                phase,
-                AgentToolActivityPhase::Queued { .. } | AgentToolActivityPhase::Ongoing
-            ) =>
-            {
-                Some((name.as_str(), summary.as_deref()))
-            }
+            } => Some((name.as_str(), summary.as_deref())),
             _ => None,
         });
     if let Some((name, summary)) = tool {

@@ -3435,7 +3435,7 @@ mod tests {
             .await
             .expect("stop route");
         let output = manager
-            .output(&task_id, true, Duration::from_secs(1), 1024)
+            .output(&task_id, true, Duration::from_secs(1), 4096)
             .await
             .expect("terminal workflow output");
         assert_eq!(

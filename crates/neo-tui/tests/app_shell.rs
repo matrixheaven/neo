@@ -882,7 +882,23 @@ fn blocking_question_dialog_hides_composer_prompt() {
         }],
     );
 
-    let mut tui = neo_tui::NeoTui::new(app, TranscriptPane::new(80, 20));
+    let mut transcript = TranscriptPane::new(80, 20);
+    // The transcript card is the single visible owner of the question; the
+    // chrome overlay keeps the runtime selection state.
+    transcript.upsert_question_prompt(
+        "question-1",
+        vec![neo_tui::dialogs::QuestionDisplayData {
+            question: "Pick one".to_owned(),
+            header: Some("Question".to_owned()),
+            body: None,
+            options: vec![neo_tui::dialogs::QuestionDisplayOption {
+                label: "Yes".to_owned(),
+                description: None,
+            }],
+            multi_select: false,
+        }],
+    );
+    let mut tui = neo_tui::NeoTui::new(app, transcript);
     let (lines, cursor) = tui.render_frame(80, 20);
     let frame = lines
         .iter()
@@ -890,7 +906,10 @@ fn blocking_question_dialog_hides_composer_prompt() {
         .collect::<Vec<_>>()
         .join("\n");
 
-    assert!(frame.contains("question"));
+    assert!(
+        frame.contains("question"),
+        "question dialog must be visible: {frame}"
+    );
     assert!(
         !frame.contains("> draft"),
         "composer should be hidden: {frame}"
@@ -1131,6 +1150,15 @@ fn transcript_pane_frame_keeps_latest_live_row_visible() {
 fn transcript_pane_maps_shell_command_lifecycle_to_tool_run() {
     let mut runtime = TranscriptPane::new(100, 12);
 
+    // The runtime emits ToolExecutionStarted (which creates the card) before
+    // ShellCommandStarted for the same id; the shell events only update it.
+    runtime.apply_agent_event(neo_agent_core::AgentEvent::ToolExecutionStarted {
+        turn: 1,
+        id: "shell-1".to_owned(),
+        name: "Bash".to_owned(),
+        arguments: serde_json::json!({ "command": "cargo test -p neo-tui" }),
+        workflow_origin: None,
+    });
     runtime.apply_agent_event(neo_agent_core::AgentEvent::ShellCommandStarted {
         turn: 1,
         id: "shell-1".to_owned(),

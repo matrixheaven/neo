@@ -540,7 +540,7 @@ max_command_parallelism = 2
         let (_temp, config_path, project_dir) = temp_project_config(
             r#"
 [runtime.shell]
-output_bytes = 32768
+max_output_bytes = 32768
 
 [runtime.workflow]
 task_output_page_bytes = 65536

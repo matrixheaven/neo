@@ -1209,7 +1209,7 @@ fn neo_tui_draw_composes_body_then_chrome_in_one_frame() {
     );
     app.prompt_mut().text = "next".to_owned();
     app.prompt_mut().cursor = 4;
-    let mut transcript = TranscriptPane::new(80, 12);
+    let mut transcript = TranscriptPane::new(80, 20);
     transcript.push_banner("Welcome to neo");
     transcript.apply_agent_event(AgentEvent::ToolExecutionStarted {
         turn: 0,
@@ -1219,7 +1219,7 @@ fn neo_tui_draw_composes_body_then_chrome_in_one_frame() {
         workflow_origin: None,
     });
 
-    let lines = compose_tui_frame(&app, &mut transcript, 80, 12)
+    let lines = compose_tui_frame(&app, &mut transcript, 80, 20)
         .expect("transcript frame composes body + chrome");
 
     let joined = lines
@@ -1265,12 +1265,12 @@ fn neo_tui_draw_replays_finished_tool_before_prompt_chrome() {
             AgentMessage::tool_result("tool-1", "Read", [Content::text("README contents")], false),
         ],
     );
-    let mut transcript = TranscriptPane::new(80, 12);
+    let mut transcript = TranscriptPane::new(80, 20);
     transcript.push_banner("Welcome to neo");
     replay_session_into_transcript(&mut transcript, &loaded);
 
     let lines =
-        compose_tui_frame(&app, &mut transcript, 80, 12).expect("transcript frame composes replay");
+        compose_tui_frame(&app, &mut transcript, 80, 20).expect("transcript frame composes replay");
 
     // Tool header spans are individually ANSI-colored, so strip codes
     // before substring searching for the committed tool card.
@@ -12631,15 +12631,16 @@ async fn workflow_intent_slash_end_to_end_selects_runs_and_persists() {
         .await
         .expect("workflow turn completes");
 
-    let requests = requests.lock().expect("requests lock");
-    assert_eq!(requests.len(), 1);
-    assert_eq!(
-        requests[0].prompt,
-        vec![Content::text("/workflow:demo Research battery recycling")]
-    );
-    assert!(requests[0].workflow_context.is_some());
-    assert_eq!(requests[0].skill_context, None);
-    drop(requests);
+    {
+        let requests = requests.lock().expect("requests lock");
+        assert_eq!(requests.len(), 1);
+        assert_eq!(
+            requests[0].prompt,
+            vec![Content::text("/workflow:demo Research battery recycling")]
+        );
+        assert!(requests[0].workflow_context.is_some());
+        assert_eq!(requests[0].skill_context, None);
+    }
 
     let model_requests = harness.requests();
     assert_eq!(model_requests.len(), 2);

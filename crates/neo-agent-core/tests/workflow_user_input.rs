@@ -529,12 +529,18 @@ async fn task_answer_adapter_uses_runtime_model_policy() {
         )
         .await
         .expect("human-only TaskOutput");
-    assert!(
-        denied_output
-            .content
-            .contains("next_action: wait_for_human")
+    let denied_content: serde_json::Value =
+        serde_json::from_str(&denied_output.content).expect("denied summary content JSON");
+    assert_eq!(
+        denied_content["pending_user"]["next_action"], "wait_for_human",
+        "human-only request must tell the model to wait: {}",
+        denied_output.content
     );
-    assert!(!denied_output.content.contains("wait_for_human("));
+    assert!(
+        !denied_output.content.contains("wait_for_human("),
+        "never surface a callable action for a human-only request: {}",
+        denied_output.content
+    );
 
     let allowed_fixture = live_await_user_fixture(await_user_script("human_or_model")).await;
     let allowed_task_id = allowed_fixture.handle.run_id.0.clone();

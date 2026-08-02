@@ -245,9 +245,10 @@ async fn oversized_final_result_uses_artifact_without_losing_usage() {
                 assert!(outcome.ok);
                 assert_eq!(outcome.actual_usage.unwrap().input_tokens, 41);
 
-                // Larger than task_output_page_bytes (64) → artifact ref.
+                // Larger than task_output_page_bytes (64) and the 256-byte
+                // page budget floor → artifact ref.
                 let large = serde_json::json!({
-                    "report": "x".repeat(200),
+                    "report": "x".repeat(400),
                     "ok": true,
                 });
                 let final_result = handle
@@ -304,7 +305,7 @@ async fn oversized_final_result_uses_artifact_without_losing_usage() {
             let value: serde_json::Value =
                 serde_json::from_slice(&content.bytes).expect("json artifact");
             assert_eq!(value["ok"], true);
-            assert_eq!(value["report"].as_str().unwrap().len(), 200);
+            assert_eq!(value["report"].as_str().unwrap().len(), 400);
         }
         FinalResultBody::Inline { .. } => panic!("expected artifact body"),
     }

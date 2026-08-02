@@ -105,6 +105,7 @@ impl NeoTui {
             .transcript
             .render_frame(width, height)
             .unwrap_or_else(|| self.transcript.frame_ansi_lines());
+        lines.truncate(height.saturating_sub(chrome_height));
         let cursor = append_chrome(&mut lines, chrome_render, width, height);
         (lines, cursor)
     }
@@ -284,7 +285,10 @@ fn append_chrome(
 ) -> Option<CursorPos> {
     debug_assert!(
         lines.len() + chrome.lines.len() <= height,
-        "transcript and fitted chrome must fit the terminal height"
+        "transcript and fitted chrome must fit the terminal height: body={} chrome={} height={}",
+        lines.len(),
+        chrome.lines.len(),
+        height
     );
     let body_len = lines.len();
     lines.extend(chrome.lines);

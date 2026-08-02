@@ -109,9 +109,31 @@ fn workflow_definition_is_saved(
                 && definition.display_name == display_name
                 && definition.description == metadata.description
                 && definition.phases == metadata.phases
-                && definition.input_schema == metadata.input_schema
+                && input_schema_matches(
+                    definition.input_schema.as_ref(),
+                    metadata.input_schema.as_ref(),
+                )
                 && &definition.output_schema == output_schema
         })
+}
+
+/// Resolved definitions fill a missing `input_schema` with a default object
+/// schema at resolve time, while inline run metadata keeps `None`. Compare
+/// both sides normalized so a saved workflow with no explicit input schema
+/// still matches its inline origin.
+fn input_schema_matches(
+    definition: Option<&serde_json::Value>,
+    metadata: Option<&serde_json::Value>,
+) -> bool {
+    fn normalize(schema: Option<&serde_json::Value>) -> serde_json::Value {
+        schema.cloned().unwrap_or_else(|| {
+            serde_json::json!({
+                "type": "object",
+                "additionalProperties": false,
+            })
+        })
+    }
+    normalize(definition) == normalize(metadata)
 }
 
 fn workflow_browser_meta(

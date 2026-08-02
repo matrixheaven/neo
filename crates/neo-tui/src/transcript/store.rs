@@ -1851,6 +1851,22 @@ pub(super) fn merge_swarm_snapshot(
     if current.swarm_id != incoming.swarm_id {
         return incoming;
     }
+    if swarm_snapshot_is_terminal(current) && !swarm_snapshot_is_terminal(&incoming) {
+        // A terminal swarm stays terminal unless the incoming snapshot carries
+        // a genuine resume (a known child with a higher run count). A purely
+        // late non-terminal snapshot — including one that introduces brand-new
+        // running children — must not re-open a finalized card.
+        let has_resume = incoming.children.iter().any(|incoming_child| {
+            current.children.iter().any(|current_child| {
+                (current_child.item_index == incoming_child.item_index
+                    || current_child.agent.id == incoming_child.agent.id)
+                    && incoming_child.agent.run_count > current_child.agent.run_count
+            })
+        });
+        if !has_resume {
+            return current.clone();
+        }
+    }
     let mut children = incoming
         .children
         .into_iter()

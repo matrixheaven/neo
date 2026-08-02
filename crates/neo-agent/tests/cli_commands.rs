@@ -1899,7 +1899,8 @@ fn workflow_list_and_check_have_stable_output() {
         "text: {list_text}"
     );
 
-    // Empty list is still valid.
+    // A fresh home has no user or project definitions: the effective list
+    // degrades to the builtin workflows only.
     let empty_home = std::env::temp_dir().join(format!(
         "neo-cli-empty-home-{}",
         SystemTime::now()
@@ -1915,12 +1916,31 @@ fn workflow_list_and_check_have_stable_output() {
         .args(["workflow", "list", "--json"]);
     let empty_list = run(empty_cmd);
     let empty_value: Value = serde_json::from_str(empty_list.trim()).expect("empty list json");
-    assert_eq!(
-        empty_value
-            .get("workflows")
-            .and_then(Value::as_array)
-            .map(Vec::len),
-        Some(0)
+    let empty_definitions = empty_value
+        .get("workflows")
+        .and_then(Value::as_array)
+        .expect("workflows array");
+    assert!(
+        !empty_definitions.is_empty(),
+        "builtin workflows are always available: {empty_list}"
+    );
+    assert!(
+        empty_definitions
+            .iter()
+            .all(|item| item
+                .get("name")
+                .and_then(Value::as_str)
+                .is_some_and(|name| matches!(
+                    name,
+                    "code-review" | "deep-research" | "large-refactor"
+                ))),
+        "fresh home exposes only builtin workflows: {empty_list}"
+    );
+    assert!(
+        !empty_definitions
+            .iter()
+            .any(|item| item.get("name").and_then(Value::as_str) == Some("stable-demo")),
+        "user workflow must not leak into a fresh home: {empty_list}"
     );
 
     // check --json is stable and creates no runs.

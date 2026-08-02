@@ -22,6 +22,12 @@ slow-timeout = { period = "30s", terminate-after = 3 }
 filter = "test(mcp_manager_auth_action_shows_status_on_oauth_failure)"
 slow-timeout = { period = "30s", terminate-after = 3 }
 
+# Writes 10_000 journal records (each synced) and paginates all of them;
+# on slow filesystems this takes well over the default 40s budget.
+[[profile.default.overrides]]
+filter = "test(child_pages_cover_thousand_and_ten_thousand_rows_with_stable_cursor)"
+slow-timeout = { period = "45s", terminate-after = 3 }
+
 [profile.ci]
 inherits = "default"
 status-level = "all"

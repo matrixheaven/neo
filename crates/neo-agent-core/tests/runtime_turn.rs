@@ -11265,12 +11265,12 @@ async fn context_pressure_compacts_before_pending_epoch_admission() {
     const NESTED_SENTINEL: &str = "NESTED-SENTINEL-77aa10-rules";
     const ORDINARY_SENTINEL: &str = "ORDINARY-SENTINEL-0f3b55-history";
 
-    // Token economics (builtin tool schemas ≈ 12_500 tokens, workspace
+    // Token economics (builtin tool schemas ≈ 15_400 tokens, workspace
     // overhead ≈ 250): in a 32_000-token window the trigger is 25_600. The
-    // ~10_000 tokens of ordinary history keep the first request below the
-    // trigger (~23_000), but admitting the ~4_000-token nested epoch on top
-    // (~27_300) crosses it — so compact-first admission must run. After
-    // compaction the request shrinks below the trigger (~17_200 with the
+    // ~7_500 tokens of ordinary history keep the first request below the
+    // trigger (~23_200), but admitting the ~4_000-token nested epoch on top
+    // (~27_200) crosses it — so compact-first admission must run. After
+    // compaction the request shrinks below the trigger (~15_700 with the
     // epoch), so the epoch is admitted without a second compaction.
     let nested_rules = format!(
         "# nested rules\n{NESTED_SENTINEL}\n{}\n",
@@ -11299,10 +11299,10 @@ async fn context_pressure_compacts_before_pending_epoch_admission() {
     });
     config.model.capabilities.max_context_tokens = Some(32_000);
     let mut context = preflight_context(&fixture);
-    // ~10_000 tokens of ordinary history carrying its own sentinel.
+    // ~7_500 tokens of ordinary history carrying its own sentinel.
     context.append_message(AgentMessage::user_text(format!(
         "please remember {ORDINARY_SENTINEL} {}",
-        "x".repeat(40_000)
+        "x".repeat(30_000)
     )));
     context.append_message(AgentMessage::assistant(
         [Content::text("noted")],
@@ -11312,8 +11312,21 @@ async fn context_pressure_compacts_before_pending_epoch_admission() {
     let runtime =
         AgentRuntime::with_tools(config, harness.client(), ToolRegistry::with_builtin_tools());
 
-    let events = run_turn_collect(&runtime, &mut context, "edit the nested file").await;
-
+    let events = match runtime
+        .run_turn(
+            &mut context,
+            AgentMessage::user_text("edit the nested file"),
+        )
+        .collect::<Vec<_>>()
+        .await
+        .into_iter()
+        .collect::<Result<Vec<_>, _>>()
+    {
+        Ok(events) => events,
+        Err(error) => {
+            panic!("turn should succeed: {error}");
+        }
+    };
     let (baseline_model_content, nested_model_content, nested_generation) =
         assert_pending_epoch_events(&events, &target, NESTED_SENTINEL);
     assert_compaction_request_inputs(
