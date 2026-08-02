@@ -79,6 +79,8 @@ fn tokenize_skill_args(input: &str) -> Result<Vec<String>, String> {
             } else {
                 current.push(ch);
             }
+        } else if ch == '\'' && !current.is_empty() && !current.ends_with('=') {
+            current.push(ch);
         } else if ch == '\'' || ch == '"' {
             quote = Some(ch);
         } else if ch == '\\' {

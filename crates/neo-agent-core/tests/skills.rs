@@ -271,6 +271,20 @@ fn parse_skill_invocation_handles_named_and_positional_args() {
 }
 
 #[test]
+fn parse_skill_invocation_treats_apostrophes_inside_words_as_literals() {
+    let invocation = parse_skill_invocation(
+        "analyze this project's AI coding workflow and generate an evidence-backed report",
+    )
+    .unwrap();
+
+    assert_eq!(invocation.positional.len(), 11);
+    assert_eq!(invocation.positional[2], "project's");
+
+    let quoted = parse_skill_invocation("--mode='full review'").unwrap();
+    assert_eq!(quoted.named.get("mode"), Some(&"full review".into()));
+}
+
+#[test]
 fn user_skill_dirs_contains_only_neo_skills() {
     let home = Path::new("/home/alice/.neo");
     assert_eq!(user_skill_dirs(home), vec![home.join("skills")]);
