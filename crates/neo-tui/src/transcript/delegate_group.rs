@@ -6,8 +6,9 @@ use crate::primitive::theme::TuiTheme;
 use crate::primitive::{Component, Finalization, Line, Span, Style};
 use crate::transcript::{
     MAX_CHILD_TOOL_ROWS, can_detach, child_activity_view, display_elapsed,
-    format_cache_token_usage, format_elapsed, format_token_count, render_child_body,
-    render_child_final, render_child_thinking, render_child_tool_row, role_badge_style, role_label,
+    format_cache_token_usage, format_elapsed, format_token_count, render_child_agent_summary,
+    render_child_body, render_child_final, render_child_thinking, render_child_tool_row,
+    role_badge_style, role_label,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -135,6 +136,44 @@ impl DelegateGroupComponent {
                 theme,
             ));
         }
+        lines
+    }
+
+    #[must_use]
+    pub(crate) fn render_result_archive_with_theme(
+        &self,
+        width: usize,
+        theme: &TuiTheme,
+    ) -> Vec<Line> {
+        let muted = Style::default().fg(theme.text_muted);
+        let mut lines = vec![self.header(width, theme)];
+        lines.push(Line::styled("  Results", muted));
+
+        for agent in &self.agents {
+            lines.extend(
+                render_child_agent_summary(agent, width, theme)
+                    .into_iter()
+                    .map(|line| line.prepend_prefix("    ")),
+            );
+            let view = child_activity_view(agent, 1);
+            let indent = "       ↳ ";
+            for row in &view.tools {
+                lines.extend(render_child_tool_row(
+                    row,
+                    width,
+                    indent,
+                    theme,
+                    self.now_ms,
+                ));
+            }
+            if view.tools.is_empty()
+                && let Some(body) = view.body_text.as_deref()
+                && let Some(line) = render_child_body(body, width, indent, theme)
+            {
+                lines.push(line);
+            }
+        }
+
         lines
     }
 

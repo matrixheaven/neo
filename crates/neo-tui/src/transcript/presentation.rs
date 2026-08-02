@@ -810,7 +810,7 @@ fn render_entry(
                 transcript.entries().get(index),
                 Some(TranscriptEntry::DelegateGroup { .. })
             ) {
-                lines = render_delegate_group_status(
+                lines = render_delegate_group_archive(
                     transcript.entries().get(index),
                     options.width,
                     options.theme,
@@ -914,7 +914,7 @@ fn render_live_delegate_group(
     Some(rendered)
 }
 
-fn render_delegate_group_status(
+fn render_delegate_group_archive(
     entry: Option<&TranscriptEntry>,
     width: usize,
     theme: &TuiTheme,
@@ -923,7 +923,7 @@ fn render_delegate_group_status(
         return None;
     };
     let mut lines = component
-        .render_live_status_with_theme(width, theme)
+        .render_result_archive_with_theme(width, theme)
         .into_iter()
         .map(|line| line.to_ansi())
         .collect::<Vec<_>>();

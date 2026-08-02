@@ -971,6 +971,7 @@ fn delegate_group_completion_order_keeps_done_rows_in_group() {
         .join("\n");
     assert!(
         b_history.contains("Delegate group")
+            && b_history.contains("Results")
             && b_history.contains("agent-a")
             && b_history.contains("agent-b")
             && b_history.contains("agent-c"),
@@ -982,9 +983,13 @@ fn delegate_group_completion_order_keeps_done_rows_in_group() {
         "group summary was duplicated: {b_history}"
     );
     assert_eq!(
-        b_history.matches("Used Read").count(),
-        0,
-        "group history must not expand child tools: {b_history}"
+        b_history.matches("↳").count(),
+        3,
+        "group history must show one archived activity row per child: {b_history}"
+    );
+    assert!(
+        b_history.contains("A-6") && b_history.contains("B-6"),
+        "archived results lost the latest child activity: {b_history}"
     );
     assert!(
         b_update.live.is_empty(),
