@@ -4,6 +4,7 @@ use neo_agent_core::workflow::WorkflowExecutionOrigin;
 use neo_agent_core::{
     AgentEvent, AgentToolCall, ShellCommandOrigin, ShellCommandOutcome, ToolResult,
 };
+use neo_ai::ThinkingKind;
 
 use crate::shell::ToolStatusKind;
 use crate::transcript::ShellRunComponent;
@@ -196,9 +197,9 @@ impl TranscriptPane {
 
     fn apply_thinking_event(&mut self, event: &AgentEvent) -> bool {
         match event {
-            AgentEvent::ThinkingStarted { turn, .. } => {
+            AgentEvent::ThinkingStarted { turn, kind, .. } => {
                 self.transcript.begin_live_model_attempt(*turn);
-                self.start_thinking_block();
+                self.start_thinking_block(*kind);
                 true
             }
             AgentEvent::ThinkingDelta { turn, text } => {
@@ -749,9 +750,9 @@ impl TranscriptPane {
         self.push_goal_card(kind, objective.to_owned(), None, None);
     }
 
-    fn start_thinking_block(&mut self) {
+    fn start_thinking_block(&mut self, kind: ThinkingKind) {
         self.finish_assistant_message();
-        self.transcript.start_thinking();
+        self.transcript.start_thinking_with_kind(kind);
         self.apply_expand_state_to_active_thinking();
         self.mark_dirty();
     }

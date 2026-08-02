@@ -1201,6 +1201,7 @@ fn text_after_tool_starts_a_new_assistant_entry_after_the_tool() {
     transcript_pane.apply_agent_event(neo_agent_core::AgentEvent::ThinkingStarted {
         turn: 1,
         id: "thinking-1".to_owned(),
+        kind: neo_ai::ThinkingKind::Unknown,
     });
     transcript_pane.apply_agent_event(neo_agent_core::AgentEvent::ThinkingDelta {
         turn: 1,
@@ -2255,6 +2256,7 @@ fn retry_attempt_stays_out_of_terminal_history_until_message_finishes() {
     pane.apply_agent_event(neo_agent_core::AgentEvent::ThinkingStarted {
         turn: 1,
         id: "thinking-1".to_owned(),
+        kind: neo_ai::ThinkingKind::Unknown,
     });
     pane.apply_agent_event(neo_agent_core::AgentEvent::ThinkingDelta {
         turn: 1,
@@ -2347,6 +2349,7 @@ fn retry_thinking_first_reuses_anchor_before_intervening_finalized_entry() {
     pane.apply_agent_event(neo_agent_core::AgentEvent::ThinkingStarted {
         turn: 1,
         id: "thinking-2".to_owned(),
+        kind: neo_ai::ThinkingKind::Unknown,
     });
     pane.apply_agent_event(neo_agent_core::AgentEvent::ThinkingDelta {
         turn: 1,

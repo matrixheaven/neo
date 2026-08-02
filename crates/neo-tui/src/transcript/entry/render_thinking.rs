@@ -1,5 +1,6 @@
 use super::{Style, ThinkingPhase, TuiTheme};
 use crate::primitive::{Line, wrap_width};
+use neo_ai::ThinkingKind;
 
 /// Number of thinking lines shown in the floating window (streaming) or as a
 /// compact preview. Matches Neo's `THINKING_PREVIEW_LINES = 2`.
@@ -18,6 +19,7 @@ const THINKING_PREVIEW_LINES: usize = 2;
 pub(super) fn render_thinking(
     thinking: &str,
     width: usize,
+    kind: ThinkingKind,
     phase: ThinkingPhase,
     expanded: bool,
     theme: &TuiTheme,
@@ -30,6 +32,18 @@ pub(super) fn render_thinking(
     let mut rows = Vec::new();
 
     if phase == ThinkingPhase::Streaming && !expanded {
+        if kind == ThinkingKind::Summary {
+            let label = summary_title(thinking).map_or_else(
+                || "thinking...".to_owned(),
+                |title| format!("thinking · {title}"),
+            );
+            rows.push(Line::styled(
+                format!("{} {label}", thinking_spinner(activity_frame)),
+                style,
+            ));
+            return rows;
+        }
+
         // Streaming: spinner + tail window.
         rows.push(Line::styled(
             format!("{} thinking...", thinking_spinner(activity_frame)),
@@ -41,6 +55,43 @@ pub(super) fn render_thinking(
         }
         return rows;
     }
+
+    if kind == ThinkingKind::Summary {
+        let titles = summary_titles(thinking);
+        if !titles.is_empty() {
+            let wrapped_titles = titles
+                .iter()
+                .map(|title| wrap_width(title, body_width))
+                .collect::<Vec<_>>();
+            let total = wrapped_titles.iter().map(Vec::len).sum::<usize>();
+            let limit = if expanded {
+                total
+            } else {
+                THINKING_PREVIEW_LINES.min(total)
+            };
+            let mut emitted = 0;
+            for lines in &wrapped_titles {
+                for line in lines {
+                    if emitted >= limit {
+                        break;
+                    }
+                    let prefix = if emitted == 0 { "●" } else { "  " };
+                    rows.push(Line::styled(format!("{prefix} {line}"), style));
+                    emitted += 1;
+                }
+            }
+            if !expanded && total > limit {
+                rows.push(Line::styled(
+                    format!("  … {} more lines (ctrl+o to expand)", total - limit),
+                    Style::default().fg(theme.text_muted),
+                ));
+            }
+            return rows;
+        }
+    }
+
+    let wrapped = wrap_width(thinking, body_width);
+    let total = wrapped.len();
 
     if expanded {
         for (i, line) in wrapped.iter().enumerate() {
@@ -74,6 +125,7 @@ pub(super) fn render_thinking(
 
 pub(super) fn render_thinking_block(
     content: &str,
+    kind: ThinkingKind,
     phase: ThinkingPhase,
     expanded: bool,
     width: usize,
@@ -83,8 +135,49 @@ pub(super) fn render_thinking_block(
     if content.is_empty() {
         Vec::new()
     } else {
-        render_thinking(content, width, phase, expanded, theme, activity_frame)
+        render_thinking(content, width, kind, phase, expanded, theme, activity_frame)
     }
+}
+
+fn summary_title(text: &str) -> Option<String> {
+    summary_titles(text).pop()
+}
+
+fn summary_titles(text: &str) -> Vec<String> {
+    let bytes = text.as_bytes();
+    let mut index = 0;
+    let mut titles = Vec::new();
+    while index + 1 < bytes.len() {
+        if bytes[index..].starts_with(b"**") {
+            let start = index + 2;
+            let Some(end) = text[start..].find("**").map(|offset| offset + start) else {
+                let title = text[start..].trim();
+                if !title.is_empty() {
+                    titles.push(title.to_owned());
+                }
+                break;
+            };
+            let title = text[start..end].trim();
+            if !title.is_empty() {
+                if !titles.iter().any(|known| known == title) {
+                    titles.push(title.to_owned());
+                }
+            }
+            index = end + 2;
+        } else {
+            index += 1;
+        }
+    }
+    if !titles.is_empty() {
+        return titles;
+    }
+
+    text.lines()
+        .map(str::trim)
+        .find(|line| !line.is_empty())
+        .map_or_else(Vec::new, |line| {
+            vec![line.trim_matches('*').trim().to_owned()]
+        })
 }
 
 fn thinking_spinner(activity_frame: usize) -> char {

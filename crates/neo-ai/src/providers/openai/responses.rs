@@ -918,8 +918,10 @@ impl ParseState {
                 if self.active_thinking_id.is_some() {
                     return;
                 }
-                self.events
-                    .push(AiStreamEvent::ThinkingStart { id: id.clone() });
+                self.events.push(AiStreamEvent::ThinkingStart {
+                    id: id.clone(),
+                    kind: crate::ThinkingKind::Summary,
+                });
                 self.active_thinking_id = Some(id.clone());
             }
 

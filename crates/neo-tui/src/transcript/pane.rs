@@ -464,17 +464,22 @@ impl TranscriptPane {
             text: thinking_text,
             redacted,
             signature: _,
+            kind,
         } = part
         else {
             return;
         };
         self.flush_replayed_assistant_text(text);
         if !thinking_text.is_empty() {
-            self.push_transcript(TranscriptEntry::thinking_complete(
+            self.push_transcript(TranscriptEntry::thinking_complete_with_kind(
                 thinking_text.to_string(),
+                *kind,
             ));
         } else if *redacted {
-            self.push_transcript(TranscriptEntry::thinking_complete("[Reasoning redacted]"));
+            self.push_transcript(TranscriptEntry::thinking_complete_with_kind(
+                "[Reasoning redacted]",
+                *kind,
+            ));
         }
     }
 

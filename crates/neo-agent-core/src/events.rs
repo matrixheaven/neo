@@ -150,6 +150,8 @@ pub enum AgentEvent {
     ThinkingStarted {
         turn: u32,
         id: String,
+        #[serde(default)]
+        kind: neo_ai::ThinkingKind,
     },
     ThinkingDelta {
         turn: u32,

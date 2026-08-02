@@ -457,6 +457,7 @@ fn in_place_card_updates_preserve_active_thinking() {
     pane.apply_agent_event(AgentEvent::ThinkingStarted {
         turn: 2,
         id: "reasoning".to_owned(),
+        kind: neo_ai::ThinkingKind::Unknown,
     });
     pane.apply_agent_event(AgentEvent::ThinkingDelta {
         turn: 2,

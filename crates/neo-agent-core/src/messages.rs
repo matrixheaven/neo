@@ -38,6 +38,8 @@ pub enum Content {
         text: Arc<str>,
         signature: Option<Arc<str>>,
         redacted: bool,
+        #[serde(default)]
+        kind: neo_ai::ThinkingKind,
     },
     Image {
         mime_type: Arc<str>,
@@ -61,6 +63,22 @@ impl Content {
             text: text.into(),
             signature,
             redacted,
+            kind: neo_ai::ThinkingKind::Unknown,
+        }
+    }
+
+    #[must_use]
+    pub fn thinking_with_kind(
+        text: impl Into<Arc<str>>,
+        signature: Option<Arc<str>>,
+        redacted: bool,
+        kind: neo_ai::ThinkingKind,
+    ) -> Self {
+        Self::Thinking {
+            text: text.into(),
+            signature,
+            redacted,
+            kind,
         }
     }
 
@@ -779,6 +797,7 @@ fn to_content_part(content: &Content) -> ContentPart {
             text,
             signature,
             redacted,
+            ..
         } => ContentPart::Thinking {
             text: text.to_string(),
             signature: signature.as_ref().map(std::string::ToString::to_string),

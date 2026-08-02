@@ -673,7 +673,10 @@ impl ParseState {
         self.ensure_started();
         let id = format!("google-thought:{}", self.next_thought_index);
         self.next_thought_index = self.next_thought_index.saturating_add(1);
-        self.events.push(AiStreamEvent::ThinkingStart { id });
+        self.events.push(AiStreamEvent::ThinkingStart {
+            id,
+            kind: crate::ThinkingKind::Full,
+        });
         if let Some(text) = part.get("text").and_then(Value::as_str)
             && !text.is_empty()
         {

@@ -594,6 +594,7 @@ impl ParseState {
             if !self.lifecycle.reasoning_started {
                 self.events.push(AiStreamEvent::ThinkingStart {
                     id: "reasoning".to_owned(),
+                    kind: crate::ThinkingKind::Unknown,
                 });
                 self.lifecycle.reasoning_started = true;
             }

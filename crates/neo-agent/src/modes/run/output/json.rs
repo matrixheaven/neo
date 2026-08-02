@@ -1,6 +1,7 @@
 use std::path::{Path, PathBuf};
 
 use neo_agent_core::{AgentEvent, AgentMessage, Content, instructions::InstructionEpochData};
+use neo_ai::ThinkingKind;
 use serde_json::{Value, json};
 
 use crate::config::{AppConfig, neo_home};
@@ -64,6 +65,7 @@ enum AssistantContentState {
         thinking: String,
         signature: Option<String>,
         redacted: bool,
+        kind: ThinkingKind,
     },
 }
 
@@ -151,7 +153,9 @@ impl StableJsonState {
                 }))
             }
             AgentEvent::MessageStarted { turn, id } => Some(self.map_message_started(*turn, id)),
-            AgentEvent::ThinkingStarted { turn, id: _ } => Some(self.map_thinking_started(*turn)),
+            AgentEvent::ThinkingStarted { turn, kind, id: _ } => {
+                Some(self.map_thinking_started(*turn, *kind))
+            }
             AgentEvent::ThinkingDelta { turn, text } => Some(self.map_thinking_delta(*turn, text)),
             AgentEvent::ThinkingFinished {
                 turn,
@@ -312,8 +316,8 @@ impl StableJsonState {
         self.assistant_stop_reason = None;
     }
 
-    fn map_thinking_started(&mut self, turn: u32) -> Value {
-        let content_index = self.push_thinking_content();
+    fn map_thinking_started(&mut self, turn: u32, kind: ThinkingKind) -> Value {
+        let content_index = self.push_thinking_content(kind);
         json!({
             "type": "message_update",
             "turn": turn,
@@ -321,6 +325,7 @@ impl StableJsonState {
             "assistantMessageEvent": {
                 "type": "thinking_start",
                 "contentIndex": content_index,
+                "kind": thinking_kind_label(kind),
                 "partial": self.content_part(content_index),
             },
         })
@@ -425,12 +430,13 @@ impl StableJsonState {
             .map_or(Value::Null, AssistantContentState::to_json)
     }
 
-    fn push_thinking_content(&mut self) -> usize {
+    fn push_thinking_content(&mut self, kind: ThinkingKind) -> usize {
         self.assistant_content
             .push(AssistantContentState::Thinking {
                 thinking: String::new(),
                 signature: None,
                 redacted: false,
+                kind,
             });
         let index = self.assistant_content.len() - 1;
         self.active_thinking_index = Some(index);
@@ -447,7 +453,7 @@ impl StableJsonState {
         {
             return index;
         }
-        self.push_thinking_content()
+        self.push_thinking_content(ThinkingKind::Unknown)
     }
 
     fn ensure_active_text_content(&mut self) -> usize {
@@ -479,11 +485,13 @@ impl AssistantContentState {
                 thinking,
                 signature,
                 redacted,
+                kind,
             } => json!({
                 "type": "thinking",
                 "thinking": thinking,
                 "thinkingSignature": signature,
                 "redacted": redacted,
+                "kind": thinking_kind_label(*kind),
             }),
         }
     }
@@ -684,11 +692,13 @@ fn stable_content(content: &[Content]) -> Vec<Value> {
                 text,
                 signature,
                 redacted,
+                kind,
             } => json!({
                 "type": "thinking",
                 "thinking": text,
                 "thinkingSignature": signature,
                 "redacted": redacted,
+                "kind": thinking_kind_label(*kind),
             }),
             Content::Image { mime_type, data } => json!({
                 "type": "image",
@@ -697,6 +707,14 @@ fn stable_content(content: &[Content]) -> Vec<Value> {
             }),
         })
         .collect()
+}
+
+fn thinking_kind_label(kind: ThinkingKind) -> &'static str {
+    match kind {
+        ThinkingKind::Summary => "summary",
+        ThinkingKind::Full => "full",
+        ThinkingKind::Unknown => "unknown",
+    }
 }
 
 fn stable_stop_reason(stop_reason: neo_agent_core::StopReason) -> &'static str {

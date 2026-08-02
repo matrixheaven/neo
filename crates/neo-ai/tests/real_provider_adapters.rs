@@ -10,7 +10,7 @@ use neo_ai::{
     AiError, AiStreamEvent, ApiKind, CacheRetention, ChatMessage, ChatRequest, ContentPart,
     ImageData, ImageGenerationClient, ImageGenerationRequest, ImageGenerationResponseImage,
     ModelCapabilities, ModelClient, ModelSpec, ProviderId, ReasoningEffort, ReasoningSelection,
-    RequestMetadata, RequestOptions, StopReason, ToolCall, ToolSpec,
+    RequestMetadata, RequestOptions, StopReason, ThinkingKind, ToolCall, ToolSpec,
     providers::{
         anthropic::AnthropicMessagesClient, google::GoogleGenerativeAiClient,
         openai::compatible::OpenAiCompatibleClient, openai::images::OpenAiImagesClient,
@@ -1017,7 +1017,8 @@ async fn openai_responses_client_streams_reasoning_summary_events() {
                 id: "resp-thinking".to_owned()
             },
             AiStreamEvent::ThinkingStart {
-                id: "rs_1:summary:0".to_owned()
+                id: "rs_1:summary:0".to_owned(),
+                kind: ThinkingKind::Summary,
             },
             AiStreamEvent::ThinkingDelta {
                 text: "Checked ".to_owned()
@@ -1084,7 +1085,8 @@ async fn openai_responses_client_streams_reasoning_summary_text_done_without_del
                 id: "resp-thinking-done".to_owned()
             },
             AiStreamEvent::ThinkingStart {
-                id: "rs_done:summary:0".to_owned()
+                id: "rs_done:summary:0".to_owned(),
+                kind: ThinkingKind::Summary,
             },
             AiStreamEvent::ThinkingDelta {
                 text: "Read the inputs.".to_owned()
@@ -1175,7 +1177,8 @@ async fn openai_responses_client_serializes_interleaved_reasoning_summaries_by_s
                 id: "resp-interleaved-thinking".to_owned()
             },
             AiStreamEvent::ThinkingStart {
-                id: "rs_1:summary:0".to_owned()
+                id: "rs_1:summary:0".to_owned(),
+                kind: ThinkingKind::Summary,
             },
             AiStreamEvent::ThinkingDelta {
                 text: "First ".to_owned()
@@ -1188,7 +1191,8 @@ async fn openai_responses_client_serializes_interleaved_reasoning_summaries_by_s
                 redacted: false,
             },
             AiStreamEvent::ThinkingStart {
-                id: "rs_2:summary:1".to_owned()
+                id: "rs_2:summary:1".to_owned(),
+                kind: ThinkingKind::Summary,
             },
             AiStreamEvent::ThinkingDelta {
                 text: "Second thought.".to_owned()
@@ -1273,7 +1277,8 @@ async fn openai_responses_client_keeps_reasoning_summaries_with_shared_item_id_s
                 id: "resp-shared-thinking-item".to_owned()
             },
             AiStreamEvent::ThinkingStart {
-                id: "rs_item:summary:0".to_owned()
+                id: "rs_item:summary:0".to_owned(),
+                kind: ThinkingKind::Summary,
             },
             AiStreamEvent::ThinkingDelta {
                 text: "First".to_owned()
@@ -1283,7 +1288,8 @@ async fn openai_responses_client_keeps_reasoning_summaries_with_shared_item_id_s
                 redacted: false,
             },
             AiStreamEvent::ThinkingStart {
-                id: "rs_item:summary:1".to_owned()
+                id: "rs_item:summary:1".to_owned(),
+                kind: ThinkingKind::Summary,
             },
             AiStreamEvent::ThinkingDelta {
                 text: "Second".to_owned()
@@ -1369,7 +1375,8 @@ async fn openai_responses_client_keeps_reasoning_summaries_with_shared_output_it
                 id: "resp-shared-output-index".to_owned()
             },
             AiStreamEvent::ThinkingStart {
-                id: "rs_item:output:0:summary:0".to_owned()
+                id: "rs_item:output:0:summary:0".to_owned(),
+                kind: ThinkingKind::Summary,
             },
             AiStreamEvent::ThinkingDelta {
                 text: "Output zero".to_owned()
@@ -1379,7 +1386,8 @@ async fn openai_responses_client_keeps_reasoning_summaries_with_shared_output_it
                 redacted: false,
             },
             AiStreamEvent::ThinkingStart {
-                id: "rs_item:output:1:summary:0".to_owned()
+                id: "rs_item:output:1:summary:0".to_owned(),
+                kind: ThinkingKind::Summary,
             },
             AiStreamEvent::ThinkingDelta {
                 text: "Output one".to_owned()
@@ -1446,7 +1454,8 @@ async fn openai_responses_client_keeps_streamed_summary_when_done_text_is_non_pr
                 id: "resp-thinking-correction".to_owned()
             },
             AiStreamEvent::ThinkingStart {
-                id: "rs_corrected:summary:0".to_owned()
+                id: "rs_corrected:summary:0".to_owned(),
+                kind: ThinkingKind::Summary,
             },
             AiStreamEvent::ThinkingDelta {
                 text: "streamed summary".to_owned()
@@ -2267,7 +2276,8 @@ async fn anthropic_messages_client_streams_extended_thinking_events() {
                 id: "msg-thinking-stream".to_owned()
             },
             AiStreamEvent::ThinkingStart {
-                id: "thinking:0".to_owned()
+                id: "thinking:0".to_owned(),
+                kind: ThinkingKind::Full,
             },
             AiStreamEvent::ThinkingDelta {
                 text: "Checked ".to_owned()
@@ -2806,7 +2816,8 @@ async fn google_generative_ai_client_streams_thought_parts_as_thinking_events() 
                 id: "google-generative-ai".to_owned()
             },
             AiStreamEvent::ThinkingStart {
-                id: "google-thought:0".to_owned()
+                id: "google-thought:0".to_owned(),
+                kind: ThinkingKind::Full,
             },
             AiStreamEvent::ThinkingDelta {
                 text: "Checked inputs.".to_owned()

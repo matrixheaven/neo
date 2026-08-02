@@ -426,6 +426,7 @@ fn workflow_updates_do_not_break_active_text_boundary() {
     pane.apply_agent_event(neo_agent_core::AgentEvent::ThinkingStarted {
         turn: 2,
         id: "reasoning".to_owned(),
+        kind: neo_ai::ThinkingKind::Unknown,
     });
     pane.apply_agent_event(neo_agent_core::AgentEvent::ThinkingDelta {
         turn: 2,

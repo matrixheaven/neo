@@ -1350,6 +1350,7 @@ fn transcript_pane_replays_thinking_tool_assistant_in_order() {
     runtime.apply_agent_event(neo_agent_core::AgentEvent::ThinkingStarted {
         turn: 1,
         id: "thinking-1".to_owned(),
+        kind: neo_ai::ThinkingKind::Unknown,
     });
     runtime.apply_agent_event(neo_agent_core::AgentEvent::ThinkingDelta {
         turn: 1,
@@ -1379,6 +1380,7 @@ fn transcript_pane_replays_thinking_tool_assistant_in_order() {
     runtime.apply_agent_event(neo_agent_core::AgentEvent::ThinkingStarted {
         turn: 1,
         id: "thinking-2".to_owned(),
+        kind: neo_ai::ThinkingKind::Unknown,
     });
     runtime.apply_agent_event(neo_agent_core::AgentEvent::ThinkingDelta {
         turn: 1,

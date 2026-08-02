@@ -19,6 +19,7 @@ use neo_agent_core::{
     ApprovalAction, ApprovalPresentation, ApprovalRequest, ApprovalResolution,
     SkillInvocationOutcome, SkillInvocationSource,
 };
+use neo_ai::ThinkingKind;
 use serde::{Deserialize, Serialize};
 
 mod copy;
@@ -166,6 +167,7 @@ pub enum TranscriptEntry {
     },
     ThinkingBlock {
         content: String,
+        kind: ThinkingKind,
         phase: ThinkingPhase,
         expanded: bool,
     },
@@ -381,8 +383,14 @@ impl TranscriptEntry {
 
     #[must_use]
     pub fn thinking_streaming(content: impl Into<String>) -> Self {
+        Self::thinking_streaming_with_kind(content, ThinkingKind::Unknown)
+    }
+
+    #[must_use]
+    pub fn thinking_streaming_with_kind(content: impl Into<String>, kind: ThinkingKind) -> Self {
         Self::ThinkingBlock {
             content: content.into(),
+            kind,
             phase: ThinkingPhase::Streaming,
             expanded: false,
         }
@@ -390,8 +398,14 @@ impl TranscriptEntry {
 
     #[must_use]
     pub fn thinking_complete(content: impl Into<String>) -> Self {
+        Self::thinking_complete_with_kind(content, ThinkingKind::Unknown)
+    }
+
+    #[must_use]
+    pub fn thinking_complete_with_kind(content: impl Into<String>, kind: ThinkingKind) -> Self {
         Self::ThinkingBlock {
             content: content.into(),
+            kind,
             phase: ThinkingPhase::Complete,
             expanded: false,
         }
@@ -804,10 +818,12 @@ impl TranscriptEntry {
             }
             Self::ThinkingBlock {
                 content,
+                kind,
                 phase,
                 expanded,
             } => render_thinking::render_thinking_block(
                 content,
+                *kind,
                 *phase,
                 *expanded,
                 inner_width,
@@ -1554,6 +1570,7 @@ mod tests {
         let content = "one two three four five six seven eight nine ten eleven twelve";
         let collapsed = TranscriptEntry::ThinkingBlock {
             content: content.to_owned(),
+            kind: ThinkingKind::Unknown,
             phase: ThinkingPhase::Complete,
             expanded: false,
         }
@@ -1563,6 +1580,7 @@ mod tests {
         .collect::<Vec<_>>();
         let expanded = TranscriptEntry::ThinkingBlock {
             content: content.to_owned(),
+            kind: ThinkingKind::Unknown,
             phase: ThinkingPhase::Complete,
             expanded: true,
         }

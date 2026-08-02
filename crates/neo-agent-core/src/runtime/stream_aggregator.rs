@@ -1,7 +1,7 @@
 use std::{sync::Arc, time::Duration};
 
 use futures::StreamExt;
-use neo_ai::{AiStreamEvent, ChatRequest, ModelClient};
+use neo_ai::{AiStreamEvent, ChatRequest, ModelClient, ThinkingKind};
 use tokio_util::sync::CancellationToken;
 
 use super::config::AgentConfig;
@@ -88,7 +88,9 @@ impl ModelTurnState {
         match event {
             AiStreamEvent::MessageStart { id } => self.start_message(turn, id, emitter),
             AiStreamEvent::TextDelta { text } => self.apply_text_delta(turn, text, emitter),
-            AiStreamEvent::ThinkingStart { id } => self.start_thinking(turn, id, emitter),
+            AiStreamEvent::ThinkingStart { id, kind } => {
+                self.start_thinking(turn, id, kind, emitter);
+            }
             AiStreamEvent::ThinkingDelta { text } => {
                 self.apply_thinking_delta(turn, text, emitter);
             }
@@ -129,11 +131,18 @@ impl ModelTurnState {
         emitter.emit(AgentEvent::TextDelta { turn, text });
     }
 
-    fn start_thinking(&mut self, turn: u32, id: String, emitter: &mut EventEmitter) {
-        self.content.push(Content::thinking("", None, false));
+    fn start_thinking(
+        &mut self,
+        turn: u32,
+        id: String,
+        kind: ThinkingKind,
+        emitter: &mut EventEmitter,
+    ) {
+        self.content
+            .push(Content::thinking_with_kind("", None, false, kind));
         self.active_thinking_index = Some(self.content.len() - 1);
         self.active_text_index = None;
-        emitter.emit(AgentEvent::ThinkingStarted { turn, id });
+        emitter.emit(AgentEvent::ThinkingStarted { turn, id, kind });
     }
 
     fn apply_thinking_delta(&mut self, turn: u32, text: String, emitter: &mut EventEmitter) {

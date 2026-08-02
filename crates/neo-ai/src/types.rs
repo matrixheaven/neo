@@ -380,6 +380,15 @@ pub enum StopReason {
     Error,
 }
 
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum ThinkingKind {
+    Summary,
+    Full,
+    #[default]
+    Unknown,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub enum AiStreamEvent {
     MessageStart {
@@ -387,6 +396,8 @@ pub enum AiStreamEvent {
     },
     ThinkingStart {
         id: String,
+        #[serde(default)]
+        kind: ThinkingKind,
     },
     ThinkingDelta {
         text: String,

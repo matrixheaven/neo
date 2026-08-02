@@ -825,6 +825,7 @@ impl ParseState {
         self.thinking_blocks.insert(index, ThinkingBlock::default());
         self.events.push(AiStreamEvent::ThinkingStart {
             id: format!("thinking:{index}"),
+            kind: crate::ThinkingKind::Full,
         });
     }
 }

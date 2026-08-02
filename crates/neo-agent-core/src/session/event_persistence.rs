@@ -314,6 +314,7 @@ mod tests {
             AgentEvent::ThinkingStarted {
                 turn: 1,
                 id: "thinking".to_owned(),
+                kind: neo_ai::ThinkingKind::Unknown,
             },
             AgentEvent::ThinkingDelta {
                 turn: 1,

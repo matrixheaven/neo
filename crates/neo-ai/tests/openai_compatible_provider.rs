@@ -10,7 +10,7 @@ use futures::StreamExt;
 use neo_ai::{
     AiStreamEvent, ApiKind, CacheRetention, ChatMessage, ChatRequest, ContentPart, ImageData,
     ModelCapabilities, ModelClient, ModelSpec, ProviderId, ReasoningEffort, ReasoningSelection,
-    RequestMetadata, RequestOptions, StopReason, ToolSpec,
+    RequestMetadata, RequestOptions, StopReason, ThinkingKind, ToolSpec,
     providers::openai::compatible::OpenAiCompatibleClient,
 };
 use serde_json::{Value, json};
@@ -406,6 +406,7 @@ async fn openai_streams_reasoning_content_as_thinking_events() {
 
     assert!(events.contains(&AiStreamEvent::ThinkingStart {
         id: "reasoning".to_owned(),
+        kind: ThinkingKind::Unknown,
     }));
     assert!(events.contains(&AiStreamEvent::ThinkingDelta {
         text: "plan privately".to_owned(),

@@ -14,7 +14,7 @@ use neo_agent_core::{
 };
 use neo_ai::{
     AiError, AiStreamEvent, ApiKind, ChatRequest, ModelCapabilities, ModelClient, ModelSpec,
-    ProviderId, ReasoningCapability, ReasoningEffort, ReasoningSelection, ToolSpec,
+    ProviderId, ReasoningCapability, ReasoningEffort, ReasoningSelection, ThinkingKind, ToolSpec,
 };
 use serde_json::json;
 use std::{
@@ -957,6 +957,7 @@ async fn runtime_streams_thinking_events_and_persists_thinking_content() {
         },
         AiStreamEvent::ThinkingStart {
             id: "thinking_1".to_owned(),
+            kind: ThinkingKind::Unknown,
         },
         AiStreamEvent::ThinkingDelta {
             text: "Checked ".to_owned(),
@@ -990,6 +991,7 @@ async fn runtime_streams_thinking_events_and_persists_thinking_content() {
     assert!(events.contains(&AgentEvent::ThinkingStarted {
         turn: 1,
         id: "thinking_1".to_owned(),
+        kind: ThinkingKind::Unknown,
     }));
     assert!(events.contains(&AgentEvent::ThinkingDelta {
         turn: 1,
@@ -1028,6 +1030,7 @@ async fn runtime_preserves_multiple_thinking_parts_and_text_order() {
         },
         AiStreamEvent::ThinkingStart {
             id: "thinking_1".to_owned(),
+            kind: ThinkingKind::Unknown,
         },
         AiStreamEvent::ThinkingDelta {
             text: "first thought".to_owned(),
@@ -1038,6 +1041,7 @@ async fn runtime_preserves_multiple_thinking_parts_and_text_order() {
         },
         AiStreamEvent::ThinkingStart {
             id: "thinking_2".to_owned(),
+            kind: ThinkingKind::Unknown,
         },
         AiStreamEvent::ThinkingDelta {
             text: "second thought".to_owned(),
@@ -1089,6 +1093,7 @@ async fn runtime_sends_persisted_thinking_content_back_to_model() {
             },
             AiStreamEvent::ThinkingStart {
                 id: "thinking_1".to_owned(),
+                kind: ThinkingKind::Unknown,
             },
             AiStreamEvent::ThinkingDelta {
                 text: "local reasoning summary".to_owned(),
@@ -1170,6 +1175,7 @@ async fn runtime_can_disable_persisted_thinking_replay() {
             },
             AiStreamEvent::ThinkingStart {
                 id: "thinking_1".to_owned(),
+                kind: ThinkingKind::Unknown,
             },
             AiStreamEvent::ThinkingDelta {
                 text: "local reasoning summary".to_owned(),

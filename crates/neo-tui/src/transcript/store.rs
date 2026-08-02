@@ -22,6 +22,7 @@ use neo_agent_core::multi_agent::{
     apply_swarm_child_progress,
 };
 use neo_agent_core::workflow::{WorkflowExecutionOrigin, WorkflowSnapshot};
+use neo_ai::ThinkingKind;
 
 use super::progressive::{
     ChildAgentFact, ChildToolFact, ProgressiveFact, ProgressiveFactId, ProgressiveFactPayload,
@@ -562,12 +563,16 @@ impl TranscriptStore {
     }
 
     pub fn start_thinking(&mut self) {
+        self.start_thinking_with_kind(ThinkingKind::Unknown);
+    }
+
+    pub fn start_thinking_with_kind(&mut self, kind: ThinkingKind) {
         if self.active_thinking.is_some() {
             return;
         }
         if let Some(index) = self.take_empty_live_attempt_anchor() {
             self.mutate_entry(index, |entry| {
-                *entry = TranscriptEntry::thinking_streaming(String::new());
+                *entry = TranscriptEntry::thinking_streaming_with_kind(String::new(), kind);
                 true
             });
             self.active_thinking = Some(index);
@@ -576,7 +581,12 @@ impl TranscriptStore {
         // Merge a new thinking stream into an immediately preceding completed
         // thinking block so consecutive reasoning events render as one card.
         if let Some(index) = self.entries.len().checked_sub(1)
-            && let Some(TranscriptEntry::ThinkingBlock { phase, .. }) = self.entries.get_mut(index)
+            && let Some(TranscriptEntry::ThinkingBlock {
+                kind: existing_kind,
+                phase,
+                ..
+            }) = self.entries.get_mut(index)
+            && *existing_kind == kind
             && *phase == ThinkingPhase::Complete
         {
             *phase = ThinkingPhase::Streaming;
@@ -584,7 +594,10 @@ impl TranscriptStore {
             self.touch_entry(index);
             return;
         }
-        let index = self.append_entry(TranscriptEntry::thinking_streaming(String::new()));
+        let index = self.append_entry(TranscriptEntry::thinking_streaming_with_kind(
+            String::new(),
+            kind,
+        ));
         self.active_thinking = Some(index);
     }
 
