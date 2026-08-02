@@ -296,15 +296,19 @@ impl WorkflowCardComponent {
             return (lines, false);
         }
 
-        let action_line = self.actionable_line(width, theme);
-        let (state_action_line, running_action_line) =
+        let action_lines = self.actionable_lines(width, theme);
+        let (state_action_lines, running_action_lines) =
             if self.snapshot.state == WorkflowState::Running {
-                (None, action_line)
+                (None, action_lines)
             } else {
-                (action_line, None)
+                (action_lines, None)
             };
-        if let Some(action_line) = state_action_line {
-            lines.push(action_line);
+        if let Some(action_lines) = state_action_lines {
+            lines.extend(
+                action_lines
+                    .into_iter()
+                    .take(max_rows.saturating_sub(lines.len())),
+            );
         }
 
         let (actionable_tool_indexes, completed_tool_indexes): (Vec<_>, Vec<_>) =
@@ -370,7 +374,7 @@ impl WorkflowCardComponent {
 
                 let remaining = max_rows.saturating_sub(lines.len());
                 let reserve_running_action =
-                    usize::from(running_action_line.is_some() && remaining > 0);
+                    usize::from(running_action_lines.is_some() && remaining > 0);
                 let context_slots = remaining.saturating_sub(reserve_running_action);
                 for line in [report_line, Some(self.stats_line(width, theme))]
                     .into_iter()
@@ -379,10 +383,14 @@ impl WorkflowCardComponent {
                 {
                     lines.push(line);
                 }
-                if let Some(action_line) = running_action_line
+                if let Some(action_lines) = running_action_lines
                     && lines.len() < max_rows
                 {
-                    lines.push(action_line);
+                    lines.extend(
+                        action_lines
+                            .into_iter()
+                            .take(max_rows.saturating_sub(lines.len())),
+                    );
                 }
                 if let Some(log) = self.snapshot.latest_log_summary.as_deref()
                     && lines.len() < max_rows
@@ -460,7 +468,7 @@ impl WorkflowCardComponent {
         .truncate_to_width(width)
     }
 
-    fn actionable_line(&self, width: usize, theme: &TuiTheme) -> Option<Line> {
+    fn actionable_lines(&self, width: usize, theme: &TuiTheme) -> Option<Vec<Line>> {
         let text = match self.snapshot.state {
             WorkflowState::Running => workflow_controls(self.snapshot.state)?.to_owned(),
             WorkflowState::Queued => format!(
@@ -501,18 +509,43 @@ impl WorkflowCardComponent {
         } else {
             "Action"
         };
-        Some(self.summary_line(label, &text, width, theme))
+        Some(self.summary_lines(label, &text, width, theme))
     }
 
     fn summary_line(&self, label: &str, summary: &str, width: usize, theme: &TuiTheme) -> Line {
-        Line::from_spans(vec![
-            Span::styled(
-                format!("│ {label}  "),
-                Style::default().fg(theme.text_muted),
-            ),
-            Span::styled(summary, Style::default().fg(theme.text_primary)),
-        ])
-        .truncate_to_width(width)
+        self.summary_lines(label, summary, width, theme)
+            .into_iter()
+            .next()
+            .unwrap_or_else(|| Line::styled("", Style::default().fg(theme.text_primary)))
+    }
+
+    fn summary_lines(
+        &self,
+        label: &str,
+        summary: &str,
+        width: usize,
+        theme: &TuiTheme,
+    ) -> Vec<Line> {
+        let continuation_prefix = format!("│ {:width$}", "", width = label.len() + 2);
+        summary
+            .split('\n')
+            .enumerate()
+            .map(|(index, summary)| {
+                let prefix = if index == 0 {
+                    format!("│ {label}  ")
+                } else {
+                    continuation_prefix.clone()
+                };
+                Line::from_spans(vec![
+                    Span::styled(prefix, Style::default().fg(theme.text_muted)),
+                    Span::styled(
+                        summary.trim_end_matches('\r'),
+                        Style::default().fg(theme.text_primary),
+                    ),
+                ])
+                .truncate_to_width(width)
+            })
+            .collect()
     }
 
     fn direct_tool_indexes(&self) -> Vec<usize> {
@@ -746,5 +779,23 @@ mod tests {
             assert!(rendered.contains(expected), "{state:?}:\n{rendered}");
             assert!(!rendered.contains("RunningTool"), "{state:?}:\n{rendered}");
         }
+    }
+
+    #[test]
+    fn multiline_reason_keeps_continuation_fields_on_the_card_column() {
+        let mut failed = card(WorkflowState::Failed);
+        failed.snapshot.terminal_reason = Some(
+            "workflow failed: agent_id: agent-1\nname: Archimedes\nstatus: failed\nrun_index: 1\nsummary_scope: current_run\ncontext_mode: inherit"
+                .to_owned(),
+        );
+
+        let rendered = render_text(&failed, 7);
+        let lines = rendered.lines().collect::<Vec<_>>();
+        assert_eq!(lines[1], "│ Reason  workflow failed: agent_id: agent-1");
+        assert_eq!(lines[2], "│         name: Archimedes");
+        assert_eq!(lines[3], "│         status: failed");
+        assert_eq!(lines[4], "│         run_index: 1");
+        assert_eq!(lines[5], "│         summary_scope: current_run");
+        assert_eq!(lines[6], "│         context_mode: inherit");
     }
 }
