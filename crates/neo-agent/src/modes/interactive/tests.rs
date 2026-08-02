@@ -8951,6 +8951,7 @@ fn interleaved_replay_prelude_events() -> Vec<AgentEvent> {
         AgentEvent::ThinkingStarted {
             turn: 1,
             id: "thinking-one".to_owned(),
+            kind: neo_ai::ThinkingKind::Unknown,
         },
         AgentEvent::ThinkingDelta {
             turn: 1,
@@ -13081,6 +13082,7 @@ async fn permission_switch_does_not_split_streaming_thinking() {
     controller.apply_turn_event(AgentEvent::ThinkingStarted {
         turn: 1,
         id: "thinking-one".to_owned(),
+        kind: neo_ai::ThinkingKind::Unknown,
     });
     controller.apply_turn_event(AgentEvent::ThinkingDelta {
         turn: 1,

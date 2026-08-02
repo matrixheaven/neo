@@ -14,6 +14,7 @@ use neo_agent_core::{
 };
 use neo_ai::{
     AiError, AiStreamEvent, ChatMessage, ChatRequest, ContentPart, ModelClient, StopReason,
+    ThinkingKind,
 };
 use serde_json::json;
 use std::sync::{Arc, Mutex};
@@ -3538,6 +3539,7 @@ async fn cancel_agent_stops_active_child_stream() {
         }),
         DelayedStep::Event(AiStreamEvent::ThinkingStart {
             id: "thinking".to_owned(),
+            kind: ThinkingKind::Unknown,
         }),
         DelayedStep::Delay(std::time::Duration::from_secs(30)),
         DelayedStep::Event(AiStreamEvent::ThinkingDelta {
