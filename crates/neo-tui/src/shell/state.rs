@@ -2,6 +2,7 @@ use std::collections::VecDeque;
 use std::path::{Path, PathBuf};
 
 use neo_agent_core::PermissionMode;
+use neo_ai::ReasoningSelection;
 
 use crate::primitive::Color;
 use crate::primitive::theme::{ChromeMode, DevelopmentMode, TuiTheme};
@@ -54,8 +55,8 @@ pub struct NeoChromeState {
     /// Optional custom label shown in the footer as a working indicator.
     pub(super) custom_working_label: Option<String>,
     pub(super) mcp_startup_active: bool,
-    /// Whether the current model has thinking enabled (shown in the footer).
-    pub(super) thinking_enabled: bool,
+    /// Current reasoning selection shown after the model label.
+    pub(super) reasoning_selection: ReasoningSelection,
     /// Optional persistent exit-confirmation message shown in the footer.
     pub(super) exit_confirmation_label: Option<String>,
     /// Formatted git branch/status badge shown after the workspace path.
@@ -104,7 +105,7 @@ impl NeoChromeState {
             btw_panel_state: None,
             custom_working_label: None,
             mcp_startup_active: false,
-            thinking_enabled: false,
+            reasoning_selection: ReasoningSelection::Off,
             exit_confirmation_label: None,
             git_status_label: None,
             pending_input: PendingInputState::new(),
@@ -233,13 +234,20 @@ impl NeoChromeState {
     }
 
     #[must_use]
-    pub fn thinking_enabled(&self) -> bool {
-        self.thinking_enabled
+    pub fn reasoning_label(&self) -> Option<String> {
+        match &self.reasoning_selection {
+            ReasoningSelection::Off => None,
+            ReasoningSelection::On => Some("on".to_owned()),
+            ReasoningSelection::Effort { effort } => Some(effort.to_string()),
+            ReasoningSelection::BudgetTokens { budget_tokens } => Some(format!(
+                "budget:{}",
+                crate::primitive::theme::format_token_count(*budget_tokens)
+            )),
+        }
     }
 
-    /// Toggle the thinking-enabled indicator shown in the footer.
-    pub fn set_thinking_enabled(&mut self, enabled: bool) {
-        self.thinking_enabled = enabled;
+    pub fn set_reasoning_selection(&mut self, selection: ReasoningSelection) {
+        self.reasoning_selection = selection;
     }
 
     #[must_use]

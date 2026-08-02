@@ -6,6 +6,7 @@ Entries are workspace records, not authoritative runtime decisions.
 | Date | Kind | Path | Title |
 | --- | --- | --- | --- |
 | 2026-08-03 | handoff | docs/aegis/handoffs/2026-08-03-workflow-output-reliability.md | Workflow Output Reliability Handoff |
+| 2026-08-03 | plan | docs/aegis/plans/2026-08-03-footer-reasoning-effort.md | Neo Footer Reasoning Effort Display Implementation Plan |
 | 2026-08-03 | plan | docs/aegis/plans/2026-08-03-workflow-output-reliability.md | Workflow Output Reliability Implementation Plan |
 | 2026-08-03 | spec | docs/aegis/specs/2026-08-03-workflow-output-reliability-design.md | Workflow Output Reliability Design |
 | 2026-08-03 | work | docs/aegis/work/2026-08-03-workflow-output-reliability/10-intent.md | Workflow Output Reliability intent |

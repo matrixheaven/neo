@@ -979,9 +979,8 @@ impl InteractiveController {
     }
 
     fn set_current_reasoning(&mut self, reasoning: neo_ai::ReasoningSelection) {
-        let thinking_enabled = reasoning.is_enabled();
-        self.current_reasoning = reasoning;
-        self.tui.chrome_mut().set_thinking_enabled(thinking_enabled);
+        self.current_reasoning = reasoning.clone();
+        self.tui.chrome_mut().set_reasoning_selection(reasoning);
     }
 
     /// Fire a notification for the given event based on the controller's

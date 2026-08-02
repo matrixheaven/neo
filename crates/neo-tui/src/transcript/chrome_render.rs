@@ -775,10 +775,10 @@ fn render_footer_lines(app: &NeoChromeState, width: usize) -> Vec<String> {
             Style::default().fg(theme.text_muted),
         ));
     }
-    if app.thinking_enabled() {
+    if let Some(reasoning) = app.reasoning_label() {
         left_parts.push(paint(
-            "thinking",
-            Style::default().fg(theme.footer_working).italic(),
+            &format!("· {reasoning}"),
+            Style::default().fg(theme.text_muted),
         ));
     }
     if let Some(exit) = app.exit_confirmation_label() {
@@ -869,6 +869,7 @@ mod tests {
     use super::*;
     use crate::primitive::theme::TuiTheme;
     use crate::shell::{NeoChromeState, PickerItem, PromptCompletionPrefix, PromptEdit};
+    use neo_ai::{ReasoningEffort, ReasoningSelection};
 
     #[test]
     fn prompt_box_lines_are_exact_width() {
@@ -1044,5 +1045,38 @@ mod tests {
             "",
             "pending preview should sit flush against the prompt box"
         );
+    }
+
+    #[test]
+    fn footer_reasoning_selection() {
+        let mut app = NeoChromeState::new("neo", "s", "custom/gpt-5.6-luna", "/tmp");
+        assert_eq!(app.reasoning_label(), None);
+
+        app.set_reasoning_selection(ReasoningSelection::On);
+        assert_eq!(app.reasoning_label(), Some("on".to_owned()));
+
+        app.set_reasoning_selection(ReasoningSelection::Effort {
+            effort: ReasoningEffort::max(),
+        });
+        assert_eq!(app.reasoning_label(), Some("max".to_owned()));
+
+        app.set_reasoning_selection(ReasoningSelection::BudgetTokens {
+            budget_tokens: 8_192,
+        });
+        assert_eq!(app.reasoning_label(), Some("budget:8k".to_owned()));
+    }
+
+    #[test]
+    fn footer_reasoning_does_not_duplicate_working_status() {
+        let mut app = NeoChromeState::new("neo", "s", "custom/gpt-5.6-luna", "/tmp");
+        app.set_reasoning_selection(ReasoningSelection::Effort {
+            effort: ReasoningEffort::max(),
+        });
+        app.restore_streaming_mode();
+
+        let footer = crate::primitive::strip_ansi(&render_footer_lines(&app, 200)[0]);
+        assert!(footer.contains("custom/gpt-5.6-luna · max"), "{footer}");
+        assert!(footer.contains("⠋ working · esc interrupt"), "{footer}");
+        assert!(!footer.contains("thinking"), "{footer}");
     }
 }
