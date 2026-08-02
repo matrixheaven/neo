@@ -1,4 +1,4 @@
-use std::collections::{BTreeMap, VecDeque};
+use std::collections::{BTreeMap, BTreeSet, VecDeque};
 
 use crate::primitive::Finalization;
 use crate::primitive::theme::TuiTheme;
@@ -19,6 +19,9 @@ pub enum TranscriptBlockId {
         source_start: usize,
         source_end: usize,
     },
+    Progressive {
+        id: super::progressive::ProgressiveFactId,
+    },
 }
 
 impl TranscriptBlockId {
@@ -27,6 +30,7 @@ impl TranscriptBlockId {
             Self::Entries(ids) => ids.first().copied(),
             Self::Workflow { entry } => Some(*entry),
             Self::AssistantSegment { entry, .. } => Some(*entry),
+            Self::Progressive { id } => Some(id.entry()),
         }
     }
 
@@ -35,6 +39,7 @@ impl TranscriptBlockId {
             Self::Entries(ids) => ids.last().copied(),
             Self::Workflow { entry } => Some(*entry),
             Self::AssistantSegment { entry, .. } => Some(*entry),
+            Self::Progressive { id } => Some(id.entry()),
         }
     }
 }
@@ -47,6 +52,7 @@ pub enum FinalizedBlockProof {
         revision: u64,
     },
     AssistantSource(String),
+    Progressive(Vec<super::progressive::ProgressiveFact>),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -236,6 +242,7 @@ pub(super) struct TranscriptPresentation {
     committed_entry_revisions: BTreeMap<TranscriptEntryId, u64>,
     assistant_offsets: BTreeMap<TranscriptEntryId, usize>,
     assistant_sources: BTreeMap<TranscriptEntryId, String>,
+    acknowledged_facts: BTreeSet<super::progressive::ProgressiveFactId>,
     acknowledged_tail_owner: Option<TranscriptEntryId>,
     diagnostics: VecDeque<String>,
 }
@@ -267,7 +274,9 @@ impl TranscriptPresentation {
                     index += 1;
                     continue;
                 };
-                render_entry(transcript, index, id, revision, true, options, &mut frame);
+                render_entry(
+                    transcript, index, id, revision, true, false, options, &mut frame,
+                );
                 break;
             }
             // Everything from the live model attempt start is rollback-able
@@ -282,7 +291,9 @@ impl TranscriptPresentation {
                 index += 1;
                 continue;
             };
+            let progressive = self.has_progressive_history(transcript, id);
             if let Some(expected_revision) = self.committed_entry_revisions.get(&id).copied() {
+                self.emit_progressive_facts(transcript, id, !blocked, options, &mut frame);
                 if expected_revision != revision {
                     self.record_diagnostic(format!(
                         "committed entry {id:?} changed from revision {expected_revision} to {revision}"
@@ -327,11 +338,93 @@ impl TranscriptPresentation {
             }
 
             render_entry(
-                transcript, index, id, revision, blocked, options, &mut frame,
+                transcript,
+                index,
+                id,
+                revision,
+                blocked,
+                progressive,
+                options,
+                &mut frame,
             );
+            self.emit_progressive_facts(transcript, id, !blocked, options, &mut frame);
             index += 1;
         }
         frame.finish(options.live_budget)
+    }
+
+    fn has_progressive_history(
+        &self,
+        transcript: &TranscriptStore,
+        entry_id: TranscriptEntryId,
+    ) -> bool {
+        self.acknowledged_facts
+            .iter()
+            .any(|id| id.entry() == entry_id)
+            || progressive_facts_for_entry(transcript, entry_id)
+                .into_iter()
+                .next()
+                .is_some()
+    }
+
+    fn emit_progressive_facts(
+        &self,
+        transcript: &TranscriptStore,
+        entry_id: TranscriptEntryId,
+        allowed: bool,
+        options: TranscriptRenderOptions<'_>,
+        frame: &mut PresentationFrame,
+    ) {
+        if !allowed {
+            return;
+        }
+        let facts = progressive_facts_for_entry(transcript, entry_id);
+        let mut offset = 0;
+        while let Some(terminal) = facts.get(offset).copied() {
+            let ProgressiveFactPayload::ChildAgent(_) = &terminal.payload else {
+                offset += 1;
+                continue;
+            };
+            let mut child_facts = vec![terminal];
+            offset += 1;
+            while let Some(tool) = facts.get(offset).copied()
+                && matches!(tool.payload, ProgressiveFactPayload::ChildTool(_))
+                && facts_share_child_run(terminal, tool)
+            {
+                child_facts.push(tool);
+                offset += 1;
+            }
+            if self.acknowledged_facts.contains(&terminal.id) {
+                continue;
+            }
+            let rendered_terminal = render_progressive_fact(terminal, options.width, options.theme);
+            let mut lines = rendered_terminal
+                .first()
+                .cloned()
+                .into_iter()
+                .collect::<Vec<_>>();
+            lines.extend(
+                child_facts
+                    .iter()
+                    .skip(1)
+                    .flat_map(|fact| render_progressive_fact(fact, options.width, options.theme)),
+            );
+            lines.extend(rendered_terminal.into_iter().skip(1));
+            let separator_before = advance_semantic_owner(
+                &mut frame.rendered_tail_owner,
+                Some(entry_id),
+                Some(entry_id),
+                !lines.is_empty(),
+            );
+            frame.pending_history.push(FinalizedBlock {
+                id: TranscriptBlockId::Progressive {
+                    id: terminal.id.clone(),
+                },
+                proof: FinalizedBlockProof::Progressive(child_facts.into_iter().cloned().collect()),
+                lines,
+                separator_before,
+            });
+        }
     }
 
     fn render_assistant_entry(
@@ -527,6 +620,13 @@ impl TranscriptPresentation {
                         .and_modify(|offset| *offset = (*offset).max(*source_end))
                         .or_insert(*source_end);
                 }
+                (
+                    TranscriptBlockId::Progressive { id },
+                    FinalizedBlockProof::Progressive(facts),
+                ) if facts.first().is_some_and(|fact| id == &fact.id) => {
+                    self.acknowledged_facts
+                        .extend(facts.iter().map(|fact| fact.id.clone()));
+                }
                 _ => self.record_diagnostic(format!(
                     "presentation proof does not match block identity: {:?}",
                     block.id
@@ -538,6 +638,10 @@ impl TranscriptPresentation {
                 self.acknowledged_tail_owner = Some(owner);
             }
         }
+    }
+
+    pub(super) fn prune_acknowledged_facts(&self, transcript: &mut TranscriptStore) {
+        transcript.retain_progressive_facts(|fact| !self.acknowledged_facts.contains(&fact.id));
     }
 
     fn record_diagnostic(&mut self, diagnostic: String) {
@@ -553,6 +657,41 @@ impl TranscriptPresentation {
         }
         self.diagnostics.push_back(diagnostic);
     }
+}
+
+fn progressive_facts_for_entry<'a>(
+    transcript: &'a TranscriptStore,
+    entry_id: TranscriptEntryId,
+) -> Vec<&'a super::progressive::ProgressiveFact> {
+    let facts = transcript
+        .progressive_facts()
+        .iter()
+        .filter(|fact| fact.id.entry() == entry_id)
+        .collect::<Vec<_>>();
+    let mut terminal_facts = facts
+        .iter()
+        .copied()
+        .filter(|fact| matches!(fact.payload, ProgressiveFactPayload::ChildAgent(_)))
+        .collect::<Vec<_>>();
+    terminal_facts.sort_unstable_by_key(|fact| fact.capture_sequence());
+
+    let mut projected = Vec::new();
+    for terminal in terminal_facts {
+        projected.push(terminal);
+        let mut tools = facts
+            .iter()
+            .copied()
+            .filter(|fact| matches!(fact.payload, ProgressiveFactPayload::ChildTool(_)))
+            .filter(|tool| facts_share_child_run(terminal, tool))
+            .collect::<Vec<_>>();
+        tools.sort_unstable_by_key(|fact| match &fact.payload {
+            ProgressiveFactPayload::ChildTool(tool) => tool.activity_index,
+            _ => usize::MAX,
+        });
+        let first_visible = tools.len().saturating_sub(super::MAX_CHILD_TOOL_ROWS);
+        projected.extend(tools.into_iter().skip(first_visible));
+    }
+    projected
 }
 
 /// Index of the earliest unresolved blocking dialog (approval or question),
@@ -605,6 +744,7 @@ fn render_entry(
     id: TranscriptEntryId,
     revision: u64,
     blocked: bool,
+    progressive: bool,
     options: TranscriptRenderOptions<'_>,
     frame: &mut PresentationFrame,
 ) {
@@ -620,7 +760,14 @@ fn render_entry(
     super::pane::trim_ansi_transcript_block(&mut lines);
     match transcript.entry_finalization(index) {
         Some(Finalization::Finalized) if !blocked => {
-            if let Some(terminal_lines) =
+            if progressive
+                && matches!(
+                    transcript.entries().get(index),
+                    Some(TranscriptEntry::Delegate { .. } | TranscriptEntry::DelegateGroup { .. })
+                )
+            {
+                lines = terminal_summary_lines(transcript, index, options.width, options.theme);
+            } else if let Some(terminal_lines) =
                 render_delegate_family_terminal(transcript, index, id, options)
             {
                 lines = terminal_lines;
@@ -642,6 +789,15 @@ fn render_entry(
             });
         }
         Some(_) => {
+            if !blocked
+                && let Some(active_lines) = render_live_delegate_group(
+                    transcript.entries().get(index),
+                    options.width,
+                    options.theme,
+                )
+            {
+                lines = active_lines;
+            }
             let separator_before = advance_semantic_owner(
                 &mut frame.rendered_tail_owner,
                 block_id.first_owner(),
@@ -659,6 +815,67 @@ fn render_entry(
         }
         None => {}
     }
+}
+
+fn render_live_delegate_group(
+    entry: Option<&TranscriptEntry>,
+    width: usize,
+    theme: &TuiTheme,
+) -> Option<Vec<String>> {
+    let TranscriptEntry::DelegateGroup { component } = entry? else {
+        return None;
+    };
+    if !component
+        .snapshots()
+        .iter()
+        .any(|snapshot| snapshot.state.is_terminal())
+    {
+        return None;
+    }
+    let active = component
+        .snapshots()
+        .iter()
+        .filter(|snapshot| !snapshot.state.is_terminal())
+        .cloned()
+        .collect::<Vec<_>>();
+    if active.is_empty() {
+        return None;
+    }
+    let header = component
+        .render_with_theme(width, theme)
+        .into_iter()
+        .next()?;
+    let active_component =
+        super::delegate_group::DelegateGroupComponent::new(component.turn(), active);
+    let mut lines = active_component.render_with_theme(width, theme);
+    if let Some(first) = lines.first_mut() {
+        *first = header;
+    }
+    let mut rendered = lines
+        .into_iter()
+        .map(|line| line.to_ansi())
+        .collect::<Vec<_>>();
+    super::pane::trim_ansi_transcript_block(&mut rendered);
+    Some(rendered)
+}
+
+fn terminal_summary_lines(
+    transcript: &TranscriptStore,
+    index: usize,
+    width: usize,
+    theme: &TuiTheme,
+) -> Vec<String> {
+    let lines = match transcript.entries().get(index) {
+        Some(TranscriptEntry::Delegate { component }) => component.terminal_summary(width, theme),
+        Some(TranscriptEntry::DelegateGroup { component }) => {
+            component.terminal_summary(width, theme)
+        }
+        Some(TranscriptEntry::DelegateSwarm { component }) => {
+            component.terminal_summary(width, theme)
+        }
+        _ => Vec::new(),
+    };
+    lines.into_iter().map(|line| line.to_ansi()).collect()
 }
 
 fn render_delegate_family_terminal(
@@ -703,46 +920,40 @@ fn render_delegate_family_terminal(
     let mut terminal_facts = facts
         .iter()
         .copied()
-        .filter(|fact| {
-            matches!(
-                &fact.payload,
-                ProgressiveFactPayload::ChildAgent(_) | ProgressiveFactPayload::SwarmItem(_)
-            )
-        })
+        .filter(|fact| matches!(&fact.payload, ProgressiveFactPayload::ChildAgent(_)))
         .collect::<Vec<_>>();
-    terminal_facts.sort_by_key(|fact| fact_child_rank(entry, fact));
+    terminal_facts.sort_unstable_by_key(|fact| fact.capture_sequence());
     let mut tool_facts = facts
         .iter()
         .copied()
         .filter(|fact| matches!(&fact.payload, ProgressiveFactPayload::ChildTool(_)))
         .collect::<Vec<_>>();
-    tool_facts.sort_by_key(|fact| {
-        let activity_index = match &fact.payload {
-            ProgressiveFactPayload::ChildTool(tool) => tool.activity_index,
-            _ => usize::MAX,
-        };
-        (fact_child_rank(entry, fact), activity_index)
-    });
-    if matches!(entry, TranscriptEntry::Delegate { .. }) {
-        let first_visible = tool_facts.len().saturating_sub(super::MAX_CHILD_TOOL_ROWS);
-        tool_facts.drain(..first_visible);
-    }
 
     for fact in &terminal_facts {
         let rendered = render_progressive_fact(fact, options.width, options.theme);
         lines.extend(rendered.first().cloned());
-        for tool in &tool_facts {
-            if facts_share_child_run(fact, tool) {
-                lines.extend(render_progressive_fact(tool, options.width, options.theme));
-            }
+        let mut child_tools = tool_facts
+            .iter()
+            .copied()
+            .filter(|tool| facts_share_child_run(fact, tool))
+            .collect::<Vec<_>>();
+        child_tools.sort_unstable_by_key(|tool| match &tool.payload {
+            ProgressiveFactPayload::ChildTool(tool) => tool.activity_index,
+            _ => usize::MAX,
+        });
+        let first_visible = child_tools.len().saturating_sub(super::MAX_CHILD_TOOL_ROWS);
+        for tool in child_tools.into_iter().skip(first_visible) {
+            lines.extend(render_progressive_fact(tool, options.width, options.theme));
         }
         lines.extend(rendered.into_iter().skip(1));
     }
-    for tool in &tool_facts {
-        if !terminal_facts
-            .iter()
-            .any(|fact| facts_share_child_run(fact, tool))
-        {
+    if terminal_facts.is_empty() {
+        tool_facts.sort_unstable_by_key(|tool| match &tool.payload {
+            ProgressiveFactPayload::ChildTool(tool) => tool.activity_index,
+            _ => usize::MAX,
+        });
+        let first_visible = tool_facts.len().saturating_sub(super::MAX_CHILD_TOOL_ROWS);
+        for tool in tool_facts.into_iter().skip(first_visible) {
             lines.extend(render_progressive_fact(tool, options.width, options.theme));
         }
     }
@@ -763,36 +974,6 @@ fn facts_share_child_run(terminal: &super::ProgressiveFact, tool: &super::Progre
             item.agent_id == tool.agent_id && item.run_count == tool.run_count
         }
         ProgressiveFactPayload::ChildTool(_) => false,
-    }
-}
-
-fn fact_child_rank(entry: &TranscriptEntry, fact: &super::ProgressiveFact) -> usize {
-    let agent_id = match &fact.payload {
-        ProgressiveFactPayload::ChildTool(fact) => Some(fact.agent_id.as_str()),
-        ProgressiveFactPayload::ChildAgent(fact) => Some(fact.agent_id.as_str()),
-        ProgressiveFactPayload::SwarmItem(_) => None,
-    };
-    match entry {
-        TranscriptEntry::Delegate { .. } => 0,
-        TranscriptEntry::DelegateGroup { component } => agent_id
-            .and_then(|agent_id| {
-                component
-                    .snapshots()
-                    .iter()
-                    .position(|snapshot| snapshot.id.as_str() == agent_id)
-            })
-            .unwrap_or(usize::MAX),
-        TranscriptEntry::DelegateSwarm { component } => match &fact.payload {
-            ProgressiveFactPayload::SwarmItem(fact) => fact.item_index,
-            ProgressiveFactPayload::ChildTool(fact) => component
-                .snapshot()
-                .children
-                .iter()
-                .find(|child| child.agent.id.as_str() == fact.agent_id)
-                .map_or(usize::MAX, |child| child.item_index),
-            ProgressiveFactPayload::ChildAgent(_) => usize::MAX,
-        },
-        _ => usize::MAX,
     }
 }
 

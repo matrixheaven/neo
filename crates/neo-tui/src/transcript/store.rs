@@ -195,6 +195,7 @@ pub struct TranscriptStore {
     render_cache: Vec<Option<CachedRender>>,
     first_dirty_entry: Option<usize>,
     progressive_facts: Vec<ProgressiveFact>,
+    next_progressive_sequence: u64,
 }
 
 impl TranscriptStore {
@@ -226,12 +227,16 @@ impl TranscriptStore {
             {
                 incoming.activity_index = current.activity_index;
             }
-            if *existing == fact {
+            if existing.payload == fact.payload {
                 return false;
             }
+            fact.capture_sequence = existing.capture_sequence();
             *existing = fact;
             return true;
         }
+        let mut fact = fact;
+        fact.capture_sequence = self.next_progressive_sequence;
+        self.next_progressive_sequence = self.next_progressive_sequence.saturating_add(1);
         self.progressive_facts.push(fact);
         true
     }
@@ -260,6 +265,7 @@ impl TranscriptStore {
                     agent_id: agent_id.clone(),
                     run_count,
                 },
+                capture_sequence: 0,
                 payload: ProgressiveFactPayload::ChildAgent(ChildAgentFact {
                     agent_id: agent_id.clone(),
                     run_count,
@@ -283,6 +289,7 @@ impl TranscriptStore {
                         agent_id: agent_id.clone(),
                         run_count,
                     },
+                    capture_sequence: 0,
                     payload: ProgressiveFactPayload::SwarmItem(SwarmItemFact {
                         swarm_id: snapshot.swarm_id.clone(),
                         item_index: child.item_index,
@@ -336,6 +343,7 @@ impl TranscriptStore {
                     run_count,
                     tool_id: id.clone(),
                 },
+                capture_sequence: 0,
                 payload: ProgressiveFactPayload::ChildTool(fact),
             });
         }

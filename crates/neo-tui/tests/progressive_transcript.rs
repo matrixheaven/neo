@@ -819,3 +819,157 @@ fn every_live_entry_family_is_bounded_and_commits_once() {
     pane.transcript_mut().upsert_workflow(completed);
     assert_one_canonical_commit(&mut pane, 100, 24);
 }
+
+#[test]
+fn delegate_group_completion_order_is_capture_order_and_each_child_keeps_four_tools() {
+    let tools = |agent: &str| {
+        (0..6)
+            .map(|index| {
+                done_tool(
+                    &format!("{agent}-tool-{index}"),
+                    "Read",
+                    &format!("{agent}-{index}"),
+                )
+            })
+            .collect::<Vec<_>>()
+    };
+    let tools_with_new_content = |agent: &str| {
+        let mut activity = tools(agent);
+        activity.push(done_tool(
+            &format!("{agent}-tool-6"),
+            "Read",
+            &format!("{agent}-6"),
+        ));
+        activity
+    };
+    let mut pane = TranscriptPane::new(100, 14);
+    pane.transcript_mut()
+        .upsert_delegate(1, running_agent("agent-a", tools("A")));
+    pane.transcript_mut()
+        .upsert_delegate(1, running_agent("agent-b", tools("B")));
+    pane.transcript_mut()
+        .upsert_delegate(1, running_agent("agent-c", tools("C")));
+    let initial = pane.render_terminal_update(100, 14);
+    assert!(
+        !initial.live.iter().any(|line| line.contains("more rows")),
+        "initial live group was silently shortened: {:?}",
+        initial.live
+    );
+    pane.acknowledge_history(&initial.history);
+
+    pane.transcript_mut()
+        .upsert_delegate(1, running_agent("agent-a", tools_with_new_content("A")));
+    pane.transcript_mut()
+        .upsert_delegate(1, running_agent("agent-b", tools_with_new_content("B")));
+
+    let completed_c = completed_agent("agent-c", tools("C"));
+    pane.transcript_mut().upsert_delegate(1, completed_c);
+    let c_update = pane.render_terminal_update(100, 14);
+    let c_history = c_update
+        .history
+        .iter()
+        .flat_map(|block| block.lines.iter())
+        .map(|line| strip_ansi(line))
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(
+        c_history.contains("agent-c"),
+        "C did not commit first: {c_history}"
+    );
+    assert_eq!(
+        c_history.matches("Used Read").count(),
+        4,
+        "C history: {c_history}"
+    );
+    assert!(
+        c_history.rfind("Used Read").unwrap() < c_history.find("agent-c done").unwrap(),
+        "C body must follow its tool rows: {c_history}"
+    );
+    assert!(
+        c_history.contains("agent-c done"),
+        "C terminal body is missing: {c_history}"
+    );
+    assert!(
+        c_update
+            .live
+            .iter()
+            .all(|line| !strip_ansi(line).contains("agent-c")),
+        "completed C remained in the mutable group: {:?}",
+        c_update.live
+    );
+    assert!(
+        c_update
+            .live
+            .iter()
+            .all(|line| !strip_ansi(line).contains("more rows")),
+        "C-first live group was silently shortened: {:?}",
+        c_update.live
+    );
+    pane.acknowledge_history(&c_update.history);
+
+    pane.transcript_mut()
+        .upsert_delegate(1, completed_agent("agent-a", tools_with_new_content("A")));
+    let a_update = pane.render_terminal_update(100, 14);
+    let a_history = a_update
+        .history
+        .iter()
+        .flat_map(|block| block.lines.iter())
+        .map(|line| strip_ansi(line))
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(
+        a_history.contains("agent-a"),
+        "A did not commit after C: {a_history}"
+    );
+    assert_eq!(
+        a_history.matches("Used Read").count(),
+        4,
+        "A history: {a_history}"
+    );
+    assert!(
+        a_history.contains("A-6"),
+        "A newest tool was lost: {a_history}"
+    );
+    assert!(
+        a_history.rfind("Used Read").unwrap() < a_history.find("agent-a done").unwrap(),
+        "A body must follow its tool rows: {a_history}"
+    );
+    assert!(
+        !a_history.contains("agent-c done"),
+        "C was replayed after acknowledgement: {a_history}"
+    );
+    pane.acknowledge_history(&a_update.history);
+
+    pane.transcript_mut()
+        .upsert_delegate(1, completed_agent("agent-b", tools_with_new_content("B")));
+    let b_update = pane.render_terminal_update(100, 14);
+    let b_history = b_update
+        .history
+        .iter()
+        .flat_map(|block| block.lines.iter())
+        .map(|line| strip_ansi(line))
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(
+        b_history.contains("agent-b"),
+        "B did not commit after A: {b_history}"
+    );
+    assert_eq!(
+        b_history.matches("Used Read").count(),
+        4,
+        "B history: {b_history}"
+    );
+    assert!(
+        b_history.contains("B-6"),
+        "B newest tool was lost: {b_history}"
+    );
+    assert!(
+        !b_history.contains("agent-a done") && !b_history.contains("agent-c done"),
+        "earlier children were replayed: {b_history}"
+    );
+    assert!(
+        b_update.live.is_empty(),
+        "all children are terminal but the group stayed live: {:?}",
+        b_update.live
+    );
+}

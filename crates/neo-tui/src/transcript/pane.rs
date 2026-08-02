@@ -800,9 +800,8 @@ impl TranscriptPane {
 
     pub fn acknowledge_history(&mut self, blocks: &[FinalizedBlock]) {
         self.presentation.acknowledge(blocks);
-        let presentation = &self.presentation;
-        self.transcript
-            .retain_progressive_facts(|fact| !presentation.is_committed(fact.id.entry()));
+        self.presentation
+            .prune_acknowledged_facts(&mut self.transcript);
     }
 
     /// The earliest unresolved blocking entry (approval or question) in

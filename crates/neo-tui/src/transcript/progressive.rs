@@ -44,7 +44,15 @@ impl ProgressiveFactId {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ProgressiveFact {
     pub id: ProgressiveFactId,
+    pub(crate) capture_sequence: u64,
     pub(crate) payload: ProgressiveFactPayload,
+}
+
+impl ProgressiveFact {
+    #[must_use]
+    pub(crate) const fn capture_sequence(&self) -> u64 {
+        self.capture_sequence
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
