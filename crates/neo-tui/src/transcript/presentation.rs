@@ -1,12 +1,12 @@
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 
-use crate::primitive::Finalization;
 use crate::primitive::theme::TuiTheme;
+use crate::primitive::{Component, Finalization};
 use crate::terminal_image::{ImageRenderPolicy, TerminalImageCapabilities};
 
 use super::progressive::{ProgressiveFactPayload, render_progressive_fact};
 use super::streaming_prefix::stable_prefix_len;
-use super::{TranscriptEntry, TranscriptEntryId, TranscriptStore};
+use super::{ToolCallComponent, TranscriptEntry, TranscriptEntryId, TranscriptStore};
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum TranscriptBlockId {
@@ -107,6 +107,22 @@ struct LiveBlock {
     lines: Vec<String>,
     animated_line_indices: Vec<usize>,
     separator_before: bool,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct DelegateWaitProjection {
+    wait_index: usize,
+    target_index: usize,
+}
+
+impl DelegateWaitProjection {
+    fn emit_index(self) -> usize {
+        self.wait_index.min(self.target_index)
+    }
+
+    fn skipped_index(self) -> usize {
+        self.wait_index.max(self.target_index)
+    }
 }
 
 impl LiveBlock {
@@ -260,6 +276,7 @@ impl TranscriptPresentation {
         let mut frame = PresentationFrame::new(self.acknowledged_tail_owner);
         let attempt_start = transcript.live_model_attempt_start();
         let blocking_index = blocking_dialog_index(transcript);
+        let wait_projections = delegate_wait_projections(transcript);
         let mut terminal_history_barrier = false;
         let mut index = 0;
         while index < transcript.entries().len() {
@@ -291,6 +308,22 @@ impl TranscriptPresentation {
                 index += 1;
                 continue;
             };
+            if let Some(projection) = wait_projections
+                .iter()
+                .copied()
+                .find(|projection| projection.emit_index() == index)
+            {
+                render_delegate_wait_target(transcript, projection, options, &mut frame);
+                index += 1;
+                continue;
+            }
+            if wait_projections
+                .iter()
+                .any(|projection| projection.skipped_index() == index)
+            {
+                index += 1;
+                continue;
+            }
             let progressive = self.has_progressive_history(transcript, id);
             if let Some(expected_revision) = self.committed_entry_revisions.get(&id).copied() {
                 self.emit_progressive_facts(transcript, id, !blocked, options, &mut frame);
@@ -789,13 +822,17 @@ fn render_entry(
             });
         }
         Some(_) => {
-            if !blocked
-                && let Some(active_lines) = render_live_delegate_group(
-                    transcript.entries().get(index),
-                    options.width,
-                    options.theme,
-                )
-            {
+            let separator_before = matches!(frame.rendered_tail_owner, Some(tail) if tail != id);
+            let available_rows = options
+                .live_budget
+                .saturating_sub(live_blocks_cost(&frame.live_blocks))
+                .saturating_sub(usize::from(separator_before));
+            if let Some(active_lines) = render_live_delegate_group(
+                transcript.entries().get(index),
+                options.width,
+                options.theme,
+                available_rows,
+            ) {
                 lines = active_lines;
             }
             let separator_before = advance_semantic_owner(
@@ -821,42 +858,205 @@ fn render_live_delegate_group(
     entry: Option<&TranscriptEntry>,
     width: usize,
     theme: &TuiTheme,
+    max_rows: usize,
 ) -> Option<Vec<String>> {
     let TranscriptEntry::DelegateGroup { component } = entry? else {
         return None;
     };
-    if !component
-        .snapshots()
-        .iter()
-        .any(|snapshot| snapshot.state.is_terminal())
-    {
-        return None;
+    if max_rows == 0 {
+        return Some(Vec::new());
     }
-    let active = component
-        .snapshots()
-        .iter()
-        .filter(|snapshot| !snapshot.state.is_terminal())
-        .cloned()
-        .collect::<Vec<_>>();
-    if active.is_empty() {
-        return None;
+
+    // Group cards use one tool row per running child. If that still does not
+    // fit, keep every child status and spend the remaining rows on the most
+    // recently updated child activity.
+    let mut lines = component.render_live_with_theme(width, theme, 1);
+    if lines.len() > max_rows {
+        lines = component.render_live_status_with_theme(width, theme);
+        let status_rows = lines.len();
+        if status_rows > max_rows {
+            // On an extreme viewport, the child status rows are more useful
+            // than the group header; keep the complete child roster visible.
+            lines.drain(..1);
+        } else if status_rows < max_rows {
+            lines.extend(component.render_live_activity_tail(width, theme, max_rows - status_rows));
+        }
     }
-    let header = component
-        .render_with_theme(width, theme)
-        .into_iter()
-        .next()?;
-    let active_component =
-        super::delegate_group::DelegateGroupComponent::new(component.turn(), active);
-    let mut lines = active_component.render_with_theme(width, theme);
-    if let Some(first) = lines.first_mut() {
-        *first = header;
-    }
+    lines.truncate(max_rows);
     let mut rendered = lines
         .into_iter()
         .map(|line| line.to_ansi())
         .collect::<Vec<_>>();
     super::pane::trim_ansi_transcript_block(&mut rendered);
     Some(rendered)
+}
+
+fn render_live_delegate_target(
+    entry: Option<&TranscriptEntry>,
+    width: usize,
+    theme: &TuiTheme,
+    max_rows: usize,
+) -> Option<Vec<String>> {
+    match entry {
+        Some(TranscriptEntry::DelegateGroup { .. }) => {
+            render_live_delegate_group(entry, width, theme, max_rows)
+        }
+        Some(TranscriptEntry::DelegateSwarm { component }) => {
+            let mut lines = component
+                .render_with_theme(width, theme)
+                .into_iter()
+                .map(|line| line.to_ansi())
+                .collect::<Vec<_>>();
+            super::pane::trim_ansi_transcript_block(&mut lines);
+            if lines.len() > max_rows {
+                if max_rows == 0 {
+                    lines.clear();
+                } else {
+                    let header = lines.remove(0);
+                    let keep = max_rows.saturating_sub(1);
+                    let tail = lines.split_off(lines.len().saturating_sub(keep));
+                    lines = Vec::with_capacity(max_rows);
+                    lines.push(header);
+                    lines.extend(tail);
+                }
+            }
+            Some(lines)
+        }
+        _ => None,
+    }
+}
+
+fn render_delegate_wait_target(
+    transcript: &TranscriptStore,
+    projection: DelegateWaitProjection,
+    options: TranscriptRenderOptions<'_>,
+    frame: &mut PresentationFrame,
+) {
+    let Some(TranscriptEntry::ToolRun { component: wait }) =
+        transcript.entries().get(projection.wait_index)
+    else {
+        return;
+    };
+    let wait_lines = render_live_wait_header(wait, options.width, options.theme);
+    if wait_lines.is_empty() {
+        return;
+    }
+
+    let first_owner = transcript.entry_ids().get(projection.emit_index()).copied();
+    let target_owner = transcript.entry_ids().get(projection.target_index).copied();
+    let separator_before = matches!(
+        (frame.rendered_tail_owner, first_owner),
+        (Some(tail), Some(first)) if tail != first
+    );
+    let available_rows = options
+        .live_budget
+        .saturating_sub(live_blocks_cost(&frame.live_blocks))
+        .saturating_sub(usize::from(separator_before));
+    if available_rows == 0 {
+        return;
+    }
+    let target_rows = available_rows.saturating_sub(wait_lines.len());
+    let mut lines = wait_lines;
+    lines.extend(
+        render_live_delegate_target(
+            transcript.entries().get(projection.target_index),
+            options.width,
+            options.theme,
+            target_rows,
+        )
+        .unwrap_or_default(),
+    );
+    if lines.is_empty() {
+        return;
+    }
+    let separator_before = advance_semantic_owner(
+        &mut frame.rendered_tail_owner,
+        first_owner,
+        target_owner.or(first_owner),
+        true,
+    );
+    frame
+        .live_blocks
+        .push(LiveBlock::with_header(lines, true, separator_before));
+}
+
+fn render_live_wait_header(
+    component: &ToolCallComponent,
+    width: usize,
+    theme: &TuiTheme,
+) -> Vec<String> {
+    let mut component = component.clone();
+    let mut lines = component
+        .render_with_theme(width, theme)
+        .into_iter()
+        .take(1)
+        .map(|line| line.to_ansi())
+        .collect::<Vec<_>>();
+    super::pane::trim_ansi_transcript_block(&mut lines);
+    lines
+}
+
+fn delegate_wait_projections(transcript: &TranscriptStore) -> Vec<DelegateWaitProjection> {
+    let mut projections = Vec::new();
+    let mut claimed_targets = BTreeSet::new();
+    for (wait_index, entry) in transcript.entries().iter().enumerate() {
+        let TranscriptEntry::ToolRun { component: wait } = entry else {
+            continue;
+        };
+        let Some(ids) = pending_wait_target_ids(wait) else {
+            continue;
+        };
+        let Some(target_index) =
+            transcript
+                .entries()
+                .iter()
+                .enumerate()
+                .find_map(|(target_index, entry)| {
+                    let matches = match entry {
+                        TranscriptEntry::DelegateGroup { component } => {
+                            component.finalization() == Finalization::Live
+                                && ids.iter().any(|id| component.contains(id))
+                        }
+                        TranscriptEntry::DelegateSwarm { component } => {
+                            component.finalization() == Finalization::Live
+                                && ids.iter().any(|id| {
+                                    id == component.swarm_id()
+                                        || component
+                                            .snapshot()
+                                            .children
+                                            .iter()
+                                            .any(|child| child.agent.id.as_str() == id)
+                                })
+                        }
+                        _ => false,
+                    };
+                    (matches && !claimed_targets.contains(&target_index)).then_some(target_index)
+                })
+        else {
+            continue;
+        };
+        claimed_targets.insert(target_index);
+        projections.push(DelegateWaitProjection {
+            wait_index,
+            target_index,
+        });
+    }
+    projections
+}
+
+fn pending_wait_target_ids(component: &ToolCallComponent) -> Option<Vec<String>> {
+    if component.name() != "WaitDelegate" || component.finalization() != Finalization::Live {
+        return None;
+    }
+    let value = serde_json::from_str::<serde_json::Value>(component.arguments()?).ok()?;
+    let ids = value
+        .get("ids")
+        .and_then(serde_json::Value::as_array)?
+        .iter()
+        .filter_map(serde_json::Value::as_str)
+        .map(str::to_owned)
+        .collect::<Vec<_>>();
+    (!ids.is_empty()).then_some(ids)
 }
 
 fn terminal_summary_lines(

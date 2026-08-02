@@ -84,7 +84,7 @@ impl DelegateGroupComponent {
         let mut lines = vec![self.header(width, theme)];
         for (index, agent) in self.agents.iter().enumerate() {
             let last = index + 1 == self.agents.len();
-            lines.extend(self.render_agent(agent, last, width, theme));
+            lines.extend(self.render_agent(agent, last, width, theme, MAX_CHILD_TOOL_ROWS));
         }
         if self.agents.iter().any(can_detach) {
             lines.push(Line::styled(
@@ -93,6 +93,65 @@ impl DelegateGroupComponent {
             ));
         }
         lines
+    }
+
+    #[must_use]
+    pub(crate) fn render_live_with_theme(
+        &self,
+        width: usize,
+        theme: &TuiTheme,
+        max_tool_rows: usize,
+    ) -> Vec<Line> {
+        let mut lines = vec![self.header(width, theme)];
+        for (index, agent) in self.agents.iter().enumerate() {
+            let last = index + 1 == self.agents.len();
+            if agent.state.is_terminal() {
+                lines.push(self.render_agent_status(agent, last, width, theme));
+            } else {
+                lines.extend(self.render_agent(agent, last, width, theme, max_tool_rows));
+            }
+        }
+        if self.agents.iter().any(can_detach) {
+            lines.push(Line::styled(
+                "  Press Ctrl+B to run in background",
+                Style::default().fg(theme.text_muted),
+            ));
+        }
+        lines
+    }
+
+    #[must_use]
+    pub(crate) fn render_live_status_with_theme(
+        &self,
+        width: usize,
+        theme: &TuiTheme,
+    ) -> Vec<Line> {
+        let mut lines = vec![self.header(width, theme)];
+        for (index, agent) in self.agents.iter().enumerate() {
+            lines.push(self.render_agent_status(
+                agent,
+                index + 1 == self.agents.len(),
+                width,
+                theme,
+            ));
+        }
+        lines
+    }
+
+    #[must_use]
+    pub(crate) fn render_live_activity_tail(
+        &self,
+        width: usize,
+        theme: &TuiTheme,
+        max_tool_rows: usize,
+    ) -> Vec<Line> {
+        self.agents
+            .iter()
+            .filter(|agent| !agent.state.is_terminal())
+            .max_by_key(|agent| agent.updated_at_ms)
+            .map_or_else(Vec::new, |agent| {
+                self.render_agent_activity(agent, width, theme, max_tool_rows, "   ")
+            })
     }
 
     #[must_use]
@@ -184,35 +243,100 @@ impl DelegateGroupComponent {
         is_last: bool,
         width: usize,
         theme: &TuiTheme,
+        max_tool_rows: usize,
     ) -> Vec<Line> {
         let branch = if is_last { "└─" } else { "├─" };
         let continuation = if is_last { "   " } else { "│  " };
+        let mut lines = vec![self.render_agent_header(agent, branch, width, theme)];
+        lines.extend(self.render_agent_activity(agent, width, theme, max_tool_rows, continuation));
+        lines
+    }
+
+    fn render_agent_header(
+        &self,
+        agent: &AgentSnapshot,
+        branch: &str,
+        width: usize,
+        theme: &TuiTheme,
+    ) -> Line {
         let brand = Style::default().fg(theme.brand);
         let muted = Style::default().fg(theme.text_muted);
         let primary = Style::default().fg(theme.text_primary);
-        let mut lines = vec![
-            Line::from_spans(vec![
-                Span::styled(format!("  {branch} "), muted),
-                Span::styled(agent.display_name.as_str(), brand),
-                Span::raw("  "),
-                Span::styled(
-                    format!("[{}]", role_label(agent.role)),
-                    role_badge_style(agent.role, theme),
+        Line::from_spans(vec![
+            Span::styled(format!("  {branch} "), muted),
+            Span::styled(agent.display_name.as_str(), brand),
+            Span::raw("  "),
+            Span::styled(
+                format!("[{}]", role_label(agent.role)),
+                role_badge_style(agent.role, theme),
+            ),
+            Span::styled(
+                format!(
+                    "  {}{}",
+                    agent.display_title(),
+                    format_stats(agent, self.now_ms)
                 ),
-                Span::styled(
-                    format!(
-                        "  {}{}",
-                        agent.display_title(),
-                        format_stats(agent, self.now_ms)
-                    ),
-                    primary,
-                ),
-            ])
-            .truncate_to_width(width),
-        ];
+                primary,
+            ),
+        ])
+        .truncate_to_width(width)
+    }
 
+    fn render_agent_status(
+        &self,
+        agent: &AgentSnapshot,
+        is_last: bool,
+        width: usize,
+        theme: &TuiTheme,
+    ) -> Line {
+        let branch = if is_last { "└─" } else { "├─" };
+        let (marker, label, marker_color) = match agent.state {
+            AgentLifecycleState::Completed => ("✓", "done", theme.status_ok),
+            AgentLifecycleState::Failed | AgentLifecycleState::TimedOut => {
+                ("✗", "failed", theme.status_error)
+            }
+            AgentLifecycleState::Cancelled | AgentLifecycleState::Interrupted => {
+                ("◌", "cancelled", theme.status_warn)
+            }
+            AgentLifecycleState::Queued => ("◌", "queued", theme.status_pending),
+            AgentLifecycleState::Running => ("●", "running", theme.brand),
+        };
+        let muted = Style::default().fg(theme.text_muted);
+        Line::from_spans(vec![
+            Span::styled(format!("  {branch} "), muted),
+            Span::styled(marker, Style::default().fg(marker_color)),
+            Span::styled(
+                format!(" {}", agent.display_name.as_str()),
+                Style::default().fg(marker_color),
+            ),
+            Span::raw("  "),
+            Span::styled(
+                format!("[{}]", role_label(agent.role)),
+                role_badge_style(agent.role, theme),
+            ),
+            Span::styled(
+                format!(
+                    "  {} · {label}{}",
+                    agent.display_title(),
+                    format_stats(agent, self.now_ms)
+                ),
+                Style::default().fg(theme.text_primary),
+            ),
+        ])
+        .truncate_to_width(width)
+    }
+
+    fn render_agent_activity(
+        &self,
+        agent: &AgentSnapshot,
+        width: usize,
+        theme: &TuiTheme,
+        max_tool_rows: usize,
+        continuation: &str,
+    ) -> Vec<Line> {
         let indent = format!("  {continuation}    ");
-        let view = child_activity_view(agent, MAX_CHILD_TOOL_ROWS);
+        let mut lines = Vec::new();
+        let view = child_activity_view(agent, max_tool_rows);
         for row in &view.tools {
             lines.extend(render_child_tool_row(
                 row,
@@ -240,7 +364,7 @@ impl DelegateGroupComponent {
             ));
         }
 
-        if lines.len() == 1 {
+        if lines.is_empty() {
             lines.push(
                 Line::styled(
                     format!("{indent}◌ {}", fallback_activity(agent)),

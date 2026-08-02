@@ -146,6 +146,35 @@ fn live_text(pane: &mut TranscriptPane, width: usize, height: usize) -> String {
         .join("\n")
 }
 
+fn start_wait_delegate(pane: &mut TranscriptPane, id: &str, target: &str) {
+    pane.transcript_mut().push_tool_run(
+        id,
+        "WaitDelegate",
+        Some(serde_json::json!({ "ids": [target] }).to_string()),
+    );
+}
+
+fn finish_wait_delegate(pane: &mut TranscriptPane, id: &str, outcome: &str, is_error: bool) {
+    assert!(pane.transcript_mut().mutate_tool(id, |tool| {
+        tool.set_result(
+            Some(format!("outcome: {outcome}")),
+            Some(serde_json::json!({
+                "kind": "delegate_wait",
+                "outcome": outcome,
+                "aggregate": {
+                    "total": 1,
+                    "terminal": 0,
+                    "pending": 1,
+                    "not_found": usize::from(outcome == "not_found"),
+                },
+                "items": []
+            })),
+            is_error,
+            None,
+        )
+    }));
+}
+
 fn start_tool(pane: &mut TranscriptPane, id: &str, command: &str) {
     pane.apply_agent_event(neo_agent_core::AgentEvent::ToolExecutionStarted {
         turn: 1,
@@ -821,7 +850,7 @@ fn every_live_entry_family_is_bounded_and_commits_once() {
 }
 
 #[test]
-fn delegate_group_completion_order_is_capture_order_and_each_child_keeps_four_tools() {
+fn delegate_group_completion_order_is_capture_order_and_live_group_uses_one_tool() {
     let tools = |agent: &str| {
         (0..6)
             .map(|index| {
@@ -853,6 +882,16 @@ fn delegate_group_completion_order_is_capture_order_and_each_child_keeps_four_to
     assert!(
         !initial.live.iter().any(|line| line.contains("more rows")),
         "initial live group was silently shortened: {:?}",
+        initial.live
+    );
+    assert_eq!(
+        initial
+            .live
+            .iter()
+            .filter(|line| strip_ansi(line).contains("Used Read"))
+            .count(),
+        3,
+        "live group should show one tool per running child: {:?}",
         initial.live
     );
     pane.acknowledge_history(&initial.history);
@@ -890,12 +929,22 @@ fn delegate_group_completion_order_is_capture_order_and_each_child_keeps_four_to
         "C terminal body is missing: {c_history}"
     );
     assert!(
-        c_update
-            .live
-            .iter()
-            .all(|line| !strip_ansi(line).contains("agent-c")),
-        "completed C remained in the mutable group: {:?}",
+        c_update.live.iter().any(|line| {
+            let line = strip_ansi(line);
+            line.contains("agent-c") && line.contains("done")
+        }),
+        "completed C lost its mutable status row: {:?}",
         c_update.live
+    );
+    let c_live = c_update
+        .live
+        .iter()
+        .map(|line| strip_ansi(line))
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(
+        c_live.contains("A-6") && c_live.contains("B-6"),
+        "A/B live activity: {c_live}"
     );
     assert!(
         c_update
@@ -971,5 +1020,150 @@ fn delegate_group_completion_order_is_capture_order_and_each_child_keeps_four_to
         b_update.live.is_empty(),
         "all children are terminal but the group stayed live: {:?}",
         b_update.live
+    );
+}
+
+#[test]
+fn delegate_group_live_status_rows_survive_a_short_viewport() {
+    let tools = |agent: &str| {
+        (0..6)
+            .map(|index| {
+                done_tool(
+                    &format!("{agent}-tool-{index}"),
+                    "Read",
+                    &format!("{agent}-{index}"),
+                )
+            })
+            .collect::<Vec<_>>()
+    };
+    let mut pane = TranscriptPane::new(100, 9);
+    for agent in ["agent-a", "agent-b", "agent-c", "agent-d", "agent-e"] {
+        pane.transcript_mut()
+            .upsert_delegate(1, running_agent(agent, tools(agent)));
+    }
+
+    let update = pane.render_terminal_update(100, 9);
+    let live = update
+        .live
+        .iter()
+        .map(|line| strip_ansi(line))
+        .collect::<Vec<_>>();
+    for agent in ["agent-a", "agent-b", "agent-c", "agent-d", "agent-e"] {
+        assert!(
+            live.iter().any(|line| line.contains(agent)),
+            "missing {agent} status row: {live:?}"
+        );
+    }
+    assert!(
+        live.iter().all(|line| !line.contains("more rows")),
+        "status rows were replaced by a generic truncation summary: {live:?}"
+    );
+}
+
+#[test]
+fn pending_wait_delegate_is_above_running_group_regardless_of_entry_order() {
+    let mut before = TranscriptPane::new(120, 12);
+    let agent = running_agent(
+        "wait-before",
+        vec![done_tool("wait-before-tool", "Read", "before.rs")],
+    );
+    let target = agent.id.as_str().to_owned();
+    let other = running_agent("wait-before-other", Vec::new());
+    start_wait_delegate(&mut before, "wait-before-call", &target);
+    before.transcript_mut().upsert_delegate(1, agent);
+    before.transcript_mut().upsert_delegate(1, other);
+    let before_live = live_text(&mut before, 120, 12);
+    assert_wait_group_order(&before_live);
+
+    let mut after = TranscriptPane::new(120, 12);
+    let agent = running_agent(
+        "wait-after",
+        vec![done_tool("wait-after-tool", "Read", "after.rs")],
+    );
+    let target = agent.id.as_str().to_owned();
+    let other = running_agent("wait-after-other", Vec::new());
+    after.transcript_mut().upsert_delegate(1, agent);
+    after.transcript_mut().upsert_delegate(1, other);
+    start_wait_delegate(&mut after, "wait-after-call", &target);
+    let after_live = live_text(&mut after, 120, 12);
+    assert_wait_group_order(&after_live);
+}
+
+#[test]
+fn pending_wait_delegate_is_above_running_swarm() {
+    let mut pane = TranscriptPane::new(120, 14);
+    let swarm = running_swarm(
+        "swarm-wait",
+        vec![
+            running_agent("swarm-wait-a", Vec::new()),
+            running_agent("swarm-wait-b", Vec::new()),
+        ],
+    );
+    let target = swarm.swarm_id.clone();
+    start_wait_delegate(&mut pane, "wait-swarm-call", &target);
+    pane.transcript_mut().upsert_delegate_swarm(swarm);
+
+    let live = live_text(&mut pane, 120, 14);
+    let wait = live.find("Waiting for").expect("wait row missing");
+    let swarm = live.find("DelegateSwarm").expect("swarm header missing");
+    assert!(wait < swarm, "wait must render above swarm: {live}");
+}
+
+#[test]
+fn ended_wait_delegate_does_not_remove_running_group() {
+    for (outcome, is_error) in [("wait_timed_out", false), ("not_found", true)] {
+        let mut pane = TranscriptPane::new(120, 12);
+        let agent = running_agent(
+            "wait-ended",
+            vec![done_tool("wait-ended-tool", "Read", "ended.rs")],
+        );
+        let target = agent.id.as_str().to_owned();
+        let other = running_agent("wait-ended-other", Vec::new());
+        pane.transcript_mut().upsert_delegate(1, agent);
+        pane.transcript_mut().upsert_delegate(1, other);
+        start_wait_delegate(&mut pane, "wait-ended-call", &target);
+        finish_wait_delegate(&mut pane, "wait-ended-call", outcome, is_error);
+
+        let update = pane.render_terminal_update(120, 12);
+        let history = update
+            .history
+            .iter()
+            .flat_map(|block| block.lines.iter())
+            .map(|line| strip_ansi(line))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let live = update
+            .live
+            .iter()
+            .map(|line| strip_ansi(line))
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(
+            history.contains("Wait timed out") || history.contains("Target not found"),
+            "wait outcome missing for {outcome}: {history}"
+        );
+        assert!(live.contains("Delegate group"), "group disappeared: {live}");
+        assert!(
+            !history.contains("Delegate group"),
+            "group moved to history: {history}"
+        );
+    }
+}
+
+fn assert_wait_group_order(live: &str) {
+    let wait = live.find("Waiting for").expect("wait row missing");
+    let group = live
+        .find("Delegate group")
+        .unwrap_or_else(|| panic!("group header missing: {live}"));
+    assert!(wait < group, "wait must render above group: {live}");
+    assert_eq!(
+        live.matches("Waiting for").count(),
+        1,
+        "duplicate wait: {live}"
+    );
+    assert_eq!(
+        live.matches("Delegate group").count(),
+        1,
+        "duplicate group: {live}"
     );
 }
