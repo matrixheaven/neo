@@ -23,6 +23,7 @@ Context preservation is a hard invariant for every Neo feature and code change:
 2. **Never rewrite system prompts or historical conversation.** Canonical system instructions, user messages, assistant messages, tool calls, tool results, reasoning, and session events are append-only records. Corrections, updates, and new instructions must be represented by a new event appended after the existing records.
 3. **Derived views must not replace the source.** Compaction, token-budget views, redaction, export, replay, and provider-specific projections may create a separate derived representation only when the canonical records and their order remain intact; they must never mutate, delete, reorder, or silently omit existing canonical content.
 4. **Verify prefix stability when touching context code.** Tests or other focused evidence must prove that an unchanged session keeps the same cache prefix and that every new piece of context is appended. A change that cannot preserve this invariant must be rejected or redesigned before implementation.
+5. **Keep micro compaction and snip+dedup disabled by default.** Every development change must preserve their default-off state. No new feature may depend on, require, or silently enable either mechanism. Treat both as high-cost, high-risk features; they must remain independently opt-in and must never become prerequisites for other functionality.
 
 ## Work loop: recall → scope → verify
 
