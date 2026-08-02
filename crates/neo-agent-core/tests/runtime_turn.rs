@@ -10201,7 +10201,7 @@ async fn compaction_rehydration_never_admits_previously_ignored_bundle() {
     let pinned = context
         .messages()
         .iter()
-        .filter(|message| matches!(message, AgentMessage::Instruction { .. }))
+        .filter(|message| message.is_injection_variant("instruction_epoch"))
         .map(AgentMessage::text)
         .collect::<String>();
     assert!(
@@ -10256,7 +10256,7 @@ async fn compacted_sibling_scope_reactivates_when_reentered() {
     let pinned = context
         .messages()
         .iter()
-        .filter(|message| matches!(message, AgentMessage::Instruction { .. }))
+        .filter(|message| message.is_injection_variant("instruction_epoch"))
         .map(AgentMessage::text)
         .collect::<Vec<_>>()
         .concat();
@@ -11053,12 +11053,14 @@ async fn baseline_epoch_precedes_first_user_message_for_new_and_legacy_sessions(
     let instruction_position = context
         .messages()
         .iter()
-        .position(|message| matches!(message, AgentMessage::Instruction { .. }))
+        .position(|message| message.is_injection_variant("instruction_epoch"))
         .expect("pinned instruction message");
     let user_position = context
         .messages()
         .iter()
-        .position(|message| matches!(message, AgentMessage::User { .. }))
+        .position(
+            |message| matches!(message, AgentMessage::User { origin, .. } if origin.is_user()),
+        )
         .expect("user message");
     assert!(
         instruction_position < user_position,
@@ -11233,27 +11235,19 @@ fn assert_rehydrated_instruction_context(
     context: &AgentContext,
     baseline_model_content: &str,
     nested_model_content: &str,
-    nested_generation: u64,
+    _nested_generation: u64,
 ) {
-    let pinned: Vec<(u64, String)> = context
+    let pinned: Vec<String> = context
         .messages()
         .iter()
-        .filter_map(|message| match message {
-            AgentMessage::Instruction {
-                generation,
-                content,
-            } => Some((
-                *generation,
-                content.iter().filter_map(Content::as_text).collect(),
-            )),
-            _ => None,
-        })
+        .filter(|message| message.is_injection_variant("instruction_epoch"))
+        .map(AgentMessage::text)
         .collect();
     assert_eq!(
         pinned,
         vec![
-            (1, baseline_model_content.to_owned()),
-            (nested_generation, nested_model_content.to_owned()),
+            baseline_model_content.to_owned(),
+            nested_model_content.to_owned(),
         ],
         "rehydrate-then-admit must preserve instruction bytes exactly"
     );

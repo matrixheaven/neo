@@ -823,7 +823,7 @@ fn child_runtime_deps(ctx: &ToolContext) -> Result<ChildRuntimeDeps, ToolError> 
 }
 
 /// When `output_schema` is set, validate the child result and perform exactly one
-/// tools-disabled repair (journaled when a workflow invocation is active).
+/// non-executing repair (journaled when a workflow invocation is active).
 async fn apply_child_output_schema(
     ctx: &ToolContext,
     deps: &ChildRuntimeDeps,
@@ -918,7 +918,7 @@ async fn apply_child_output_schema(
         return Ok((output, extra));
     }
 
-    // Non-workflow: still enforce one local tools-disabled repair without journal.
+    // Non-workflow: still enforce one local non-executing repair without journal.
     let first_raw = crate::multi_agent::child_final_assistant_text(&output);
     let first_usage = accumulate_actual_usage(None, &output.events);
     match accept_structured_output(
@@ -939,7 +939,7 @@ async fn apply_child_output_schema(
         Err(first_err) => {
             let repair = ctx
                 .multi_agent
-                .run_tools_disabled_schema_repair_turn(
+                .run_schema_repair_turn(
                     deps.clone(),
                     &output.snapshot.id,
                     &first_err.to_string(),

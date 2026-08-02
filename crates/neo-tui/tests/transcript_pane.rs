@@ -2663,6 +2663,7 @@ fn instruction_test_epoch(generation: u64, deferred_tool_ids: &[&str]) -> Instru
             nominal: 65_536,
             actual: 65_536,
         },
+        body_revisions: None,
         model_content: Some("scoped rules".to_owned()),
     }
 }

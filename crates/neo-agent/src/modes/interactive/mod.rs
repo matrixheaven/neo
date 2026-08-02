@@ -2739,9 +2739,6 @@ fn replay_session_into_transcript(
                             transcript.replay_message(message);
                         }
                     }
-                    // Instruction content is replayed from the owning
-                    // InstructionEpoch event, never as ordinary transcript prose.
-                    AgentMessage::Instruction { .. } => {}
                 },
                 // Retry intermediate ticks are live-only. ApprovalRequested and
                 // ApprovalResolved are transcript-only history: apply them so

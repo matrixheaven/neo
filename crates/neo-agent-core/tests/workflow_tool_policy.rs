@@ -193,7 +193,7 @@ fn workflow_tool_is_root_only_and_description_has_no_choreography() {
     assert!(!child.contains("TaskAnswer"));
     assert!(!child.contains("RunWorkflow"));
 
-    // Schema-repair turns run tools-disabled: no workflow launch surface.
+    // Schema-repair turns do not execute tools: no workflow launch surface.
     let repair = ToolRegistry::new();
     assert!(!repair.contains("Workflow"));
 

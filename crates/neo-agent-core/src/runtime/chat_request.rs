@@ -6,6 +6,8 @@ use super::image_blobs::resolve_image_blobs;
 use crate::compaction::projection::{ProjectionPlan, project_for_request};
 use crate::{AgentMessage, sanitize_tool_exchange_messages};
 
+pub(super) const DYNAMIC_INSTRUCTION_RULES: &str = "Neo instruction updates arrive as user-role injections. Each <instruction_revision> defines one immutable revision body. The highest-generation <instruction_active_state> is the complete active set and supersedes every earlier active state. Revisions omitted from the latest active state are inactive; previously defined bodies remain available for later reactivation.";
+
 pub(super) async fn chat_request(
     config: &AgentConfig,
     context: &AgentContext,
@@ -18,6 +20,7 @@ pub(super) async fn chat_request(
     if let Some(workspace_context) = workspace_context_message(config) {
         messages.push(workspace_context.to_chat_message());
     }
+    messages.push(AgentMessage::system_text(DYNAMIC_INSTRUCTION_RULES).to_chat_message());
     let mut context_messages = context.messages.clone();
     if let Some(transform) = &config.context_append_transform {
         context_messages.extend(transform(context.messages()));
@@ -31,29 +34,12 @@ pub(super) async fn chat_request(
     // trailing tool turns and against compaction boundaries that accidentally
     // orphan such a message.
     let context_messages = sanitize_tool_exchange_messages(&context_messages);
-    let turn_system_context = config
-        .turn_system_context
-        .as_deref()
-        .map(|context| AgentMessage::system_text(context).to_chat_message());
-    let last_user_index = context_messages
-        .iter()
-        .rposition(|message| matches!(message, AgentMessage::User { .. }));
-    for (index, message) in context_messages.iter().enumerate() {
-        if Some(index) == last_user_index
-            && let Some(turn_system_context) = &turn_system_context
-        {
-            messages.push(turn_system_context.clone());
-        }
+    for message in context_messages.iter() {
         messages.push(if config.replay_reasoning {
             message.to_chat_message()
         } else {
             without_reasoning_content(message.to_chat_message())
         });
-    }
-    if last_user_index.is_none()
-        && let Some(turn_system_context) = turn_system_context
-    {
-        messages.push(turn_system_context);
     }
     ChatRequest {
         model: config.model.clone(),
@@ -454,9 +440,9 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn chat_request_places_workflow_context_before_latest_user_message() {
+    async fn chat_request_does_not_project_unappended_workflow_injection() {
         let config = AgentConfig::for_model(tool_model())
-            .with_turn_system_context("Workflow guidance")
+            .with_turn_injection("Workflow guidance")
             .with_system_prompt("Base system");
         let mut context = AgentContext::new();
         context.append_message(AgentMessage::user_text("Earlier request"));
@@ -468,22 +454,37 @@ mod tests {
         context.append_message(AgentMessage::user_text("Current request"));
 
         let request = chat_request(&config, &context, &ProjectionPlan::disabled()).await;
-        let latest_user_index = request
-            .messages
-            .iter()
-            .rposition(|message| matches!(message, ChatMessage::User { .. }))
-            .expect("current user message");
-        let Some(ChatMessage::System { content }) = request.messages.get(latest_user_index - 1)
-        else {
-            panic!("workflow guidance must directly precede the current user message");
-        };
-        assert!(
-            content.iter().any(|part| matches!(
-                part,
-                ContentPart::Text { text } if text == "Workflow guidance"
-            )),
-            "{request:?}"
-        );
+        assert!(!format!("{request:?}").contains("Workflow guidance"));
+    }
+
+    #[tokio::test]
+    async fn chat_request_preserves_prefix_when_instruction_update_appends() {
+        let config = AgentConfig::for_model(tool_model()).with_system_prompt("Base system");
+        let mut context = AgentContext::new();
+        context.append_message(AgentMessage::injection_text(
+            "<instruction_revision id=\"root\">root rules</instruction_revision>\n<instruction_active_state generation=\"1\" />",
+            "instruction_epoch",
+        ));
+        context.append_message(AgentMessage::user_text("First request"));
+        let first = chat_request(&config, &context, &ProjectionPlan::disabled()).await;
+
+        context.append_message(AgentMessage::assistant(
+            vec![Content::text("First answer")],
+            Vec::new(),
+            crate::StopReason::EndTurn,
+        ));
+        context.append_message(AgentMessage::injection_text(
+            "<instruction_active_state generation=\"2\" />",
+            "instruction_epoch",
+        ));
+        let second = chat_request(&config, &context, &ProjectionPlan::disabled()).await;
+
+        assert_eq!(first.tools, second.tools);
+        assert_eq!(first.messages, second.messages[..first.messages.len()]);
+        assert!(matches!(
+            second.messages.last(),
+            Some(ChatMessage::User { .. })
+        ));
     }
 
     #[tokio::test]

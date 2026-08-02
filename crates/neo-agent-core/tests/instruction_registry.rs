@@ -4,6 +4,7 @@
 //! comparison (macOS maps `/var` to `/private/var`). Tests never touch the
 //! process environment or shared cwd.
 
+use std::collections::BTreeMap;
 use std::ffi::OsString;
 use std::fmt::Write as _;
 use std::fs;
@@ -817,7 +818,7 @@ async fn changed_invalid_utf8_bytes_emit_new_blocked_epoch() {
 }
 
 #[tokio::test]
-async fn removed_epoch_revokes_prior_instruction_authority() {
+async fn removed_epoch_deactivates_without_resending_body_on_revisit() {
     let (_temp, workspace) = workspace_fixture();
     fs::write(workspace.join("AGENTS.md"), "OLD AUTHORITY\n").expect("agents file");
     let registry = InstructionRegistry::new(config_for(&workspace, None)).expect("registry");
@@ -837,7 +838,7 @@ async fn removed_epoch_revokes_prior_instruction_authority() {
     state.apply_epoch(&activated, &fingerprint);
     fs::remove_file(workspace.join("AGENTS.md")).expect("remove agents file");
 
-    let (removed, _) = expect_defer(
+    let (removed, removed_fingerprint) = expect_defer(
         registry
             .reconcile(
                 reconcile_request(
@@ -850,13 +851,32 @@ async fn removed_epoch_revokes_prior_instruction_authority() {
     );
 
     assert_eq!(removed.outcome, InstructionEpochOutcome::Removed);
-    let authority = removed
+    let update = removed
         .model_content
         .as_deref()
-        .expect("removal must carry model-visible authority");
-    assert!(authority.contains("complete current path-scoped instruction snapshot"));
-    assert!(authority.contains("No path-scoped instruction bundles are currently active"));
-    assert!(!authority.contains("OLD AUTHORITY"));
+        .expect("removal must carry model-visible active state");
+    assert!(update.contains("<instruction_active_state"));
+    assert!(!update.contains("<active_instruction"));
+    assert!(!update.contains("OLD AUTHORITY"));
+    state.apply_epoch(&removed, &removed_fingerprint);
+
+    fs::write(workspace.join("AGENTS.md"), "OLD AUTHORITY\n").expect("restore agents file");
+    let (revisited, _) = expect_defer(
+        registry
+            .reconcile(
+                reconcile_request(
+                    InstructionReconcileKind::ToolPreflight,
+                    vec![workspace.clone()],
+                ),
+                &state,
+            )
+            .await,
+    );
+    let revisit_update = revisited.model_content.as_deref().expect("revisit update");
+    assert!(revisit_update.contains("<active_instruction"));
+    assert!(!revisit_update.contains("<instruction_revision"));
+    assert!(!revisit_update.contains("OLD AUTHORITY"));
+    assert_eq!(revisited.body_revisions, Some(BTreeMap::new()));
 }
 
 #[tokio::test]

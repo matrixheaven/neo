@@ -430,9 +430,9 @@ async fn running_workflow_handle(
 }
 
 /// The real workflow Delegate entry repairs invalid child output exactly once
-/// with tools disabled and preserves aggregate usage.
+/// without tool execution and preserves aggregate usage.
 #[tokio::test]
-async fn child_schema_invalid_output_gets_exactly_one_tools_disabled_repair() {
+async fn child_schema_invalid_output_gets_one_non_executing_repair_with_stable_tools() {
     use neo_agent_core::workflow::journal::{JournalPayload, collect_journal};
     use neo_agent_core::workflow::{WorkflowInvocationKind, WorkflowOutcomeStatus};
 
@@ -472,6 +472,8 @@ async fn child_schema_invalid_output_gets_exactly_one_tools_disabled_repair() {
     config = config
         .with_permission_mode(neo_agent_core::PermissionMode::Yolo)
         .with_workflow_runtime(runtime);
+    let registry = std::sync::Arc::new(ToolRegistry::with_builtin_tools());
+    config.tools = registry.specs();
     let input = json!({
         "task": "return structured ok",
         "output_schema": child_schema_doc(),
@@ -479,7 +481,7 @@ async fn child_schema_invalid_output_gets_exactly_one_tools_disabled_repair() {
     let dispatch = WorkflowDispatchHandle {
         config,
         model_client: harness.client(),
-        registry: std::sync::Arc::new(ToolRegistry::with_builtin_tools()),
+        registry,
         process_supervisor: ProcessSupervisor::default(),
         context: AgentContext::new(),
     };
@@ -513,9 +515,12 @@ async fn child_schema_invalid_output_gets_exactly_one_tools_disabled_repair() {
         "expected original + one repair: {requests:?}"
     );
     assert!(
-        requests[1].tools.is_empty(),
-        "repair turn must advertise no tools: {:?}",
-        requests[1].tools
+        !requests[0].tools.is_empty(),
+        "initial tools must be non-empty"
+    );
+    assert_eq!(
+        requests[1].tools, requests[0].tools,
+        "repair must preserve advertised tools"
     );
     let response_format = requests[0]
         .options
@@ -530,7 +535,7 @@ async fn child_schema_invalid_output_gets_exactly_one_tools_disabled_repair() {
         Some(response_format),
         "repair must reuse the exact strict response format"
     );
-    for request in &requests {
+    for (index, request) in requests.iter().enumerate() {
         let prompt = request
             .messages
             .iter()
@@ -555,7 +560,9 @@ async fn child_schema_invalid_output_gets_exactly_one_tools_disabled_repair() {
             "{prompt}"
         );
         assert!(prompt.contains("Do not use a Markdown fence"), "{prompt}");
-        assert!(prompt.contains("Do not call a formatting tool"), "{prompt}");
+        if index == 1 {
+            assert!(prompt.contains("Do not call any tool"), "{prompt}");
+        }
     }
 
     let usage = outcome.actual_usage.expect("usage");
@@ -593,10 +600,10 @@ async fn child_schema_invalid_output_gets_exactly_one_tools_disabled_repair() {
     assert_eq!(repair_starts, 1, "exactly one repair start: {kinds:?}");
 }
 
-/// The real workflow swarm entry applies the same single tools-disabled repair
+/// The real workflow swarm entry applies the same single non-executing repair
 /// to a successful child whose content violates its output schema.
 #[tokio::test]
-async fn workflow_swarm_invalid_output_gets_exactly_one_tools_disabled_repair() {
+async fn workflow_swarm_invalid_output_gets_exactly_one_non_executing_repair() {
     use neo_agent_core::multi_agent::{
         AgentRole, ChildPlan, ChildRuntimeDeps, ChildWorktreePolicy, DelegateContext,
         MultiAgentRuntime,
@@ -673,7 +680,7 @@ async fn workflow_swarm_invalid_output_gets_exactly_one_tools_disabled_repair() 
         2,
         "one child turn plus one repair: {requests:?}"
     );
-    assert!(requests[1].tools.is_empty(), "{requests:?}");
+    assert_eq!(requests[1].tools, requests[0].tools, "{requests:?}");
 
     let run_dir = neo_agent_core::workflow::run_dir(session_dir, &handle.run_id);
     let envelopes = collect_journal(
@@ -717,10 +724,17 @@ async fn schema_repair_tool_attempt_is_forbidden() {
         tool_attempt_turn(),
     ]);
     let multi = MultiAgentRuntime::new().with_session_directory(session_dir.to_path_buf());
+    let mut config = neo_agent_core::AgentConfig::for_model(harness.model())
+        .with_workspace_root(session_dir.to_path_buf())
+        .expect("workspace");
+    config.tools = vec![neo_ai::ToolSpec::string_arg(
+        "Read",
+        "Read a file",
+        "path",
+        "Path to read",
+    )];
     let deps = ChildRuntimeDeps::new(
-        neo_agent_core::AgentConfig::for_model(harness.model())
-            .with_workspace_root(session_dir.to_path_buf())
-            .expect("workspace"),
+        config,
         harness.client(),
         std::sync::Arc::new(ToolRegistry::new()),
     );
@@ -794,7 +808,8 @@ async fn schema_repair_tool_attempt_is_forbidden() {
         2,
         "one original + one failed repair"
     );
-    assert!(harness.requests()[1].tools.is_empty());
+    assert!(!harness.requests()[0].tools.is_empty());
+    assert_eq!(harness.requests()[1].tools, harness.requests()[0].tools);
 
     let run_dir = neo_agent_core::workflow::run_dir(session_dir, &handle.run_id);
     let envelopes = collect_journal(

@@ -75,7 +75,7 @@ pub enum WorkflowProjectionStage {
     Finished,
 }
 
-/// Host acceptance of a child structured output with at most one tools-disabled repair.
+/// Host acceptance of a child structured output with at most one non-executing repair.
 #[derive(Debug, Clone)]
 pub struct ChildSchemaAcceptResult {
     pub ok: bool,
@@ -89,7 +89,7 @@ pub struct ChildSchemaAcceptResult {
     pub actual_usage: Option<AgentTokenUsage>,
 }
 
-/// Inputs for child structured-output validation plus one tools-disabled repair.
+/// Inputs for child structured-output validation plus one non-executing repair.
 #[derive(Debug, Clone, Copy)]
 pub struct ChildSchemaRepairRequest<'a> {
     pub invocation_id: &'a str,
@@ -1449,7 +1449,7 @@ impl WorkflowRuntime {
             .await
     }
 
-    /// Append `SchemaRepairStarted` before a tools-disabled corrective model call.
+    /// Append `SchemaRepairStarted` before a non-executing corrective model call.
     ///
     /// Returns the durable `repair_id`. Callers must not dispatch the repair model
     /// effect until this append has synced. A second start for the same
@@ -2328,12 +2328,12 @@ impl WorkflowRuntime {
         guard.control.stop_token.is_cancelled()
     }
 
-    /// Validate a child output against `schema`, with exactly one tools-disabled repair.
+    /// Validate a child output against `schema`, with exactly one non-executing repair.
     ///
     /// Ordering:
     /// 1. validate first provider-native/assistant value;
     /// 2. on failure, append `SchemaRepairStarted` before any corrective model call;
-    /// 3. continue the same child session with tools disabled;
+    /// 3. continue the same child session without allowing tool execution;
     /// 4. reject repair tool attempts as `schema_repair_tool_forbidden`;
     /// 5. append `SchemaRepairFinished` and aggregate both attempts' actual usage.
     ///
@@ -2392,12 +2392,7 @@ impl WorkflowRuntime {
                 let repair_id = self.start_schema_repair(run_id, invocation_id).await?;
 
                 let repair = multi_agent
-                    .run_tools_disabled_schema_repair_turn(
-                        deps,
-                        agent_id,
-                        &first_err.to_string(),
-                        schema.schema(),
-                    )
+                    .run_schema_repair_turn(deps, agent_id, &first_err.to_string(), schema.schema())
                     .await
                     .map_err(|e| WorkflowError::Host(format!("schema repair turn failed: {e}")))?;
 

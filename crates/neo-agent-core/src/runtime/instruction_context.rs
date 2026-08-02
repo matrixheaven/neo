@@ -11,12 +11,12 @@ use super::config::AgentConfig;
 use super::context::AgentContext;
 use super::context_budget::{ContextBudgetEstimator, ContextBudgetSnapshot};
 use super::estimate_message_tokens;
+use crate::AgentMessage;
 use crate::compaction::projection::ProjectionPlan;
 use crate::instructions::{
     InstructionBudget, InstructionEpochData, InstructionError, InstructionFingerprint,
     InstructionRegistry, InstructionScopeKind,
 };
-use crate::{AgentMessage, Content};
 
 /// How to admit one pending instruction epoch without ever injecting a
 /// large epoch and immediately summarizing it.
@@ -93,10 +93,7 @@ impl InstructionContextBridge {
     ) -> PendingEpochAdmission {
         let snapshot = Self::snapshot(config, context);
         let pending_tokens = epoch.model_content.as_deref().map_or(0, |content| {
-            estimate_message_tokens(&AgentMessage::Instruction {
-                generation: epoch.generation,
-                content: vec![Content::text(content)],
-            })
+            estimate_message_tokens(&AgentMessage::injection_text(content, "instruction_epoch"))
         });
         if pending_tokens == 0 {
             return PendingEpochAdmission::Admit;
@@ -121,8 +118,8 @@ impl InstructionContextBridge {
         }
     }
 
-    /// Applies one admitted epoch: pins its model content as an
-    /// [`AgentMessage::Instruction`], updates agent-local visibility, and
+    /// Applies one admitted epoch: appends its model content as an instruction
+    /// injection, updates agent-local visibility, and
     /// records the decision fingerprint so an unchanged re-probe proceeds
     /// silently.
     ///
@@ -210,6 +207,7 @@ impl InstructionContextBridge {
                 )
             })
             .collect();
+        state.retained_body_revisions = state.visible_revisions.clone();
         Ok(repinned)
     }
 
@@ -248,6 +246,7 @@ mod tests {
                 nominal: 65_536,
                 actual: 65_536,
             },
+            body_revisions: None,
             model_content,
         }
     }

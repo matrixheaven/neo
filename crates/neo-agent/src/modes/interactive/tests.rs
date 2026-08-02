@@ -8059,6 +8059,7 @@ fn rebuild_transcript_sets_workspace_root_before_replaying_instruction_cards() {
             nominal: 65_536,
             actual: 65_536,
         },
+        body_revisions: None,
         model_content: Some("SECRET INSTRUCTION BODY".to_owned()),
     };
     let loaded = LoadedSessionTranscript::new(SESSION_A, Vec::new(), Vec::new())
@@ -12570,9 +12571,7 @@ async fn workflow_intent_slash_end_to_end_selects_runs_and_persists() {
                 .expect("workspace root")
                 .with_session_directory(session_path.parent().expect("session parent"))
                 .with_permission_mode(PermissionMode::Yolo)
-                .with_turn_system_context(
-                    request.workflow_context.clone().expect("workflow context"),
-                )
+                .with_turn_injection(request.workflow_context.clone().expect("workflow context"))
                 .with_workflow_runtime(config.workflow_runtime.clone())
                 .with_workflow_definitions(config.workflow_definitions.clone());
             let runtime = AgentRuntime::with_tools(

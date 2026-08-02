@@ -178,6 +178,7 @@ fn base_instruction_epoch(outcome: InstructionEpochOutcome) -> InstructionEpochD
             nominal: 65_536,
             actual: 65_536,
         },
+        body_revisions: None,
         model_content: Some(format!(
             "system rules {INSTRUCTION_SENTINEL} with absolute path /home/user/.neo/AGENTS.md"
         )),

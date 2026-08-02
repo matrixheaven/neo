@@ -983,9 +983,10 @@ mod tests {
     }
 
     #[test]
-    fn anthropic_omits_response_format_wire_hint() {
+    fn anthropic_omits_response_format_wire_hint_but_preserves_tools() {
         use crate::{
             ApiKind, ModelCapabilities, ModelSpec, ProviderId, RequestOptions, ResponseFormat,
+            ToolSpec,
         };
 
         let request = ChatRequest {
@@ -993,14 +994,19 @@ mod tests {
                 provider: ProviderId("p".to_owned()),
                 model: "m".to_owned(),
                 api: ApiKind::AnthropicMessages,
-                capabilities: ModelCapabilities::chat(),
+                capabilities: ModelCapabilities::tool_chat(),
             },
             messages: vec![ChatMessage::User {
                 content: vec![ContentPart::Text {
                     text: "hi".to_owned(),
                 }],
             }],
-            tools: vec![],
+            tools: vec![ToolSpec::string_arg(
+                "read_file",
+                "Read a file",
+                "path",
+                "Path to read",
+            )],
             options: RequestOptions {
                 response_format: Some(ResponseFormat {
                     name: "result".to_owned(),
@@ -1016,5 +1022,67 @@ mod tests {
         assert!(body.pointer("/text/format").is_none());
         assert!(body.pointer("/generationConfig/responseSchema").is_none());
         assert!(body.pointer("/generationConfig/responseMimeType").is_none());
+        assert_eq!(body.pointer("/tools/0/name"), Some(&json!("read_file")));
+    }
+
+    #[test]
+    fn anthropic_keeps_system_tools_and_prior_messages_as_request_prefix() {
+        use crate::{
+            ApiKind, CacheRetention, ModelCapabilities, ModelSpec, ProviderId, RequestOptions,
+            ToolSpec,
+        };
+
+        let model = ModelSpec {
+            provider: ProviderId("p".to_owned()),
+            model: "m".to_owned(),
+            api: ApiKind::AnthropicMessages,
+            capabilities: ModelCapabilities::tool_chat(),
+        };
+        let tools = vec![ToolSpec::string_arg(
+            "read_file",
+            "Read a file",
+            "path",
+            "Path to read",
+        )];
+        let first = ChatRequest {
+            model: model.clone(),
+            messages: vec![
+                ChatMessage::System {
+                    content: vec![ContentPart::Text {
+                        text: "stable system".to_owned(),
+                    }],
+                },
+                ChatMessage::User {
+                    content: vec![ContentPart::Text {
+                        text: "first prompt".to_owned(),
+                    }],
+                },
+                ChatMessage::User {
+                    content: vec![ContentPart::Text {
+                        text: "instruction update".to_owned(),
+                    }],
+                },
+            ],
+            tools: tools.clone(),
+            options: RequestOptions {
+                cache: CacheRetention::None,
+                ..RequestOptions::default()
+            },
+        };
+        let mut second = first.clone();
+        second.messages.push(ChatMessage::Assistant {
+            content: vec![ContentPart::Text {
+                text: "answer".to_owned(),
+            }],
+            tool_calls: Vec::new(),
+        });
+
+        let first_body = request_body(&first).expect("first body");
+        let second_body = request_body(&second).expect("second body");
+        assert_eq!(first_body["system"], second_body["system"]);
+        assert_eq!(first_body["tools"], second_body["tools"]);
+        let first_messages = first_body["messages"].as_array().expect("first messages");
+        let second_messages = second_body["messages"].as_array().expect("second messages");
+        assert_eq!(first_messages, &second_messages[..first_messages.len()]);
     }
 }

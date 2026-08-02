@@ -1312,6 +1312,7 @@ fn instruction_epoch(
             nominal: 65_536,
             actual: 65_536,
         },
+        body_revisions: None,
         model_content: model_content.map(str::to_owned),
     }
 }
@@ -1361,21 +1362,9 @@ async fn instruction_epoch_persists_once_and_replays_model_context() {
         Some("rev-1")
     );
     assert_eq!(context.messages().len(), 1);
-    let Some(AgentMessage::Instruction {
-        generation,
-        content,
-    }) = context.messages().first()
-    else {
-        panic!("expected one pinned instruction message");
-    };
-    assert_eq!(*generation, 1);
-    assert_eq!(
-        content
-            .iter()
-            .filter_map(Content::as_text)
-            .collect::<String>(),
-        "scoped rules body"
-    );
+    let message = context.messages().first().expect("instruction injection");
+    assert!(message.is_injection_variant("instruction_epoch"));
+    assert_eq!(message.text(), "scoped rules body");
 }
 
 #[tokio::test]

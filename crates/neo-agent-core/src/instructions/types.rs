@@ -61,6 +61,11 @@ pub struct InstructionEpochData {
     pub failure: Option<InstructionFailure>,
     pub deferred_tool_ids: Vec<String>,
     pub budget: InstructionBudget,
+    /// Revisions whose expanded bodies are present in `model_content`.
+    /// `None` identifies an older snapshot event; replay then resends the
+    /// current bodies on the next update.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub body_revisions: Option<BTreeMap<PathBuf, String>>,
     // Persisted once in this event and consumed only by model-context projection.
     pub model_content: Option<String>,
 }
@@ -74,6 +79,9 @@ pub struct AgentInstructionState {
     pub visible_generation: u64,
     pub visible_revisions: BTreeMap<PathBuf, String>,
     pub visited_revisions: BTreeMap<PathBuf, String>,
+    /// Instruction revision bodies retained in the current model context.
+    #[serde(default)]
+    pub retained_body_revisions: BTreeMap<PathBuf, String>,
     pub active_scopes: Vec<PathBuf>,
     pub most_recent_scope: Option<PathBuf>,
     pub last_epoch_fingerprint: Option<String>,
@@ -126,6 +134,11 @@ impl AgentInstructionState {
                     .iter()
                     .map(|(path, revision)| (path.clone(), revision.clone())),
             );
+            if let Some(body_revisions) = &epoch.body_revisions {
+                self.retained_body_revisions.extend(body_revisions.clone());
+            } else {
+                self.retained_body_revisions.clear();
+            }
             self.visible_revisions = visible_revisions;
         }
         self.last_epoch_fingerprint = Some(instruction_selection_fingerprint(

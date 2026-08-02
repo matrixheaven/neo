@@ -239,7 +239,7 @@ matching the return table.
 - Single chunk; final result is the **return value** (one table / scalar).
   Zero returns or a single `nil` become JSON `null` (usually fails schema).
   Multiple return values fail.
-- Exactly one tools-disabled schema repair is allowed for child structured
+- Exactly one non-executing schema repair is allowed for child structured
   output; still require strong schemas and fail closed on evidence gates.
 
 ## Host API

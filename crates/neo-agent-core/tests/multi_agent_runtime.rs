@@ -3614,17 +3614,13 @@ fn cancel_swarm_preserves_completed_canonical_child_when_swarm_snapshot_is_stale
     assert_eq!(cancelled.aggregate.cancelled, 1);
 }
 
-/// Combined text of every pinned `AgentMessage::Instruction` in a context.
+/// Combined text of every instruction injection in a context.
 fn instruction_message_text(context: &AgentContext) -> String {
     context
         .messages()
         .iter()
-        .filter_map(|message| match message {
-            AgentMessage::Instruction { content, .. } => Some(content.as_slice()),
-            _ => None,
-        })
-        .flatten()
-        .filter_map(neo_agent_core::Content::as_text)
+        .filter(|message| message.is_injection_variant("instruction_epoch"))
+        .map(AgentMessage::text)
         .collect()
 }
 

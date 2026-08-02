@@ -31,11 +31,8 @@ use super::types::{
 use crate::runtime::estimate_text_tokens;
 use crate::xml_escape::escape_attribute;
 
-const AUTHORITY_PREFIX: &str = "<instruction_authority mode=\"replace_all\">\n\
-This epoch is the complete current path-scoped instruction snapshot. Earlier \
-path-scoped instruction epochs are historical and no longer authoritative.\n";
-const AUTHORITY_EMPTY: &str = "No path-scoped instruction bundles are currently active.\n";
-const AUTHORITY_SUFFIX: &str = "</instruction_authority>\n";
+const UPDATE_PREFIX: &str = "<neo_instruction_update>\n";
+const UPDATE_SUFFIX: &str = "</neo_instruction_update>\n";
 
 /// One complete bundle offered for budget admission.
 #[derive(Debug, Clone)]
@@ -370,16 +367,6 @@ impl InstructionRegistry {
             kind: error.failure_kind(),
             detail: error.to_string(),
         });
-        let model_content = if let Some(failure) = &failure_data {
-            Some(format!(
-                "Instruction scope blocked: {}. No instructions from this scope were \
-                 injected; resolve the issue to load them.",
-                failure.detail
-            ))
-        } else {
-            self.render_selection_within_budget(&selection, request.budget.actual)
-        };
-        self.drop_ignored_bodies(&selection.ignored);
         let selected_bundles = selection
             .admitted
             .iter()
@@ -414,6 +401,36 @@ impl InstructionRegistry {
             build_replacements_and_outcome(&selection, state, request, failure.as_ref());
 
         let generation = self.generation.fetch_add(1, AtomicOrdering::SeqCst) + 1;
+        let model_content = if let Some(failure) = &failure_data {
+            Some(format!(
+                "<neo_instruction_blocked generation=\"{generation}\">{}</neo_instruction_blocked>",
+                failure.detail
+            ))
+        } else {
+            self.render_selection_within_budget(&selection, request.budget.actual)
+                .and_then(|_| {
+                    self.render_instruction_update(&selection, state, generation, false, true)
+                })
+        };
+        let body_revisions = if model_content.is_some() && failure_data.is_none() {
+            selection
+                .admitted
+                .iter()
+                .filter(|candidate| {
+                    state.retained_body_revisions.get(&candidate.scope_dir)
+                        != Some(&candidate.metadata.revision)
+                })
+                .map(|candidate| {
+                    (
+                        candidate.scope_dir.clone(),
+                        candidate.metadata.revision.clone(),
+                    )
+                })
+                .collect()
+        } else {
+            BTreeMap::new()
+        };
+        self.drop_ignored_bodies(&selection.ignored);
         let epoch = InstructionEpochData {
             agent_id: request.agent_id.clone(),
             generation,
@@ -425,6 +442,7 @@ impl InstructionRegistry {
             failure: failure_data,
             deferred_tool_ids: request.deferred_tool_ids.clone(),
             budget: request.budget,
+            body_revisions: Some(body_revisions),
             model_content,
         };
         (fingerprint, Some(epoch))
@@ -466,39 +484,74 @@ impl InstructionRegistry {
     /// Renders admitted bundles in model rendering order with provenance
     /// wrappers. Epoch evaluation and post-compaction rehydration share this
     /// path so both produce byte-identical content for the same bundle set.
-    fn render_admitted_bundles(&self, admitted: &[AdmissionCandidate]) -> String {
+    fn render_admitted_bundles(
+        &self,
+        admitted: &[AdmissionCandidate],
+        state: &AgentInstructionState,
+        force_bodies: bool,
+    ) -> String {
         let mut rendered = String::new();
         for candidate in InstructionAdmission::rendering_order(admitted.to_vec()) {
+            if !force_bodies
+                && state.retained_body_revisions.get(&candidate.scope_dir)
+                    == Some(&candidate.metadata.revision)
+            {
+                continue;
+            }
             let display = escape_attribute(
                 &self
                     .resolver
                     .display_for_model(&candidate.scope_dir)
                     .to_string_lossy(),
             );
-            writeln!(rendered, "<instructions path=\"{display}\">").expect("write to string");
+            writeln!(
+                rendered,
+                "<instruction_revision id=\"{}\" path=\"{display}\">",
+                candidate.metadata.revision
+            )
+            .expect("write to string");
             rendered.push_str(&candidate.content);
             if !candidate.content.ends_with('\n') {
                 rendered.push('\n');
             }
-            rendered.push_str("</instructions>\n");
+            rendered.push_str("</instruction_revision>\n");
         }
         rendered
     }
 
-    fn render_authoritative_content(
+    fn render_instruction_update(
         &self,
-        admitted: &[AdmissionCandidate],
-        ignored: &[IgnoredInstructionBundle],
+        selection: &AdmissionSelection,
+        state: &AgentInstructionState,
+        generation: u64,
+        force_bodies: bool,
         include_omission_notice: bool,
-    ) -> String {
-        let mut rendered = String::from(AUTHORITY_PREFIX);
-        if admitted.is_empty() {
-            rendered.push_str(AUTHORITY_EMPTY);
-        } else {
-            rendered.push_str(&self.render_admitted_bundles(admitted));
+    ) -> Option<String> {
+        let mut rendered = String::from(UPDATE_PREFIX);
+        rendered.push_str(&self.render_admitted_bundles(&selection.admitted, state, force_bodies));
+        writeln!(
+            rendered,
+            "<instruction_active_state generation=\"{generation}\">"
+        )
+        .expect("write to string");
+        for candidate in InstructionAdmission::rendering_order(selection.admitted.clone()) {
+            let display = escape_attribute(
+                &self
+                    .resolver
+                    .display_for_model(&candidate.scope_dir)
+                    .to_string_lossy(),
+            );
+            writeln!(
+                rendered,
+                "<active_instruction revision=\"{}\" path=\"{display}\" />",
+                candidate.metadata.revision
+            )
+            .expect("write to string");
         }
-        if include_omission_notice && !ignored.is_empty() {
-            let ignored = ignored
+        rendered.push_str("</instruction_active_state>\n");
+        if include_omission_notice && !selection.ignored.is_empty() {
+            let ignored = selection
+                .ignored
                 .iter()
                 .map(|bundle| {
                     format!(
@@ -516,8 +569,8 @@ impl InstructionRegistry {
             )
             .expect("write to string");
         }
-        rendered.push_str(AUTHORITY_SUFFIX);
-        rendered
+        rendered.push_str(UPDATE_SUFFIX);
+        Some(rendered)
     }
 
     fn select_for_rendered_budget(
@@ -525,8 +578,8 @@ impl InstructionRegistry {
         mut candidates: Vec<AdmissionCandidate>,
         budget: InstructionBudget,
     ) -> AdmissionSelection {
-        let base_tokens = estimate_text_tokens(AUTHORITY_PREFIX)
-            .saturating_add(estimate_text_tokens(AUTHORITY_SUFFIX));
+        let base_tokens =
+            estimate_text_tokens(UPDATE_PREFIX).saturating_add(estimate_text_tokens(UPDATE_SUFFIX));
         let available = budget
             .actual
             .saturating_sub(u64::try_from(base_tokens).unwrap_or(u64::MAX));
@@ -546,7 +599,11 @@ impl InstructionRegistry {
             .map(|(index, candidate)| (candidate.scope_dir.clone(), index))
             .collect::<HashMap<_, _>>();
         for candidate in &mut candidates {
-            let rendered = self.render_admitted_bundles(std::slice::from_ref(candidate));
+            let rendered = self.render_admitted_bundles(
+                std::slice::from_ref(candidate),
+                &AgentInstructionState::default(),
+                true,
+            );
             candidate.metadata.token_estimate =
                 u64::try_from(estimate_text_tokens(&rendered)).unwrap_or(u64::MAX);
         }
@@ -563,10 +620,9 @@ impl InstructionRegistry {
         for bundle in &mut selection.ignored {
             bundle.token_estimate = original_estimates[&bundle.display_path];
         }
-        while !selection.ignored.is_empty()
-            && self
-                .render_selection_within_budget(&selection, budget.actual)
-                .is_none()
+        while self
+            .render_selection_within_budget(&selection, budget.actual)
+            .is_none()
         {
             let Some(candidate) = selection.admitted.pop() else {
                 break;
@@ -592,15 +648,17 @@ impl InstructionRegistry {
         selection: &AdmissionSelection,
         actual: u64,
     ) -> Option<String> {
-        let without_notice =
-            self.render_authoritative_content(&selection.admitted, &selection.ignored, false);
+        let without_notice = self
+            .render_instruction_update(selection, &AgentInstructionState::default(), 0, true, false)
+            .expect("instruction update always renders");
         let without_notice_tokens =
             u64::try_from(estimate_text_tokens(&without_notice)).unwrap_or(u64::MAX);
         if without_notice_tokens > actual {
             return None;
         }
-        let with_notice =
-            self.render_authoritative_content(&selection.admitted, &selection.ignored, true);
+        let with_notice = self
+            .render_instruction_update(selection, &AgentInstructionState::default(), 0, true, true)
+            .expect("instruction update always renders");
         let with_notice_tokens =
             u64::try_from(estimate_text_tokens(&with_notice)).unwrap_or(u64::MAX);
         if selection.ignored.is_empty() {
@@ -682,12 +740,17 @@ impl InstructionRegistry {
             );
             chain.push(candidate);
         }
-        let rendered = self.render_authoritative_content(&chain, &[], false);
-        let model_content = if chain.is_empty() {
-            None
-        } else {
-            Some(rendered)
+        let selection = AdmissionSelection {
+            admitted: chain.clone(),
+            ignored: Vec::new(),
         };
+        let model_content = self.render_instruction_update(
+            &selection,
+            &AgentInstructionState::default(),
+            self.generation.load(AtomicOrdering::SeqCst),
+            true,
+            false,
+        );
         Ok(RehydrationSnapshot {
             chain,
             model_content,

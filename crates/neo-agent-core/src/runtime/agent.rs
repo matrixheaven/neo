@@ -373,7 +373,7 @@ impl AgentRuntime {
             live_context,
             workflow_event_lease,
             model,
-            config,
+            mut config,
             tools,
             skills,
             goal_manager,
@@ -411,9 +411,16 @@ impl AgentRuntime {
             return;
         }
         append_available_skills_snapshot(skills.as_ref(), &mut emitter);
-        if config.turn_system_context.is_some() {
+        if let Some(turn_injection) = config.turn_injection.take() {
             append_runtime_reminders(&config, &mut emitter);
             rehydrate_instruction_context_after_compaction(&mut emitter, false).await;
+
+            let workflow_injection = AgentMessage::injection_text(
+                format!(
+                    "<workflow_turn_context applies_to=\"next_model_request_only\">\n{turn_injection}\n</workflow_turn_context>"
+                ),
+                "workflow_turn_context",
+            );
 
             let (projection_sender, _projection_receiver) = mpsc::unbounded_channel();
             let mut projected_emitter =
@@ -424,6 +431,9 @@ impl AgentRuntime {
             if natural_user_turn {
                 append_pending_workflow_notifications(&config, &mut projected_emitter);
             }
+            projected_emitter.emit(AgentEvent::MessageAppended {
+                message: workflow_injection.clone(),
+            });
             if !context_fits_after_compaction(&config, &projected_emitter.context) {
                 process_supervisor.cleanup_all().await;
                 emitter.emit(AgentEvent::RunFinished {
@@ -434,10 +444,18 @@ impl AgentRuntime {
                 let _ = final_sender.send(emitter.context);
                 return;
             }
-        }
-        emitter.emit(AgentEvent::MessageAppended { message });
-        if natural_user_turn {
-            append_pending_workflow_notifications(&config, &mut emitter);
+            emitter.emit(AgentEvent::MessageAppended { message });
+            if natural_user_turn {
+                append_pending_workflow_notifications(&config, &mut emitter);
+            }
+            emitter.emit(AgentEvent::MessageAppended {
+                message: workflow_injection,
+            });
+        } else {
+            emitter.emit(AgentEvent::MessageAppended { message });
+            if natural_user_turn {
+                append_pending_workflow_notifications(&config, &mut emitter);
+            }
         }
         if let Err(err) = run_agent_turn(
             AgentTurnRuntime {
@@ -624,7 +642,7 @@ mod tests {
     #[test]
     fn turn_messages_fit_after_compaction_uses_existing_budget_and_headroom() {
         let mut config = fake_compaction_config();
-        config.turn_system_context = Some("workflow catalog ".repeat(400_000));
+        config.turn_injection = Some("workflow catalog ".repeat(400_000));
         let runtime = AgentRuntime::new(
             config,
             Arc::new(neo_ai::providers::fake::FakeModelClient::default()),
@@ -636,7 +654,7 @@ mod tests {
         ));
 
         let mut small_config = fake_compaction_config();
-        small_config.turn_system_context = Some("complete workflow catalog".to_owned());
+        small_config.turn_injection = Some("complete workflow catalog".to_owned());
         let small_runtime = AgentRuntime::new(
             small_config,
             Arc::new(neo_ai::providers::fake::FakeModelClient::default()),
@@ -669,7 +687,7 @@ mod tests {
         .expect("skill file");
 
         let mut config = fake_compaction_config();
-        config.turn_system_context = Some("complete workflow catalog".to_owned());
+        config.turn_injection = Some("complete workflow catalog".to_owned());
         let runtime = AgentRuntime::with_tools_and_skills(
             config,
             Arc::new(neo_ai::providers::fake::FakeModelClient::default()),
@@ -686,7 +704,7 @@ mod tests {
     #[tokio::test]
     async fn workflow_context_capacity_guard_runs_before_provider_request() {
         let mut config = fake_compaction_config();
-        config.turn_system_context = Some("complete workflow catalog".to_owned());
+        config.turn_injection = Some("complete workflow catalog".to_owned());
         let runtime = AgentRuntime::new(
             config,
             Arc::new(neo_ai::providers::fake::FakeModelClient::default()),

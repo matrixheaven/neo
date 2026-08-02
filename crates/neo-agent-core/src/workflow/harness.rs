@@ -81,10 +81,10 @@ pub struct FixtureDelegateOutcome {
     pub summary: String,
     #[serde(default)]
     pub details: Value,
-    /// Optional invalid first model text; pairs with `repair_raw` for one tools-disabled repair.
+    /// Optional invalid first model text; pairs with `repair_raw` for one non-executing repair.
     #[serde(default)]
     pub first_raw: Option<String>,
-    /// Exactly one tools-disabled repair model text.
+    /// Exactly one non-executing repair model text.
     #[serde(default)]
     pub repair_raw: Option<String>,
 }
@@ -515,12 +515,12 @@ pub async fn run_fixture_retained(
 
     if use_real_delegate {
         let requests = harness.requests();
-        if requests.len() >= 2 && !requests[1].tools.is_empty() {
+        if requests.len() >= 2 && requests[1].tools != requests[0].tools {
             diagnostics.push(json!({
                 "severity": "error",
-                "code": "repair_tools_not_disabled",
+                "code": "repair_tools_changed",
                 "message": format!(
-                    "repair turn advertised tools: {:?}",
+                    "repair turn changed advertised tools: {:?}",
                     requests[1]
                         .tools
                         .iter()

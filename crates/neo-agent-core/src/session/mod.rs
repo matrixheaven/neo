@@ -1041,21 +1041,18 @@ fn message_role(message: &AgentMessage) -> &'static str {
         AgentMessage::Assistant { .. } => "assistant",
         AgentMessage::ToolResult { .. } => "tool",
         AgentMessage::ShellCommand { .. } => "shell",
-        AgentMessage::Instruction { .. } => "instructions",
     }
 }
 
 fn one_line_message_text(message: &AgentMessage) -> String {
+    if message.is_injection_variant("instruction_epoch") {
+        return "[instruction update]".to_owned();
+    }
     let content = match message {
         AgentMessage::System { content }
         | AgentMessage::User { content, .. }
         | AgentMessage::Assistant { content, .. }
         | AgentMessage::ToolResult { content, .. } => content,
-        // Pinned instruction bodies are exact model context: label them by
-        // generation only, never as conversation prose in summaries.
-        AgentMessage::Instruction { generation, .. } => {
-            return format!("[pinned instructions, epoch generation {generation}]");
-        }
         AgentMessage::ShellCommand {
             command,
             stdout,

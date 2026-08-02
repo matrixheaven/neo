@@ -174,16 +174,6 @@ pub enum AgentMessage {
         #[serde(default)]
         truncated: bool,
     },
-    /// Pinned path-scoped AGENTS.md instruction context for one epoch.
-    ///
-    /// Converts to a provider [`ChatMessage::System`], is never emitted as
-    /// `MessageAppended` (the owning `AgentEvent::InstructionEpoch` is the
-    /// single persisted source), and is never exported as user/assistant
-    /// prose.
-    Instruction {
-        generation: u64,
-        content: Vec<Content>,
-    },
 }
 
 impl AgentMessage {
@@ -277,6 +267,17 @@ impl AgentMessage {
     }
 
     #[must_use]
+    pub fn is_injection_variant(&self, expected: &str) -> bool {
+        matches!(
+            self,
+            Self::User {
+                origin: MessageOrigin::Injection { variant },
+                ..
+            } if variant.as_ref() == expected
+        )
+    }
+
+    #[must_use]
     pub fn assistant(
         content: impl Into<Vec<Content>>,
         tool_calls: impl Into<Vec<AgentToolCall>>,
@@ -332,8 +333,7 @@ impl AgentMessage {
             Self::System { content }
             | Self::User { content, .. }
             | Self::Assistant { content, .. }
-            | Self::ToolResult { content, .. }
-            | Self::Instruction { content, .. } => content,
+            | Self::ToolResult { content, .. } => content,
             Self::ShellCommand {
                 command,
                 stdout,
@@ -357,7 +357,7 @@ impl AgentMessage {
     #[must_use]
     pub fn to_chat_message(&self) -> ChatMessage {
         match self {
-            Self::System { content } | Self::Instruction { content, .. } => ChatMessage::System {
+            Self::System { content } => ChatMessage::System {
                 content: content.iter().map(to_content_part).collect(),
             },
             Self::User { content, .. } => ChatMessage::User {
@@ -807,17 +807,12 @@ mod tests {
     use super::*;
 
     #[test]
-    fn instruction_message_converts_to_provider_system_message_and_counts_tokens() {
+    fn instruction_injection_converts_to_provider_user_message_and_counts_tokens() {
         let body = "Follow the scoped rules.\nNever regress established behavior.";
-        let message = AgentMessage::Instruction {
-            generation: 7,
-            content: vec![Content::text(body)],
-        };
+        let message = AgentMessage::injection_text(body, "instruction_epoch");
 
-        // Provider conversion maps the pinned instruction to a system message
-        // with the exact body preserved.
-        let ChatMessage::System { content } = message.to_chat_message() else {
-            panic!("expected instruction to convert to a system chat message");
+        let ChatMessage::User { content } = message.to_chat_message() else {
+            panic!("expected instruction to convert to a user chat message");
         };
         assert_eq!(
             content,
@@ -826,22 +821,18 @@ mod tests {
             }]
         );
 
-        // Token estimation includes the body exactly like an equivalent
-        // system message, and an empty instruction counts no body tokens.
         assert_eq!(
             crate::runtime::estimate_message_tokens(&message),
-            crate::runtime::estimate_message_tokens(&AgentMessage::system_text(body))
+            crate::runtime::estimate_message_tokens(&AgentMessage::user_text(body))
         );
         assert!(
             crate::runtime::estimate_message_tokens(&message)
-                > crate::runtime::estimate_message_tokens(&AgentMessage::Instruction {
-                    generation: 7,
-                    content: Vec::new(),
-                })
+                > crate::runtime::estimate_message_tokens(&AgentMessage::injection_text(
+                    "",
+                    "instruction_epoch",
+                ))
         );
 
-        // Image-blob resolution passes the pinned instruction through
-        // unchanged.
         let resolved = tokio::runtime::Builder::new_current_thread()
             .enable_all()
             .build()

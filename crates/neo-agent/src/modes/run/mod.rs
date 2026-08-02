@@ -680,7 +680,7 @@ async fn runtime_for_config(
     if let Some(request) = request {
         agent_config = agent_config.with_plan_mode(Arc::clone(&request.plan_mode));
         if let Some(workflow_context) = &request.workflow_context {
-            agent_config = agent_config.with_turn_system_context(workflow_context.clone());
+            agent_config = agent_config.with_turn_injection(workflow_context.clone());
         }
     }
     if request.is_some_and(|request| request.goal_mode_authoring) {
@@ -2099,7 +2099,7 @@ mod tests {
                     .with_max_context_tokens(100_000)
                     .with_max_output_tokens(4_096),
             })
-            .with_turn_system_context("workflow catalog ".repeat(400_000)),
+            .with_turn_injection("workflow catalog ".repeat(400_000)),
             Arc::new(fake.clone()),
         );
         let mut writer = JsonlSessionWriter::create(&session_path)
@@ -2138,7 +2138,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn workflow_turn_context_is_system_role_and_user_slash_is_persisted_exactly() {
+    async fn workflow_turn_injection_is_tail_only_and_persisted() {
         let temp = tempfile::tempdir().expect("tempdir");
         let session_path = temp.path().join("session.jsonl");
         let fake = FakeModelClient::new(vec![
@@ -2154,8 +2154,7 @@ mod tests {
             },
         ]);
         let runtime = AgentRuntime::new(
-            AgentConfig::for_model(fake_model())
-                .with_turn_system_context("complete workflow guidance"),
+            AgentConfig::for_model(fake_model()).with_turn_injection("complete workflow guidance"),
             Arc::new(fake.clone()),
         );
         let mut writer = JsonlSessionWriter::create(&session_path)
@@ -2173,14 +2172,12 @@ mod tests {
 
         let request = fake.requests().remove(0);
         assert!(matches!(
-            request.messages.first(),
-            Some(ChatMessage::System { content })
-                if chat_message_text(&request.messages[0]) == "complete workflow guidance"
-                    && content.len() == 1
+            request.messages.last(),
+            Some(ChatMessage::User { .. })
         ));
         assert_eq!(
-            chat_message_text(request.messages.last().expect("user message")),
-            "/workflow:demo Research battery recycling"
+            chat_message_text(request.messages.last().expect("workflow injection")),
+            "<workflow_turn_context applies_to=\"next_model_request_only\">\ncomplete workflow guidance\n</workflow_turn_context>"
         );
         let messages = JsonlSessionReader::replay_messages(&session_path)
             .await
@@ -2192,13 +2189,9 @@ mod tests {
                     if content == &vec![Content::text("/workflow:demo Research battery recycling")]
             )
         }));
-        assert!(messages.iter().all(|message| {
-            !matches!(
-                message,
-                AgentMessage::System { content } if content
-                    .iter()
-                    .any(|part| part.as_text() == Some("complete workflow guidance"))
-            )
+        assert!(messages.iter().any(|message| {
+            message.is_injection_variant("workflow_turn_context")
+                && message.text().contains("complete workflow guidance")
         }));
     }
 
@@ -2286,7 +2279,7 @@ type = "object"
             .expect("workspace root")
             .with_session_directory(&session_dir)
             .with_permission_mode(PermissionMode::Yolo)
-            .with_turn_system_context("workflow slash guidance")
+            .with_turn_injection("workflow slash guidance")
             .with_workflow_runtime(workflow_runtime.clone())
             .with_workflow_definitions(definitions.clone());
         let tools = ToolRegistry::with_builtin_tools();
@@ -2309,20 +2302,15 @@ type = "object"
 
         let requests = harness.requests();
         assert_eq!(requests.len(), 2);
-        assert!(requests[0].messages.iter().any(|message| {
-            matches!(message, ChatMessage::System { .. })
-                && chat_message_text(message) == "workflow slash guidance"
-        }));
         assert_eq!(
-            chat_message_text(requests[0].messages.last().expect("slash user")),
-            "/workflow:demo run it"
+            chat_message_text(requests[0].messages.last().expect("workflow injection")),
+            "<workflow_turn_context applies_to=\"next_model_request_only\">\nworkflow slash guidance\n</workflow_turn_context>"
         );
         assert!(requests[0].tools.iter().any(|tool| tool.name == "Workflow"));
-        assert!(
-            !requests[1]
-                .messages
-                .iter()
-                .any(|message| chat_message_text(message) == "workflow slash guidance")
+        assert_eq!(requests[1].tools, requests[0].tools);
+        assert_eq!(
+            requests[0].messages,
+            requests[1].messages[..requests[0].messages.len()]
         );
         let workflow_result = turn.events.iter().find_map(|event| match event {
             AgentEvent::ToolExecutionFinished { name, result, .. } if name == "Workflow" => {
@@ -2567,6 +2555,7 @@ type = "object"
                 nominal: 65_536,
                 actual: 65_536,
             },
+            body_revisions: None,
             model_content: Some("SECRET INSTRUCTION BODY".to_owned()),
         };
         let turn = super::PromptTurn {
@@ -2639,6 +2628,7 @@ type = "object"
                 nominal: 65_536,
                 actual: 65_536,
             },
+            body_revisions: None,
             model_content: Some("SECRET INSTRUCTION BODY".to_owned()),
         };
         let turn = super::PromptTurn {

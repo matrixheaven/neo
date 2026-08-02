@@ -94,10 +94,11 @@ pub struct AgentConfig {
     #[serde(skip)]
     #[schemars(skip)]
     pub context_append_transform: Option<ContextAppendTransform>,
-    /// One-turn system guidance that is sent before the durable context.
+    /// One-turn guidance appended after the current user turn and cleared
+    /// before the model loop starts.
     #[serde(skip)]
     #[schemars(skip)]
-    pub turn_system_context: Option<String>,
+    pub turn_injection: Option<String>,
     #[serde(skip)]
     #[schemars(skip)]
     pub before_tool_call: Option<BeforeToolCallHook>,
@@ -275,7 +276,7 @@ impl AgentConfig {
             compaction: None,
             observed_max_context_tokens: Arc::new(Mutex::new(None)),
             context_append_transform: None,
-            turn_system_context: None,
+            turn_injection: None,
             before_tool_call: None,
             async_before_tool_call: None,
             after_tool_call: None,
@@ -395,8 +396,8 @@ impl AgentConfig {
     }
 
     #[must_use]
-    pub fn with_turn_system_context(mut self, context: impl Into<String>) -> Self {
-        self.turn_system_context = Some(context.into());
+    pub fn with_turn_injection(mut self, context: impl Into<String>) -> Self {
+        self.turn_injection = Some(context.into());
         self
     }
 

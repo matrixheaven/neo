@@ -79,7 +79,7 @@ pub struct DelegateRequest {
     pub context: DelegateContext,
     #[serde(default)]
     #[schemars(
-        description = "Required JSON Schema for structured child output when set. Host validation is authoritative; invalid output gets exactly one same-session tools-disabled repair turn."
+        description = "Required JSON Schema for structured child output when set. Host validation is authoritative; invalid output gets exactly one same-session non-executing repair turn."
     )]
     pub output_schema: Option<serde_json::Value>,
 }
@@ -1421,7 +1421,7 @@ pub struct ChildRunOutput {
     pub messages: Vec<AgentMessage>,
 }
 
-/// Result of a single tools-disabled schema-repair model turn on an existing child session.
+/// Result of a single non-executing schema-repair model turn on an existing child session.
 #[derive(Debug, Clone)]
 pub struct SchemaRepairTurnResult {
     pub events: Vec<AgentEvent>,
@@ -1468,7 +1468,7 @@ pub fn schema_repair_correction_prompt(
     schema: &serde_json::Value,
 ) -> String {
     format!(
-        "Your previous response did not match the required output schema.\n\nValidation error: {validation_error}\n\nRequired JSON Schema:\n{}\n\nReply with exactly one JSON value matching the schema. Every required field must be present. Do not use a Markdown fence or add prose before or after the JSON. Do not call a formatting tool.",
+        "Your previous response did not match the required output schema.\n\nValidation error: {validation_error}\n\nRequired JSON Schema:\n{}\n\nReply with exactly one JSON value matching the schema. Every required field must be present. Do not use a Markdown fence or add prose before or after the JSON. Do not call any tool.",
         schema
     )
 }
@@ -1983,12 +1983,12 @@ impl MultiAgentRuntime {
         self.finish_child_run(&snapshot, started_at, run)
     }
 
-    /// Continue an existing child session with tools fully disabled for schema repair.
+    /// Continue an existing child session for schema repair without executing tools.
     ///
     /// This is an additional model effect on the same session, not a re-execution of the
-    /// original child task. External tools are never advertised or executed; a tool-call
+    /// original child task. External tools are advertised but never executed; a tool-call
     /// attempt is reported via [`SchemaRepairTurnResult::tool_attempted`].
-    pub async fn run_tools_disabled_schema_repair_turn(
+    pub async fn run_schema_repair_turn(
         &self,
         mut deps: ChildRuntimeDeps,
         agent_id: &AgentId,
@@ -1998,10 +1998,9 @@ impl MultiAgentRuntime {
         let snapshot = self
             .agent_snapshot(agent_id.as_str())
             .ok_or_else(|| format!("schema repair: unknown agent {}", agent_id.as_str()))?;
-        // Tools disabled: advertise none and attach no registry so a tool-call
-        // attempt cannot execute external effects (turn_loop breaks when tools
-        // is None). Host still flags the attempt as schema_repair_tool_forbidden.
-        deps.config.tools.clear();
+        // Preserve advertised schemas, but attach no registry so a tool-call
+        // attempt cannot execute external effects. Host still flags the
+        // attempt as schema_repair_tool_forbidden.
         set_child_response_format(&mut deps.config, Some(schema));
         let prior_context = self.replay_child_context(&snapshot).await?;
         let prompt = schema_repair_correction_prompt(validation_error, schema);

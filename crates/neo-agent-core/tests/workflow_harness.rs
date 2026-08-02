@@ -138,9 +138,9 @@ type = "string"
     assert_eq!(report.state, WorkflowState::Completed.as_str());
 }
 
-/// Child schema repair: exactly one tools-disabled corrective model turn.
+/// Child schema repair: exactly one non-executing corrective model turn.
 #[tokio::test]
-async fn deterministic_fixture_records_one_child_schema_repair_with_tools_disabled() {
+async fn deterministic_fixture_records_one_non_executing_child_schema_repair() {
     let script = r#"
 local outcome = neo.delegate({
   task = "return structured ok",
@@ -157,7 +157,7 @@ return { ok = true }
     let definition = resolve_script(
         "schema-repair",
         "Schema Repair",
-        "one tools-disabled repair",
+        "one non-executing repair",
         script,
     );
     let fixture =

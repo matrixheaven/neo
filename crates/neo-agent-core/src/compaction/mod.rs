@@ -119,7 +119,9 @@ pub fn can_split_after(messages: &[AgentMessage], index: usize) -> bool {
     let Some(message) = messages.get(index) else {
         return false;
     };
-    if matches!(message, AgentMessage::User { .. }) {
+    if matches!(message, AgentMessage::User { .. })
+        && !message.is_injection_variant("instruction_epoch")
+    {
         return false;
     }
     if let AgentMessage::Assistant { tool_calls, .. } = message
@@ -351,17 +353,13 @@ fn render_single_message(message: &AgentMessage, index: usize) -> String {
     )];
 
     match message {
+        AgentMessage::User { .. } if message.is_injection_variant("instruction_epoch") => {
+            lines.push("instruction update; body excluded from summary input".to_owned());
+        }
         AgentMessage::System { content }
         | AgentMessage::User { content, .. }
         | AgentMessage::ToolResult { content, .. } => {
             render_content_parts(content, &mut lines);
-        }
-        // Pinned instruction bodies are exact model context: they are
-        // excluded from summary input and labeled by generation only.
-        AgentMessage::Instruction { generation, .. } => {
-            lines.push(format!(
-                "pinned instructions (epoch generation {generation}); body excluded from summary input"
-            ));
         }
         AgentMessage::Assistant {
             content,
@@ -449,7 +447,6 @@ fn message_role_label(message: &AgentMessage) -> &'static str {
         AgentMessage::Assistant { .. } => "assistant",
         AgentMessage::ToolResult { .. } => "tool",
         AgentMessage::ShellCommand { .. } => "shell",
-        AgentMessage::Instruction { .. } => "instructions",
     }
 }
 

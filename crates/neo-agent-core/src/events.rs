@@ -348,8 +348,8 @@ pub enum AgentEvent {
     },
     /// One append-only instruction epoch: the single persisted source for
     /// path-scoped AGENTS.md model content and transcript metadata. Never
-    /// duplicated as a `MessageAppended` event; replay rebuilds the pinned
-    /// `AgentMessage::Instruction` and agent-local visibility from this.
+    /// duplicated as a `MessageAppended` event; replay rebuilds the sourced
+    /// instruction injection and agent-local visibility from this.
     InstructionEpoch {
         epoch: crate::instructions::InstructionEpochData,
     },

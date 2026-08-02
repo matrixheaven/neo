@@ -295,7 +295,7 @@ pub(super) async fn run_agent_turn(
 ) -> Result<(), AgentRuntimeError> {
     let AgentTurnRuntime {
         model,
-        mut config,
+        config,
         tools,
         skills,
         goal_manager,
@@ -333,9 +333,6 @@ pub(super) async fn run_agent_turn(
             pending_compaction_debt.take(),
         )
         .await;
-        // Workflow guidance applies to the initial request and its recovery
-        // retry only. Follow-up requests use the normal conversation state.
-        config.turn_system_context = None;
         let (turn, assistant) = match next_turn {
             Ok(ModelTurnOutcome::Assistant { turn, message }) => (turn, message),
             Ok(ModelTurnOutcome::Stop { turn, reason }) => {

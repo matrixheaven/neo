@@ -417,12 +417,6 @@ impl TranscriptPane {
                     self.push_status(text);
                 }
             }
-            AgentMessage::Instruction { .. } => {
-                // Pinned instruction context is model-visible only. The
-                // transcript shows the metadata card projected from the
-                // owning `AgentEvent::InstructionEpoch`, never the
-                // instruction body as prose.
-            }
             AgentMessage::ShellCommand {
                 command,
                 stdout,

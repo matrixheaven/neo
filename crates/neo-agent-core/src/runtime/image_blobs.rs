@@ -45,9 +45,6 @@ pub(crate) async fn resolve_image_blobs(
             AgentMessage::System { content } => AgentMessage::System {
                 content: resolve_content_blobs(content, session_dir).await,
             },
-            // Pinned instruction context is exact text: pass it through
-            // unchanged.
-            message @ AgentMessage::Instruction { .. } => message,
             AgentMessage::ShellCommand {
                 command,
                 stdout,

@@ -611,14 +611,13 @@ fn display_instruction_path(
 }
 
 fn stable_message(message: &AgentMessage) -> Value {
+    if message.is_injection_variant("instruction_epoch") {
+        return json!({ "role": "instruction" });
+    }
     match message {
         AgentMessage::System { content } => json!({
             "role": "system",
             "content": stable_content(content),
-        }),
-        AgentMessage::Instruction { generation, .. } => json!({
-            "role": "instruction",
-            "generation": generation,
         }),
         AgentMessage::User {
             content, origin, ..
@@ -738,7 +737,7 @@ mod tests {
     use std::path::Path;
 
     use neo_agent_core::instructions::{InstructionEpochData, InstructionEpochOutcome};
-    use neo_agent_core::{AgentEvent, AgentMessage, Content};
+    use neo_agent_core::{AgentEvent, AgentMessage};
 
     use super::{StableJsonState, display_instruction_path, stable_message};
 
@@ -757,6 +756,7 @@ mod tests {
                 nominal: 65_536,
                 actual: 65_536,
             },
+            body_revisions: None,
             model_content: Some(body.to_owned()),
         }
     }
@@ -781,14 +781,13 @@ mod tests {
     }
 
     #[test]
-    fn instruction_message_is_stable_metadata_without_body() {
-        let record = stable_message(&AgentMessage::Instruction {
-            generation: 7,
-            content: vec![Content::text("SECRET INSTRUCTION BODY")],
-        });
+    fn instruction_injection_is_stable_metadata_without_body() {
+        let record = stable_message(&AgentMessage::injection_text(
+            "SECRET INSTRUCTION BODY",
+            "instruction_epoch",
+        ));
 
         assert_eq!(record["role"], "instruction");
-        assert_eq!(record["generation"], 7);
         assert!(record.get("content").is_none());
         assert!(!record.to_string().contains("SECRET INSTRUCTION BODY"));
     }

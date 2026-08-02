@@ -440,11 +440,9 @@ mod tests {
     }
 
     #[test]
-    fn micro_projection_never_changes_instruction_messages() {
-        let instruction = AgentMessage::Instruction {
-            generation: 7,
-            content: vec![Content::text("pinned rules ".repeat(4_000))],
-        };
+    fn micro_projection_never_changes_instruction_injections() {
+        let instruction =
+            AgentMessage::injection_text("pinned rules ".repeat(4_000), "instruction_epoch");
         let messages = vec![
             AgentMessage::tool_result(
                 "old_call",
@@ -482,7 +480,7 @@ mod tests {
             assert!(result.messages[0].text().contains("omitted"), "{mode:?}");
             assert!(result.messages[2].text().contains("omitted"), "{mode:?}");
             assert!(result.omitted_tokens > 0, "{mode:?}");
-            // ...but the pinned instruction message passes through byte-for-byte.
+            // ...but the instruction injection passes through byte-for-byte.
             assert_eq!(result.messages[1], instruction, "{mode:?}");
         }
     }
