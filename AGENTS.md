@@ -15,6 +15,15 @@ Read [CX.md](./CX.md) and [RTK.md](./RTK.md). Use `cx`/`rtk` CLIs to save tokens
 5. **Tests must earn their place.** No redundant tests that duplicate another test's coverage with only cosmetic differences (e.g., a different output flag). No tests asserting trivially true properties (struct field round-trips, derived trait behavior, library correctness). When writing or reviewing tests, apply the same "simplify, don't pile on" principle — a test that catches nothing you wouldn't catch by deleting it is dead weight.
 6. **Cross-platform is non-negotiable.** Every feature must work on Windows, Linux, and macOS. No hardcoded path separators (use `Path`/`PathBuf`), shell invocations (no bare `sh -c`), Unix signals, or file-permission assumptions without `#[cfg]` guards and cross-platform fallbacks. Platform-specific code must be isolated behind `cfg(unix)` / `cfg(windows)` with a portable default — never `panic!` or `todo!` on unsupported platforms.
 
+## Context integrity
+
+Context preservation is a hard invariant for every Neo feature and code change:
+
+1. **Never modify the context cache prefix.** Existing prefix bytes, message ordering, and request-visible prefix content must remain stable. Do not introduce rewriting, normalization, truncation, snipping, deduplication, summarization, or other transformations that change an existing prefix.
+2. **Never rewrite system prompts or historical conversation.** Canonical system instructions, user messages, assistant messages, tool calls, tool results, reasoning, and session events are append-only records. Corrections, updates, and new instructions must be represented by a new event appended after the existing records.
+3. **Derived views must not replace the source.** Compaction, token-budget views, redaction, export, replay, and provider-specific projections may create a separate derived representation only when the canonical records and their order remain intact; they must never mutate, delete, reorder, or silently omit existing canonical content.
+4. **Verify prefix stability when touching context code.** Tests or other focused evidence must prove that an unchanged session keeps the same cache prefix and that every new piece of context is appended. A change that cannot preserve this invariant must be rejected or redesigned before implementation.
+
 ## Work loop: recall → scope → verify
 
 1. Recall: `icm recall-context "<task>" --limit 5`.
