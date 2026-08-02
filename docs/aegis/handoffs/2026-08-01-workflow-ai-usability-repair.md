@@ -1,5 +1,10 @@
 # Handoff Prompt: Implement Workflow AI Usability Repair
 
+> **Entire handoff superseded on 2026-08-03.** Do not execute this handoff. Use
+> `docs/aegis/handoffs/2026-08-03-workflow-output-reliability.md` and its
+> associated spec and plan. In particular, do not implement mandatory child
+> schema failure, hidden repair, or fail-closed built-in behavior.
+
 Copy everything below the separator into the implementation task unchanged.
 
 ---

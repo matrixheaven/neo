@@ -4,6 +4,12 @@ Date: `2026-08-01`
 
 Status: `approved design; ready for external implementation and final review`
 
+> **Entire plan superseded on 2026-08-03.** Use
+> `docs/aegis/plans/2026-08-03-workflow-output-reliability.md` for the current
+> implementation route. Do not execute any task in this plan: its strict
+> child-output gate, hidden repair task, and fail-closed built-in tasks are
+> retired.
+
 ## Implementer Directive
 
 This plan is the execution path, not a request for another design pass. Read the

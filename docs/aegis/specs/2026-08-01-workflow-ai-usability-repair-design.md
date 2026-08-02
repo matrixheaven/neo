@@ -4,11 +4,14 @@ Date: `2026-08-01`
 
 Status: `approved by the user on 2026-08-01`
 
-This design selectively supersedes the provider-request and related acceptance
-rules in `2026-07-30-dynamic-workflow-ai-reliability-design.md`. The explicit
-schema, strict host validation, single repair, fail-closed built-ins, task
-ownership, persistence, and presentation boundaries from that design remain in
-force.
+> **Entire document superseded on 2026-08-03.** See
+> `docs/aegis/specs/2026-08-03-workflow-output-reliability-design.md`.
+> Do not execute any output-enforcement rule below. Its mandatory child output
+> schema, one hidden repair turn, fail-closed projection behavior, and mixed
+> host/business `ok` semantics are retired.
+
+This file is retained only as historical evidence for the 2026-08-01
+investigation. It is not a current implementation authority.
 
 ## Problem
 

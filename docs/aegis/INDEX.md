@@ -5,6 +5,13 @@ Entries are workspace records, not authoritative runtime decisions.
 
 | Date | Kind | Path | Title |
 | --- | --- | --- | --- |
+| 2026-08-03 | handoff | docs/aegis/handoffs/2026-08-03-workflow-output-reliability.md | Workflow Output Reliability Handoff |
+| 2026-08-03 | plan | docs/aegis/plans/2026-08-03-workflow-output-reliability.md | Workflow Output Reliability Implementation Plan |
+| 2026-08-03 | spec | docs/aegis/specs/2026-08-03-workflow-output-reliability-design.md | Workflow Output Reliability Design |
+| 2026-08-03 | work | docs/aegis/work/2026-08-03-workflow-output-reliability/10-intent.md | Workflow Output Reliability intent |
+| 2026-08-03 | work | docs/aegis/work/2026-08-03-workflow-output-reliability/20-checkpoint.md | Workflow Output Reliability checkpoint |
+| 2026-08-03 | work | docs/aegis/work/2026-08-03-workflow-output-reliability/90-evidence.md | Workflow Output Reliability evidence |
+| 2026-08-03 | work | docs/aegis/work/2026-08-03-workflow-output-reliability/99-reflection.md | Workflow Output Reliability reflection |
 | 2026-08-02 | spec | docs/aegis/specs/2026-08-02-read-token-cache-optimization-design.md | Read 工具 Token 缓存优化 Design |
 | 2026-08-02 | plan | docs/aegis/plans/2026-08-02-read-token-cache-optimization.md | Read 工具 Token 缓存优化 Implementation Plan |
 | 2026-08-02 | spec | docs/aegis/specs/2026-08-02-session-title-generation-fix-design.md | Session Title Generation Fix Design |
