@@ -2952,6 +2952,48 @@ async fn list_delegates_defaults_to_meta_only_rows_with_title() {
 }
 
 #[tokio::test]
+async fn list_delegates_includes_requested_summary_in_model_content() {
+    let (registry, ctx) = registry_with_multi_agent();
+    let _ = registry
+        .run(
+            "Delegate",
+            &ctx,
+            serde_json::json!({
+                "task": "inspect summary output",
+                "title": "Summary contract",
+                "mode": "foreground"
+            }),
+        )
+        .await
+        .expect("delegate should complete");
+
+    let result = registry
+        .run(
+            "ListDelegates",
+            &ctx,
+            serde_json::json!({
+                "include_completed": true,
+                "kind": "agent",
+                "include": ["summary"]
+            }),
+        )
+        .await
+        .expect("list should succeed");
+
+    let details = result.details.as_ref().expect("list details");
+    assert_eq!(details["include"], serde_json::json!(["summary"]));
+    let summary = details["delegates"][0]["summary"]
+        .as_str()
+        .filter(|summary| !summary.is_empty())
+        .expect("completed delegate summary");
+    assert!(
+        result.content.contains(&format!("summary: {summary}")),
+        "summary missing from model-facing content: {}",
+        result.content
+    );
+}
+
+#[tokio::test]
 async fn list_delegates_rejects_cursor_reused_with_different_query() {
     let (registry, ctx) = registry_with_multi_agent();
     for index in 0..4 {

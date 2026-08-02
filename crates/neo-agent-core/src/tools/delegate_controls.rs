@@ -309,6 +309,53 @@ fn encode_list_cursor(
     Ok(base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(bytes))
 }
 
+const MAX_DELEGATE_LIST_FIELD_CHARS: usize = 4096;
+const DELEGATE_LIST_TRUNCATION_MARKER: &str = "...";
+const DELEGATE_LIST_CONTENT_TRUNCATION_SUFFIX: &str =
+    "\n[delegate list output truncated; request a smaller limit or omit optional fields]";
+
+fn append_delegate_list_field(detail: &mut String, label: &str, value: &str) {
+    let mut value = value
+        .chars()
+        .map(|character| {
+            if character.is_control() {
+                ' '
+            } else {
+                character
+            }
+        })
+        .collect::<String>();
+    if value.chars().count() > MAX_DELEGATE_LIST_FIELD_CHARS {
+        let keep = MAX_DELEGATE_LIST_FIELD_CHARS - DELEGATE_LIST_TRUNCATION_MARKER.len();
+        value = value.chars().take(keep).collect();
+        value.push_str(DELEGATE_LIST_TRUNCATION_MARKER);
+    }
+    let _ = writeln!(detail, "  {label}: {value}");
+}
+
+fn truncate_delegate_list_content(content: &str, max_bytes: usize) -> String {
+    let mut end = max_bytes.min(content.len());
+    while end > 0 && !content.is_char_boundary(end) {
+        end -= 1;
+    }
+    content[..end].to_owned()
+}
+
+fn cap_delegate_list_content(content: String, max_bytes: usize) -> String {
+    if content.len() <= max_bytes {
+        return content;
+    }
+    if max_bytes <= DELEGATE_LIST_CONTENT_TRUNCATION_SUFFIX.len() {
+        return truncate_delegate_list_content(&content, max_bytes);
+    }
+    let mut capped = truncate_delegate_list_content(
+        &content,
+        max_bytes - DELEGATE_LIST_CONTENT_TRUNCATION_SUFFIX.len(),
+    );
+    capped.push_str(DELEGATE_LIST_CONTENT_TRUNCATION_SUFFIX);
+    capped
+}
+
 fn collect_delegate_list_rows(
     ctx: &ToolContext,
     input: &ListDelegatesInput,
@@ -328,13 +375,6 @@ fn collect_delegate_list_rows(
             {
                 continue;
             }
-            let detail = format!(
-                "\n- agent_id: {} ({}) state: {} title: {}",
-                agent.id.as_str(),
-                agent.display_name.as_str(),
-                agent.state.as_str(),
-                agent.task_title,
-            );
             let mut row = super::multi_agent_format::agent_details(
                 "agent",
                 agent,
@@ -353,6 +393,26 @@ fn collect_delegate_list_rows(
                     .map(|state| state.as_str())
                     .collect::<Vec<_>>()
             );
+            let mut detail = format!(
+                "\n- agent_id: {} ({}) state: {} title: {}",
+                agent.id.as_str(),
+                agent.display_name.as_str(),
+                agent.state.as_str(),
+                agent.task_title,
+            );
+            if include_task && let Some(task) = row.get("task").and_then(Value::as_str) {
+                append_delegate_list_field(&mut detail, "task", task);
+            }
+            if include_summary
+                && let Some(summary) = row.get("summary").and_then(Value::as_str)
+                && !summary.is_empty()
+            {
+                append_delegate_list_field(&mut detail, "summary", summary);
+            }
+            if include_activity && let Some(activity) = row.get("activity_tail") {
+                let activity = serde_json::to_string(activity).unwrap_or_else(|_| "[]".to_owned());
+                append_delegate_list_field(&mut detail, "activity_tail", &activity);
+            }
             rows.push(DelegateListRow {
                 created_index: ctx
                     .multi_agent
@@ -506,6 +566,7 @@ impl Tool for ListDelegatesTool {
             for row in &page_rows {
                 content.push_str(&row.detail);
             }
+            let content = cap_delegate_list_content(content, ctx.max_output_bytes);
 
             let mut details = json!({
                 "kind": "delegate_list",
@@ -935,6 +996,24 @@ mod tests {
     fn test_context() -> ToolContext {
         let dir = tempfile::tempdir().expect("temp dir");
         ToolContext::new(dir.path()).expect("tool context")
+    }
+
+    #[test]
+    fn delegate_list_optional_fields_are_bounded_and_single_line() {
+        let mut detail = String::new();
+        append_delegate_list_field(
+            &mut detail,
+            "summary",
+            &format!("first line\n{}", "x".repeat(MAX_DELEGATE_LIST_FIELD_CHARS)),
+        );
+        assert_eq!(detail.lines().count(), 1);
+        assert!(detail.contains("first line "));
+        assert!(detail.ends_with("...\n"));
+
+        let max_bytes = DELEGATE_LIST_CONTENT_TRUNCATION_SUFFIX.len() + 8;
+        let capped = cap_delegate_list_content("x".repeat(128), max_bytes);
+        assert!(capped.len() <= max_bytes);
+        assert!(capped.ends_with(DELEGATE_LIST_CONTENT_TRUNCATION_SUFFIX));
     }
 
     #[tokio::test]
