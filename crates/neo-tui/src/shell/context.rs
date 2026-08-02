@@ -141,13 +141,37 @@ fn format_cache_usage(read: u64, write: u64) -> Option<String> {
 
 #[must_use]
 fn format_usage_token_count(tokens: u64) -> String {
-    if tokens >= 1_000 {
-        // u64 -> f64 is lossy for values above 2^53, but token counts well under
-        // that bound are safely represented; precision loss is acceptable here.
+    // u64 -> f64 is lossy for values above 2^53, but token counts well under
+    // that bound are safely represented; precision loss is acceptable here.
+    if tokens >= 1_000_000 {
+        #[allow(clippy::cast_precision_loss)]
+        let scaled = tokens as f64 / 1_000_000.0;
+        format!("{scaled:.1}M")
+    } else if tokens >= 1_000 {
         #[allow(clippy::cast_precision_loss)]
         let scaled = tokens as f64 / 1_000.0;
         format!("{scaled:.1}k")
     } else {
         tokens.to_string()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn format_usage_token_count_uses_megabytes_at_one_million() {
+        assert_eq!(format_usage_token_count(999_999), "1000.0k");
+        assert_eq!(format_usage_token_count(1_000_000), "1.0M");
+        assert_eq!(format_usage_token_count(16_435_200), "16.4M");
+    }
+
+    #[test]
+    fn format_cache_usage_uses_megabytes_for_large_reads() {
+        assert_eq!(
+            format_cache_usage(16_435_200, 0),
+            Some("cache 16.4M read".to_owned())
+        );
     }
 }
