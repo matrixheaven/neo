@@ -128,9 +128,7 @@ impl InteractiveController {
             return true;
         }
         if toggles_output {
-            if let Some(state) = self.tui.chrome_mut().transcript_browser_state_mut() {
-                state.toggle();
-            }
+            self.tui.chrome_mut().close_transcript_browser();
             self.transcript_mut().mark_dirty();
             return true;
         }

@@ -6010,21 +6010,10 @@ async fn ctrl_o_enters_and_leaves_transcript_browser() {
     controller
         .handle_input_event(InputEvent::Key(KeyId::new("ctrl+o").expect("valid key")))
         .await
-        .expect("ctrl-o toggles browser expansion");
-    assert!(
-        !controller
-            .chrome()
-            .transcript_browser_state()
-            .expect("transcript browser remains open")
-            .expanded()
-    );
-
-    controller
-        .handle_input_event(InputEvent::Cancel)
-        .await
-        .expect("escape closes transcript browser");
+        .expect("ctrl-o closes transcript browser");
     assert!(controller.chrome().transcript_browser_state().is_none());
     assert!(!controller.transcript().tool_output_expanded());
+    assert!(!controller.tui.render_terminal_frame(80, 24).review_surface);
 }
 
 #[tokio::test]
