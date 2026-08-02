@@ -411,6 +411,19 @@ impl TranscriptPresentation {
         if !allowed {
             return;
         }
+        let Some(index) = transcript
+            .entry_ids()
+            .iter()
+            .position(|current| *current == entry_id)
+        else {
+            return;
+        };
+        if matches!(
+            transcript.entries().get(index),
+            Some(TranscriptEntry::DelegateGroup { .. })
+        ) {
+            return;
+        }
         let facts = progressive_facts_for_entry(transcript, entry_id);
         let mut offset = 0;
         while let Some(terminal) = facts.get(offset).copied() {
@@ -793,10 +806,20 @@ fn render_entry(
     super::pane::trim_ansi_transcript_block(&mut lines);
     match transcript.entry_finalization(index) {
         Some(Finalization::Finalized) if !blocked => {
-            if progressive
+            if matches!(
+                transcript.entries().get(index),
+                Some(TranscriptEntry::DelegateGroup { .. })
+            ) {
+                lines = render_delegate_group_status(
+                    transcript.entries().get(index),
+                    options.width,
+                    options.theme,
+                )
+                .unwrap_or_default();
+            } else if progressive
                 && matches!(
                     transcript.entries().get(index),
-                    Some(TranscriptEntry::Delegate { .. } | TranscriptEntry::DelegateGroup { .. })
+                    Some(TranscriptEntry::Delegate { .. })
                 )
             {
                 lines = terminal_summary_lines(transcript, index, options.width, options.theme);
@@ -889,6 +912,23 @@ fn render_live_delegate_group(
         .collect::<Vec<_>>();
     super::pane::trim_ansi_transcript_block(&mut rendered);
     Some(rendered)
+}
+
+fn render_delegate_group_status(
+    entry: Option<&TranscriptEntry>,
+    width: usize,
+    theme: &TuiTheme,
+) -> Option<Vec<String>> {
+    let TranscriptEntry::DelegateGroup { component } = entry? else {
+        return None;
+    };
+    let mut lines = component
+        .render_live_status_with_theme(width, theme)
+        .into_iter()
+        .map(|line| line.to_ansi())
+        .collect::<Vec<_>>();
+    super::pane::trim_ansi_transcript_block(&mut lines);
+    Some(lines)
 }
 
 fn render_live_delegate_target(

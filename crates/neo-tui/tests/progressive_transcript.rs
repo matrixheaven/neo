@@ -850,7 +850,7 @@ fn every_live_entry_family_is_bounded_and_commits_once() {
 }
 
 #[test]
-fn delegate_group_completion_order_is_capture_order_and_live_group_uses_one_tool() {
+fn delegate_group_completion_order_keeps_done_rows_in_group() {
     let tools = |agent: &str| {
         (0..6)
             .map(|index| {
@@ -912,21 +912,8 @@ fn delegate_group_completion_order_is_capture_order_and_live_group_uses_one_tool
         .collect::<Vec<_>>()
         .join("\n");
     assert!(
-        c_history.contains("agent-c"),
-        "C did not commit first: {c_history}"
-    );
-    assert_eq!(
-        c_history.matches("Used Read").count(),
-        4,
-        "C history: {c_history}"
-    );
-    assert!(
-        c_history.rfind("Used Read").unwrap() < c_history.find("agent-c done").unwrap(),
-        "C body must follow its tool rows: {c_history}"
-    );
-    assert!(
-        c_history.contains("agent-c done"),
-        "C terminal body is missing: {c_history}"
+        c_history.is_empty(),
+        "completed C must stay in the live group: {c_history}"
     );
     assert!(
         c_update.live.iter().any(|line| {
@@ -967,25 +954,8 @@ fn delegate_group_completion_order_is_capture_order_and_live_group_uses_one_tool
         .collect::<Vec<_>>()
         .join("\n");
     assert!(
-        a_history.contains("agent-a"),
-        "A did not commit after C: {a_history}"
-    );
-    assert_eq!(
-        a_history.matches("Used Read").count(),
-        4,
-        "A history: {a_history}"
-    );
-    assert!(
-        a_history.contains("A-6"),
-        "A newest tool was lost: {a_history}"
-    );
-    assert!(
-        a_history.rfind("Used Read").unwrap() < a_history.find("agent-a done").unwrap(),
-        "A body must follow its tool rows: {a_history}"
-    );
-    assert!(
-        !a_history.contains("agent-c done"),
-        "C was replayed after acknowledgement: {a_history}"
+        a_history.is_empty(),
+        "completed A must stay in the live group: {a_history}"
     );
     pane.acknowledge_history(&a_update.history);
 
@@ -1000,21 +970,21 @@ fn delegate_group_completion_order_is_capture_order_and_live_group_uses_one_tool
         .collect::<Vec<_>>()
         .join("\n");
     assert!(
-        b_history.contains("agent-b"),
-        "B did not commit after A: {b_history}"
+        b_history.contains("Delegate group")
+            && b_history.contains("agent-a")
+            && b_history.contains("agent-b")
+            && b_history.contains("agent-c"),
+        "completed group must commit one status row per child: {b_history}"
+    );
+    assert_eq!(
+        b_history.matches("Delegate group").count(),
+        1,
+        "group summary was duplicated: {b_history}"
     );
     assert_eq!(
         b_history.matches("Used Read").count(),
-        4,
-        "B history: {b_history}"
-    );
-    assert!(
-        b_history.contains("B-6"),
-        "B newest tool was lost: {b_history}"
-    );
-    assert!(
-        !b_history.contains("agent-a done") && !b_history.contains("agent-c done"),
-        "earlier children were replayed: {b_history}"
+        0,
+        "group history must not expand child tools: {b_history}"
     );
     assert!(
         b_update.live.is_empty(),
