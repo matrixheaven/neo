@@ -47,14 +47,16 @@ pub fn estimate_swarm_progress(input: &SwarmProgressInput) -> f32 {
 
     let cfg = SwarmEstimatorConfig::default();
 
-    // Prior median: observed median completed duration scaled by the workload
-    // spread factor (running tasks tend to be longer-lived than completed
-    // ones — survivorship bias), or the conservative cold-start default when
-    // no completion samples exist yet. Mirrors `SwarmProgressEstimator::prior_duration`.
+    // Prior median in seconds: observed median completed duration scaled by
+    // the workload spread factor (running tasks tend to be longer-lived than
+    // completed ones — survivorship bias), or the conservative cold-start
+    // default when no completion samples exist yet. `elapsed_ms` below is in
+    // seconds despite the name; keep both branches in the same unit.
+    // Mirrors `SwarmProgressEstimator::prior_duration` (which uses ms).
     let prior_median_ms = input
         .median_completed_duration
         .map(|duration| duration.as_secs_f32() * cfg.workload_spread_factor)
-        .unwrap_or(cfg.cold_start_prior_ms)
+        .unwrap_or(cfg.cold_start_prior_ms / 1000.0)
         .max(1.0);
 
     // Every child owns one share of swarm progress. Terminal agents contribute
@@ -697,6 +699,10 @@ mod tests {
     fn calibrated_defaults_do_not_race_ahead_before_first_completion() {
         // 3 agents running at 300s elapsed, nothing completed yet; the first
         // real completion in this swarm landed at 348s.
+        // Expected: a small but non-zero running credit (~1-2%).  The narrow
+        // band also pins the unit of `cold_start_prior_ms`: if it were fed to
+        // the standalone estimator as milliseconds (1000x too large) the
+        // result would collapse to exactly 0.0 and fail the lower bound.
         let progress = estimate_swarm_progress(&SwarmProgressInput {
             total: 3,
             completed: 0,
@@ -708,16 +714,17 @@ mod tests {
             running_durations: vec![Duration::from_secs(300); 3],
         });
         assert!(
-            progress < 0.15,
-            "early estimate too optimistic with no completion samples: {progress}"
+            (0.005..=0.05).contains(&progress),
+            "early estimate out of expected band: {progress}"
         );
     }
 
     #[test]
     fn calibrated_defaults_track_real_completion_fraction() {
         // Same swarm mid-flight: 2 of 3 done (348s / 392s), last agent elapsed
-        // 700s of its eventual 726s. True fraction is 0.67; the estimate must
-        // stay near it instead of racing toward the aggregate cap.
+        // 700s of its eventual 726s. True fraction is 0.67. The band upper
+        // bound 0.75 excludes the old uncalibrated defaults, which give ~0.81
+        // on this exact input (the over-estimation this calibration fixes).
         let progress = estimate_swarm_progress(&SwarmProgressInput {
             total: 3,
             completed: 2,
@@ -729,7 +736,7 @@ mod tests {
             running_durations: vec![Duration::from_secs(700)],
         });
         assert!(
-            (0.6..=0.85).contains(&progress),
+            (0.6..=0.75).contains(&progress),
             "mid-flight estimate drifted from reality: {progress}"
         );
     }

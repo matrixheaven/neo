@@ -46,14 +46,16 @@ pub fn estimate_swarm_progress(input: &SwarmProgressInput) -> f32 {
 
     let cfg = SwarmEstimatorConfig::default();
 
-    // Prior median: observed median completed duration scaled by the workload
-    // spread factor (running tasks tend to be longer-lived than completed
-    // ones — survivorship bias), or the conservative cold-start default when
-    // no completion samples exist yet. Mirrors `SwarmProgressEstimator::prior_duration`.
+    // Prior median in seconds: observed median completed duration scaled by
+    // the workload spread factor (running tasks tend to be longer-lived than
+    // completed ones — survivorship bias), or the conservative cold-start
+    // default when no completion samples exist yet. `elapsed_ms` below is in
+    // seconds despite the name; keep both branches in the same unit.
+    // Mirrors `SwarmProgressEstimator::prior_duration` (which uses ms).
     let prior_median_ms = input
         .median_completed_duration
         .map(|duration| duration.as_secs_f32() * cfg.workload_spread_factor)
-        .unwrap_or(cfg.cold_start_prior_ms)
+        .unwrap_or(cfg.cold_start_prior_ms / 1000.0)
         .max(1.0);
 
     let mut weighted_sum = terminal as f32;
@@ -397,8 +399,8 @@ fn main() {
     });
     check(
         "no-race-before-first-completion",
-        early < 0.15,
-        format!("early estimate too optimistic: {early}"),
+        (0.005..=0.05).contains(&early),
+        format!("early estimate out of expected band: {early}"),
     );
     println!("    early estimate = {:.1}% (old defaults: ~71%)", early * 100.0);
 
@@ -415,7 +417,7 @@ fn main() {
     });
     check(
         "mid-flight-tracks-reality",
-        (0.6..=0.85).contains(&mid),
+        (0.6..=0.75).contains(&mid),
         format!("mid-flight estimate drifted from reality: {mid}"),
     );
     println!("    mid-flight estimate = {:.1}% (true 67%, old defaults: ~81%)", mid * 100.0);
