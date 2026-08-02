@@ -10,7 +10,7 @@
 //! concurrent reads of one source; positive bundle caches live behind a
 //! standard mutex and missing results are never cached across calls.
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering as AtomicOrdering};
@@ -413,12 +413,11 @@ impl InstructionRegistry {
                 })
         };
         let body_revisions = if model_content.is_some() && failure_data.is_none() {
-            selection
-                .admitted
-                .iter()
+            let mut emitted_revisions = BTreeSet::new();
+            InstructionAdmission::rendering_order(selection.admitted.clone())
+                .into_iter()
                 .filter(|candidate| {
-                    state.retained_body_revisions.get(&candidate.scope_dir)
-                        != Some(&candidate.metadata.revision)
+                    should_render_body(candidate, state, false, &mut emitted_revisions)
                 })
                 .map(|candidate| {
                     (
@@ -491,11 +490,9 @@ impl InstructionRegistry {
         force_bodies: bool,
     ) -> String {
         let mut rendered = String::new();
+        let mut emitted_revisions = BTreeSet::new();
         for candidate in InstructionAdmission::rendering_order(admitted.to_vec()) {
-            if !force_bodies
-                && state.retained_body_revisions.get(&candidate.scope_dir)
-                    == Some(&candidate.metadata.revision)
-            {
+            if !should_render_body(&candidate, state, force_bodies, &mut emitted_revisions) {
                 continue;
             }
             let display = escape_attribute(
@@ -799,6 +796,23 @@ impl InstructionRegistry {
     fn cache(&self) -> std::sync::MutexGuard<'_, HashMap<PathBuf, CachedBundle>> {
         self.bundles.lock().unwrap_or_else(PoisonError::into_inner)
     }
+}
+
+fn should_render_body(
+    candidate: &AdmissionCandidate,
+    state: &AgentInstructionState,
+    force_bodies: bool,
+    emitted_revisions: &mut BTreeSet<String>,
+) -> bool {
+    if !force_bodies
+        && state
+            .retained_body_revisions
+            .values()
+            .any(|revision| revision == &candidate.metadata.revision)
+    {
+        return false;
+    }
+    emitted_revisions.insert(candidate.metadata.revision.clone())
 }
 
 fn source_stamps(bundle: &InstructionBundle) -> Vec<SourceStamp> {

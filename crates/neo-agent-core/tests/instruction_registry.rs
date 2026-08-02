@@ -296,6 +296,63 @@ async fn depth_six_cycle_back_edge_expands_once_and_proceeds_after_visibility() 
 }
 
 #[tokio::test]
+async fn identical_nested_scope_reuses_retained_body_but_keeps_scope_state() {
+    let (_temp, workspace) = workspace_fixture();
+    let nested = workspace.join(".head-check");
+    fs::create_dir_all(&nested).expect("nested scope");
+    fs::write(workspace.join("AGENTS.md"), "shared rules\n").expect("root agents");
+    fs::write(nested.join("AGENTS.md"), "shared rules\n").expect("nested agents");
+    let registry = InstructionRegistry::new(config_for(&workspace, None)).expect("registry");
+    let mut state = AgentInstructionState::default();
+
+    let (baseline, baseline_fingerprint) = expect_defer(
+        registry
+            .reconcile(
+                reconcile_request(
+                    InstructionReconcileKind::ToolPreflight,
+                    vec![workspace.clone()],
+                ),
+                &state,
+            )
+            .await,
+    );
+    assert_eq!(
+        baseline
+            .model_content
+            .as_deref()
+            .expect("baseline model content")
+            .matches("<instruction_revision")
+            .count(),
+        1
+    );
+    state.apply_epoch(&baseline, &baseline_fingerprint);
+
+    let (nested_epoch, _) = expect_defer(
+        registry
+            .reconcile(
+                reconcile_request(InstructionReconcileKind::ToolPreflight, vec![nested]),
+                &state,
+            )
+            .await,
+    );
+    let nested_content = nested_epoch
+        .model_content
+        .as_deref()
+        .expect("nested model content");
+    assert_eq!(
+        nested_content.matches("<instruction_revision").count(),
+        0,
+        "the shared body must not be appended again: {nested_content}"
+    );
+    assert_eq!(
+        nested_content.matches("<active_instruction").count(),
+        2,
+        "both scope identities remain active: {nested_content}"
+    );
+    assert_eq!(nested_epoch.body_revisions, Some(BTreeMap::new()));
+}
+
+#[tokio::test]
 async fn epoch_metadata_preserves_import_paths_in_expansion_order() {
     let (_temp, workspace) = workspace_fixture();
     fs::create_dir_all(workspace.join("docs")).expect("docs dir");
