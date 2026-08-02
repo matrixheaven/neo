@@ -4,10 +4,11 @@ target
 .references/
 .DS_Store
 .worktrees/
-docs/aegis/work/
+.reasonix
 .mimocode
 .grok/
 .codegraph/
+docs/aegis/work/
 docs/node_modules/
 docs/.vitepress/cache/
 docs/.vitepress/dist/
