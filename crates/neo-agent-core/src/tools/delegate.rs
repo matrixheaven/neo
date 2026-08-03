@@ -227,12 +227,10 @@ async fn execute_delegate(
             details[k] = v.clone();
         }
     }
-    let content = details
-        .get("structured_output")
-        .map_or_else(
-            || delegate_result_content(&completed, request.context),
-            ToString::to_string,
-        );
+    let content = details.get("structured_output").map_or_else(
+        || delegate_result_content(&completed, request.context),
+        ToString::to_string,
+    );
     Ok(ToolResult::ok(content).with_details(details))
 }
 
