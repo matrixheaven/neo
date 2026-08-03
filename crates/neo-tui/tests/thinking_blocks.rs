@@ -64,13 +64,26 @@ fn summary_thinking_shows_latest_title_and_spinner() {
     let mut runtime = TranscriptPane::new(60, 12);
     runtime.apply_agent_event(neo_agent_core::AgentEvent::ThinkingStarted {
         turn: 1,
-        id: "summary".to_owned(),
+        id: "summary-1".to_owned(),
         kind: neo_ai::ThinkingKind::Summary,
     });
     runtime.apply_agent_event(neo_agent_core::AgentEvent::ThinkingDelta {
         turn: 1,
-        text: "**Planning context recall and repo inspection****Planning parallel recall"
-            .to_owned(),
+        text: "**Planning context recall and repo inspection**".to_owned(),
+    });
+    runtime.apply_agent_event(neo_agent_core::AgentEvent::ThinkingFinished {
+        turn: 1,
+        signature: None,
+        redacted: false,
+    });
+    runtime.apply_agent_event(neo_agent_core::AgentEvent::ThinkingStarted {
+        turn: 1,
+        id: "summary-2".to_owned(),
+        kind: neo_ai::ThinkingKind::Summary,
+    });
+    runtime.apply_agent_event(neo_agent_core::AgentEvent::ThinkingDelta {
+        turn: 1,
+        text: "**Planning parallel recall**".to_owned(),
     });
 
     let first = plain_frame(&mut runtime, 60, 12).join("\n");
@@ -92,34 +105,291 @@ fn summary_thinking_shows_latest_title_and_spinner() {
 }
 
 #[test]
-fn summary_thinking_deduplicates_repeated_titles_when_expanded() {
+fn summary_thinking_keeps_title_across_empty_active_part() {
+    let mut runtime = TranscriptPane::new(80, 16);
+    runtime.apply_agent_event(neo_agent_core::AgentEvent::ThinkingStarted {
+        turn: 1,
+        id: "summary-1".to_owned(),
+        kind: neo_ai::ThinkingKind::Summary,
+    });
+    runtime.apply_agent_event(neo_agent_core::AgentEvent::ThinkingDelta {
+        turn: 1,
+        text: "**Plan**\nfirst body".to_owned(),
+    });
+    runtime.apply_agent_event(neo_agent_core::AgentEvent::ThinkingFinished {
+        turn: 1,
+        signature: None,
+        redacted: false,
+    });
+    runtime.apply_agent_event(neo_agent_core::AgentEvent::ThinkingStarted {
+        turn: 1,
+        id: "summary-placeholder".to_owned(),
+        kind: neo_ai::ThinkingKind::Summary,
+    });
+    runtime.apply_agent_event(neo_agent_core::AgentEvent::ThinkingDelta {
+        turn: 1,
+        text: "<!-- -->".to_owned(),
+    });
+
+    let rows = plain_frame(&mut runtime, 80, 16);
+    let frame = rows.join("\n");
+
+    assert_eq!(
+        rows.iter().filter(|row| row.contains("thinking")).count(),
+        1,
+        "Summary streaming stays one spinner row: {rows:?}"
+    );
+    assert!(
+        frame.contains("thinking · Plan"),
+        "prior title remains visible: {frame}"
+    );
+    assert!(
+        !frame.contains("first body"),
+        "body is not streamed: {frame}"
+    );
+    assert!(
+        !frame.contains("<!-- -->"),
+        "placeholder is not streamed: {frame}"
+    );
+}
+
+#[test]
+fn summary_thinking_without_leading_title_uses_generic_spinner() {
+    let mut runtime = TranscriptPane::new(60, 12);
+    runtime.apply_agent_event(neo_agent_core::AgentEvent::ThinkingStarted {
+        turn: 1,
+        id: "summary".to_owned(),
+        kind: neo_ai::ThinkingKind::Summary,
+    });
+    runtime.apply_agent_event(neo_agent_core::AgentEvent::ThinkingDelta {
+        turn: 1,
+        text: "body with **inline bold**".to_owned(),
+    });
+
+    let frame = plain_frame(&mut runtime, 60, 12).join("\n");
+
+    assert!(
+        frame.contains("⠋ thinking..."),
+        "generic summary spinner: {frame}"
+    );
+    assert!(
+        !frame.contains("thinking ·"),
+        "body-only summary has no title label: {frame}"
+    );
+    assert!(
+        !frame.contains("inline bold"),
+        "summary body stays out of streaming scrollback: {frame}"
+    );
+}
+
+#[test]
+fn summary_thinking_preserves_body_after_title() {
     let mut runtime = TranscriptPane::new(80, 16);
     runtime.push_transcript(TranscriptEntry::thinking_complete_with_kind(
-        "**Planning context recall and repo inspection****Planning parallel recall and codegraph check****Initiating parallel memory recall and repo status checks****Planning context recall and repo inspection**",
+        "**Plan**\n- inspect [the repository](https://example.com/repo)\n- preserve the ordered parts",
         neo_ai::ThinkingKind::Summary,
     ));
 
     assert!(runtime.toggle_tool_output_expanded());
     let frame = plain_frame(&mut runtime, 80, 16).join("\n");
 
+    assert!(frame.contains("● Plan"), "summary title: {frame}");
+    assert!(
+        frame.contains("- inspect [the repository](https://example.com/repo)"),
+        "summary link body: {frame}"
+    );
+    assert!(
+        frame.contains("- preserve the ordered parts"),
+        "summary bullet body: {frame}"
+    );
+}
+
+#[test]
+fn summary_thinking_preserves_indented_body_after_title() {
+    let mut runtime = TranscriptPane::new(80, 16);
+    runtime.push_transcript(TranscriptEntry::thinking_complete_with_kind(
+        "**Title**\n    ```\n    let value = 42;\n    ```",
+        neo_ai::ThinkingKind::Summary,
+    ));
+
+    assert!(runtime.toggle_tool_output_expanded());
+    let rows = plain_frame(&mut runtime, 80, 16);
+
+    assert!(
+        rows.iter().any(|row| row.ends_with("    ```")),
+        "code fence indentation: {rows:?}"
+    );
+    assert!(
+        rows.iter().any(|row| row.ends_with("    let value = 42;")),
+        "code body indentation: {rows:?}"
+    );
+}
+
+#[test]
+fn summary_thinking_keeps_inline_bold_body() {
+    let mut runtime = TranscriptPane::new(80, 12);
+    runtime.push_transcript(TranscriptEntry::thinking_complete_with_kind(
+        "**Plan**\nThe **inline bold** detail remains body text.",
+        neo_ai::ThinkingKind::Summary,
+    ));
+
+    let frame = plain_frame(&mut runtime, 80, 12).join("\n");
+
+    assert!(frame.contains("● Plan"), "summary title: {frame}");
+    assert!(
+        frame.contains("The **inline bold** detail remains body text."),
+        "inline bold stays in body: {frame}"
+    );
+    assert!(
+        !frame.contains("● inline bold"),
+        "inline bold is not promoted to a title: {frame}"
+    );
+}
+
+#[test]
+fn summary_thinking_collapses_adjacent_duplicate_titles() {
+    let mut runtime = TranscriptPane::new(80, 16);
+    for (id, text) in [
+        ("summary-1", "**Plan**\nfirst body"),
+        ("summary-2", "**Plan**\nsecond body"),
+        ("summary-3", "**Review**\nthird body"),
+        ("summary-4", "**Plan**\nfourth body"),
+    ] {
+        runtime.apply_agent_event(neo_agent_core::AgentEvent::ThinkingStarted {
+            turn: 1,
+            id: id.to_owned(),
+            kind: neo_ai::ThinkingKind::Summary,
+        });
+        runtime.apply_agent_event(neo_agent_core::AgentEvent::ThinkingDelta {
+            turn: 1,
+            text: text.to_owned(),
+        });
+        runtime.apply_agent_event(neo_agent_core::AgentEvent::ThinkingFinished {
+            turn: 1,
+            signature: None,
+            redacted: false,
+        });
+    }
+
+    assert!(runtime.toggle_tool_output_expanded());
+    let frame = plain_frame(&mut runtime, 80, 16).join("\n");
+
     assert_eq!(
-        frame
-            .matches("Planning context recall and repo inspection")
-            .count(),
+        frame.matches("Plan").count(),
+        2,
+        "adjacent Plan collapses but non-adjacent Plan remains: {frame}"
+    );
+    assert_eq!(
+        frame.matches("Review").count(),
         1,
-        "repeated title is shown once: {frame}"
+        "Review remains distinct: {frame}"
+    );
+    assert!(frame.contains("first body"), "first body retained: {frame}");
+    assert!(
+        frame.contains("second body"),
+        "second body retained: {frame}"
+    );
+    assert!(frame.contains("third body"), "third body retained: {frame}");
+    assert!(
+        frame.contains("fourth body"),
+        "fourth body retained: {frame}"
+    );
+}
+
+#[test]
+fn summary_thinking_omits_placeholder_and_collapses_titles_across_it() {
+    let mut runtime = TranscriptPane::new(80, 16);
+    for (id, text) in [
+        ("summary-1", "**Plan**\nfirst body"),
+        ("summary-placeholder", "<!-- -->"),
+        ("summary-2", "**Plan**\nsecond body"),
+    ] {
+        runtime.apply_agent_event(neo_agent_core::AgentEvent::ThinkingStarted {
+            turn: 1,
+            id: id.to_owned(),
+            kind: neo_ai::ThinkingKind::Summary,
+        });
+        runtime.apply_agent_event(neo_agent_core::AgentEvent::ThinkingDelta {
+            turn: 1,
+            text: text.to_owned(),
+        });
+        runtime.apply_agent_event(neo_agent_core::AgentEvent::ThinkingFinished {
+            turn: 1,
+            signature: None,
+            redacted: false,
+        });
+    }
+
+    assert!(runtime.toggle_tool_output_expanded());
+    let frame = plain_frame(&mut runtime, 80, 16).join("\n");
+
+    assert_eq!(
+        frame.matches("Plan").count(),
+        1,
+        "placeholder does not break adjacent title collapse: {frame}"
+    );
+    assert!(frame.contains("first body"), "first body retained: {frame}");
+    assert!(
+        frame.contains("second body"),
+        "second body retained: {frame}"
     );
     assert!(
-        frame.contains("Planning parallel recall and codegraph check"),
-        "second title remains: {frame}"
+        !frame.contains("<!-- -->"),
+        "empty placeholder body is omitted: {frame}"
+    );
+}
+
+#[test]
+fn full_thinking_renders_bounded_preview() {
+    let mut runtime = TranscriptPane::new(40, 12);
+    runtime.push_transcript(TranscriptEntry::thinking_complete_with_kind(
+        "alpha\nbeta\ngamma\ndelta",
+        neo_ai::ThinkingKind::Full,
+    ));
+
+    let collapsed = plain_frame(&mut runtime, 40, 12).join("\n");
+    assert!(collapsed.contains("● alpha"), "full head: {collapsed}");
+    assert!(collapsed.contains("beta"), "full preview: {collapsed}");
+    assert!(
+        collapsed.contains("2 more lines (ctrl+o to expand)"),
+        "full collapse hint: {collapsed}"
     );
     assert!(
-        frame.contains("Initiating parallel memory recall and repo status checks"),
-        "third title remains: {frame}"
+        !collapsed.contains("gamma"),
+        "full preview is bounded: {collapsed}"
+    );
+
+    assert!(runtime.toggle_tool_output_expanded());
+    let expanded = plain_frame(&mut runtime, 40, 12).join("\n");
+    assert!(expanded.contains("gamma"), "expanded full body: {expanded}");
+    assert!(expanded.contains("delta"), "expanded full tail: {expanded}");
+    assert!(
+        !expanded.contains("ctrl+o to expand"),
+        "expanded full thinking has no hint: {expanded}"
+    );
+}
+
+#[test]
+fn unknown_thinking_does_not_extract_title() {
+    let mut runtime = TranscriptPane::new(60, 12);
+    runtime.push_transcript(TranscriptEntry::thinking_complete_with_kind(
+        "**Title**\nbody remains generic",
+        neo_ai::ThinkingKind::Unknown,
+    ));
+
+    let frame = plain_frame(&mut runtime, 60, 12).join("\n");
+
+    assert!(
+        frame.contains("● **Title**"),
+        "unknown keeps raw text: {frame}"
     );
     assert!(
-        !frame.contains("**"),
-        "summary markers stay out of UI: {frame}"
+        frame.contains("body remains generic"),
+        "unknown body: {frame}"
+    );
+    assert!(
+        !frame.contains("thinking · Title"),
+        "unknown has no summary title: {frame}"
     );
 }
 

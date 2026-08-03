@@ -36,11 +36,30 @@
 - `cargo fmt --all -- --check`: passed; `git diff --check`: passed.
 - A first unqualified library filter matched zero tests and was discarded as invalid evidence; the subsequent module-qualified exact test passed.
 
+## Task 3 Verification Evidence
+
+- `cargo test -p neo-tui --test thinking_blocks summary_thinking_preserves_body_after_title -- --exact --nocapture`: passed, 1 test.
+- `cargo test -p neo-tui --test thinking_blocks summary_thinking_keeps_inline_bold_body -- --exact --nocapture`: passed, 1 test.
+- `cargo test -p neo-tui --test thinking_blocks summary_thinking_collapses_adjacent_duplicate_titles -- --exact --nocapture`: passed, 1 test.
+- `cargo test -p neo-tui --test thinking_blocks summary_thinking_omits_placeholder_and_collapses_titles_across_it -- --exact --nocapture`: passed, 1 test.
+- `cargo test -p neo-tui --test thinking_blocks summary_thinking_keeps_title_across_empty_active_part -- --exact --nocapture`: passed, 1 test.
+- `cargo test -p neo-tui --test thinking_blocks summary_thinking_without_leading_title_uses_generic_spinner -- --exact --nocapture`: passed, 1 test.
+- `cargo test -p neo-tui --test thinking_blocks summary_thinking_preserves_indented_body_after_title -- --exact --nocapture`: passed, 1 test.
+- `cargo test -p neo-tui --test thinking_blocks full_thinking_renders_bounded_preview -- --exact --nocapture`: passed, 1 test.
+- `cargo test -p neo-tui --test thinking_blocks unknown_thinking_does_not_extract_title -- --exact --nocapture`: passed, 1 test.
+- `cargo test -p neo-tui --test transcript_store summary_projection_keeps_body_after_leading_title_across_ordered_parts -- --exact --nocapture`: passed, 1 test.
+- `cargo test -p neo-tui --test transcript_store summary_projection_keeps_unclosed_bold_body_across_parts -- --exact --nocapture`: passed, 1 test.
+- `cargo test -p neo-tui --test transcript_store summary_projection_keeps_body_without_leading_title_across_parts -- --exact --nocapture`: passed, 1 test.
+- `cargo check -p neo-tui --tests`: passed; `cargo fmt --all -- --check`: passed; `git diff --check`: passed.
+
 ## Review Evidence
 
-- Fresh Task 2 implementer completed the slice without Git lifecycle mutations.
-- Spec-compliance reviewer: `PASS` after empty id-bearing replay, pre-render part preservation, and live/replay grouping repairs.
-- Code-quality reviewer: `PASS` after runtime expectation, global display wrapping, redaction parity, API cleanup, duplicate-test cleanup, and unclosed-title deduplication repairs.
+- Fresh Task 2 implementer completed the previous slice without Git lifecycle mutations.
+- Task 2 spec-compliance reviewer: `PASS` after empty id-bearing replay, pre-render part preservation, and live/replay grouping repairs.
+- Task 2 code-quality reviewer: `PASS` after runtime expectation, global display wrapping, redaction parity, API cleanup, duplicate-test cleanup, and unclosed-title deduplication repairs.
+- Fresh Task 3 implementer completed the renderer slice without Git lifecycle mutations.
+- Task 3 spec-compliance reviewer: `PASS` after placeholder continuity, body-only streaming, and ordered title/body repairs.
+- Task 3 code-quality reviewer: `PASS` after active-title, body-indentation, renderer-comment, and checkpoint-state repairs.
 
 ## Scope Notes
 

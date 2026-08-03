@@ -8,10 +8,10 @@ const THINKING_PREVIEW_LINES: usize = 2;
 
 /// Render the thinking block as a fixed-height floating window.
 ///
-/// - **Streaming**: a braille-spinner header line
-///   `⠋ thinking...` followed by the *last* `THINKING_PREVIEW_LINES` wrapped
-///   rows. As new content streams in the window shows the tail, giving the
-///   impression of text scrolling up within a fixed 2-line height.
+/// - **Streaming Summary**: a single braille-spinner title/status row. Summary
+///   body stays out of ordinary scrollback while the part is live.
+/// - **Streaming Full/Unknown**: a braille-spinner header followed by the *last*
+///   `THINKING_PREVIEW_LINES` wrapped rows, so the window shows a scrolling tail.
 /// - **Complete**: the *first* `THINKING_PREVIEW_LINES` rows prefixed with a
 ///   `●` bullet, followed by a `… N more lines (ctrl+o to expand)` hint when
 ///   the full text was longer. This keeps completed thinking compact instead
@@ -27,29 +27,54 @@ fn render_thinking_parts(
 ) -> Vec<Line> {
     let style = thinking_style(theme);
     let body_width = width.max(1).saturating_sub(2).max(1);
-    let wrapped = wrap_thinking_parts(parts, body_width);
-    let total = wrapped.len();
-    let summary = (kind == ThinkingKind::Summary).then(|| summary_projection(parts));
-    let mut rows = Vec::new();
 
-    if total == 0 {
-        return rows;
-    }
-
-    if phase == ThinkingPhase::Streaming && !expanded {
-        if let Some(summary) = summary.as_ref() {
-            let label = summary.titles.last().map_or_else(
+    if kind == ThinkingKind::Summary {
+        let summary = summary_projection(parts);
+        if phase == ThinkingPhase::Streaming && !expanded {
+            let label = summary.latest_title().map_or_else(
                 || "thinking...".to_owned(),
                 |title| format!("thinking · {title}"),
             );
-            rows.push(Line::styled(
+            return vec![Line::styled(
                 format!("{} {label}", thinking_spinner(activity_frame)),
                 style,
-            ));
-            return rows;
+            )];
         }
 
+        let wrapped = summary.wrapped_lines(body_width);
+        let total = wrapped.len();
+        if total == 0 {
+            return Vec::new();
+        }
+
+        let limit = if expanded {
+            total
+        } else {
+            THINKING_PREVIEW_LINES.min(total)
+        };
+        let mut rows = Vec::new();
+        for (index, line) in wrapped.iter().take(limit).enumerate() {
+            let prefix = if index == 0 { "●" } else { "  " };
+            rows.push(Line::styled(format!("{prefix} {line}"), style));
+        }
+        if !expanded && total > limit {
+            rows.push(Line::styled(
+                format!("  … {} more lines (ctrl+o to expand)", total - limit),
+                Style::default().fg(theme.text_muted),
+            ));
+        }
+        return rows;
+    }
+
+    let wrapped = wrap_thinking_parts(parts, body_width);
+    let total = wrapped.len();
+    if total == 0 {
+        return Vec::new();
+    }
+
+    if phase == ThinkingPhase::Streaming && !expanded {
         // Streaming: spinner + tail window.
+        let mut rows = Vec::new();
         rows.push(Line::styled(
             format!("{} thinking...", thinking_spinner(activity_frame)),
             style,
@@ -61,41 +86,8 @@ fn render_thinking_parts(
         return rows;
     }
 
-    if let Some(summary) = summary.as_ref()
-        && !summary.titles.is_empty()
-    {
-        let wrapped_titles = summary
-            .titles
-            .iter()
-            .map(|title| wrap_width(title, body_width))
-            .collect::<Vec<_>>();
-        let total = wrapped_titles.iter().map(Vec::len).sum::<usize>();
-        let limit = if expanded {
-            total
-        } else {
-            THINKING_PREVIEW_LINES.min(total)
-        };
-        let mut emitted = 0;
-        for lines in &wrapped_titles {
-            for line in lines {
-                if emitted >= limit {
-                    break;
-                }
-                let prefix = if emitted == 0 { "●" } else { "  " };
-                rows.push(Line::styled(format!("{prefix} {line}"), style));
-                emitted += 1;
-            }
-        }
-        if !expanded && total > limit {
-            rows.push(Line::styled(
-                format!("  … {} more lines (ctrl+o to expand)", total - limit),
-                Style::default().fg(theme.text_muted),
-            ));
-        }
-        return rows;
-    }
-
     if expanded {
+        let mut rows = Vec::new();
         for (index, line) in wrapped.iter().enumerate() {
             let prefix = if index == 0 { "●" } else { "  " };
             rows.push(Line::styled(format!("{prefix} {line}"), style));
@@ -105,6 +97,7 @@ fn render_thinking_parts(
 
     // Complete: head window + collapse hint.
     let limit = THINKING_PREVIEW_LINES.min(total);
+    let mut rows = Vec::new();
     for (index, line) in wrapped.iter().take(limit).enumerate() {
         let prefix = if index == 0 { "●" } else { "  " };
         rows.push(Line::styled(format!("{prefix} {line}"), style));
@@ -155,115 +148,102 @@ pub(super) fn render_thinking_block(
 
 #[derive(Default)]
 struct SummaryProjection {
-    titles: Vec<String>,
+    parts: Vec<SummaryPart>,
+}
+
+struct SummaryPart {
+    title: Option<String>,
+    body: String,
 }
 
 fn summary_projection(parts: &[ThinkingPart]) -> SummaryProjection {
-    let mut parser = SummaryParser::default();
-    for part in parts {
-        parser.push(thinking_part_display_text(part));
+    SummaryProjection {
+        parts: parts
+            .iter()
+            .map(|part| parse_summary_part(thinking_part_display_text(part)))
+            .collect(),
     }
-    parser.finish()
 }
 
-#[derive(Default)]
-struct SummaryParser {
-    titles: Vec<String>,
-    fallback: Option<String>,
-    line: String,
-    in_title: bool,
-    pending_star: bool,
-    title: String,
+fn parse_summary_part(text: &str) -> SummaryPart {
+    let presentation = text.trim();
+    let Some(after_open) = presentation.strip_prefix("**") else {
+        return SummaryPart {
+            title: None,
+            body: summary_body(presentation),
+        };
+    };
+    let Some(close_offset) = after_open.find("**") else {
+        return SummaryPart {
+            title: None,
+            body: summary_body(presentation),
+        };
+    };
+
+    let title = after_open[..close_offset].trim();
+    if title.is_empty() {
+        return SummaryPart {
+            title: None,
+            body: summary_body(presentation),
+        };
+    }
+
+    SummaryPart {
+        title: Some(title.to_owned()),
+        body: summary_body(&after_open[close_offset + 2..]),
+    }
 }
 
-impl SummaryParser {
-    fn push(&mut self, text: &str) {
-        self.push_fallback(text);
-        for character in text.chars() {
-            self.push_title_character(character);
+fn summary_body(text: &str) -> String {
+    let body = strip_summary_separator(text).trim_end();
+    if body.trim() == "<!-- -->" {
+        String::new()
+    } else {
+        body.to_owned()
+    }
+}
+
+/// Remove the title/body separator without stripping indentation after a newline.
+fn strip_summary_separator(text: &str) -> &str {
+    let text = text.trim_start_matches(|character| matches!(character, ' ' | '\t'));
+    text.strip_prefix("\r\n")
+        .or_else(|| text.strip_prefix('\n'))
+        .or_else(|| text.strip_prefix('\r'))
+        .unwrap_or(text)
+}
+
+impl SummaryProjection {
+    fn latest_title(&self) -> Option<&str> {
+        for part in self.parts.iter().rev() {
+            if let Some(title) = part.title.as_deref() {
+                return Some(title);
+            }
+            if !part.body.is_empty() {
+                return None;
+            }
         }
+        None
     }
 
-    fn push_fallback(&mut self, text: &str) {
-        if self.fallback.is_some() {
-            return;
-        }
-        for character in text.chars() {
-            if character == '\n' {
-                self.finish_line();
-                if self.fallback.is_some() {
-                    break;
+    fn wrapped_lines(&self, width: usize) -> Vec<String> {
+        let mut lines = Vec::new();
+        let mut previous_title = None;
+
+        for part in &self.parts {
+            if let Some(title) = part.title.as_deref() {
+                if previous_title != Some(title) {
+                    lines.extend(wrap_width(title, width));
                 }
-            } else {
-                self.line.push(character);
+                previous_title = Some(title);
+            } else if !part.body.is_empty() {
+                previous_title = None;
+            }
+            if !part.body.is_empty() {
+                lines.extend(wrap_width(&part.body, width));
             }
         }
-    }
 
-    fn finish_line(&mut self) {
-        if self.fallback.is_none() {
-            let line = self.line.trim();
-            if !line.is_empty() {
-                self.fallback = Some(line.trim_matches('*').trim().to_owned());
-            }
-        }
-        self.line.clear();
-    }
-
-    fn push_title_character(&mut self, character: char) {
-        if self.in_title {
-            if character == '*' {
-                if self.pending_star {
-                    self.add_closed_title();
-                    self.in_title = false;
-                    self.pending_star = false;
-                } else {
-                    self.pending_star = true;
-                }
-            } else {
-                if self.pending_star {
-                    self.title.push('*');
-                    self.pending_star = false;
-                }
-                self.title.push(character);
-            }
-        } else if character == '*' {
-            if self.pending_star {
-                self.in_title = true;
-                self.pending_star = false;
-                self.title.clear();
-            } else {
-                self.pending_star = true;
-            }
-        } else {
-            self.pending_star = false;
-        }
-    }
-
-    fn add_closed_title(&mut self) {
-        let title = self.title.trim();
-        if !title.is_empty() && !self.titles.iter().any(|known| known == title) {
-            self.titles.push(title.to_owned());
-        }
-        self.title.clear();
-    }
-
-    fn finish(mut self) -> SummaryProjection {
-        if self.in_title {
-            if self.pending_star {
-                self.title.push('*');
-            }
-            self.add_closed_title();
-        }
-        self.finish_line();
-        if self.titles.is_empty()
-            && let Some(fallback) = self.fallback
-        {
-            self.titles.push(fallback);
-        }
-        SummaryProjection {
-            titles: self.titles,
-        }
+        lines
     }
 }
 

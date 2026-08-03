@@ -956,7 +956,7 @@ fn live_and_replayed_redacted_thinking_keep_raw_text_and_render_parity() {
 }
 
 #[test]
-fn summary_projection_is_global_across_ordered_parts() {
+fn summary_projection_keeps_body_after_leading_title_across_ordered_parts() {
     let mut pane = TranscriptPane::new(80, 20);
     pane.replay_assistant_content(&[
         neo_agent_core::Content::thinking_with_kind_and_id(
@@ -975,15 +975,24 @@ fn summary_projection_is_global_across_ordered_parts() {
         ),
     ]);
 
+    assert!(pane.toggle_tool_output_expanded());
     let rendered = plain_rows(pane.transcript()).join("\n");
     assert!(rendered.contains("● Plan"), "rendered summary: {rendered}");
     assert!(
-        rendered.contains("  Cross title"),
-        "rendered summary: {rendered}"
+        rendered.contains("**Cross"),
+        "body marker is retained: {rendered}"
     );
     assert!(
-        rendered.contains("… 1 more lines (ctrl+o to expand)"),
-        "rendered summary: {rendered}"
+        rendered.contains("title**"),
+        "body tail is retained: {rendered}"
+    );
+    assert!(
+        rendered.contains("**Plan**"),
+        "later bold body is retained: {rendered}"
+    );
+    assert!(
+        rendered.contains("**Latest**"),
+        "later inline bold body is retained: {rendered}"
     );
 
     let mut streaming = TranscriptPane::new(80, 20);
@@ -1019,7 +1028,7 @@ fn summary_projection_is_global_across_ordered_parts() {
 }
 
 #[test]
-fn summary_projection_deduplicates_unclosed_title_across_parts() {
+fn summary_projection_keeps_unclosed_bold_body_across_parts() {
     let mut pane = TranscriptPane::new(80, 20);
     pane.replay_assistant_content(&[
         neo_agent_core::Content::thinking_with_kind_and_id(
@@ -1038,17 +1047,28 @@ fn summary_projection_deduplicates_unclosed_title_across_parts() {
         ),
     ]);
 
+    assert!(pane.toggle_tool_output_expanded());
     let rendered = plain_rows(pane.transcript());
-    let plan_rows = rendered
-        .iter()
-        .filter(|row| row.contains("Plan"))
-        .map(String::as_str)
-        .collect::<Vec<_>>();
-    assert_eq!(plan_rows, vec!["● Plan"]);
+    assert!(
+        rendered.iter().any(|row| row.contains("● Plan")),
+        "leading title is retained: {rendered:?}"
+    );
+    assert!(
+        rendered.iter().any(|row| row.contains("**Pla")),
+        "unclosed bold body is retained: {rendered:?}"
+    );
+    assert!(
+        rendered.iter().any(|row| row.trim() == "n"),
+        "later body part is retained: {rendered:?}"
+    );
+    assert!(
+        !rendered.iter().any(|row| row.trim() == "Pla"),
+        "unclosed body is not promoted to a title: {rendered:?}"
+    );
 }
 
 #[test]
-fn summary_projection_keeps_first_line_fallback_across_parts() {
+fn summary_projection_keeps_body_without_leading_title_across_parts() {
     let mut pane = TranscriptPane::new(80, 20);
     pane.replay_assistant_content(&[
         neo_agent_core::Content::thinking_with_kind_and_id(
@@ -1067,14 +1087,19 @@ fn summary_projection_keeps_first_line_fallback_across_parts() {
         ),
     ]);
 
+    assert!(pane.toggle_tool_output_expanded());
     let rendered = plain_rows(pane.transcript()).join("\n");
     assert!(
         rendered.contains("● first fallback"),
-        "rendered summary: {rendered}"
+        "first body line is retained: {rendered}"
     );
     assert!(
-        !rendered.contains("more lines"),
-        "fallback should remain one projected title: {rendered}"
+        rendered.contains("body"),
+        "later body line is retained: {rendered}"
+    );
+    assert!(
+        rendered.contains("second fallback"),
+        "second body part is retained: {rendered}"
     );
 }
 
