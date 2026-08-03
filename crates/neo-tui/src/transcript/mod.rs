@@ -47,8 +47,8 @@ pub use delegate_card::DelegateCardComponent;
 pub use delegate_group::DelegateGroupComponent;
 pub use entry::{
     ApprovalDisplayState, ApprovalPromptData, BannerData, McpStartupPhase, McpStartupStatusData,
-    QuestionPromptData, QuestionPromptState, StatusSeverity, ThinkingPhase, TranscriptEntry,
-    TranscriptImageAttachment,
+    QuestionPromptData, QuestionPromptState, StatusSeverity, ThinkingPart, ThinkingPhase,
+    TranscriptEntry, TranscriptImageAttachment,
 };
 pub use instruction_card::InstructionCardComponent;
 pub use pane::{BlockingEntryKind, TranscriptPane};

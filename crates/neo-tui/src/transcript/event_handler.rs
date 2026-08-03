@@ -197,9 +197,9 @@ impl TranscriptPane {
 
     fn apply_thinking_event(&mut self, event: &AgentEvent) -> bool {
         match event {
-            AgentEvent::ThinkingStarted { turn, kind, .. } => {
+            AgentEvent::ThinkingStarted { turn, id, kind } => {
                 self.transcript.begin_live_model_attempt(*turn);
-                self.start_thinking_block(*kind);
+                self.start_thinking_block(*kind, Some(id.clone()));
                 true
             }
             AgentEvent::ThinkingDelta { turn, text } => {
@@ -207,8 +207,8 @@ impl TranscriptPane {
                 self.append_thinking_block(text);
                 true
             }
-            AgentEvent::ThinkingFinished { .. } => {
-                self.finish_thinking_block();
+            AgentEvent::ThinkingFinished { redacted, .. } => {
+                self.finish_thinking_block(*redacted);
                 true
             }
             _ => false,
@@ -750,9 +750,9 @@ impl TranscriptPane {
         self.push_goal_card(kind, objective.to_owned(), None, None);
     }
 
-    fn start_thinking_block(&mut self, kind: ThinkingKind) {
+    fn start_thinking_block(&mut self, kind: ThinkingKind, id: Option<String>) {
         self.finish_assistant_message();
-        self.transcript.start_thinking_with_kind(kind);
+        self.transcript.start_thinking_with_kind_and_id(kind, id);
         self.apply_expand_state_to_active_thinking();
         self.mark_dirty();
     }
@@ -763,8 +763,8 @@ impl TranscriptPane {
         self.mark_dirty();
     }
 
-    fn finish_thinking_block(&mut self) {
-        self.transcript.finish_thinking();
+    fn finish_thinking_block(&mut self, redacted: bool) {
+        self.transcript.finish_thinking(redacted);
         self.mark_dirty();
     }
 

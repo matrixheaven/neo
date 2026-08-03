@@ -31,7 +31,7 @@ fn semantic_block_spacing_survives_history_live_partition_and_ack_boundaries() {
     assert_blank_rows_between(&mut screen, "spacing-user", "thinking...", 1);
     pane.acknowledge_history(&update.history);
 
-    pane.transcript_mut().finish_thinking();
+    pane.transcript_mut().finish_thinking(false);
     pane.mark_dirty();
     pane.apply_agent_event(AgentEvent::ToolExecutionStarted {
         turn: 1,
@@ -119,7 +119,7 @@ fn thinking_keeps_one_blank_row_after_tool_while_streaming_and_complete() {
     render_update(&mut inline, &mut screen, &mut pane, &mut output);
     assert_blank_rows_between(&mut screen, &tool_tail, "thinking...", 1);
 
-    pane.transcript_mut().finish_thinking();
+    pane.transcript_mut().finish_thinking(false);
     pane.mark_dirty();
     render_update(&mut inline, &mut screen, &mut pane, &mut output);
     assert_blank_rows_between(&mut screen, &tool_tail, "thinking spacing sentinel", 1);

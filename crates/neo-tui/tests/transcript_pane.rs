@@ -2373,7 +2373,8 @@ fn retry_thinking_first_reuses_anchor_before_intervening_finalized_entry() {
     assert_eq!(pane.transcript().entry_ids(), &[anchor_id, intervening_id]);
     assert!(matches!(
         &pane.transcript().entries()[0],
-        TranscriptEntry::ThinkingBlock { content, .. } if content == "winning reasoning"
+        TranscriptEntry::ThinkingBlock { parts, .. }
+            if parts.len() == 1 && parts[0].text == "winning reasoning"
     ));
     assert!(matches!(
         &pane.transcript().entries()[1],

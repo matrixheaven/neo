@@ -533,10 +533,7 @@ fn in_place_card_updates_preserve_active_thinking() {
         .transcript()
         .entries()
         .iter()
-        .filter_map(|entry| match entry {
-            TranscriptEntry::ThinkingBlock { content, .. } => Some(content.as_str()),
-            _ => None,
-        })
+        .filter_map(TranscriptEntry::thinking_content)
         .collect::<Vec<_>>();
     assert_eq!(thinking, vec!["Archimedes"]);
 

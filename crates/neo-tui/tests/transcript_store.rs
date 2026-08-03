@@ -16,7 +16,10 @@ use neo_agent_core::{
 };
 use neo_tui::primitive::theme::TuiTheme;
 use neo_tui::primitive::{Component, Finalization, strip_ansi};
-use neo_tui::transcript::{ShellRunComponent, TranscriptEntry, TranscriptPane, TranscriptStore};
+use neo_tui::transcript::{
+    ShellRunComponent, ThinkingPart, ThinkingPhase, TranscriptEntry, TranscriptPane,
+    TranscriptStore,
+};
 
 fn tool_activity(
     id: &str,
@@ -186,14 +189,11 @@ fn request_test_approval(pane: &mut TranscriptPane) {
     });
 }
 
-fn thinking_contents(store: &TranscriptStore) -> Vec<&str> {
+fn thinking_contents(store: &TranscriptStore) -> Vec<String> {
     store
         .entries()
         .iter()
-        .filter_map(|entry| match entry {
-            TranscriptEntry::ThinkingBlock { content, .. } => Some(content.as_str()),
-            _ => None,
-        })
+        .filter_map(TranscriptEntry::thinking_content)
         .collect()
 }
 
@@ -449,10 +449,7 @@ fn workflow_updates_do_not_break_active_text_boundary() {
         .transcript()
         .entries()
         .iter()
-        .filter_map(|entry| match entry {
-            TranscriptEntry::ThinkingBlock { content, .. } => Some(content.as_str()),
-            _ => None,
-        })
+        .filter_map(TranscriptEntry::thinking_content)
         .collect::<Vec<_>>();
     assert_eq!(thinking, vec!["continuous thinking"]);
 }
@@ -701,7 +698,7 @@ fn thinking_finishes_in_place_without_creating_a_second_entry() {
     store.append_thinking_delta("alpha\nbeta\ngamma");
     assert_eq!(store.entries().len(), 1);
 
-    store.finish_thinking();
+    store.finish_thinking(false);
     let rows = plain_rows(&store);
 
     assert_eq!(store.entries().len(), 1);
@@ -715,7 +712,7 @@ fn completed_thinking_stays_finalized_when_adjacent_thinking_starts() {
 
     store.start_thinking();
     store.append_thinking_delta("first");
-    store.finish_thinking();
+    store.finish_thinking(false);
     let completed_id = store.entry_ids()[0];
     assert_eq!(store.entry_finalization(0), Some(Finalization::Finalized));
 
@@ -728,6 +725,114 @@ fn completed_thinking_stays_finalized_when_adjacent_thinking_starts() {
     assert_eq!(store.entries().len(), 1);
     assert_eq!(store.entry_ids()[0], completed_id);
     assert_eq!(store.entry_finalization(0), Some(Finalization::Live));
+}
+
+#[test]
+fn multi_part_unknown_thinking_wraps_as_one_display_stream() {
+    let parts = vec![
+        ThinkingPart::new("abc", None),
+        ThinkingPart::new("defgh", None),
+    ];
+
+    let complete = TranscriptEntry::ThinkingBlock {
+        parts: parts.clone(),
+        kind: neo_ai::ThinkingKind::Unknown,
+        phase: ThinkingPhase::Complete,
+        expanded: false,
+    };
+    let complete_rows = complete
+        .render(6, &TuiTheme::default())
+        .into_iter()
+        .map(|line| line.text().clone())
+        .collect::<Vec<_>>();
+    assert_eq!(complete_rows, vec!["● abcd", "   efgh"]);
+    assert!(
+        complete_rows
+            .iter()
+            .all(|line| !line.contains("ctrl+o to expand"))
+    );
+
+    let streaming = TranscriptEntry::ThinkingBlock {
+        parts,
+        kind: neo_ai::ThinkingKind::Unknown,
+        phase: ThinkingPhase::Streaming,
+        expanded: false,
+    };
+    let streaming_rows = streaming
+        .render(6, &TuiTheme::default())
+        .into_iter()
+        .map(|line| line.text().clone())
+        .collect::<Vec<_>>();
+    assert_eq!(streaming_rows, vec!["⠋ thinking...", "  abcd", "  efgh"]);
+}
+
+#[test]
+fn adjacent_summary_parts_keep_ids_and_compact_visible_projection() {
+    let mut live = TranscriptPane::new(80, 20);
+
+    for (id, text) in [("summary-1", "first"), ("summary-2", "second")] {
+        live.apply_agent_event(neo_agent_core::AgentEvent::ThinkingStarted {
+            turn: 1,
+            id: id.to_owned(),
+            kind: neo_ai::ThinkingKind::Summary,
+        });
+        live.apply_agent_event(neo_agent_core::AgentEvent::ThinkingDelta {
+            turn: 1,
+            text: text.to_owned(),
+        });
+        live.apply_agent_event(neo_agent_core::AgentEvent::ThinkingFinished {
+            turn: 1,
+            signature: None,
+            redacted: false,
+        });
+    }
+
+    assert_eq!(live.transcript().entries().len(), 1);
+    let TranscriptEntry::ThinkingBlock { parts, .. } = &live.transcript().entries()[0] else {
+        panic!("expected one live thinking block");
+    };
+    assert_eq!(parts.len(), 2);
+    assert_eq!(parts[0].id.as_deref(), Some("summary-1"));
+    assert_eq!(parts[0].text, "first");
+    assert_eq!(parts[1].id.as_deref(), Some("summary-2"));
+    assert_eq!(parts[1].text, "second");
+    assert_eq!(
+        live.transcript().entries()[0].thinking_content().as_deref(),
+        Some("firstsecond")
+    );
+
+    let replayed_parts = vec![
+        neo_agent_core::Content::thinking_with_kind_and_id(
+            "first",
+            None,
+            false,
+            neo_ai::ThinkingKind::Summary,
+            Some("summary-1".into()),
+        ),
+        neo_agent_core::Content::thinking_with_kind_and_id(
+            "second",
+            None,
+            false,
+            neo_ai::ThinkingKind::Summary,
+            Some("summary-2".into()),
+        ),
+    ];
+    let mut replay = TranscriptPane::new(80, 20);
+    replay.replay_assistant_content(&replayed_parts);
+
+    assert_eq!(replay.transcript().entries().len(), 1);
+    let TranscriptEntry::ThinkingBlock { parts, .. } = &replay.transcript().entries()[0] else {
+        panic!("expected one replayed thinking block");
+    };
+    assert_eq!(parts.len(), 2);
+    assert_eq!(parts[0].id.as_deref(), Some("summary-1"));
+    assert_eq!(parts[0].text, "first");
+    assert_eq!(parts[1].id.as_deref(), Some("summary-2"));
+    assert_eq!(parts[1].text, "second");
+    assert_eq!(
+        plain_rows(replay.transcript()),
+        plain_rows(live.transcript())
+    );
 }
 
 #[test]
@@ -745,12 +850,12 @@ fn assistant_text_blocks_thinking_coalescing() {
 
     store.start_thinking();
     store.append_thinking_delta("first");
-    store.finish_thinking();
+    store.finish_thinking(false);
     store.append_assistant_delta("visible answer");
     store.finish_assistant();
     store.start_thinking();
     store.append_thinking_delta("second");
-    store.finish_thinking();
+    store.finish_thinking(false);
 
     assert_eq!(thinking_contents(&store), vec!["first", "second"]);
     assert_eq!(store.entries().len(), 3);
@@ -762,14 +867,215 @@ fn tool_runs_block_thinking_coalescing() {
 
     store.start_thinking();
     store.append_thinking_delta("first");
-    store.finish_thinking();
+    store.finish_thinking(false);
     store.push_tool_run("tool-1", "Bash", Some(r#"{"command":"pwd"}"#.to_owned()));
     store.start_thinking();
     store.append_thinking_delta("second");
-    store.finish_thinking();
+    store.finish_thinking(false);
 
     assert_eq!(thinking_contents(&store), vec!["first", "second"]);
     assert_eq!(store.entries().len(), 3);
+}
+
+#[test]
+fn replayed_empty_id_thinking_part_is_retained() {
+    let mut pane = TranscriptPane::new(80, 20);
+    pane.replay_assistant_content(&[neo_agent_core::Content::thinking_with_kind_and_id(
+        "",
+        None,
+        false,
+        neo_ai::ThinkingKind::Summary,
+        Some("empty-summary".into()),
+    )]);
+
+    let entries = pane.transcript().entries();
+    assert_eq!(entries.len(), 1);
+    let TranscriptEntry::ThinkingBlock { parts, .. } = &entries[0] else {
+        panic!("expected one empty thinking block");
+    };
+    assert_eq!(parts.len(), 1);
+    assert_eq!(parts[0].id.as_deref(), Some("empty-summary"));
+    assert!(parts[0].text.is_empty());
+
+    let mut historical = TranscriptPane::new(80, 20);
+    historical.replay_assistant_content(&[neo_agent_core::Content::thinking("", None, false)]);
+    assert!(historical.transcript().entries().is_empty());
+}
+
+#[test]
+fn live_and_replayed_redacted_thinking_keep_raw_text_and_render_parity() {
+    let mut live = TranscriptPane::new(80, 20);
+    live.apply_agent_event(neo_agent_core::AgentEvent::ThinkingStarted {
+        turn: 1,
+        id: "redacted-thinking".to_owned(),
+        kind: neo_ai::ThinkingKind::Unknown,
+    });
+    live.apply_agent_event(neo_agent_core::AgentEvent::ThinkingFinished {
+        turn: 1,
+        signature: None,
+        redacted: true,
+    });
+
+    let TranscriptEntry::ThinkingBlock { parts, .. } = &live.transcript().entries()[0] else {
+        panic!("expected one live thinking block");
+    };
+    assert_eq!(parts.len(), 1);
+    assert!(parts[0].text.is_empty());
+    assert!(parts[0].redacted);
+    assert_eq!(
+        live.transcript().entries()[0].thinking_content(),
+        Some("[Reasoning redacted]".to_owned())
+    );
+    let live_rows = plain_rows(live.transcript());
+    assert!(
+        live_rows
+            .iter()
+            .any(|row| row.contains("[Reasoning redacted]"))
+    );
+
+    let mut replay = TranscriptPane::new(80, 20);
+    replay.replay_assistant_content(&[neo_agent_core::Content::thinking_with_kind_and_id(
+        "",
+        Some("opaque-signature".into()),
+        true,
+        neo_ai::ThinkingKind::Unknown,
+        Some("redacted-thinking".into()),
+    )]);
+
+    let TranscriptEntry::ThinkingBlock { parts, .. } = &replay.transcript().entries()[0] else {
+        panic!("expected one replayed thinking block");
+    };
+    assert_eq!(parts.len(), 1);
+    assert!(parts[0].text.is_empty());
+    assert!(parts[0].redacted);
+    assert_eq!(
+        replay.transcript().entries()[0].thinking_content(),
+        live.transcript().entries()[0].thinking_content()
+    );
+    assert_eq!(plain_rows(replay.transcript()), live_rows);
+}
+
+#[test]
+fn summary_projection_is_global_across_ordered_parts() {
+    let mut pane = TranscriptPane::new(80, 20);
+    pane.replay_assistant_content(&[
+        neo_agent_core::Content::thinking_with_kind_and_id(
+            "**Plan**\n**Cross",
+            None,
+            false,
+            neo_ai::ThinkingKind::Summary,
+            Some("summary-1".into()),
+        ),
+        neo_agent_core::Content::thinking_with_kind_and_id(
+            " title**\n**Plan**\n**Latest**",
+            None,
+            false,
+            neo_ai::ThinkingKind::Summary,
+            Some("summary-2".into()),
+        ),
+    ]);
+
+    let rendered = plain_rows(pane.transcript()).join("\n");
+    assert!(rendered.contains("● Plan"), "rendered summary: {rendered}");
+    assert!(
+        rendered.contains("  Cross title"),
+        "rendered summary: {rendered}"
+    );
+    assert!(
+        rendered.contains("… 1 more lines (ctrl+o to expand)"),
+        "rendered summary: {rendered}"
+    );
+
+    let mut streaming = TranscriptPane::new(80, 20);
+    streaming.apply_agent_event(neo_agent_core::AgentEvent::ThinkingStarted {
+        turn: 1,
+        id: "summary-1".to_owned(),
+        kind: neo_ai::ThinkingKind::Summary,
+    });
+    streaming.apply_agent_event(neo_agent_core::AgentEvent::ThinkingDelta {
+        turn: 1,
+        text: "**First**".to_owned(),
+    });
+    streaming.apply_agent_event(neo_agent_core::AgentEvent::ThinkingFinished {
+        turn: 1,
+        signature: None,
+        redacted: false,
+    });
+    streaming.apply_agent_event(neo_agent_core::AgentEvent::ThinkingStarted {
+        turn: 1,
+        id: "summary-2".to_owned(),
+        kind: neo_ai::ThinkingKind::Summary,
+    });
+    streaming.apply_agent_event(neo_agent_core::AgentEvent::ThinkingDelta {
+        turn: 1,
+        text: "**Latest**".to_owned(),
+    });
+
+    let rendered = plain_rows(streaming.transcript()).join("\n");
+    assert!(
+        rendered.contains("thinking · Latest"),
+        "rendered summary: {rendered}"
+    );
+}
+
+#[test]
+fn summary_projection_deduplicates_unclosed_title_across_parts() {
+    let mut pane = TranscriptPane::new(80, 20);
+    pane.replay_assistant_content(&[
+        neo_agent_core::Content::thinking_with_kind_and_id(
+            "**Plan**\n**Pla",
+            None,
+            false,
+            neo_ai::ThinkingKind::Summary,
+            Some("summary-1".into()),
+        ),
+        neo_agent_core::Content::thinking_with_kind_and_id(
+            "n",
+            None,
+            false,
+            neo_ai::ThinkingKind::Summary,
+            Some("summary-2".into()),
+        ),
+    ]);
+
+    let rendered = plain_rows(pane.transcript());
+    let plan_rows = rendered
+        .iter()
+        .filter(|row| row.contains("Plan"))
+        .map(String::as_str)
+        .collect::<Vec<_>>();
+    assert_eq!(plan_rows, vec!["● Plan"]);
+}
+
+#[test]
+fn summary_projection_keeps_first_line_fallback_across_parts() {
+    let mut pane = TranscriptPane::new(80, 20);
+    pane.replay_assistant_content(&[
+        neo_agent_core::Content::thinking_with_kind_and_id(
+            "first fallback\nbody",
+            None,
+            false,
+            neo_ai::ThinkingKind::Summary,
+            Some("summary-1".into()),
+        ),
+        neo_agent_core::Content::thinking_with_kind_and_id(
+            "second fallback",
+            None,
+            false,
+            neo_ai::ThinkingKind::Summary,
+            Some("summary-2".into()),
+        ),
+    ]);
+
+    let rendered = plain_rows(pane.transcript()).join("\n");
+    assert!(
+        rendered.contains("● first fallback"),
+        "rendered summary: {rendered}"
+    );
+    assert!(
+        !rendered.contains("more lines"),
+        "fallback should remain one projected title: {rendered}"
+    );
 }
 
 #[test]

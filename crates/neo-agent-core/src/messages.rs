@@ -40,6 +40,8 @@ pub enum Content {
         redacted: bool,
         #[serde(default)]
         kind: neo_ai::ThinkingKind,
+        #[serde(default)]
+        id: Option<Arc<str>>,
     },
     Image {
         mime_type: Arc<str>,
@@ -59,12 +61,13 @@ impl Content {
         signature: Option<Arc<str>>,
         redacted: bool,
     ) -> Self {
-        Self::Thinking {
-            text: text.into(),
+        Self::thinking_with_kind_and_id(
+            text,
             signature,
             redacted,
-            kind: neo_ai::ThinkingKind::Unknown,
-        }
+            neo_ai::ThinkingKind::Unknown,
+            None,
+        )
     }
 
     #[must_use]
@@ -74,11 +77,23 @@ impl Content {
         redacted: bool,
         kind: neo_ai::ThinkingKind,
     ) -> Self {
+        Self::thinking_with_kind_and_id(text, signature, redacted, kind, None)
+    }
+
+    #[must_use]
+    pub fn thinking_with_kind_and_id(
+        text: impl Into<Arc<str>>,
+        signature: Option<Arc<str>>,
+        redacted: bool,
+        kind: neo_ai::ThinkingKind,
+        id: Option<Arc<str>>,
+    ) -> Self {
         Self::Thinking {
             text: text.into(),
             signature,
             redacted,
             kind,
+            id,
         }
     }
 
@@ -954,6 +969,28 @@ mod tests {
             serde_json::from_str(r#"{"User":{"content":[{"Text":{"text":"legacy"}}]}}"#)
                 .expect("deserialize legacy user message");
         assert_eq!(legacy.display_text(), None);
+    }
+
+    #[test]
+    fn thinking_part_id_roundtrips_and_historical_content_defaults() {
+        let content = Content::thinking_with_kind_and_id(
+            "raw summary",
+            None,
+            false,
+            neo_ai::ThinkingKind::Summary,
+            Some("summary-1".into()),
+        );
+        let decoded: Content = serde_json::from_str(
+            &serde_json::to_string(&content).expect("serialize thinking content"),
+        )
+        .expect("deserialize thinking content");
+        assert_eq!(decoded, content);
+
+        let historical: Content = serde_json::from_str(
+            r#"{"Thinking":{"text":"legacy","signature":null,"redacted":false}}"#,
+        )
+        .expect("deserialize historical thinking content");
+        assert_eq!(historical, Content::thinking("legacy", None, false));
     }
 
     #[test]

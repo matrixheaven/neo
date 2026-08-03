@@ -521,22 +521,23 @@ impl TranscriptPane {
             redacted,
             signature: _,
             kind,
+            id,
         } = part
         else {
             return;
         };
         self.flush_replayed_assistant_text(text);
-        if !thinking_text.is_empty() {
-            self.push_transcript(TranscriptEntry::thinking_complete_with_kind(
-                thinking_text.to_string(),
-                *kind,
-            ));
-        } else if *redacted {
-            self.push_transcript(TranscriptEntry::thinking_complete_with_kind(
-                "[Reasoning redacted]",
-                *kind,
-            ));
+        if thinking_text.is_empty() && !*redacted && id.is_none() {
+            return;
         }
+        self.transcript.start_thinking_with_kind_and_id(
+            *kind,
+            id.as_ref().map(std::string::ToString::to_string),
+        );
+        self.transcript.append_thinking_delta(thinking_text);
+        self.transcript.finish_thinking(*redacted);
+        self.apply_expand_state_to_active_thinking();
+        self.mark_dirty();
     }
 
     fn flush_replayed_assistant_text(&mut self, text: &mut String) {
@@ -650,7 +651,7 @@ impl TranscriptPane {
     }
 
     pub fn append_assistant_delta(&mut self, text: &str) {
-        self.transcript.finish_thinking();
+        self.transcript.finish_thinking(false);
         self.transcript.append_assistant_delta(text);
         self.mark_dirty();
     }
@@ -1324,7 +1325,7 @@ impl TranscriptPane {
 
     pub(super) fn finish_active_text_blocks(&mut self) {
         self.finish_assistant_message();
-        self.transcript.finish_thinking();
+        self.transcript.finish_thinking(false);
     }
 
     fn latest_compaction_is_complete(&self) -> bool {

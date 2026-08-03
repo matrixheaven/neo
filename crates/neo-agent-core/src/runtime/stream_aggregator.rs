@@ -153,8 +153,13 @@ impl ModelTurnState {
         kind: ThinkingKind,
         emitter: &mut EventEmitter,
     ) {
-        self.content
-            .push(Content::thinking_with_kind("", None, false, kind));
+        self.content.push(Content::thinking_with_kind_and_id(
+            "",
+            None,
+            false,
+            kind,
+            Some(id.clone().into()),
+        ));
         self.active_thinking_index = Some(self.content.len() - 1);
         self.active_text_index = None;
         emitter.emit(AgentEvent::ThinkingStarted { turn, id, kind });
@@ -406,5 +411,64 @@ mod tests {
                 phase: MessagePhase::Unknown,
             }
         );
+    }
+
+    #[test]
+    fn thinking_parts_preserve_provider_ids_and_raw_order() {
+        let (sender, _receiver) = tokio::sync::mpsc::unbounded_channel();
+        let mut emitter = EventEmitter::new(sender, crate::AgentContext::new());
+        let mut state = ModelTurnState::new();
+
+        for (id, text) in [("summary-1", "first"), ("summary-2", "second")] {
+            state.apply_model_event(
+                1,
+                AiStreamEvent::ThinkingStart {
+                    id: id.to_owned(),
+                    kind: ThinkingKind::Summary,
+                },
+                &mut emitter,
+            );
+            state.apply_model_event(
+                1,
+                AiStreamEvent::ThinkingDelta {
+                    text: text.to_owned(),
+                },
+                &mut emitter,
+            );
+            state.apply_model_event(
+                1,
+                AiStreamEvent::ThinkingEnd {
+                    signature: None,
+                    redacted: false,
+                },
+                &mut emitter,
+            );
+        }
+
+        let AgentMessage::Assistant { content, .. } =
+            state.into_assistant_message(StopReason::EndTurn)
+        else {
+            panic!("expected assistant message");
+        };
+        assert_eq!(content.len(), 2);
+        let [
+            Content::Thinking {
+                text: first_text,
+                id: first_id,
+                ..
+            },
+            Content::Thinking {
+                text: second_text,
+                id: second_id,
+                ..
+            },
+        ] = content.as_slice()
+        else {
+            panic!("expected two thinking content parts");
+        };
+        assert_eq!(first_id.as_deref(), Some("summary-1"));
+        assert_eq!(first_text.as_ref(), "first");
+        assert_eq!(second_id.as_deref(), Some("summary-2"));
+        assert_eq!(second_text.as_ref(), "second");
     }
 }

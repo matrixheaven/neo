@@ -1041,7 +1041,13 @@ async fn runtime_streams_thinking_events_and_persists_thinking_content() {
         context.messages()[1],
         AgentMessage::assistant(
             [
-                Content::thinking("Checked the plan.", Some("sig-1".into()), false),
+                Content::thinking_with_kind_and_id(
+                    "Checked the plan.",
+                    Some("sig-1".into()),
+                    false,
+                    ThinkingKind::Unknown,
+                    Some("thinking_1".into()),
+                ),
                 Content::text("final answer"),
             ],
             Vec::new(),
@@ -1107,8 +1113,20 @@ async fn runtime_preserves_multiple_thinking_parts_and_text_order() {
         AgentMessage::assistant(
             [
                 Content::text("intro "),
-                Content::thinking("first thought", Some("sig-1".into()), false),
-                Content::thinking("second thought", Some("sig-2".into()), true),
+                Content::thinking_with_kind_and_id(
+                    "first thought",
+                    Some("sig-1".into()),
+                    false,
+                    ThinkingKind::Unknown,
+                    Some("thinking_1".into()),
+                ),
+                Content::thinking_with_kind_and_id(
+                    "second thought",
+                    Some("sig-2".into()),
+                    true,
+                    ThinkingKind::Unknown,
+                    Some("thinking_2".into()),
+                ),
                 Content::text("outro"),
             ],
             Vec::new(),

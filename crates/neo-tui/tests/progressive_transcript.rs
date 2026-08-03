@@ -617,7 +617,7 @@ fn every_live_entry_family_is_bounded_and_commits_once() {
         store.append_thinking_delta("partial thought");
     }
     assert_bounded_live(&mut pane, 100, 24);
-    pane.transcript_mut().finish_thinking();
+    pane.transcript_mut().finish_thinking(false);
     assert_one_canonical_commit(&mut pane, 100, 24);
 
     // -- AssistantMessage: bounded until the attempt is canonical ----------

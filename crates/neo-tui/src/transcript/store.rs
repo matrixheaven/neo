@@ -10,7 +10,7 @@ use crate::transcript::{
 };
 
 use super::entry::{
-    ApprovalPromptData, RetryPhase, RetryStatusData, ThinkingPhase, TranscriptEntry,
+    ApprovalPromptData, RetryPhase, RetryStatusData, ThinkingPart, ThinkingPhase, TranscriptEntry,
 };
 use neo_agent_core::instructions::{
     IgnoredInstructionBundle, InstructionBundleMetadata, InstructionEpochData,
@@ -567,36 +567,47 @@ impl TranscriptStore {
     }
 
     pub fn start_thinking_with_kind(&mut self, kind: ThinkingKind) {
+        self.start_thinking_with_kind_and_id(kind, None);
+    }
+
+    pub fn start_thinking_with_kind_and_id(&mut self, kind: ThinkingKind, id: Option<String>) {
         if self.active_thinking.is_some() {
             return;
         }
         if let Some(index) = self.take_empty_live_attempt_anchor() {
             self.mutate_entry(index, |entry| {
-                *entry = TranscriptEntry::thinking_streaming_with_kind(String::new(), kind);
+                *entry = TranscriptEntry::thinking_streaming_with_kind_and_id(
+                    String::new(),
+                    kind,
+                    id.clone(),
+                );
                 true
             });
             self.active_thinking = Some(index);
             return;
         }
-        // Merge a new thinking stream into an immediately preceding completed
-        // thinking block so consecutive reasoning events render as one card.
+        // Keep adjacent same-kind streams in one visible block, but preserve
+        // each provider part as a separate ordered item.
         if let Some(index) = self.entries.len().checked_sub(1)
             && let Some(TranscriptEntry::ThinkingBlock {
                 kind: existing_kind,
                 phase,
+                parts,
                 ..
             }) = self.entries.get_mut(index)
             && *existing_kind == kind
             && *phase == ThinkingPhase::Complete
         {
             *phase = ThinkingPhase::Streaming;
+            parts.push(ThinkingPart::new(String::new(), id));
             self.active_thinking = Some(index);
             self.touch_entry(index);
             return;
         }
-        let index = self.append_entry(TranscriptEntry::thinking_streaming_with_kind(
+        let index = self.append_entry(TranscriptEntry::thinking_streaming_with_kind_and_id(
             String::new(),
             kind,
+            id,
         ));
         self.active_thinking = Some(index);
     }
@@ -609,17 +620,23 @@ impl TranscriptStore {
         let Some(index) = self.active_thinking else {
             return;
         };
-        if let Some(TranscriptEntry::ThinkingBlock { content, .. }) = self.entries.get_mut(index) {
-            content.push_str(text);
+        if let Some(TranscriptEntry::ThinkingBlock { parts, .. }) = self.entries.get_mut(index)
+            && let Some(part) = parts.last_mut()
+        {
+            part.text.push_str(text);
         }
         self.touch_entry(index);
     }
 
-    pub fn finish_thinking(&mut self) {
+    pub fn finish_thinking(&mut self, redacted: bool) {
         if let Some(index) = self.active_thinking.take() {
-            if let Some(TranscriptEntry::ThinkingBlock { phase, .. }) = self.entries.get_mut(index)
+            if let Some(TranscriptEntry::ThinkingBlock { phase, parts, .. }) =
+                self.entries.get_mut(index)
             {
                 *phase = ThinkingPhase::Complete;
+                if let Some(part) = parts.last_mut() {
+                    part.redacted = redacted;
+                }
             }
             self.touch_entry(index);
         }
@@ -1383,7 +1400,7 @@ impl TranscriptStore {
             || self.active_assistant.is_some()
             || self.active_thinking.is_some();
         self.finish_assistant();
-        self.finish_thinking();
+        self.finish_thinking(false);
 
         for index in 0..self.entries.len() {
             changed |= self.mutate_entry(index, TranscriptEntry::interrupt);
@@ -1556,7 +1573,7 @@ impl TranscriptStore {
     }
 
     fn mark_visible_boundary(&mut self) {
-        self.finish_thinking();
+        self.finish_thinking(false);
     }
 
     // ── Render cache management ───────────────────────────────────────────

@@ -81,7 +81,9 @@ fn text_copy_parts(entry: &TranscriptEntry) -> Option<(&'static str, String)> {
     match entry {
         TranscriptEntry::UserMessage { content, .. } => Some(("You", content.clone())),
         TranscriptEntry::AssistantMessage { content } => Some(("Assistant", content.clone())),
-        TranscriptEntry::ThinkingBlock { content, .. } => Some(("Thinking", content.clone())),
+        TranscriptEntry::ThinkingBlock { .. } => {
+            Some(("Thinking", entry.thinking_content().unwrap_or_default()))
+        }
         _ => None,
     }
 }

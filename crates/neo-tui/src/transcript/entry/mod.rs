@@ -155,6 +155,31 @@ impl TranscriptImageAttachment {
     }
 }
 
+const REASONING_REDACTED_TEXT: &str = "[Reasoning redacted]";
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ThinkingPart {
+    pub id: Option<String>,
+    pub text: String,
+    pub redacted: bool,
+}
+
+impl ThinkingPart {
+    #[must_use]
+    pub fn new(text: impl Into<String>, id: Option<String>) -> Self {
+        Self::new_with_redacted(text, id, false)
+    }
+
+    #[must_use]
+    pub fn new_with_redacted(text: impl Into<String>, id: Option<String>, redacted: bool) -> Self {
+        Self {
+            id,
+            text: text.into(),
+            redacted,
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum TranscriptEntry {
     Banner(BannerData),
@@ -166,7 +191,7 @@ pub enum TranscriptEntry {
         content: String,
     },
     ThinkingBlock {
-        content: String,
+        parts: Vec<ThinkingPart>,
         kind: ThinkingKind,
         phase: ThinkingPhase,
         expanded: bool,
@@ -388,8 +413,17 @@ impl TranscriptEntry {
 
     #[must_use]
     pub fn thinking_streaming_with_kind(content: impl Into<String>, kind: ThinkingKind) -> Self {
+        Self::thinking_streaming_with_kind_and_id(content, kind, None)
+    }
+
+    #[must_use]
+    pub fn thinking_streaming_with_kind_and_id(
+        content: impl Into<String>,
+        kind: ThinkingKind,
+        id: Option<String>,
+    ) -> Self {
         Self::ThinkingBlock {
-            content: content.into(),
+            parts: vec![ThinkingPart::new(content, id)],
             kind,
             phase: ThinkingPhase::Streaming,
             expanded: false,
@@ -403,12 +437,45 @@ impl TranscriptEntry {
 
     #[must_use]
     pub fn thinking_complete_with_kind(content: impl Into<String>, kind: ThinkingKind) -> Self {
+        Self::thinking_complete_with_kind_and_id(content, kind, None)
+    }
+
+    #[must_use]
+    pub fn thinking_complete_with_kind_and_id(
+        content: impl Into<String>,
+        kind: ThinkingKind,
+        id: Option<String>,
+    ) -> Self {
         Self::ThinkingBlock {
-            content: content.into(),
+            parts: vec![ThinkingPart::new(content, id)],
             kind,
             phase: ThinkingPhase::Complete,
             expanded: false,
         }
+    }
+
+    #[must_use]
+    pub fn thinking_parts(&self) -> Option<&[ThinkingPart]> {
+        match self {
+            Self::ThinkingBlock { parts, .. } => Some(parts),
+            _ => None,
+        }
+    }
+
+    #[must_use]
+    pub fn thinking_content(&self) -> Option<String> {
+        self.thinking_parts().map(|parts| {
+            parts
+                .iter()
+                .map(|part| {
+                    if part.text.is_empty() && part.redacted {
+                        REASONING_REDACTED_TEXT
+                    } else {
+                        part.text.as_str()
+                    }
+                })
+                .collect::<String>()
+        })
     }
 
     #[must_use]
@@ -817,12 +884,12 @@ impl TranscriptEntry {
                 render_banner::render_assistant_message(content, inner_width, theme)
             }
             Self::ThinkingBlock {
-                content,
+                parts,
                 kind,
                 phase,
                 expanded,
             } => render_thinking::render_thinking_block(
-                content,
+                parts,
                 *kind,
                 *phase,
                 *expanded,
@@ -1571,7 +1638,7 @@ mod tests {
     fn thinking_block_expands_full_text() {
         let content = "one two three four five six seven eight nine ten eleven twelve";
         let collapsed = TranscriptEntry::ThinkingBlock {
-            content: content.to_owned(),
+            parts: vec![ThinkingPart::new(content, None)],
             kind: ThinkingKind::Unknown,
             phase: ThinkingPhase::Complete,
             expanded: false,
@@ -1581,7 +1648,7 @@ mod tests {
         .map(|line| line.text().clone())
         .collect::<Vec<_>>();
         let expanded = TranscriptEntry::ThinkingBlock {
-            content: content.to_owned(),
+            parts: vec![ThinkingPart::new(content, None)],
             kind: ThinkingKind::Unknown,
             phase: ThinkingPhase::Complete,
             expanded: true,

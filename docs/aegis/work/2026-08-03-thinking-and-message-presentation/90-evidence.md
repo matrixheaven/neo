@@ -24,14 +24,28 @@
 - `cargo fmt --all -- --check`: passed; `git diff --check`: passed.
 - Workspace-wide `cargo test --workspace --no-run` was attempted by the implementer and remains blocked only by unrelated `crates/neo-agent/src/modes/interactive/tests.rs:12959` calling missing `NeoChromeState::thinking_enabled()`; no fix was made.
 
+## Task 2 Verification Evidence
+
+- `cargo test -p neo-agent-core --lib messages::tests::thinking_part_id_roundtrips_and_historical_content_defaults -- --exact --nocapture`: passed, 1 test.
+- `cargo test -p neo-agent-core --lib runtime::stream_aggregator::tests::thinking_parts_preserve_provider_ids_and_raw_order -- --exact --nocapture`: passed, 1 test.
+- `cargo test -p neo-agent-core --test runtime_turn runtime_preserves_multiple_thinking_parts_and_text_order -- --exact --nocapture`: passed, 1 test.
+- `cargo test -p neo-tui --test transcript_store adjacent_summary_parts_keep_ids_and_compact_visible_projection -- --exact --nocapture`: passed, 1 test.
+- `cargo test -p neo-tui --test transcript_store multi_part_unknown_thinking_wraps_as_one_display_stream -- --exact --nocapture`: passed, 1 test.
+- `cargo test -p neo-tui --test transcript_store live_and_replayed_redacted_thinking_keep_raw_text_and_render_parity -- --exact --nocapture`: passed, 1 test.
+- `cargo test -p neo-tui --test transcript_store summary_projection_deduplicates_unclosed_title_across_parts -- --exact --nocapture`: passed, 1 test.
+- `cargo fmt --all -- --check`: passed; `git diff --check`: passed.
+- A first unqualified library filter matched zero tests and was discarded as invalid evidence; the subsequent module-qualified exact test passed.
+
 ## Review Evidence
 
-- Fresh implementer completed the slice without Git lifecycle mutations.
-- Spec-compliance reviewer: `APPROVED` after buffering, late-phase, fallback, idempotence, and historical serde repairs.
-- Code-quality reviewer: `APPROVED` after all direct compatibility literals and formatting repairs.
+- Fresh Task 2 implementer completed the slice without Git lifecycle mutations.
+- Spec-compliance reviewer: `PASS` after empty id-bearing replay, pre-render part preservation, and live/replay grouping repairs.
+- Code-quality reviewer: `PASS` after runtime expectation, global display wrapping, redaction parity, API cleanup, duplicate-test cleanup, and unclosed-title deduplication repairs.
 
 ## Scope Notes
 
 - MessagePhase remains orthogonal to ThinkingKind.
 - OpenAI phase mapping uses only explicit output-item `phase` values.
+- Task 2 retains provider/event thinking ids and raw ordered parts in canonical `Content` and existing TUI `ThinkingBlock` state; redacted placeholders remain render-time projection.
 - No transcript owner, hidden-reasoning path, provider runtime rewrite, card, context-prefix, or session-history change was introduced by this slice.
+- Workspace-wide `cargo test --workspace --no-run` remains unclaimed; the known unrelated `NeoChromeState::thinking_enabled()` error at `crates/neo-agent/src/modes/interactive/tests.rs:12959` remains outside scope and untouched.
