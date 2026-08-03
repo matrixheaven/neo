@@ -1604,30 +1604,35 @@ impl TranscriptStore {
             .enumerate()
             .flat_map(|(index, entry)| match entry {
                 TranscriptEntry::AssistantMessage { content } if content.is_empty() => Vec::new(),
-                TranscriptEntry::AssistantMessage { content } => {
-                    let phase = self.assistant_phase(index);
-                    let first_prefix = if phase == MessagePhase::Commentary {
-                        "▸ "
-                    } else {
-                        "● "
-                    };
-                    let mut render_theme = *theme;
-                    if phase == MessagePhase::Commentary {
-                        render_theme.brand = theme.text_muted;
-                        render_theme.text_primary = theme.text_muted;
-                        render_theme.user_message = theme.text_muted;
-                    }
-                    crate::markdown::render_markdown(
-                        content,
-                        width,
-                        &render_theme,
-                        first_prefix,
-                        "  ",
-                    )
-                }
+                TranscriptEntry::AssistantMessage { content } => Self::render_assistant_message(
+                    content,
+                    width,
+                    theme,
+                    self.assistant_phase(index),
+                ),
                 _ => entry.render(width, theme),
             })
             .collect()
+    }
+
+    fn render_assistant_message(
+        content: &str,
+        width: usize,
+        theme: &TuiTheme,
+        phase: MessagePhase,
+    ) -> Vec<Line> {
+        let first_prefix = if phase == MessagePhase::Commentary {
+            "▸ "
+        } else {
+            "● "
+        };
+        let mut render_theme = *theme;
+        if phase == MessagePhase::Commentary {
+            render_theme.brand = theme.text_muted;
+            render_theme.text_primary = theme.text_muted;
+            render_theme.user_message = theme.text_muted;
+        }
+        crate::markdown::render_markdown(content, width, &render_theme, first_prefix, "  ")
     }
 
     fn mark_visible_boundary(&mut self) {
@@ -1851,6 +1856,9 @@ impl TranscriptStore {
         image_capabilities: TerminalImageCapabilities,
     ) -> Vec<Line> {
         match self.entries.get(index) {
+            Some(TranscriptEntry::AssistantMessage { content }) => {
+                Self::render_assistant_message(content, width, theme, self.assistant_phase(index))
+            }
             Some(entry) => entry.render_with_image_context(
                 width,
                 theme,

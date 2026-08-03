@@ -1246,6 +1246,37 @@ fn unknown_message_phase_preserves_legacy_rendering() {
 }
 
 #[test]
+fn cached_frame_renderer_preserves_commentary_phase() {
+    let mut pane = TranscriptPane::new(80, 20);
+    pane.apply_agent_event(neo_agent_core::AgentEvent::MessageStarted {
+        turn: 1,
+        id: "commentary-1".to_owned(),
+        phase: neo_ai::MessagePhase::Commentary,
+    });
+    pane.apply_agent_event(neo_agent_core::AgentEvent::TextDelta {
+        turn: 1,
+        text: "Checking the cache".to_owned(),
+    });
+
+    let frame = pane
+        .render_frame(80, 20)
+        .expect("cached frame should render");
+    let frame = frame
+        .into_iter()
+        .map(|line| strip_ansi(&line))
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(
+        frame.contains("▸ Checking the cache"),
+        "cached frame uses Commentary marker: {frame}"
+    );
+    assert!(
+        !frame.contains("● Checking"),
+        "cached frame does not fall back to legacy marker: {frame}"
+    );
+}
+
+#[test]
 fn retry_status_countdown_formats_long_delay() {
     let mut pane = TranscriptPane::new(80, 20);
     pane.apply_agent_event(neo_agent_core::AgentEvent::RetryScheduled {
