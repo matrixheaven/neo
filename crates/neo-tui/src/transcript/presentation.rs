@@ -162,23 +162,30 @@ impl LiveBlock {
     }
 }
 
-struct PresentationFrame {
+struct PresentationFrame<'a> {
     live_blocks: Vec<LiveBlock>,
     pending_history: Vec<FinalizedBlock>,
     rendered_tail_owner: Option<TranscriptEntryId>,
+    options: TranscriptRenderOptions<'a>,
+    progressive_group: bool,
 }
 
-impl PresentationFrame {
-    fn new(rendered_tail_owner: Option<TranscriptEntryId>) -> Self {
+impl<'a> PresentationFrame<'a> {
+    fn new(
+        rendered_tail_owner: Option<TranscriptEntryId>,
+        options: TranscriptRenderOptions<'a>,
+    ) -> Self {
         Self {
             live_blocks: Vec::new(),
             pending_history: Vec::new(),
             rendered_tail_owner,
+            options,
+            progressive_group: false,
         }
     }
 
-    fn finish(self, live_budget: usize) -> TranscriptTerminalUpdate {
-        let blocks = bound_live_blocks(self.live_blocks, live_budget);
+    fn finish(self) -> TranscriptTerminalUpdate {
+        let blocks = bound_live_blocks(self.live_blocks, self.options.live_budget);
         let (live, has_visible_animation) = compose_live_blocks(blocks);
         TranscriptTerminalUpdate {
             history: self.pending_history,
@@ -260,6 +267,7 @@ pub(super) struct TranscriptPresentation {
     assistant_offsets: BTreeMap<TranscriptEntryId, usize>,
     assistant_sources: BTreeMap<TranscriptEntryId, String>,
     acknowledged_facts: BTreeSet<super::progressive::ProgressiveFactId>,
+    observed_standalone_delegates: BTreeSet<TranscriptEntryId>,
     acknowledged_tail_owner: Option<TranscriptEntryId>,
     diagnostics: VecDeque<String>,
 }
@@ -274,7 +282,7 @@ impl TranscriptPresentation {
         transcript: &mut TranscriptStore,
         options: TranscriptRenderOptions<'_>,
     ) -> TranscriptTerminalUpdate {
-        let mut frame = PresentationFrame::new(self.acknowledged_tail_owner);
+        let mut frame = PresentationFrame::new(self.acknowledged_tail_owner, options);
         let attempt_start = transcript.live_model_attempt_start();
         let blocking_index = blocking_dialog_index(transcript);
         let wait_projections = delegate_wait_projections(transcript);
@@ -292,9 +300,8 @@ impl TranscriptPresentation {
                     index += 1;
                     continue;
                 };
-                render_entry(
-                    transcript, index, id, revision, true, false, options, &mut frame,
-                );
+                frame.progressive_group = false;
+                render_entry(transcript, index, id, revision, true, false, &mut frame);
                 break;
             }
             // Everything from the live model attempt start is rollback-able
@@ -309,6 +316,12 @@ impl TranscriptPresentation {
                 index += 1;
                 continue;
             };
+            if matches!(
+                transcript.entries().get(index),
+                Some(TranscriptEntry::Delegate { .. })
+            ) {
+                self.observed_standalone_delegates.insert(id);
+            }
             if let Some(projection) = wait_projections
                 .iter()
                 .copied()
@@ -326,6 +339,7 @@ impl TranscriptPresentation {
                 continue;
             }
             let progressive = self.has_progressive_history(transcript, id);
+            let progressive_group = progressive && self.observed_standalone_delegates.contains(&id);
             if let Some(expected_revision) = self.committed_entry_revisions.get(&id).copied() {
                 self.emit_progressive_facts(transcript, id, !blocked, options, &mut frame);
                 if expected_revision != revision {
@@ -342,15 +356,7 @@ impl TranscriptPresentation {
             {
                 let finalization = transcript.entry_finalization(index);
                 let phase = transcript.assistant_phase(index);
-                self.render_assistant_entry(
-                    id,
-                    content,
-                    phase,
-                    finalization,
-                    blocked,
-                    options,
-                    &mut frame,
-                );
+                self.render_assistant_entry(id, content, phase, finalization, blocked, &mut frame);
                 index += 1;
                 continue;
             }
@@ -373,6 +379,7 @@ impl TranscriptPresentation {
                 continue;
             }
 
+            frame.progressive_group = progressive_group;
             render_entry(
                 transcript,
                 index,
@@ -380,13 +387,12 @@ impl TranscriptPresentation {
                 revision,
                 blocked,
                 progressive,
-                options,
                 &mut frame,
             );
             self.emit_progressive_facts(transcript, id, !blocked, options, &mut frame);
             index += 1;
         }
-        frame.finish(options.live_budget)
+        frame.finish()
     }
 
     fn has_progressive_history(
@@ -409,7 +415,7 @@ impl TranscriptPresentation {
         entry_id: TranscriptEntryId,
         allowed: bool,
         options: TranscriptRenderOptions<'_>,
-        frame: &mut PresentationFrame,
+        frame: &mut PresentationFrame<'_>,
     ) {
         if !allowed {
             return;
@@ -483,9 +489,9 @@ impl TranscriptPresentation {
         phase: MessagePhase,
         finalization: Option<Finalization>,
         blocked: bool,
-        options: TranscriptRenderOptions<'_>,
-        frame: &mut PresentationFrame,
+        frame: &mut PresentationFrame<'_>,
     ) {
+        let options = frame.options;
         let source_mismatch = self
             .assistant_sources
             .get(&id)
@@ -580,7 +586,7 @@ impl TranscriptPresentation {
         index: usize,
         blocked: bool,
         options: TranscriptRenderOptions<'_>,
-        frame: &mut PresentationFrame,
+        frame: &mut PresentationFrame<'_>,
     ) -> Option<usize> {
         let Some(TranscriptEntry::ToolRun { component }) = transcript.entries().get(index) else {
             return None;
@@ -716,10 +722,10 @@ impl TranscriptPresentation {
     }
 }
 
-fn progressive_facts_for_entry<'a>(
-    transcript: &'a TranscriptStore,
+fn progressive_facts_for_entry(
+    transcript: &TranscriptStore,
     entry_id: TranscriptEntryId,
-) -> Vec<&'a super::progressive::ProgressiveFact> {
+) -> Vec<&super::progressive::ProgressiveFact> {
     let facts = transcript
         .progressive_facts()
         .iter()
@@ -816,9 +822,9 @@ fn render_entry(
     revision: u64,
     blocked: bool,
     progressive: bool,
-    options: TranscriptRenderOptions<'_>,
-    frame: &mut PresentationFrame,
+    frame: &mut PresentationFrame<'_>,
 ) {
+    let options = frame.options;
     let block_id = TranscriptBlockId::Entries(vec![id]);
     let mut lines = transcript.render_entry_ansi_cached(
         index,
@@ -835,12 +841,24 @@ fn render_entry(
                 transcript.entries().get(index),
                 Some(TranscriptEntry::DelegateGroup { .. })
             ) {
-                lines = render_delegate_group_archive(
-                    transcript.entries().get(index),
-                    options.width,
-                    options.theme,
-                )
-                .unwrap_or_default();
+                lines = if frame.progressive_group {
+                    render_delegate_family_terminal(transcript, index, id, options)
+                        .or_else(|| {
+                            render_delegate_group_archive(
+                                transcript.entries().get(index),
+                                options.width,
+                                options.theme,
+                            )
+                        })
+                        .unwrap_or_default()
+                } else {
+                    render_delegate_group_archive(
+                        transcript.entries().get(index),
+                        options.width,
+                        options.theme,
+                    )
+                    .unwrap_or_default()
+                };
             } else if progressive
                 && matches!(
                     transcript.entries().get(index),
@@ -995,7 +1013,7 @@ fn render_delegate_wait_target(
     transcript: &TranscriptStore,
     projection: DelegateWaitProjection,
     options: TranscriptRenderOptions<'_>,
-    frame: &mut PresentationFrame,
+    frame: &mut PresentationFrame<'_>,
 ) {
     let Some(TranscriptEntry::ToolRun { component: wait }) =
         transcript.entries().get(projection.wait_index)
@@ -1187,7 +1205,22 @@ fn render_delegate_family_terminal(
         .copied()
         .filter(|fact| matches!(&fact.payload, ProgressiveFactPayload::ChildAgent(_)))
         .collect::<Vec<_>>();
-    terminal_facts.sort_unstable_by_key(|fact| fact.capture_sequence());
+    if let TranscriptEntry::DelegateGroup { component } = entry {
+        // Group roster order is semantic; completion order is not.
+        terminal_facts.sort_unstable_by_key(|fact| {
+            let roster_index = match &fact.payload {
+                ProgressiveFactPayload::ChildAgent(agent) => component
+                    .snapshots()
+                    .iter()
+                    .position(|snapshot| snapshot.id.as_str() == agent.agent_id.as_str())
+                    .unwrap_or(usize::MAX),
+                _ => usize::MAX,
+            };
+            (roster_index, fact.capture_sequence())
+        });
+    } else {
+        terminal_facts.sort_unstable_by_key(|fact| fact.capture_sequence());
+    }
     let mut tool_facts = facts
         .iter()
         .copied()
@@ -1249,7 +1282,7 @@ fn render_workflow_entry(
     revision: u64,
     blocked: bool,
     options: TranscriptRenderOptions<'_>,
-    frame: &mut PresentationFrame,
+    frame: &mut PresentationFrame<'_>,
 ) -> bool {
     let Some(TranscriptEntry::Workflow { component }) = transcript.entries().get(index) else {
         return false;

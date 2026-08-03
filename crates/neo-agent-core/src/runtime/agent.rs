@@ -220,6 +220,16 @@ impl AgentRuntime {
             });
         }
         append_runtime_reminders(&self.config, &mut projected_emitter);
+        if let Some(turn_injection) = &self.config.turn_injection {
+            projected_emitter.emit(AgentEvent::MessageAppended {
+                message: AgentMessage::injection_text(
+                    format!(
+                        "<workflow_turn_context applies_to=\"next_model_request_only\">\n{turn_injection}\n</workflow_turn_context>"
+                    ),
+                    "workflow_turn_context",
+                ),
+            });
+        }
         context_fits_after_compaction(&self.config, &projected_emitter.context)
     }
 

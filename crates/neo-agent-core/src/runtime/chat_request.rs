@@ -6,8 +6,6 @@ use super::image_blobs::resolve_image_blobs;
 use crate::compaction::projection::{ProjectionPlan, project_for_request};
 use crate::{AgentMessage, sanitize_tool_exchange_messages};
 
-pub(super) const DYNAMIC_INSTRUCTION_RULES: &str = "Neo instruction updates arrive as user-role injections. Each <instruction_revision> defines one immutable revision body. The highest-generation <instruction_active_state> is the complete active set and supersedes every earlier active state. Revisions omitted from the latest active state are inactive; previously defined bodies remain available for later reactivation.";
-
 pub(super) async fn chat_request(
     config: &AgentConfig,
     context: &AgentContext,
@@ -20,7 +18,6 @@ pub(super) async fn chat_request(
     if let Some(workspace_context) = workspace_context_message(config) {
         messages.push(workspace_context.to_chat_message());
     }
-    messages.push(AgentMessage::system_text(DYNAMIC_INSTRUCTION_RULES).to_chat_message());
     let mut context_messages = context.messages.clone();
     if let Some(transform) = &config.context_append_transform {
         context_messages.extend(transform(context.messages()));

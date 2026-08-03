@@ -2402,6 +2402,7 @@ type = "object"
         let contents = requests[0]
             .messages
             .iter()
+            .filter(|message| !matches!(message, ChatMessage::System { .. }))
             .map(chat_message_text)
             .collect::<Vec<_>>();
         assert_eq!(contents, vec!["hello", "hi back", "continue"]);
@@ -2977,7 +2978,7 @@ type = "object"
         let empty_authority = request_text
             .iter()
             .rposition(|text| {
-                text.contains("No path-scoped instruction bundles are currently active.")
+                text.contains("<instruction_active_state") && !text.contains("<active_instruction")
             })
             .expect("removed authority snapshot");
         let prompt = request_text

@@ -95,6 +95,12 @@ pub struct AgentContext {
     #[serde(skip)]
     #[schemars(skip)]
     pub(super) instruction_authority_content: Option<String>,
+    /// Full compaction removed the pinned message or retained only a delta;
+    /// the registry must restore the complete authority before the next model
+    /// request, even when the old authority snapshot remains available.
+    #[serde(skip)]
+    #[schemars(skip)]
+    pub(super) instruction_authority_needs_rehydration: bool,
     /// Exact current Blocked notice, retained beside a rehydrated authority
     /// snapshot. A successful epoch clears the failure notice.
     #[serde(skip)]
@@ -165,16 +171,17 @@ impl AgentContext {
     }
 
     pub fn apply_compaction(&mut self, summary: CompactionSummary) {
+        let authority_was_pinned = self.instruction_authority_snapshot().is_some();
         let keep_from = summary.first_kept_message_index.min(self.messages.len());
         let mut kept = self.messages.split_off(keep_from);
         // Drop any trailing assistant-with-tool-calls whose results were
         // compacted away, so the retained tail is always provider-valid.
         kept = sanitize_tool_exchange_messages(&kept).into_owned();
         // Full compaction may retain a recent active-state delta while dropping
-        // the earlier revision bodies it references. Force the registry-backed
-        // rehydration path to rebuild one clean current instruction state.
-        self.instruction_authority_generation = None;
-        self.instruction_authority_content = None;
+        // the earlier revision bodies it references. Keep the exact authority
+        // snapshot for fallback, but force the registry-backed rehydration path
+        // to rebuild one clean current instruction state.
+        self.instruction_authority_needs_rehydration = authority_was_pinned;
         self.instruction_state.retained_body_revisions.clear();
         let todo_snapshot = if self.todos.is_empty() {
             String::new()
@@ -256,6 +263,9 @@ impl AgentContext {
 
     #[must_use]
     pub(crate) fn instruction_authority_is_pinned(&self) -> bool {
+        if self.instruction_authority_needs_rehydration {
+            return false;
+        }
         let authority_pinned = match (
             self.instruction_authority_generation,
             self.instruction_authority_content.as_deref(),
@@ -307,6 +317,7 @@ impl AgentContext {
             self.instruction_authority_generation = None;
             self.instruction_authority_content = None;
         }
+        self.instruction_authority_needs_rehydration = false;
         if let Some((blocked_generation, blocked_content)) = self.current_blocked_notice.clone() {
             let _ = blocked_generation;
             self.append_message(AgentMessage::injection_text(
@@ -346,6 +357,7 @@ impl AgentContext {
             if epoch.outcome != InstructionEpochOutcome::Blocked {
                 self.instruction_authority_generation = Some(epoch.generation);
                 self.instruction_authority_content = Some(model_content.clone());
+                self.instruction_authority_needs_rehydration = false;
             }
         }
         if epoch.outcome == InstructionEpochOutcome::Blocked {

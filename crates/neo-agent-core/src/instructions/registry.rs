@@ -680,6 +680,10 @@ impl InstructionRegistry {
     /// cache. Agent-local visited history is durable state and remains
     /// unchanged by rehydration.
     ///
+    /// `authority_generation` is the generation of the existing canonical
+    /// authority, so rehydration does not mint a new epoch generation from the
+    /// registry counter.
+    ///
     /// # Errors
     /// Returns the typed [`InstructionError`] when scope discovery or a
     /// bundle read fails; callers must surface it rather than rehydrate
@@ -688,6 +692,7 @@ impl InstructionRegistry {
         &self,
         most_recent_scope: Option<&Path>,
         admitted_revisions: &BTreeMap<PathBuf, String>,
+        authority_generation: u64,
     ) -> Result<RehydrationSnapshot, InstructionError> {
         let _guard = self.sync.lock().await;
         let targets: Vec<PathBuf> =
@@ -744,7 +749,7 @@ impl InstructionRegistry {
         let model_content = self.render_instruction_update(
             &selection,
             &AgentInstructionState::default(),
-            self.generation.load(AtomicOrdering::SeqCst),
+            authority_generation,
             true,
             false,
         );

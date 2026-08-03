@@ -12799,14 +12799,31 @@ async fn workflow_intent_slash_end_to_end_selects_runs_and_persists() {
 
     let model_requests = harness.requests();
     assert_eq!(model_requests.len(), 2);
-    assert_eq!(
+    let slash_index = model_requests[0]
+        .messages
+        .iter()
+        .position(|message| {
+            chat_message_text(message) == "/workflow:demo Research battery recycling"
+        })
+        .expect("slash user message");
+    let injection_index = model_requests[0]
+        .messages
+        .iter()
+        .rposition(|message| chat_message_text(message).contains("<workflow_turn_context"))
+        .expect("workflow injection");
+    assert!(
+        slash_index < injection_index,
+        "workflow injection must append after the user message: {:?}",
+        model_requests[0].messages
+    );
+    assert!(
         chat_message_text(
             model_requests[0]
                 .messages
                 .last()
-                .expect("slash user message"),
-        ),
-        "/workflow:demo Research battery recycling"
+                .expect("workflow injection"),
+        )
+        .contains("<workflow_turn_context")
     );
     assert!(
         model_requests[0]
@@ -12820,11 +12837,10 @@ async fn workflow_intent_slash_end_to_end_selects_runs_and_persists() {
             .iter()
             .any(|tool| tool.name == "Workflow")
     );
-    assert!(
-        model_requests[1]
-            .messages
-            .iter()
-            .all(|message| !chat_message_text(message).contains("neo-workflow-request"))
+    assert_eq!(model_requests[1].tools, model_requests[0].tools);
+    assert_eq!(
+        model_requests[0].messages,
+        model_requests[1].messages[..model_requests[0].messages.len()]
     );
 
     let messages = neo_agent_core::session::JsonlSessionReader::replay_messages(&session_path)
@@ -16674,7 +16690,23 @@ async fn shell_mode_ctrl_b_detaches_running_command() {
         .handle_input_event(InputEvent::Submit)
         .await
         .expect("start shell command");
-    tokio::time::sleep(Duration::from_millis(50)).await;
+    tokio::time::timeout(Duration::from_secs(1), async {
+        loop {
+            let tasks = controller
+                .local_config
+                .as_ref()
+                .expect("config")
+                .background_tasks
+                .list(true, 10)
+                .await;
+            if !tasks.is_empty() {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+    })
+    .await
+    .expect("shell task should register before ctrl+b");
     controller
         .handle_input_event(InputEvent::Key(KeyId::new("ctrl+b").expect("valid key")))
         .await
@@ -16806,7 +16838,23 @@ async fn shell_mode_detach_uses_shared_background_tasks_for_next_turn() {
         .handle_input_event(InputEvent::Submit)
         .await
         .expect("start shell command");
-    tokio::time::sleep(Duration::from_millis(50)).await;
+    tokio::time::timeout(Duration::from_secs(1), async {
+        loop {
+            let tasks = controller
+                .local_config
+                .as_ref()
+                .expect("config")
+                .background_tasks
+                .list(true, 10)
+                .await;
+            if !tasks.is_empty() {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+    })
+    .await
+    .expect("shell task should register before ctrl+b");
     controller
         .handle_input_event(InputEvent::Key(KeyId::new("ctrl+b").expect("valid key")))
         .await
@@ -17837,7 +17885,23 @@ async fn shell_mode_esc_cancels_running_command() {
         .handle_input_event(InputEvent::Submit)
         .await
         .expect("start shell command");
-    tokio::time::sleep(Duration::from_millis(50)).await;
+    tokio::time::timeout(Duration::from_secs(1), async {
+        loop {
+            let tasks = controller
+                .local_config
+                .as_ref()
+                .expect("config")
+                .background_tasks
+                .list(true, 10)
+                .await;
+            if !tasks.is_empty() {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+    })
+    .await
+    .expect("shell task should register before esc");
     controller
         .handle_input_event(InputEvent::Cancel)
         .await

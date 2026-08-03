@@ -205,7 +205,7 @@ fn summary_body(text: &str) -> String {
 
 /// Remove the title/body separator without stripping indentation after a newline.
 fn strip_summary_separator(text: &str) -> &str {
-    let text = text.trim_start_matches(|character| matches!(character, ' ' | '\t'));
+    let text = text.trim_start_matches([' ', '\t']);
     text.strip_prefix("\r\n")
         .or_else(|| text.strip_prefix('\n'))
         .or_else(|| text.strip_prefix('\r'))

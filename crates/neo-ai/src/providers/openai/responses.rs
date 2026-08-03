@@ -1413,14 +1413,14 @@ mod tests {
         let starts = events
             .iter()
             .filter_map(|event| match event {
-                AiStreamEvent::MessageStart { phase, .. } => Some(phase.clone()),
+                AiStreamEvent::MessageStart { phase, .. } => Some(*phase),
                 _ => None,
             })
             .collect::<Vec<_>>();
         let ends = events
             .iter()
             .filter_map(|event| match event {
-                AiStreamEvent::MessageEnd { phase, .. } => Some(phase.clone()),
+                AiStreamEvent::MessageEnd { phase, .. } => Some(*phase),
                 _ => None,
             })
             .collect::<Vec<_>>();

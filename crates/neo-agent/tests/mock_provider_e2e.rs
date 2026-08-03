@@ -4,11 +4,7 @@ use std::{
     io::{Read, Write},
     net::{TcpListener, TcpStream},
     process::{Command, Stdio},
-    sync::{
-        Arc, Mutex,
-        atomic::{AtomicU64, Ordering},
-    },
-    time::{SystemTime, UNIX_EPOCH},
+    sync::{Arc, Mutex},
 };
 
 use serde_json::{Value, json};
@@ -104,19 +100,15 @@ fn run_with_stdin(mut command: Command, stdin: &str) -> String {
 /// multiple `neo()` calls within the same test share the same sessions root.
 fn isolated_home_path() -> std::path::PathBuf {
     thread_local! {
-        static HOME: std::cell::OnceCell<std::path::PathBuf> = const { std::cell::OnceCell::new() };
+        static HOME: std::cell::OnceCell<(TempDir, std::path::PathBuf)> = const { std::cell::OnceCell::new() };
     }
     HOME.with(|cell| {
-        cell.get_or_init(|| {
-            static NEXT_HOME_ID: AtomicU64 = AtomicU64::new(0);
-            let id = NEXT_HOME_ID.fetch_add(1, Ordering::Relaxed);
-            let nanos = SystemTime::now()
-                .duration_since(UNIX_EPOCH)
-                .expect("system time should be after epoch")
-                .as_nanos();
-            std::env::temp_dir().join(format!("neo-e2e-home-{nanos}-{id}"))
-        })
-        .clone()
+        let (_, path) = cell.get_or_init(|| {
+            let home = TempDir::new().expect("isolated home");
+            let path = home.path().to_path_buf();
+            (home, path)
+        });
+        path.clone()
     })
 }
 
@@ -257,6 +249,13 @@ fn system_input_contents(request: &RecordedRequest) -> Vec<&str> {
     input_messages(request)
         .iter()
         .filter(|message| message["role"] == "system")
+        .filter_map(|message| message["content"].as_str())
+        .collect()
+}
+
+fn input_contents(request: &RecordedRequest) -> Vec<&str> {
+    input_messages(request)
+        .iter()
         .filter_map(|message| message["content"].as_str())
         .collect()
 }
@@ -862,7 +861,7 @@ fn run_text_loads_project_context_after_persisted_trust() {
 
     let requests = server.requests();
     assert!(
-        system_input_contents(&requests[0])
+        input_contents(&requests[0])
             .iter()
             .any(|content| content.contains("Project context: use Rust."))
     );

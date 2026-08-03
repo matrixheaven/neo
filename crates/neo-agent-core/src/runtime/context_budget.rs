@@ -124,9 +124,6 @@ fn fixed_overhead_tokens(config: &AgentConfig, context: &AgentContext) -> usize 
     });
     let workspace_tokens =
         workspace_context_message(config).map_or(0, |message| estimate_message_tokens(&message));
-    let instruction_rule_tokens = estimate_message_tokens(&crate::AgentMessage::system_text(
-        super::chat_request::DYNAMIC_INSTRUCTION_RULES,
-    ));
     let transform_tokens = config
         .context_append_transform
         .as_ref()
@@ -134,7 +131,7 @@ fn fixed_overhead_tokens(config: &AgentConfig, context: &AgentContext) -> usize 
             estimate_messages_tokens(&transform(context.messages()))
         });
 
-    system_tokens + workspace_tokens + instruction_rule_tokens + transform_tokens
+    system_tokens + workspace_tokens + transform_tokens
 }
 
 fn projected_effective_tokens(

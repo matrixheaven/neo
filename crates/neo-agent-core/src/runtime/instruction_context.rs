@@ -137,9 +137,10 @@ impl InstructionContextBridge {
     }
 
     /// Rehydrates pinned instruction content after a full compaction:
-    /// leaves an intact typed authority snapshot untouched; otherwise strips
-    /// stale instruction messages, re-pins the exact current global + initial
-    /// workspace baseline + current/most-recent nested scope chain from
+    /// rebuilds a complete current authority from registry state; a retained
+    /// Blocked notice stays paired with the exact prior successful authority.
+    /// It strips stale instruction messages, re-pins the exact current global +
+    /// initial workspace baseline + current/most-recent nested scope chain from
     /// registry state, and retains visited sibling metadata without pinning
     /// their bodies.
     ///
@@ -168,19 +169,40 @@ impl InstructionContextBridge {
         }
         let most_recent_scope = context.instruction_state().most_recent_scope.clone();
         let admitted_revisions = context.instruction_state().visible_revisions.clone();
-        let snapshot = registry
-            .rehydration_snapshot(most_recent_scope.as_deref(), &admitted_revisions)
-            .await?;
+        let authority_generation = context
+            .instruction_authority_generation()
+            .unwrap_or(context.instruction_state().visible_generation);
+        let prior_authority = context.instruction_authority_snapshot();
+        let snapshot = match registry
+            .rehydration_snapshot(
+                most_recent_scope.as_deref(),
+                &admitted_revisions,
+                authority_generation,
+            )
+            .await
+        {
+            Ok(snapshot) => snapshot,
+            Err(_error) if prior_authority.is_some() => {
+                // The current source may have become unreadable after the
+                // authority was admitted. Keep that last complete snapshot and
+                // the current blocked notice; a later preflight will append the
+                // replacement or removal epoch without rewriting history.
+                context.replace_instruction_context(prior_authority);
+                return Ok(true);
+            }
+            Err(error) => return Err(error),
+        };
 
-        let authority = snapshot
+        let rehydrated_authority = snapshot
             .model_content
-            .map(|model_content| {
-                let generation = context
-                    .instruction_authority_generation()
-                    .unwrap_or(context.instruction_state().visible_generation);
-                (generation, model_content)
-            })
-            .or_else(|| context.instruction_authority_snapshot());
+            .map(|model_content| (authority_generation, model_content));
+        let authority = if context.current_blocked_notice.is_some() {
+            // Keep a blocked notice paired with the exact last successful
+            // authority while the failure remains current.
+            prior_authority.or(rehydrated_authority)
+        } else {
+            rehydrated_authority.or(prior_authority)
+        };
         let repinned = authority.is_some();
         context.replace_instruction_context(authority);
 
