@@ -937,8 +937,10 @@ impl TranscriptEntry {
                         phase: RetryPhase::Waiting | RetryPhase::Connecting,
                         ..
                     },
+            } => true,
+            Self::Compaction { phase, percent, .. } => {
+                *phase != Some(neo_agent_core::CompactionPhase::Applying) || *percent < 100
             }
-            | Self::Compaction { .. } => true,
             Self::ToolRun { component } => component.has_visible_animation(),
             Self::ShellRun { component } => component.has_visible_animation(),
             Self::Delegate { component } => {
@@ -1693,7 +1695,7 @@ amigo",
     }
 
     #[test]
-    fn compaction_in_progress_renders_spinner_phase_and_progress_bar() {
+    fn compaction_in_progress_renders_estimated_static_progress_bar() {
         let entry = TranscriptEntry::Compaction {
             phase: Some(neo_agent_core::CompactionPhase::Summarizing),
             percent: 70,
@@ -1709,8 +1711,49 @@ amigo",
         let text = lines.join("");
         assert!(text.contains("Compacting context"), "{text}");
         assert!(text.contains("Summarizing"), "{text}");
-        assert!(text.contains("70%"), "{text}");
+        assert!(text.contains("~70%"), "{text}");
         assert!(text.contains('█'), "{text}");
+        assert!(!text.contains('▓'), "{text}");
+        assert!(!text.contains('▒'), "{text}");
+    }
+
+    #[test]
+    fn compaction_render_is_independent_of_activity_frame() {
+        let entry = TranscriptEntry::Compaction {
+            phase: Some(neo_agent_core::CompactionPhase::Summarizing),
+            percent: 70,
+            compacted_message_count: 0,
+            tokens_before: 0,
+            tokens_after: 0,
+        };
+        let frame_zero = entry
+            .render_with_activity_frame(80, &TuiTheme::default(), 0)
+            .into_iter()
+            .map(|line| line.text().clone())
+            .collect::<Vec<_>>();
+        let frame_one = entry
+            .render_with_activity_frame(80, &TuiTheme::default(), 1)
+            .into_iter()
+            .map(|line| line.text().clone())
+            .collect::<Vec<_>>();
+        assert_eq!(frame_zero, frame_one);
+    }
+
+    #[test]
+    fn compaction_narrow_width_keeps_one_stable_line() {
+        let entry = TranscriptEntry::Compaction {
+            phase: Some(neo_agent_core::CompactionPhase::Summarizing),
+            percent: 70,
+            compacted_message_count: 0,
+            tokens_before: 0,
+            tokens_after: 0,
+        };
+        let lines = entry.render(24, &TuiTheme::default());
+        assert_eq!(lines.len(), 1);
+        let text = lines[0].text().clone();
+        assert!(text.contains("Summarizing"), "{text}");
+        assert!(text.contains("~70%"), "{text}");
+        assert!(visible_width(&text) <= 24, "{text}");
     }
 
     #[test]
@@ -1732,6 +1775,7 @@ amigo",
         assert!(text.contains("852"), "{text}");
         assert!(text.contains("192k"), "{text}");
         assert!(text.contains("24k"), "{text}");
+        assert!(!entry.has_visible_animation());
     }
 
     fn plan_prompt_data(

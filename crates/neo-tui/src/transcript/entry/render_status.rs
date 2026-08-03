@@ -104,17 +104,61 @@ fn format_retry_delay(delay_ms: u64) -> String {
     }
 }
 
-fn compaction_pulse_char(activity_frame: usize) -> char {
-    // A subtle shimmer on the leading edge of the filled bar.
-    const PULSE: &[char] = &['▓', '▒', '▓', '█'];
-    PULSE[activity_frame % PULSE.len()]
+fn compaction_active_color(
+    phase: Option<neo_agent_core::CompactionPhase>,
+    theme: &TuiTheme,
+) -> Color {
+    match phase {
+        Some(neo_agent_core::CompactionPhase::Estimating)
+        | Some(neo_agent_core::CompactionPhase::SelectingBoundary) => theme.status_warn,
+        Some(neo_agent_core::CompactionPhase::Summarizing) => theme.brand,
+        Some(neo_agent_core::CompactionPhase::Applying) => theme.status_ok,
+        None => theme.brand,
+    }
+}
+
+fn compaction_short_phase_label(phase: Option<neo_agent_core::CompactionPhase>) -> &'static str {
+    match phase {
+        Some(neo_agent_core::CompactionPhase::Estimating) => "Estimating",
+        Some(neo_agent_core::CompactionPhase::SelectingBoundary) => "Selecting",
+        Some(neo_agent_core::CompactionPhase::Summarizing) => "Summarizing",
+        Some(neo_agent_core::CompactionPhase::Applying) => "Applying",
+        None => "Compacting",
+    }
+}
+
+fn compaction_progress_line(
+    phase_label: &str,
+    percent: u8,
+    bar_width: usize,
+    active_color: Color,
+    theme: &TuiTheme,
+) -> Line {
+    let filled = (usize::from(percent.min(100)) * bar_width).div_ceil(100);
+    let empty = bar_width.saturating_sub(filled);
+    let active_style = Style::default().fg(active_color).bold();
+    let muted_style = Style::default().fg(theme.text_muted);
+    let mut spans = vec![
+        Span::styled("◈ ", Style::default().fg(theme.brand).bold()),
+        Span::styled(format!("{phase_label} "), active_style),
+        Span::styled("[", muted_style),
+    ];
+    for _ in 0..filled {
+        spans.push(Span::styled("█", active_style));
+    }
+    for _ in 0..empty {
+        spans.push(Span::styled("░", muted_style));
+    }
+    spans.push(Span::styled("]", muted_style));
+    spans.push(Span::styled(format!(" ~{percent:02}%"), active_style));
+    Line::from_spans(spans)
 }
 
 pub(super) fn render_compaction(
     entry: &super::TranscriptEntry,
     width: usize,
     theme: &TuiTheme,
-    activity_frame: usize,
+    _activity_frame: usize,
 ) -> Vec<Line> {
     let super::TranscriptEntry::Compaction {
         phase,
@@ -143,72 +187,46 @@ pub(super) fn render_compaction(
         return super::styled_wrap(&text, width, Style::default().fg(theme.status_ok).bold());
     }
 
-    let phase_label = phase.map_or_else(
-        || "Compacting".to_owned(),
-        |phase| match phase {
-            neo_agent_core::CompactionPhase::Estimating => "Estimating".to_owned(),
-            neo_agent_core::CompactionPhase::SelectingBoundary => "Selecting boundary".to_owned(),
-            neo_agent_core::CompactionPhase::Summarizing => "Summarizing".to_owned(),
-            neo_agent_core::CompactionPhase::Applying => "Applying".to_owned(),
-        },
-    );
+    let active_color = compaction_active_color(phase, theme);
+    let short_phase_label = compaction_short_phase_label(phase);
+    if width < 24 {
+        return vec![Line::styled(
+            format!("◈ compacting ~{percent:02}%"),
+            Style::default().fg(active_color).bold(),
+        )];
+    }
+    if width < 64 {
+        let bar_width = if width >= 40 { 6 } else { 2 };
+        return vec![compaction_progress_line(
+            short_phase_label,
+            percent,
+            bar_width,
+            active_color,
+            theme,
+        )];
+    }
 
-    // Warm-up -> working -> almost done colour progression.
-    let (label_color, bar_color) = match percent {
-        0..=29 => (theme.status_warn, theme.status_warn),
-        30..=69 => (theme.brand, theme.brand),
-        _ => (theme.status_ok, theme.status_ok),
-    };
-
-    let bar_width = 12;
-    let filled = ((percent as usize).min(100) * bar_width).div_ceil(100);
-    let empty = bar_width.saturating_sub(filled);
-
-    // Header: neutral product colour for context, bold for visibility.
-    let mut lines = Vec::new();
     let header = format!(
         "◈ Compacting context… {compacted_message_count} messages · {} tokens",
         super::format_token_count_usize(tokens_before)
     );
-    lines.extend(super::styled_wrap(
+    let mut lines = super::styled_wrap(
         &header,
         width,
         Style::default().fg(theme.text_primary).bold(),
+    );
+    lines.push(compaction_progress_line(
+        match phase {
+            Some(neo_agent_core::CompactionPhase::Estimating) => "Estimating",
+            Some(neo_agent_core::CompactionPhase::SelectingBoundary) => "Selecting boundary",
+            Some(neo_agent_core::CompactionPhase::Summarizing) => "Summarizing",
+            Some(neo_agent_core::CompactionPhase::Applying) => "Applying",
+            None => "Compacting",
+        },
+        percent,
+        12,
+        active_color,
+        theme,
     ));
-
-    // Progress line: fixed ◈ icon, phase label, animated bar, percentage.
-    let mut spans = vec![
-        Span::styled("◈ ", Style::default().fg(theme.brand).bold()),
-        Span::styled(
-            format!("{phase_label} "),
-            Style::default().fg(label_color).bold(),
-        ),
-        Span::styled("[", Style::default().fg(theme.text_muted)),
-    ];
-
-    // Filled portion with a subtle pulse on the leading edge.
-    if filled > 0 {
-        let pulse_char = compaction_pulse_char(activity_frame);
-        for i in 0..filled {
-            let ch = if i == filled - 1 { pulse_char } else { '█' };
-            spans.push(Span::styled(
-                ch.to_string(),
-                Style::default().fg(bar_color).bold(),
-            ));
-        }
-    }
-
-    // Empty portion.
-    for _ in 0..empty {
-        spans.push(Span::styled("░", Style::default().fg(theme.text_muted)));
-    }
-
-    spans.push(Span::styled("]", Style::default().fg(theme.text_muted)));
-    spans.push(Span::styled(
-        format!(" {percent}%"),
-        Style::default().fg(label_color).bold(),
-    ));
-    lines.push(Line::from_spans(spans));
-
     lines
 }

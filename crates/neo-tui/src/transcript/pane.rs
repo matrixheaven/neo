@@ -28,6 +28,60 @@ fn compaction_is_complete(phase: Option<neo_agent_core::CompactionPhase>, percen
     phase == Some(neo_agent_core::CompactionPhase::Applying) && percent >= 100
 }
 
+const COMPACTION_PROGRESS_TICK_MS: u64 = 250;
+const COMPACTION_MAX_STEP_PER_TICK: u8 = 1;
+const COMPACTION_TAU_ESTIMATING_MS: u64 = 1_000;
+const COMPACTION_TAU_SELECTING_MS: u64 = 1_500;
+const COMPACTION_TAU_SUMMARIZING_MS: u64 = 30_000;
+const COMPACTION_TAU_APPLYING_MS: u64 = 1_000;
+
+#[derive(Debug, Clone, Copy)]
+struct CompactionDisplayState {
+    phase: neo_agent_core::CompactionPhase,
+    confirmed_percent: u8,
+    display_percent: u8,
+    phase_started_at_ms: u64,
+    last_update_at_ms: u64,
+}
+
+const fn compaction_phase_rank(phase: neo_agent_core::CompactionPhase) -> u8 {
+    match phase {
+        neo_agent_core::CompactionPhase::Estimating => 0,
+        neo_agent_core::CompactionPhase::SelectingBoundary => 1,
+        neo_agent_core::CompactionPhase::Summarizing => 2,
+        neo_agent_core::CompactionPhase::Applying => 3,
+    }
+}
+
+const fn compaction_phase_bounds(
+    phase: neo_agent_core::CompactionPhase,
+    confirmed_percent: u8,
+) -> (u8, u8, u64) {
+    match phase {
+        neo_agent_core::CompactionPhase::Estimating => (0, 10, COMPACTION_TAU_ESTIMATING_MS),
+        neo_agent_core::CompactionPhase::SelectingBoundary => (10, 20, COMPACTION_TAU_SELECTING_MS),
+        neo_agent_core::CompactionPhase::Summarizing => (
+            20,
+            if confirmed_percent >= 85 { 85 } else { 82 },
+            COMPACTION_TAU_SUMMARIZING_MS,
+        ),
+        neo_agent_core::CompactionPhase::Applying => (85, 99, COMPACTION_TAU_APPLYING_MS),
+    }
+}
+
+fn compaction_time_target(
+    phase: neo_agent_core::CompactionPhase,
+    confirmed_percent: u8,
+    elapsed_ms: u64,
+) -> u8 {
+    let (phase_start, phase_cap, tau_ms) = compaction_phase_bounds(phase, confirmed_percent);
+    let elapsed_fraction = 1.0 - (-(elapsed_ms as f64) / tau_ms as f64).exp();
+    let timed_target = f64::from(phase_start)
+        + f64::from(phase_cap.saturating_sub(phase_start)) * elapsed_fraction;
+    let timed_target = timed_target.clamp(f64::from(phase_start), f64::from(phase_cap)) as u8;
+    confirmed_percent.max(timed_target).min(phase_cap)
+}
+
 fn is_live_compaction_entry(entry: &TranscriptEntry) -> bool {
     matches!(
         entry,
@@ -119,6 +173,7 @@ pub struct TranscriptPane {
     pub(super) completed_tool_result_ids: Vec<String>,
     next_image_id: u64,
     activity_frame: usize,
+    compaction_display: Option<CompactionDisplayState>,
     workspace_root: Option<PathBuf>,
     neo_home: Option<PathBuf>,
     /// Cache of the last composed body frame (ANSI strings, no chrome), so
@@ -156,6 +211,7 @@ impl TranscriptPane {
             completed_tool_result_ids: Vec::new(),
             next_image_id: 0,
             activity_frame: 0,
+            compaction_display: None,
             workspace_root: None,
             neo_home: None,
             last_frame: Vec::new(),
@@ -706,8 +762,13 @@ impl TranscriptPane {
         if !has_visible_animation {
             return;
         }
+        let has_frame_animation = self.transcript.entries().iter().any(|entry| {
+            !matches!(entry, TranscriptEntry::Compaction { .. }) && entry.has_visible_animation()
+        });
         self.activity_frame = self.activity_frame.wrapping_add(1);
-        if self.transcript.tick_live_entries(now_ms) || has_visible_animation {
+        let compaction_changed = self.advance_compaction_display(now_ms);
+        let live_entry_changed = self.transcript.tick_live_entries(now_ms);
+        if compaction_changed || live_entry_changed || has_frame_animation {
             self.mark_dirty();
         }
     }
@@ -1266,6 +1327,34 @@ impl TranscriptPane {
         self.transcript.finish_thinking();
     }
 
+    fn latest_compaction_is_complete(&self) -> bool {
+        self.transcript
+            .entries()
+            .iter()
+            .rev()
+            .find_map(|entry| match entry {
+                TranscriptEntry::Compaction { phase, percent, .. } => {
+                    Some(compaction_is_complete(*phase, *percent))
+                }
+                _ => None,
+            })
+            .unwrap_or(false)
+    }
+
+    fn new_compaction_display_state(
+        phase: neo_agent_core::CompactionPhase,
+        confirmed_percent: u8,
+        now_ms: u64,
+    ) -> CompactionDisplayState {
+        CompactionDisplayState {
+            phase,
+            confirmed_percent: confirmed_percent.min(99),
+            display_percent: 0,
+            phase_started_at_ms: now_ms,
+            last_update_at_ms: now_ms,
+        }
+    }
+
     pub(super) fn upsert_compaction(
         &mut self,
         phase: Option<neo_agent_core::CompactionPhase>,
@@ -1274,7 +1363,24 @@ impl TranscriptPane {
         tokens_before: usize,
         tokens_after: usize,
     ) {
-        if let Some(index) = self
+        let now_ms = super::entry::monotonic_time_ms();
+        let is_complete = compaction_is_complete(phase, percent);
+        let (display_phase, display_percent) = if is_complete {
+            self.compaction_display = None;
+            (Some(neo_agent_core::CompactionPhase::Applying), 100)
+        } else {
+            if self.compaction_display.is_none() {
+                let phase = phase.unwrap_or(neo_agent_core::CompactionPhase::Estimating);
+                self.compaction_display =
+                    Some(Self::new_compaction_display_state(phase, percent, now_ms));
+            }
+            let state = self
+                .compaction_display
+                .expect("active compaction display state initialized above");
+            (Some(state.phase), state.display_percent)
+        };
+
+        let changed = if let Some(index) = self
             .transcript
             .entries()
             .iter()
@@ -1291,31 +1397,126 @@ impl TranscriptPane {
                 else {
                     return false;
                 };
-                if *existing_phase == phase
-                    && *existing_percent == percent
+                if *existing_phase == display_phase
+                    && *existing_percent == display_percent
                     && *existing_count == compacted_message_count
                     && *existing_tokens == tokens_before
                     && *existing_tokens_after == tokens_after
                 {
                     return false;
                 }
-                *existing_phase = phase;
-                *existing_percent = percent;
+                *existing_phase = display_phase;
+                *existing_percent = display_percent;
                 *existing_count = compacted_message_count;
                 *existing_tokens = tokens_before;
                 *existing_tokens_after = tokens_after;
                 true
-            });
+            })
         } else {
             self.transcript.push(TranscriptEntry::Compaction {
-                phase,
-                percent,
+                phase: display_phase,
+                percent: display_percent,
                 compacted_message_count,
                 tokens_before,
                 tokens_after,
             });
+            true
+        };
+        if changed {
+            self.mark_dirty();
         }
-        self.mark_dirty();
+    }
+
+    fn update_compaction_progress_at_ms(
+        &mut self,
+        phase: neo_agent_core::CompactionPhase,
+        percent: u8,
+        now_ms: u64,
+    ) -> bool {
+        let percent = percent.min(99);
+        let Some(index) = self
+            .transcript
+            .entries()
+            .iter()
+            .rposition(is_live_compaction_entry)
+        else {
+            if self.latest_compaction_is_complete() {
+                return false;
+            }
+            let state = Self::new_compaction_display_state(phase, percent, now_ms);
+            self.compaction_display = Some(state);
+            self.transcript.push(TranscriptEntry::Compaction {
+                phase: Some(phase),
+                percent: state.display_percent,
+                compacted_message_count: 0,
+                tokens_before: 0,
+                tokens_after: 0,
+            });
+            self.mark_dirty();
+            return true;
+        };
+
+        let mut state = self.compaction_display.unwrap_or_else(|| {
+            let display_percent = match self.transcript.entries().get(index) {
+                Some(TranscriptEntry::Compaction { percent, .. }) => *percent,
+                _ => 0,
+            };
+            CompactionDisplayState {
+                phase,
+                confirmed_percent: display_percent,
+                display_percent,
+                phase_started_at_ms: now_ms,
+                last_update_at_ms: now_ms,
+            }
+        });
+        let current_phase = state.phase;
+        let current_rank = compaction_phase_rank(current_phase);
+        let incoming_rank = compaction_phase_rank(phase);
+        if incoming_rank < current_rank {
+            return false;
+        }
+        if incoming_rank > current_rank {
+            state.phase = phase;
+            state.confirmed_percent = percent;
+            state.phase_started_at_ms = now_ms;
+            state.last_update_at_ms = now_ms;
+        } else {
+            state.confirmed_percent = state.confirmed_percent.max(percent);
+        }
+
+        let elapsed_ms = now_ms.saturating_sub(state.phase_started_at_ms);
+        let target = compaction_time_target(state.phase, state.confirmed_percent, elapsed_ms);
+        let next_percent = target.min(
+            state
+                .display_percent
+                .saturating_add(COMPACTION_MAX_STEP_PER_TICK),
+        );
+        let phase_changed = state.phase != current_phase;
+        let display_changed = next_percent != state.display_percent;
+        state.display_percent = next_percent;
+        state.last_update_at_ms = now_ms;
+        self.compaction_display = Some(state);
+
+        let changed = self.transcript.mutate_entry(index, |entry| {
+            let TranscriptEntry::Compaction {
+                phase: existing_phase,
+                percent: existing_percent,
+                ..
+            } = entry
+            else {
+                return false;
+            };
+            if !phase_changed && !display_changed {
+                return false;
+            }
+            *existing_phase = Some(state.phase);
+            *existing_percent = state.display_percent;
+            true
+        });
+        if changed {
+            self.mark_dirty();
+        }
+        changed
     }
 
     pub(super) fn update_compaction_progress(
@@ -1323,33 +1524,57 @@ impl TranscriptPane {
         phase: neo_agent_core::CompactionPhase,
         percent: u8,
     ) {
-        if let Some(index) = self
+        let _ = self.update_compaction_progress_at_ms(
+            phase,
+            percent,
+            super::entry::monotonic_time_ms(),
+        );
+    }
+
+    fn advance_compaction_display(&mut self, now_ms: u64) -> bool {
+        let Some(mut state) = self.compaction_display else {
+            return false;
+        };
+        if now_ms.saturating_sub(state.last_update_at_ms) < COMPACTION_PROGRESS_TICK_MS {
+            return false;
+        }
+        let elapsed_ms = now_ms.saturating_sub(state.phase_started_at_ms);
+        let target = compaction_time_target(state.phase, state.confirmed_percent, elapsed_ms);
+        let next_percent = target.min(
+            state
+                .display_percent
+                .saturating_add(COMPACTION_MAX_STEP_PER_TICK),
+        );
+        state.last_update_at_ms = now_ms;
+        if next_percent == state.display_percent {
+            self.compaction_display = Some(state);
+            return false;
+        }
+        state.display_percent = next_percent;
+        self.compaction_display = Some(state);
+
+        let Some(index) = self
             .transcript
             .entries()
             .iter()
             .rposition(is_live_compaction_entry)
-        {
-            self.transcript.mutate_entry(index, |entry| {
-                let TranscriptEntry::Compaction {
-                    phase: existing_phase,
-                    percent: existing_percent,
-                    ..
-                } = entry
-                else {
-                    return false;
-                };
-                if *existing_phase == Some(phase) && *existing_percent == percent {
-                    return false;
-                }
-                *existing_phase = Some(phase);
-                *existing_percent = percent;
-                true
-            });
-        } else {
-            self.upsert_compaction(Some(phase), percent, 0, 0, 0);
-            return;
+        else {
+            return false;
+        };
+        let changed = self.transcript.mutate_entry(index, |entry| {
+            let TranscriptEntry::Compaction { percent, .. } = entry else {
+                return false;
+            };
+            if *percent == state.display_percent {
+                return false;
+            }
+            *percent = state.display_percent;
+            true
+        });
+        if changed {
+            self.mark_dirty();
         }
-        self.mark_dirty();
+        changed
     }
 
     fn render_transcript_ansi_rows(&mut self, width: usize) -> Vec<String> {
@@ -1717,7 +1942,7 @@ mod tests {
                 &entries[2],
                 TranscriptEntry::Compaction {
                     phase: Some(neo_agent_core::CompactionPhase::Summarizing),
-                    percent: 84,
+                    percent: 1,
                     compacted_message_count: 23,
                     tokens_before: 51_000,
                     tokens_after: 0,
@@ -1725,6 +1950,176 @@ mod tests {
             ),
             "latest card should carry the new compaction progress"
         );
+    }
+
+    fn latest_compaction_phase_percent(
+        pane: &TranscriptPane,
+    ) -> (Option<neo_agent_core::CompactionPhase>, u8) {
+        pane.transcript()
+            .entries()
+            .iter()
+            .rev()
+            .find_map(|entry| match entry {
+                TranscriptEntry::Compaction { phase, percent, .. } => Some((*phase, *percent)),
+                _ => None,
+            })
+            .expect("compaction entry")
+    }
+
+    #[test]
+    fn compaction_progress_is_rate_limited_and_monotonic() {
+        let mut pane = TranscriptPane::new(80, 20);
+        pane.upsert_compaction(
+            Some(neo_agent_core::CompactionPhase::Estimating),
+            0,
+            0,
+            0,
+            0,
+        );
+        pane.dirty = false;
+
+        pane.update_compaction_progress_at_ms(
+            neo_agent_core::CompactionPhase::Summarizing,
+            15,
+            1_000,
+        );
+        let (phase, first) = latest_compaction_phase_percent(&pane);
+        assert_eq!(phase, Some(neo_agent_core::CompactionPhase::Summarizing));
+        assert_eq!(first, 1);
+
+        pane.dirty = false;
+        pane.update_compaction_progress_at_ms(
+            neo_agent_core::CompactionPhase::Summarizing,
+            85,
+            1_000,
+        );
+        let (_, after_event) = latest_compaction_phase_percent(&pane);
+        assert_eq!(after_event, first + 1);
+        assert!(pane.dirty, "a one-point visible step should dirty the pane");
+
+        pane.dirty = false;
+        pane.advance_animation_at_ms(1_100);
+        assert!(!pane.dirty, "sub-cadence ticks should not redraw compact");
+        assert_eq!(latest_compaction_phase_percent(&pane).1, after_event);
+
+        pane.advance_animation_at_ms(1_250);
+        let (_, after_tick) = latest_compaction_phase_percent(&pane);
+        assert_eq!(after_tick, after_event + 1);
+        assert!(after_tick >= after_event);
+    }
+
+    #[test]
+    fn compaction_summary_estimate_stays_below_completion() {
+        let mut pane = TranscriptPane::new(80, 20);
+        pane.upsert_compaction(
+            Some(neo_agent_core::CompactionPhase::Estimating),
+            0,
+            0,
+            0,
+            0,
+        );
+        pane.update_compaction_progress_at_ms(neo_agent_core::CompactionPhase::Summarizing, 15, 0);
+
+        for tick in 1..=2_000 {
+            pane.advance_animation_at_ms(tick * COMPACTION_PROGRESS_TICK_MS);
+        }
+        let (_, before_confirmation) = latest_compaction_phase_percent(&pane);
+        assert!(
+            before_confirmation <= 82,
+            "summary estimate: {before_confirmation}"
+        );
+
+        pane.update_compaction_progress_at_ms(
+            neo_agent_core::CompactionPhase::Summarizing,
+            85,
+            500_001,
+        );
+        let (_, after_confirmation) = latest_compaction_phase_percent(&pane);
+        assert!(
+            after_confirmation <= before_confirmation + 1,
+            "confirmed anchor must remain rate-limited: {before_confirmation} -> {after_confirmation}"
+        );
+        for tick in 2_001..=2_020 {
+            pane.advance_animation_at_ms(tick * COMPACTION_PROGRESS_TICK_MS);
+        }
+        let (_, after_ticks) = latest_compaction_phase_percent(&pane);
+        assert!(after_ticks <= 85, "summary estimate: {after_ticks}");
+        assert!(after_ticks < 100, "only CompactionApplied may display 100%");
+    }
+
+    #[test]
+    fn stale_compaction_progress_does_not_regress_or_reopen_completed_card() {
+        let mut pane = TranscriptPane::new(80, 20);
+        pane.upsert_compaction(
+            Some(neo_agent_core::CompactionPhase::Estimating),
+            0,
+            0,
+            0,
+            0,
+        );
+        pane.update_compaction_progress_at_ms(
+            neo_agent_core::CompactionPhase::Summarizing,
+            15,
+            1_000,
+        );
+        let (_, before_stale) = latest_compaction_phase_percent(&pane);
+
+        pane.dirty = false;
+        pane.update_compaction_progress_at_ms(
+            neo_agent_core::CompactionPhase::SelectingBoundary,
+            15,
+            2_000,
+        );
+        let (phase, after_stale) = latest_compaction_phase_percent(&pane);
+        assert_eq!(phase, Some(neo_agent_core::CompactionPhase::Summarizing));
+        assert_eq!(after_stale, before_stale);
+        assert!(!pane.dirty, "stale phase must be a no-op");
+
+        pane.upsert_compaction(
+            Some(neo_agent_core::CompactionPhase::Applying),
+            100,
+            4,
+            100,
+            40,
+        );
+        pane.dirty = false;
+        pane.update_compaction_progress_at_ms(
+            neo_agent_core::CompactionPhase::Summarizing,
+            85,
+            3_000,
+        );
+        assert_eq!(pane.transcript().entries().len(), 1);
+        assert!(!pane.dirty, "delayed progress must not reopen completion");
+    }
+
+    #[test]
+    fn duplicate_compaction_progress_is_a_noop() {
+        let mut pane = TranscriptPane::new(80, 20);
+        pane.upsert_compaction(
+            Some(neo_agent_core::CompactionPhase::Estimating),
+            0,
+            0,
+            0,
+            0,
+        );
+        let now_ms = pane
+            .compaction_display
+            .expect("compaction display state")
+            .last_update_at_ms;
+        pane.dirty = false;
+
+        pane.update_compaction_progress_at_ms(
+            neo_agent_core::CompactionPhase::Estimating,
+            0,
+            now_ms,
+        );
+        assert!(!pane.dirty);
+        pane.update_compaction_progress_at_ms(
+            neo_agent_core::CompactionPhase::Estimating,
+            0,
+            now_ms,
+        );
+        assert!(!pane.dirty);
     }
 
     #[test]

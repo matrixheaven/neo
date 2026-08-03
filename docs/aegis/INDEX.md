@@ -369,3 +369,8 @@ Entries are workspace records, not authoritative runtime decisions.
 | 2026-08-03 | handoff | docs/aegis/handoffs/2026-08-03-thinking-and-message-presentation.md | Thinking And Message Presentation Handoff |
 | 2026-08-03 | artifact | docs/aegis/work/2026-08-03-thinking-and-message-presentation/gate-input-pack.json | 2026-08-03-thinking-and-message-presentation gate input pack |
 | 2026-08-03 | work | docs/aegis/work/2026-08-03-thinking-and-message-presentation/proof-bundle.md | 2026-08-03-thinking-and-message-presentation proof bundle |
+| 2026-08-03 | plan | docs/aegis/plans/2026-08-03-compact-progress-display.md | Neo Compact Progress Display Implementation Plan |
+| 2026-08-03 | work | docs/aegis/work/2026-08-03-compact-progress-display/10-intent.md | Compact Progress Display intent |
+| 2026-08-03 | work | docs/aegis/work/2026-08-03-compact-progress-display/20-checkpoint.md | Compact Progress Display checkpoint |
+| 2026-08-03 | work | docs/aegis/work/2026-08-03-compact-progress-display/90-evidence.md | Compact Progress Display evidence |
+| 2026-08-03 | work | docs/aegis/work/2026-08-03-compact-progress-display/99-reflection.md | Compact Progress Display reflection |
