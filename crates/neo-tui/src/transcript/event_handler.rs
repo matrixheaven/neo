@@ -123,9 +123,9 @@ impl TranscriptPane {
 
     fn apply_message_event(&mut self, event: &AgentEvent) -> bool {
         match event {
-            AgentEvent::MessageStarted { turn, .. } => {
+            AgentEvent::MessageStarted { turn, phase, .. } => {
                 self.transcript.begin_live_model_attempt(*turn);
-                self.mark_dirty();
+                self.start_assistant_message_with_phase(*phase);
                 true
             }
             AgentEvent::TextDelta { turn, text } => {

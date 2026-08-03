@@ -650,6 +650,11 @@ impl TranscriptPane {
         self.mark_dirty();
     }
 
+    pub fn start_assistant_message_with_phase(&mut self, phase: neo_ai::MessagePhase) {
+        self.transcript.start_assistant_with_phase(phase);
+        self.mark_dirty();
+    }
+
     pub fn append_assistant_delta(&mut self, text: &str) {
         self.transcript.finish_thinking(false);
         self.transcript.append_assistant_delta(text);

@@ -22,7 +22,7 @@ use neo_agent_core::multi_agent::{
     apply_swarm_child_progress,
 };
 use neo_agent_core::workflow::{WorkflowExecutionOrigin, WorkflowSnapshot};
-use neo_ai::ThinkingKind;
+use neo_ai::{MessagePhase, ThinkingKind};
 
 use super::progressive::{
     ChildAgentFact, ChildToolFact, ProgressiveFact, ProgressiveFactId, ProgressiveFactPayload,
@@ -188,6 +188,9 @@ pub struct TranscriptStore {
     /// twice (live event plus JSONL replay) never yields a duplicate card.
     instruction_epoch_cards: Vec<(String, TranscriptEntryId)>,
     active_assistant: Option<usize>,
+    /// Message phases aligned with `entries`; historical/manual entries remain Unknown.
+    assistant_phases: Vec<MessagePhase>,
+    pending_assistant_phase: Option<MessagePhase>,
     active_thinking: Option<usize>,
     live_model_attempt: Option<(u32, usize)>,
     viewport: TranscriptViewport,
@@ -393,12 +396,32 @@ impl TranscriptStore {
         Some(index)
     }
 
+    pub fn start_assistant_with_phase(&mut self, phase: MessagePhase) {
+        if let Some(index) = self.active_assistant {
+            if matches!(
+                self.entries.get(index),
+                Some(TranscriptEntry::AssistantMessage { content }) if content.is_empty()
+            ) {
+                if let Some(current) = self.assistant_phases.get_mut(index) {
+                    *current = phase;
+                }
+                self.pending_assistant_phase = None;
+                self.touch_entry(index);
+                return;
+            }
+            self.finish_assistant();
+        }
+        self.pending_assistant_phase = Some(phase);
+    }
+
     pub fn start_assistant(&mut self) {
         if self.active_assistant.is_some() {
             return;
         }
         self.mark_visible_boundary();
+        let phase = self.pending_assistant_phase.take().unwrap_or_default();
         let index = self.append_entry(TranscriptEntry::assistant_message(""));
+        self.assistant_phases[index] = phase;
         self.active_assistant = Some(index);
     }
 
@@ -414,6 +437,7 @@ impl TranscriptStore {
     }
 
     pub fn finish_assistant(&mut self) {
+        self.pending_assistant_phase = None;
         if let Some(index) = self.active_assistant.take() {
             self.touch_entry(index);
         }
@@ -1386,6 +1410,14 @@ impl TranscriptStore {
     }
 
     #[must_use]
+    pub(crate) fn assistant_phase(&self, index: usize) -> MessagePhase {
+        self.assistant_phases
+            .get(index)
+            .copied()
+            .unwrap_or_default()
+    }
+
+    #[must_use]
     pub fn entry_finalization(&self, index: usize) -> Option<Finalization> {
         let entry = self.entries.get(index)?;
         if self.active_assistant == Some(index) {
@@ -1474,6 +1506,7 @@ impl TranscriptStore {
         let entry = self.entries.remove(index);
         self.entry_ids.remove(index);
         self.entry_revisions.remove(index);
+        self.assistant_phases.remove(index);
         if index < self.render_cache.len() {
             self.render_cache.remove(index);
         }
@@ -1568,7 +1601,32 @@ impl TranscriptStore {
     pub fn render_rows(&self, width: usize, theme: &TuiTheme) -> Vec<Line> {
         self.entries
             .iter()
-            .flat_map(|entry| entry.render(width, theme))
+            .enumerate()
+            .flat_map(|(index, entry)| match entry {
+                TranscriptEntry::AssistantMessage { content } if content.is_empty() => Vec::new(),
+                TranscriptEntry::AssistantMessage { content } => {
+                    let phase = self.assistant_phase(index);
+                    let first_prefix = if phase == MessagePhase::Commentary {
+                        "▸ "
+                    } else {
+                        "● "
+                    };
+                    let mut render_theme = *theme;
+                    if phase == MessagePhase::Commentary {
+                        render_theme.brand = theme.text_muted;
+                        render_theme.text_primary = theme.text_muted;
+                        render_theme.user_message = theme.text_muted;
+                    }
+                    crate::markdown::render_markdown(
+                        content,
+                        width,
+                        &render_theme,
+                        first_prefix,
+                        "  ",
+                    )
+                }
+                _ => entry.render(width, theme),
+            })
             .collect()
     }
 
@@ -1584,6 +1642,7 @@ impl TranscriptStore {
         self.entries.push(entry);
         self.entry_ids.push(id);
         self.entry_revisions.push(0);
+        self.assistant_phases.push(MessagePhase::Unknown);
         self.render_cache.push(None);
         self.mark_dirty_from(index);
         index
@@ -1594,6 +1653,7 @@ impl TranscriptStore {
         self.entries.insert(index, entry);
         self.entry_ids.insert(index, id);
         self.entry_revisions.insert(index, 0);
+        self.assistant_phases.insert(index, MessagePhase::Unknown);
         self.render_cache.insert(index, None);
         if let Some(active) = &mut self.active_assistant
             && *active >= index

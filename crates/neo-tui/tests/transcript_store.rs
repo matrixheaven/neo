@@ -205,6 +205,22 @@ fn plain_rows(store: &TranscriptStore) -> Vec<String> {
         .collect()
 }
 
+fn plain_terminal_update(pane: &mut TranscriptPane) -> (Vec<String>, Vec<String>) {
+    let update = pane.render_terminal_update(80, 20);
+    let history = update
+        .history
+        .into_iter()
+        .flat_map(|block| block.lines)
+        .map(|line| strip_ansi(&line).trim_end().to_owned())
+        .collect();
+    let live = update
+        .live
+        .into_iter()
+        .map(|line| strip_ansi(&line).trim_end().to_owned())
+        .collect();
+    (history, live)
+}
+
 #[test]
 fn transcript_store_renders_entries_without_draining_them() {
     let mut store = TranscriptStore::new();
@@ -1101,6 +1117,132 @@ fn summary_projection_keeps_body_without_leading_title_across_parts() {
         rendered.contains("second fallback"),
         "second body part is retained: {rendered}"
     );
+}
+
+#[test]
+fn commentary_and_final_answer_render_as_separate_entries() {
+    let mut pane = TranscriptPane::new(80, 20);
+    pane.apply_agent_event(neo_agent_core::AgentEvent::MessageStarted {
+        turn: 1,
+        id: "commentary-1".to_owned(),
+        phase: neo_ai::MessagePhase::Commentary,
+    });
+    pane.apply_agent_event(neo_agent_core::AgentEvent::TextDelta {
+        turn: 1,
+        text: "Checking **the files**".to_owned(),
+    });
+
+    let (_, live) = plain_terminal_update(&mut pane);
+    let live = live.join("\n");
+    assert!(
+        live.contains("▸ Checking the files"),
+        "commentary live: {live}"
+    );
+    assert!(
+        !live.contains("● Checking"),
+        "commentary uses its own marker: {live}"
+    );
+
+    pane.apply_agent_event(neo_agent_core::AgentEvent::MessageFinished {
+        turn: 1,
+        id: "commentary-1".to_owned(),
+        stop_reason: neo_agent_core::StopReason::EndTurn,
+        phase: neo_ai::MessagePhase::Commentary,
+    });
+    pane.apply_agent_event(neo_agent_core::AgentEvent::MessageStarted {
+        turn: 1,
+        id: "final-1".to_owned(),
+        phase: neo_ai::MessagePhase::FinalAnswer,
+    });
+    pane.apply_agent_event(neo_agent_core::AgentEvent::TextDelta {
+        turn: 1,
+        text: "The final **answer**".to_owned(),
+    });
+
+    let (history, live) = plain_terminal_update(&mut pane);
+    assert!(
+        history.join("\n").contains("▸ Checking the files"),
+        "commentary committed before final answer: {history:?}"
+    );
+    assert!(
+        !history.join("\n").contains("The final"),
+        "final answer remains live: {history:?}"
+    );
+    assert!(
+        live.join("\n").contains("● The final answer"),
+        "final answer uses normal marker: {live:?}"
+    );
+    assert!(
+        !live.join("\n").contains("▸"),
+        "final answer is not commentary: {live:?}"
+    );
+
+    pane.apply_agent_event(neo_agent_core::AgentEvent::MessageFinished {
+        turn: 1,
+        id: "final-1".to_owned(),
+        stop_reason: neo_agent_core::StopReason::EndTurn,
+        phase: neo_ai::MessagePhase::FinalAnswer,
+    });
+    let (history, live) = plain_terminal_update(&mut pane);
+    let history = history.join("\n");
+    assert!(
+        live.is_empty(),
+        "completed messages leave no live rows: {live:?}"
+    );
+    let commentary_offset = history
+        .find("▸ Checking the files")
+        .expect("commentary remains in canonical history");
+    let final_offset = history
+        .find("● The final answer")
+        .expect("final answer remains in canonical history");
+    assert!(
+        commentary_offset < final_offset,
+        "canonical order is preserved: {history}"
+    );
+    let assistant_text = pane
+        .transcript()
+        .entries()
+        .iter()
+        .filter_map(|entry| match entry {
+            TranscriptEntry::AssistantMessage { content } => Some(content.as_str()),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        assistant_text,
+        ["Checking **the files**", "The final **answer**"]
+    );
+    let direct_rows = plain_rows(pane.transcript()).join("\n");
+    assert!(
+        direct_rows.contains("▸ Checking the files"),
+        "direct store rendering keeps commentary marker: {direct_rows}"
+    );
+    assert!(
+        direct_rows.contains("● The final answer"),
+        "direct store rendering keeps final-answer marker: {direct_rows}"
+    );
+}
+
+#[test]
+fn unknown_message_phase_preserves_legacy_rendering() {
+    let mut pane = TranscriptPane::new(80, 20);
+    pane.apply_agent_event(neo_agent_core::AgentEvent::MessageStarted {
+        turn: 1,
+        id: "unknown-1".to_owned(),
+        phase: neo_ai::MessagePhase::Unknown,
+    });
+    pane.apply_agent_event(neo_agent_core::AgentEvent::TextDelta {
+        turn: 1,
+        text: "Legacy answer".to_owned(),
+    });
+
+    let (_, live) = plain_terminal_update(&mut pane);
+    let live = live.join("\n");
+    assert!(
+        live.contains("● Legacy answer"),
+        "legacy assistant rendering: {live}"
+    );
+    assert!(!live.contains("▸"), "Unknown is not commentary: {live}");
 }
 
 #[test]

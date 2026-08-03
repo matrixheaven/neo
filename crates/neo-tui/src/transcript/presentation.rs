@@ -3,6 +3,7 @@ use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use crate::primitive::theme::TuiTheme;
 use crate::primitive::{Component, Finalization};
 use crate::terminal_image::{ImageRenderPolicy, TerminalImageCapabilities};
+use neo_ai::MessagePhase;
 
 use super::progressive::{ProgressiveFactPayload, render_progressive_fact};
 use super::streaming_prefix::stable_prefix_len;
@@ -340,9 +341,11 @@ impl TranscriptPresentation {
                 transcript.entries().get(index)
             {
                 let finalization = transcript.entry_finalization(index);
+                let phase = transcript.assistant_phase(index);
                 self.render_assistant_entry(
                     id,
                     content,
+                    phase,
                     finalization,
                     blocked,
                     options,
@@ -477,6 +480,7 @@ impl TranscriptPresentation {
         &mut self,
         id: TranscriptEntryId,
         content: &str,
+        phase: MessagePhase,
         finalization: Option<Finalization>,
         blocked: bool,
         options: TranscriptRenderOptions<'_>,
@@ -511,6 +515,7 @@ impl TranscriptPresentation {
                     options.width,
                     options.theme,
                     source_start > 0,
+                    phase,
                 );
                 let separator_before = advance_semantic_owner(
                     &mut frame.rendered_tail_owner,
@@ -529,8 +534,13 @@ impl TranscriptPresentation {
                 source_start,
                 source_end,
             };
-            let lines =
-                render_assistant_segment(source, options.width, options.theme, source_start > 0);
+            let lines = render_assistant_segment(
+                source,
+                options.width,
+                options.theme,
+                source_start > 0,
+                phase,
+            );
             let separator_before = advance_semantic_owner(
                 &mut frame.rendered_tail_owner,
                 block_id.first_owner(),
@@ -550,6 +560,7 @@ impl TranscriptPresentation {
                 options.width,
                 options.theme,
                 source_end > 0,
+                phase,
             );
             let separator_before = advance_semantic_owner(
                 &mut frame.rendered_tail_owner,
@@ -774,12 +785,26 @@ fn render_assistant_segment(
     width: usize,
     theme: &TuiTheme,
     continuation: bool,
+    phase: MessagePhase,
 ) -> Vec<String> {
-    let first_prefix = if continuation { "  " } else { "\u{25cf} " };
-    let mut lines = crate::markdown::render_markdown(source, width, theme, first_prefix, "  ")
-        .into_iter()
-        .map(|line| line.to_ansi())
-        .collect();
+    let first_prefix = if continuation {
+        "  "
+    } else if phase == MessagePhase::Commentary {
+        "▸ "
+    } else {
+        "● "
+    };
+    let mut render_theme = *theme;
+    if phase == MessagePhase::Commentary {
+        render_theme.brand = theme.text_muted;
+        render_theme.text_primary = theme.text_muted;
+        render_theme.user_message = theme.text_muted;
+    }
+    let mut lines =
+        crate::markdown::render_markdown(source, width, &render_theme, first_prefix, "  ")
+            .into_iter()
+            .map(|line| line.to_ansi())
+            .collect();
     super::pane::trim_ansi_transcript_block(&mut lines);
     lines
 }

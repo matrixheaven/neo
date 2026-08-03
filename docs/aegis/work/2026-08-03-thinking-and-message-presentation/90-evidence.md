@@ -52,6 +52,17 @@
 - `cargo test -p neo-tui --test transcript_store summary_projection_keeps_body_without_leading_title_across_parts -- --exact --nocapture`: passed, 1 test.
 - `cargo check -p neo-tui --tests`: passed; `cargo fmt --all -- --check`: passed; `git diff --check`: passed.
 
+## Task 4 Verification Evidence
+
+- `cargo test --package neo-tui --test transcript_store commentary_and_final_answer_render_as_separate_entries -- --exact --nocapture`: passed, 1 test. This covers explicit phase propagation, separate ordered assistant entries, `▸` Commentary presentation, `●` FinalAnswer presentation, live/history separation, and canonical text order.
+- `cargo test --package neo-tui --test transcript_store unknown_message_phase_preserves_legacy_rendering -- --exact --nocapture`: passed, 1 test. This covers the Unknown phase's historical `●` marker and non-commentary route.
+- The Task4 ordered test also exercises `TranscriptStore::render_rows` through direct `plain_rows` assertions, proving the compatibility projection uses the same phase metadata and markers as the primary presentation path.
+- `cargo check -p neo-tui --tests`: passed.
+- `cargo fmt --all -- --check`: passed; `git diff --check`: passed.
+- Task4 source scope is limited to the existing transcript event/store/pane/presentation owners and `transcript_store` tests; no card, provider, runtime, persistence, context, or session-history path is in the task-owned diff.
+- The independent advisory review identified an Important gap in the alternate `TranscriptStore::render_rows` projection. The coordinator repaired that path in the canonical store owner and added direct regression assertions; no second owner or compatibility fallback was introduced.
+- Workspace-wide `cargo test --workspace --no-run` remains unclaimed for Task4 because the known unrelated `NeoChromeState::thinking_enabled()` error at `crates/neo-agent/src/modes/interactive/tests.rs:12959` remains outside scope and untouched.
+
 ## Review Evidence
 
 - Fresh Task 2 implementer completed the previous slice without Git lifecycle mutations.
@@ -60,11 +71,15 @@
 - Fresh Task 3 implementer completed the renderer slice without Git lifecycle mutations.
 - Task 3 spec-compliance reviewer: `PASS` after placeholder continuity, body-only streaming, and ordered title/body repairs.
 - Task 3 code-quality reviewer: `PASS` after active-title, body-indentation, renderer-comment, and checkpoint-state repairs.
+- Task 4 advisory reviewer assessed the working-tree routing slice against the approved spec, owner boundary, compatibility behavior, focused evidence, and retirement rules; it identified the alternate `render_rows` route as an Important evidence/behavior gap.
+- The coordinator repaired the identified path in `TranscriptStore::render_rows`, reran both exact Task4 regressions, `cargo check -p neo-tui --tests`, formatting, and `git diff --check`; the repaired slice is ready for task-only commit review.
+- No ADR is needed for this slice: the implementation keeps the existing `TranscriptStore`/`TranscriptPresentation` owners and adds no new durable architecture contract.
 
 ## Scope Notes
 
 - MessagePhase remains orthogonal to ThinkingKind.
 - OpenAI phase mapping uses only explicit output-item `phase` values.
 - Task 2 retains provider/event thinking ids and raw ordered parts in canonical `Content` and existing TUI `ThinkingBlock` state; redacted placeholders remain render-time projection.
-- No transcript owner, hidden-reasoning path, provider runtime rewrite, card, context-prefix, or session-history change was introduced by this slice.
+- Task 4 routes explicit phase metadata through the existing assistant entry state; Commentary is lower-emphasis normal assistant output, FinalAnswer is normal Markdown, and Unknown remains legacy-compatible.
+- No second transcript owner, hidden-reasoning path, provider runtime rewrite, card, context-prefix, or session-history change was introduced by this slice.
 - Workspace-wide `cargo test --workspace --no-run` remains unclaimed; the known unrelated `NeoChromeState::thinking_enabled()` error at `crates/neo-agent/src/modes/interactive/tests.rs:12959` remains outside scope and untouched.
