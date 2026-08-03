@@ -1108,12 +1108,14 @@ async fn idle_model_update_replaces_client_before_next_workflow_invocation() {
 fn child_text_turn(text: &str) -> Vec<AiStreamEvent> {
     vec![
         AiStreamEvent::MessageStart {
+            phase: neo_ai::MessagePhase::Unknown,
             id: format!("msg_{text}"),
         },
         AiStreamEvent::TextDelta {
             text: text.to_owned(),
         },
         AiStreamEvent::MessageEnd {
+            phase: neo_ai::MessagePhase::Unknown,
             stop_reason: StopReason::EndTurn,
             usage: None,
         },
@@ -1123,12 +1125,14 @@ fn child_text_turn(text: &str) -> Vec<AiStreamEvent> {
 fn child_text_turn_with_usage(text: &str, usage: AgentTokenUsage) -> Vec<AiStreamEvent> {
     vec![
         AiStreamEvent::MessageStart {
+            phase: neo_ai::MessagePhase::Unknown,
             id: format!("msg_{text}"),
         },
         AiStreamEvent::TextDelta {
             text: text.to_owned(),
         },
         AiStreamEvent::MessageEnd {
+            phase: neo_ai::MessagePhase::Unknown,
             stop_reason: StopReason::EndTurn,
             usage: Some(neo_ai::TokenUsage {
                 input_tokens: usage.input_tokens,
@@ -1680,6 +1684,7 @@ async fn ordinary_tool_turn_finishes_while_session_resolver_remains_alive() {
     let harness = FakeHarness::from_turns([
         vec![
             AiStreamEvent::MessageStart {
+                phase: neo_ai::MessagePhase::Unknown,
                 id: "parent_tool".to_owned(),
             },
             AiStreamEvent::ToolCallStart {
@@ -1691,6 +1696,7 @@ async fn ordinary_tool_turn_finishes_while_session_resolver_remains_alive() {
                 raw_arguments: json!({"command": "echo turn-completes"}).to_string(),
             },
             AiStreamEvent::MessageEnd {
+                phase: neo_ai::MessagePhase::Unknown,
                 stop_reason: StopReason::ToolUse,
                 usage: None,
             },

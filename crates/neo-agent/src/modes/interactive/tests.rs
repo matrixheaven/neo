@@ -1339,6 +1339,7 @@ async fn controller_submits_prompt_reduces_turn_events_and_renders_snapshot() {
             assert_eq!(request.model, None);
             Ok(vec![
                 AgentEvent::MessageStarted {
+                    phase: neo_ai::MessagePhase::Unknown,
                     turn: 1,
                     id: "assistant-1".to_owned(),
                 },
@@ -2214,6 +2215,7 @@ async fn event_loop_types_submits_renders_and_exits_without_a_real_terminal() {
             assert_eq!(request.model, None);
             Ok(vec![
                 AgentEvent::MessageStarted {
+                    phase: neo_ai::MessagePhase::Unknown,
                     turn: 1,
                     id: "assistant-1".to_owned(),
                 },
@@ -3920,6 +3922,7 @@ async fn automatic_skill_invocation_renders_one_semantic_card() {
     let harness = FakeHarness::from_turns([
         vec![
             neo_ai::AiStreamEvent::MessageStart {
+                phase: neo_ai::MessagePhase::Unknown,
                 id: "msg_1".to_owned(),
             },
             neo_ai::AiStreamEvent::ToolCallStart {
@@ -3931,18 +3934,21 @@ async fn automatic_skill_invocation_renders_one_semantic_card() {
                 raw_arguments: serde_json::json!({"skill": "refactor"}).to_string(),
             },
             neo_ai::AiStreamEvent::MessageEnd {
+                phase: neo_ai::MessagePhase::Unknown,
                 stop_reason: neo_ai::StopReason::ToolUse,
                 usage: None,
             },
         ],
         vec![
             neo_ai::AiStreamEvent::MessageStart {
+                phase: neo_ai::MessagePhase::Unknown,
                 id: "msg_2".to_owned(),
             },
             neo_ai::AiStreamEvent::TextDelta {
                 text: "done".to_owned(),
             },
             neo_ai::AiStreamEvent::MessageEnd {
+                phase: neo_ai::MessagePhase::Unknown,
                 stop_reason: neo_ai::StopReason::EndTurn,
                 usage: None,
             },
@@ -5284,6 +5290,7 @@ async fn event_loop_file_reference_marker_keeps_chip_in_user_transcript() {
                     .push(request);
                 Ok(vec![
                     AgentEvent::MessageStarted {
+                        phase: neo_ai::MessagePhase::Unknown,
                         turn: 1,
                         id: "assistant-1".to_owned(),
                     },
@@ -7746,6 +7753,7 @@ async fn event_loop_interrupt_drains_cancelled_barriers_before_exit() {
         Box::pin(async move {
             *observed_token.lock().expect("token lock") = Some(channels.cancel_token.clone());
             channels.send_event(AgentEvent::MessageStarted {
+                phase: neo_ai::MessagePhase::Unknown,
                 turn: 1,
                 id: "assistant-1".to_owned(),
             });
@@ -7755,6 +7763,7 @@ async fn event_loop_interrupt_drains_cancelled_barriers_before_exit() {
             });
             channels.cancel_token.cancelled().await;
             channels.send_event(AgentEvent::MessageFinished {
+                phase: neo_ai::MessagePhase::Unknown,
                 turn: 1,
                 id: "assistant-1".to_owned(),
                 stop_reason: StopReason::Cancelled,
@@ -8197,6 +8206,7 @@ fn replay_session_into_transcript_keeps_uncovered_image_without_repeating_text()
     let mut transcript = TranscriptPane::new(100, 20);
     let loaded = LoadedSessionTranscript::new("alpha", Vec::new(), Vec::new()).with_events([
         AgentEvent::MessageStarted {
+            phase: neo_ai::MessagePhase::Unknown,
             turn: 1,
             id: "assistant-image".to_owned(),
         },
@@ -8205,6 +8215,7 @@ fn replay_session_into_transcript_keeps_uncovered_image_without_repeating_text()
             text: "image-caption".to_owned(),
         },
         AgentEvent::MessageFinished {
+            phase: neo_ai::MessagePhase::Unknown,
             turn: 1,
             id: "assistant-image".to_owned(),
             stop_reason: StopReason::EndTurn,
@@ -8254,6 +8265,7 @@ fn replay_session_into_transcript_does_not_carry_tool_lifecycle_into_next_assist
     let mut transcript = TranscriptPane::new(110, 24);
     let loaded = LoadedSessionTranscript::new("alpha", Vec::new(), Vec::new()).with_events([
         AgentEvent::MessageStarted {
+            phase: neo_ai::MessagePhase::Unknown,
             turn: 1,
             id: "assistant-before".to_owned(),
         },
@@ -8271,6 +8283,7 @@ fn replay_session_into_transcript_does_not_carry_tool_lifecycle_into_next_assist
             tool_call: tool_call.clone(),
         },
         AgentEvent::MessageFinished {
+            phase: neo_ai::MessagePhase::Unknown,
             turn: 1,
             id: "assistant-before".to_owned(),
             stop_reason: StopReason::ToolUse,
@@ -8305,6 +8318,7 @@ fn replay_session_into_transcript_does_not_carry_tool_lifecycle_into_next_assist
             ),
         },
         AgentEvent::MessageStarted {
+            phase: neo_ai::MessagePhase::Unknown,
             turn: 2,
             id: "assistant-after".to_owned(),
         },
@@ -8313,6 +8327,7 @@ fn replay_session_into_transcript_does_not_carry_tool_lifecycle_into_next_assist
             text: "after-tool".to_owned(),
         },
         AgentEvent::MessageFinished {
+            phase: neo_ai::MessagePhase::Unknown,
             turn: 2,
             id: "assistant-after".to_owned(),
             stop_reason: StopReason::EndTurn,
@@ -8945,6 +8960,7 @@ fn interleaved_replay_prelude_events() -> Vec<AgentEvent> {
             message: AgentMessage::user_text("resume-user"),
         },
         AgentEvent::MessageStarted {
+            phase: neo_ai::MessagePhase::Unknown,
             turn: 1,
             id: "assistant-one".to_owned(),
         },
@@ -8967,6 +8983,7 @@ fn interleaved_replay_prelude_events() -> Vec<AgentEvent> {
             text: "resume-output".to_owned(),
         },
         AgentEvent::MessageFinished {
+            phase: neo_ai::MessagePhase::Unknown,
             turn: 1,
             id: "assistant-one".to_owned(),
             stop_reason: StopReason::EndTurn,
@@ -9261,6 +9278,7 @@ fn session_picker_continuation_controller() -> (
                     .push(request);
                 Ok(vec![
                     AgentEvent::MessageStarted {
+                        phase: neo_ai::MessagePhase::Unknown,
                         turn: 2,
                         id: "assistant-2".to_owned(),
                     },
@@ -9370,6 +9388,7 @@ async fn event_loop_keeps_new_session_active_for_followup_prompt() {
                 .expect("record request")
                 .push(request);
             channels.send_event(AgentEvent::MessageStarted {
+                phase: neo_ai::MessagePhase::Unknown,
                 turn: 1,
                 id: "assistant-1".to_owned(),
             });
@@ -9378,6 +9397,7 @@ async fn event_loop_keeps_new_session_active_for_followup_prompt() {
                 text: "ok".to_owned(),
             });
             channels.send_event(AgentEvent::MessageFinished {
+                phase: neo_ai::MessagePhase::Unknown,
                 turn: 1,
                 id: "assistant-1".to_owned(),
                 stop_reason: StopReason::EndTurn,
@@ -9468,6 +9488,7 @@ async fn event_loop_keeps_started_session_active_after_failed_turn() {
                 anyhow::bail!("provider stream error after tool execution");
             }
             channels.send_event(AgentEvent::MessageStarted {
+                phase: neo_ai::MessagePhase::Unknown,
                 turn: 2,
                 id: "assistant-2".to_owned(),
             });
@@ -9476,6 +9497,7 @@ async fn event_loop_keeps_started_session_active_after_failed_turn() {
                 text: "continued".to_owned(),
             });
             channels.send_event(AgentEvent::MessageFinished {
+                phase: neo_ai::MessagePhase::Unknown,
                 turn: 2,
                 id: "assistant-2".to_owned(),
                 stop_reason: StopReason::EndTurn,
@@ -9634,6 +9656,7 @@ async fn event_loop_forks_selected_session_and_continues_child_session() {
                         .push(request);
                     Ok(vec![
                         AgentEvent::MessageStarted {
+                            phase: neo_ai::MessagePhase::Unknown,
                             turn: 3,
                             id: "assistant-3".to_owned(),
                         },
@@ -9761,6 +9784,7 @@ fn model_picker_submission_controller() -> (
                     .push(request);
                 Ok(vec![
                     AgentEvent::MessageStarted {
+                        phase: neo_ai::MessagePhase::Unknown,
                         turn: 1,
                         id: "assistant-1".to_owned(),
                     },
@@ -11909,6 +11933,7 @@ async fn turn_request_carries_live_local_config() {
                 *captured_config.lock().expect("capture config") = request.base_config;
                 Ok(vec![
                     AgentEvent::MessageStarted {
+                        phase: neo_ai::MessagePhase::Unknown,
                         turn: 1,
                         id: "m".to_owned(),
                     },
@@ -11973,6 +11998,7 @@ async fn turn_request_carries_workspace_policy() {
                     Some(std::sync::Arc::clone(&request.workspace_policy));
                 Ok(vec![
                     AgentEvent::MessageStarted {
+                        phase: neo_ai::MessagePhase::Unknown,
                         turn: 1,
                         id: "m".to_owned(),
                     },
@@ -12021,6 +12047,7 @@ fn controller_with_session_for_new_tests() -> (
                     .push(request);
                 Ok(vec![
                     AgentEvent::MessageStarted {
+                        phase: neo_ai::MessagePhase::Unknown,
                         turn: 1,
                         id: "assistant-1".to_owned(),
                     },
@@ -12029,6 +12056,7 @@ fn controller_with_session_for_new_tests() -> (
                         text: "hi back".to_owned(),
                     },
                     AgentEvent::MessageFinished {
+                        phase: neo_ai::MessagePhase::Unknown,
                         turn: 1,
                         id: "assistant-1".to_owned(),
                         stop_reason: StopReason::EndTurn,
@@ -12506,6 +12534,7 @@ async fn workflow_intent_slash_end_to_end_selects_runs_and_persists() {
     let harness = FakeHarness::from_turns([
         vec![
             neo_ai::AiStreamEvent::MessageStart {
+                phase: neo_ai::MessagePhase::Unknown,
                 id: "workflow-call".to_owned(),
             },
             neo_ai::AiStreamEvent::ToolCallStart {
@@ -12522,18 +12551,21 @@ async fn workflow_intent_slash_end_to_end_selects_runs_and_persists() {
                 .to_string(),
             },
             neo_ai::AiStreamEvent::MessageEnd {
+                phase: neo_ai::MessagePhase::Unknown,
                 stop_reason: neo_ai::StopReason::ToolUse,
                 usage: None,
             },
         ],
         vec![
             neo_ai::AiStreamEvent::MessageStart {
+                phase: neo_ai::MessagePhase::Unknown,
                 id: "workflow-answer".to_owned(),
             },
             neo_ai::AiStreamEvent::TextDelta {
                 text: "done".to_owned(),
             },
             neo_ai::AiStreamEvent::MessageEnd {
+                phase: neo_ai::MessagePhase::Unknown,
                 stop_reason: neo_ai::StopReason::EndTurn,
                 usage: None,
             },
@@ -13230,6 +13262,7 @@ async fn slash_new_preserves_old_session_for_resume_picker_and_next_prompt_creat
                     .expect("session id sent");
             }
             channels.send_event(AgentEvent::MessageStarted {
+                phase: neo_ai::MessagePhase::Unknown,
                 turn: 1,
                 id: "assistant-1".to_owned(),
             });
@@ -13238,6 +13271,7 @@ async fn slash_new_preserves_old_session_for_resume_picker_and_next_prompt_creat
                 text: "ok".to_owned(),
             });
             channels.send_event(AgentEvent::MessageFinished {
+                phase: neo_ai::MessagePhase::Unknown,
                 turn: 1,
                 id: "assistant-1".to_owned(),
                 stop_reason: StopReason::EndTurn,
@@ -18270,12 +18304,14 @@ fn btw_fake_client(answer: &str) -> Arc<dyn neo_ai::ModelClient> {
     use neo_ai::{AiStreamEvent, StopReason};
     Arc::new(neo_ai::providers::fake::FakeModelClient::new(vec![
         AiStreamEvent::MessageStart {
+            phase: neo_ai::MessagePhase::Unknown,
             id: "msg-1".to_owned(),
         },
         AiStreamEvent::TextDelta {
             text: answer.to_owned(),
         },
         AiStreamEvent::MessageEnd {
+            phase: neo_ai::MessagePhase::Unknown,
             stop_reason: StopReason::EndTurn,
             usage: None,
         },
@@ -18427,12 +18463,14 @@ async fn slash_btw_inherits_main_context_with_single_sidecar_projection() {
     });
     let fake = neo_ai::providers::fake::FakeModelClient::new(vec![
         AiStreamEvent::MessageStart {
+            phase: neo_ai::MessagePhase::Unknown,
             id: "msg-1".to_owned(),
         },
         AiStreamEvent::TextDelta {
             text: "side".to_owned(),
         },
         AiStreamEvent::MessageEnd {
+            phase: neo_ai::MessagePhase::Unknown,
             stop_reason: StopReason::EndTurn,
             usage: None,
         },

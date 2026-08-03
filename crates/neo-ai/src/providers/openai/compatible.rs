@@ -583,7 +583,10 @@ impl ParseState {
             .and_then(Value::as_str)
             .unwrap_or("message")
             .to_owned();
-        self.events.push(AiStreamEvent::MessageStart { id });
+        self.events.push(AiStreamEvent::MessageStart {
+            id,
+            phase: crate::MessagePhase::Unknown,
+        });
         self.lifecycle.started = true;
     }
 
@@ -692,6 +695,7 @@ impl ParseState {
             self.events.push(AiStreamEvent::MessageEnd {
                 stop_reason: self.last_stop_reason.clone(),
                 usage: self.usage.clone(),
+                phase: crate::MessagePhase::Unknown,
             });
         }
 

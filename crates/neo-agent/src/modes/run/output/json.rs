@@ -152,7 +152,9 @@ impl StableJsonState {
                     "message": message,
                 }))
             }
-            AgentEvent::MessageStarted { turn, id } => Some(self.map_message_started(*turn, id)),
+            AgentEvent::MessageStarted { turn, id, .. } => {
+                Some(self.map_message_started(*turn, id))
+            }
             AgentEvent::ThinkingStarted { turn, kind, id: _ } => {
                 Some(self.map_thinking_started(*turn, *kind))
             }
@@ -167,6 +169,7 @@ impl StableJsonState {
                 turn,
                 id: _,
                 stop_reason,
+                ..
             } => {
                 self.assistant_stop_reason = Some(*stop_reason);
                 Some(json!({
@@ -825,6 +828,7 @@ mod tests {
         let mut state = StableJsonState::default();
 
         let _ = state.map_event(&AgentEvent::MessageStarted {
+            phase: neo_ai::MessagePhase::Unknown,
             turn: 1,
             id: "message-1".to_owned(),
         });
@@ -877,6 +881,7 @@ mod tests {
             text: "winning answer".to_owned(),
         });
         let message_end = state.map_event(&AgentEvent::MessageFinished {
+            phase: neo_ai::MessagePhase::Unknown,
             turn: 1,
             id: "message-1".to_owned(),
             stop_reason: neo_agent_core::StopReason::EndTurn,
@@ -917,6 +922,7 @@ mod tests {
     fn retry_exhausted_clears_failed_assistant_attempt() {
         let mut state = StableJsonState::default();
         let _ = state.map_event(&AgentEvent::MessageStarted {
+            phase: neo_ai::MessagePhase::Unknown,
             turn: 1,
             id: "failed-message".to_owned(),
         });
@@ -949,6 +955,7 @@ mod tests {
     fn terminal_error_clears_failed_assistant_attempt() {
         let mut state = StableJsonState::default();
         let _ = state.map_event(&AgentEvent::MessageStarted {
+            phase: neo_ai::MessagePhase::Unknown,
             turn: 1,
             id: "failed-message".to_owned(),
         });

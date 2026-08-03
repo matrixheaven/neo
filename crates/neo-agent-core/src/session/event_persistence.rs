@@ -310,6 +310,7 @@ mod tests {
             AgentEvent::MessageStarted {
                 turn: 1,
                 id: "message".to_owned(),
+                phase: neo_ai::MessagePhase::Unknown,
             },
             AgentEvent::ThinkingStarted {
                 turn: 1,
@@ -357,6 +358,7 @@ mod tests {
                 turn: 1,
                 id: "message".to_owned(),
                 stop_reason: StopReason::EndTurn,
+                phase: neo_ai::MessagePhase::Unknown,
             },
         ]
     }

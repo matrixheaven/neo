@@ -51,7 +51,16 @@
 - Non-goals:
 - 本切片不改源代码、不增加新的思考枚举、不重写 provider runtime、不修改 Delegate-family 卡片
 
-These records are Method Pack drafts / hints, not authoritative runtime decisions.
+
+## Implementation Continuation
+
+The documentation handoff is now being executed in the existing workspace. The
+implementation route is subagent-driven with sequential bounded slices and
+spec-compliance plus code-quality review after each slice. This continuation
+must preserve the original intent, scope, compatibility, and retirement locks;
+it must not reinterpret the earlier documentation-only stop condition as a
+source-code non-goal.
+
 
 ## BaselineUsageDraft
 

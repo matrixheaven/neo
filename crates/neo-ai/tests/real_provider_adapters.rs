@@ -9,8 +9,9 @@ use futures::StreamExt;
 use neo_ai::{
     AiError, AiStreamEvent, ApiKind, CacheRetention, ChatMessage, ChatRequest, ContentPart,
     ImageData, ImageGenerationClient, ImageGenerationRequest, ImageGenerationResponseImage,
-    ModelCapabilities, ModelClient, ModelSpec, ProviderId, ReasoningEffort, ReasoningSelection,
-    RequestMetadata, RequestOptions, StopReason, ThinkingKind, ToolCall, ToolSpec,
+    MessagePhase, ModelCapabilities, ModelClient, ModelSpec, ProviderId, ReasoningEffort,
+    ReasoningSelection, RequestMetadata, RequestOptions, StopReason, ThinkingKind, ToolCall,
+    ToolSpec,
     providers::{
         anthropic::AnthropicMessagesClient, google::GoogleGenerativeAiClient,
         openai::compatible::OpenAiCompatibleClient, openai::images::OpenAiImagesClient,
@@ -458,26 +459,27 @@ async fn openai_responses_client_posts_responses_payload_and_streams_events() {
         events,
         vec![
             AiStreamEvent::MessageStart {
-                id: "resp-1".to_owned()
+                id: "resp-1".to_owned(),
+                phase: MessagePhase::Unknown,
             },
             AiStreamEvent::TextDelta {
-                text: "hi ".to_owned()
+                text: "hi ".to_owned(),
             },
             AiStreamEvent::ToolCallStart {
                 id: "call-1".to_owned(),
-                name: "read_file".to_owned()
+                name: "read_file".to_owned(),
             },
             AiStreamEvent::ToolCallArgsDelta {
                 id: "call-1".to_owned(),
-                json_fragment: "{\"path\":".to_owned()
+                json_fragment: "{\"path\":".to_owned(),
             },
             AiStreamEvent::ToolCallArgsDelta {
                 id: "call-1".to_owned(),
-                json_fragment: "\"Cargo.toml\"}".to_owned()
+                json_fragment: "\"Cargo.toml\"}".to_owned(),
             },
             AiStreamEvent::ToolCallEnd {
                 id: "call-1".to_owned(),
-                raw_arguments: r#"{"path":"Cargo.toml"}"#.to_owned()
+                raw_arguments: r#"{"path":"Cargo.toml"}"#.to_owned(),
             },
             AiStreamEvent::MessageEnd {
                 stop_reason: StopReason::ToolUse,
@@ -486,7 +488,8 @@ async fn openai_responses_client_posts_responses_payload_and_streams_events() {
                     output_tokens: 4,
                     input_cache_read_tokens: 0,
                     input_cache_write_tokens: 0,
-                })
+                }),
+                phase: MessagePhase::Unknown,
             },
         ]
     );
@@ -613,23 +616,24 @@ async fn openai_compatible_client_finishes_tool_call_on_tool_calls_finish_reason
         events,
         vec![
             AiStreamEvent::MessageStart {
-                id: "chatcmpl-tool".to_owned()
+                id: "chatcmpl-tool".to_owned(),
+                phase: MessagePhase::Unknown,
             },
             AiStreamEvent::ToolCallStart {
                 id: "call-1".to_owned(),
-                name: "read_file".to_owned()
+                name: "read_file".to_owned(),
             },
             AiStreamEvent::ToolCallArgsDelta {
                 id: "call-1".to_owned(),
-                json_fragment: "{\"path\":".to_owned()
+                json_fragment: "{\"path\":".to_owned(),
             },
             AiStreamEvent::ToolCallArgsDelta {
                 id: "call-1".to_owned(),
-                json_fragment: "\"Cargo.toml\"}".to_owned()
+                json_fragment: "\"Cargo.toml\"}".to_owned(),
             },
             AiStreamEvent::ToolCallEnd {
                 id: "call-1".to_owned(),
-                raw_arguments: r#"{"path":"Cargo.toml"}"#.to_owned()
+                raw_arguments: r#"{"path":"Cargo.toml"}"#.to_owned(),
             },
             AiStreamEvent::MessageEnd {
                 stop_reason: StopReason::ToolUse,
@@ -639,6 +643,7 @@ async fn openai_compatible_client_finishes_tool_call_on_tool_calls_finish_reason
                     input_cache_read_tokens: 0,
                     input_cache_write_tokens: 0,
                 }),
+                phase: MessagePhase::Unknown,
             },
         ]
     );
@@ -1014,7 +1019,8 @@ async fn openai_responses_client_streams_reasoning_summary_events() {
         events,
         vec![
             AiStreamEvent::MessageStart {
-                id: "resp-thinking".to_owned()
+                id: "resp-thinking".to_owned(),
+                phase: MessagePhase::Unknown,
             },
             AiStreamEvent::ThinkingStart {
                 id: "rs_1:summary:0".to_owned(),
@@ -1036,8 +1042,124 @@ async fn openai_responses_client_streams_reasoning_summary_events() {
             AiStreamEvent::MessageEnd {
                 stop_reason: StopReason::EndTurn,
                 usage: None,
+                phase: MessagePhase::Unknown,
             },
         ]
+    );
+}
+
+#[tokio::test]
+async fn openai_responses_client_buffers_pre_phase_reasoning_and_tool_events_until_message_phase() {
+    let server = MockServer::start(vec![sse_response(&[
+        json!({ "type": "response.created", "response": { "id": "resp-pre-phase" } }),
+        json!({
+            "type": "response.reasoning_summary_part.added",
+            "item_id": "rs_pre_phase",
+            "summary_index": 0,
+            "part": { "type": "summary_text", "text": "" }
+        }),
+        json!({
+            "type": "response.reasoning_summary_text.delta",
+            "item_id": "rs_pre_phase",
+            "summary_index": 0,
+            "delta": "Checked the tool."
+        }),
+        json!({
+            "type": "response.reasoning_summary_part.done",
+            "item_id": "rs_pre_phase",
+            "summary_index": 0,
+            "part": { "type": "summary_text", "text": "Checked the tool." }
+        }),
+        json!({
+            "type": "response.output_item.added",
+            "item": {
+                "type": "function_call",
+                "id": "item-pre-phase",
+                "call_id": "call-pre-phase",
+                "name": "read_file"
+            }
+        }),
+        json!({
+            "type": "response.function_call_arguments.delta",
+            "item_id": "item-pre-phase",
+            "delta": "{\"path\":\"Cargo.toml\"}"
+        }),
+        json!({
+            "type": "response.output_item.done",
+            "item": {
+                "type": "function_call",
+                "id": "item-pre-phase",
+                "call_id": "call-pre-phase",
+                "name": "read_file",
+                "arguments": "{\"path\":\"Cargo.toml\"}"
+            }
+        }),
+        json!({
+            "type": "response.output_item.added",
+            "item": { "type": "message", "id": "message-1", "phase": "commentary" }
+        }),
+        json!({ "type": "response.output_text.delta", "delta": "answer" }),
+        json!({
+            "type": "response.completed",
+            "response": { "status": "completed" }
+        }),
+    ])]);
+    let client = OpenAiResponsesClient::new(server.url.clone(), "test-key");
+
+    let events = client
+        .stream_chat(request(ApiKind::OpenAiResponse))
+        .collect::<Vec<_>>()
+        .await
+        .into_iter()
+        .collect::<Result<Vec<_>, _>>()
+        .unwrap();
+
+    assert_eq!(
+        events,
+        vec![
+            AiStreamEvent::MessageStart {
+                id: "resp-pre-phase".to_owned(),
+                phase: MessagePhase::Commentary,
+            },
+            AiStreamEvent::ThinkingStart {
+                id: "rs_pre_phase:summary:0".to_owned(),
+                kind: ThinkingKind::Summary,
+            },
+            AiStreamEvent::ThinkingDelta {
+                text: "Checked the tool.".to_owned(),
+            },
+            AiStreamEvent::ThinkingEnd {
+                signature: None,
+                redacted: false,
+            },
+            AiStreamEvent::ToolCallStart {
+                id: "call-pre-phase".to_owned(),
+                name: "read_file".to_owned(),
+            },
+            AiStreamEvent::ToolCallArgsDelta {
+                id: "call-pre-phase".to_owned(),
+                json_fragment: "{\"path\":\"Cargo.toml\"}".to_owned(),
+            },
+            AiStreamEvent::ToolCallEnd {
+                id: "call-pre-phase".to_owned(),
+                raw_arguments: r#"{"path":"Cargo.toml"}"#.to_owned(),
+            },
+            AiStreamEvent::TextDelta {
+                text: "answer".to_owned(),
+            },
+            AiStreamEvent::MessageEnd {
+                stop_reason: StopReason::ToolUse,
+                usage: None,
+                phase: MessagePhase::Commentary,
+            },
+        ]
+    );
+    assert_eq!(
+        events
+            .iter()
+            .filter(|event| matches!(event, AiStreamEvent::MessageStart { .. }))
+            .count(),
+        1
     );
 }
 
@@ -1082,7 +1204,8 @@ async fn openai_responses_client_streams_reasoning_summary_text_done_without_del
         events,
         vec![
             AiStreamEvent::MessageStart {
-                id: "resp-thinking-done".to_owned()
+                id: "resp-thinking-done".to_owned(),
+                phase: MessagePhase::Unknown,
             },
             AiStreamEvent::ThinkingStart {
                 id: "rs_done:summary:0".to_owned(),
@@ -1098,6 +1221,7 @@ async fn openai_responses_client_streams_reasoning_summary_text_done_without_del
             AiStreamEvent::MessageEnd {
                 stop_reason: StopReason::EndTurn,
                 usage: None,
+                phase: MessagePhase::Unknown,
             },
         ]
     );
@@ -1174,7 +1298,8 @@ async fn openai_responses_client_serializes_interleaved_reasoning_summaries_by_s
         events,
         vec![
             AiStreamEvent::MessageStart {
-                id: "resp-interleaved-thinking".to_owned()
+                id: "resp-interleaved-thinking".to_owned(),
+                phase: MessagePhase::Unknown,
             },
             AiStreamEvent::ThinkingStart {
                 id: "rs_1:summary:0".to_owned(),
@@ -1204,6 +1329,7 @@ async fn openai_responses_client_serializes_interleaved_reasoning_summaries_by_s
             AiStreamEvent::MessageEnd {
                 stop_reason: StopReason::EndTurn,
                 usage: None,
+                phase: MessagePhase::Unknown,
             },
         ]
     );
@@ -1274,7 +1400,8 @@ async fn openai_responses_client_keeps_reasoning_summaries_with_shared_item_id_s
         events,
         vec![
             AiStreamEvent::MessageStart {
-                id: "resp-shared-thinking-item".to_owned()
+                id: "resp-shared-thinking-item".to_owned(),
+                phase: MessagePhase::Unknown,
             },
             AiStreamEvent::ThinkingStart {
                 id: "rs_item:summary:0".to_owned(),
@@ -1301,6 +1428,7 @@ async fn openai_responses_client_keeps_reasoning_summaries_with_shared_item_id_s
             AiStreamEvent::MessageEnd {
                 stop_reason: StopReason::EndTurn,
                 usage: None,
+                phase: MessagePhase::Unknown,
             },
         ]
     );
@@ -1372,7 +1500,8 @@ async fn openai_responses_client_keeps_reasoning_summaries_with_shared_output_it
         events,
         vec![
             AiStreamEvent::MessageStart {
-                id: "resp-shared-output-index".to_owned()
+                id: "resp-shared-output-index".to_owned(),
+                phase: MessagePhase::Unknown,
             },
             AiStreamEvent::ThinkingStart {
                 id: "rs_item:output:0:summary:0".to_owned(),
@@ -1399,6 +1528,7 @@ async fn openai_responses_client_keeps_reasoning_summaries_with_shared_output_it
             AiStreamEvent::MessageEnd {
                 stop_reason: StopReason::EndTurn,
                 usage: None,
+                phase: MessagePhase::Unknown,
             },
         ]
     );
@@ -1451,7 +1581,8 @@ async fn openai_responses_client_keeps_streamed_summary_when_done_text_is_non_pr
         events,
         vec![
             AiStreamEvent::MessageStart {
-                id: "resp-thinking-correction".to_owned()
+                id: "resp-thinking-correction".to_owned(),
+                phase: MessagePhase::Unknown,
             },
             AiStreamEvent::ThinkingStart {
                 id: "rs_corrected:summary:0".to_owned(),
@@ -1467,6 +1598,7 @@ async fn openai_responses_client_keeps_streamed_summary_when_done_text_is_non_pr
             AiStreamEvent::MessageEnd {
                 stop_reason: StopReason::EndTurn,
                 usage: None,
+                phase: MessagePhase::Unknown,
             },
         ],
         "Neo's provider-neutral thinking stream is append-only; final text corrections need a future replacement event contract"
@@ -1753,7 +1885,8 @@ async fn anthropic_messages_client_posts_messages_payload_and_streams_events() {
         events,
         vec![
             AiStreamEvent::MessageStart {
-                id: "msg-1".to_owned()
+                id: "msg-1".to_owned(),
+                phase: MessagePhase::Unknown,
             },
             AiStreamEvent::ToolCallStart {
                 id: "toolu-1".to_owned(),
@@ -1781,7 +1914,8 @@ async fn anthropic_messages_client_posts_messages_payload_and_streams_events() {
                     output_tokens: 3,
                     input_cache_read_tokens: 8,
                     input_cache_write_tokens: 2,
-                })
+                }),
+                phase: MessagePhase::Unknown,
             },
         ]
     );
@@ -2273,7 +2407,8 @@ async fn anthropic_messages_client_streams_extended_thinking_events() {
         events,
         vec![
             AiStreamEvent::MessageStart {
-                id: "msg-thinking-stream".to_owned()
+                id: "msg-thinking-stream".to_owned(),
+                phase: MessagePhase::Unknown,
             },
             AiStreamEvent::ThinkingStart {
                 id: "thinking:0".to_owned(),
@@ -2295,6 +2430,7 @@ async fn anthropic_messages_client_streams_extended_thinking_events() {
             AiStreamEvent::MessageEnd {
                 stop_reason: StopReason::EndTurn,
                 usage: None,
+                phase: MessagePhase::Unknown,
             },
         ]
     );
@@ -2384,7 +2520,8 @@ async fn google_generative_ai_client_posts_generate_content_payload_and_streams_
     assert_eq!(
         events[0],
         AiStreamEvent::MessageStart {
-            id: "google-generative-ai".to_owned()
+            id: "google-generative-ai".to_owned(),
+            phase: MessagePhase::Unknown,
         }
     );
     assert_eq!(
@@ -2423,7 +2560,8 @@ async fn google_generative_ai_client_posts_generate_content_payload_and_streams_
                 output_tokens: 4,
                 input_cache_read_tokens: 0,
                 input_cache_write_tokens: 0,
-            })
+            }),
+            phase: MessagePhase::Unknown,
         }
     );
 
@@ -2813,7 +2951,8 @@ async fn google_generative_ai_client_streams_thought_parts_as_thinking_events() 
         events,
         vec![
             AiStreamEvent::MessageStart {
-                id: "google-generative-ai".to_owned()
+                id: "google-generative-ai".to_owned(),
+                phase: MessagePhase::Unknown,
             },
             AiStreamEvent::ThinkingStart {
                 id: "google-thought:0".to_owned(),
@@ -2832,6 +2971,7 @@ async fn google_generative_ai_client_streams_thought_parts_as_thinking_events() 
             AiStreamEvent::MessageEnd {
                 stop_reason: StopReason::EndTurn,
                 usage: None,
+                phase: MessagePhase::Unknown,
             },
         ]
     );
@@ -2865,7 +3005,8 @@ async fn google_generative_ai_client_does_not_treat_signature_only_parts_as_thin
         events,
         vec![
             AiStreamEvent::MessageStart {
-                id: "google-generative-ai".to_owned()
+                id: "google-generative-ai".to_owned(),
+                phase: MessagePhase::Unknown,
             },
             AiStreamEvent::TextDelta {
                 text: "plain signed text".to_owned()
@@ -2873,6 +3014,7 @@ async fn google_generative_ai_client_does_not_treat_signature_only_parts_as_thin
             AiStreamEvent::MessageEnd {
                 stop_reason: StopReason::EndTurn,
                 usage: None,
+                phase: MessagePhase::Unknown,
             },
         ]
     );

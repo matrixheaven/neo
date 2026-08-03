@@ -609,6 +609,7 @@ impl ParseState {
         }
         self.events.push(AiStreamEvent::MessageStart {
             id: "google-generative-ai".to_owned(),
+            phase: crate::MessagePhase::Unknown,
         });
         self.started = true;
     }
@@ -742,6 +743,7 @@ impl ParseState {
             self.events.push(AiStreamEvent::MessageEnd {
                 stop_reason: self.last_stop_reason.clone(),
                 usage: self.usage.clone(),
+                phase: crate::MessagePhase::Unknown,
             });
         }
 
@@ -1033,10 +1035,12 @@ mod tests {
             vec![
                 AiStreamEvent::MessageStart {
                     id: "google-generative-ai".to_owned(),
+                    phase: crate::MessagePhase::Unknown,
                 },
                 AiStreamEvent::MessageEnd {
                     stop_reason: StopReason::EndTurn,
                     usage: None,
+                    phase: crate::MessagePhase::Unknown,
                 },
             ]
         );

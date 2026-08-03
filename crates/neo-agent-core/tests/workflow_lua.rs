@@ -46,6 +46,7 @@ impl neo_ai::ModelClient for InterruptWorkflowOnRequestClient {
                     .expect("stop active workflow");
             }
             Ok::<_, neo_ai::AiError>(neo_ai::AiStreamEvent::MessageStart {
+                phase: neo_ai::MessagePhase::Unknown,
                 id: "interrupt-on-request".to_owned(),
             })
         })
@@ -54,6 +55,7 @@ impl neo_ai::ModelClient for InterruptWorkflowOnRequestClient {
                 text: r#"{"ok":true}"#.to_owned(),
             }),
             Ok(neo_ai::AiStreamEvent::MessageEnd {
+                phase: neo_ai::MessagePhase::Unknown,
                 stop_reason: neo_ai::StopReason::EndTurn,
                 usage: None,
             }),

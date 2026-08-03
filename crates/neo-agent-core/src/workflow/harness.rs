@@ -14,7 +14,7 @@ use std::time::Duration;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
-use neo_ai::{AiStreamEvent, StopReason, TokenUsage};
+use neo_ai::{AiStreamEvent, MessagePhase, StopReason, TokenUsage};
 
 use crate::AgentContext;
 use crate::harness::FakeHarness;
@@ -540,6 +540,7 @@ fn text_turn(text: &str, usage: Option<(u32, u32)>) -> Vec<AiStreamEvent> {
     vec![
         AiStreamEvent::MessageStart {
             id: format!("msg_{}", text.len()),
+            phase: MessagePhase::Unknown,
         },
         AiStreamEvent::TextDelta {
             text: text.to_owned(),
@@ -552,6 +553,7 @@ fn text_turn(text: &str, usage: Option<(u32, u32)>) -> Vec<AiStreamEvent> {
                 input_cache_read_tokens: 0,
                 input_cache_write_tokens: 0,
             }),
+            phase: MessagePhase::Unknown,
         },
     ]
 }

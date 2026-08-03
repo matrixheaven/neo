@@ -390,8 +390,8 @@ mod tests {
     use crate::providers::fake::FakeModelClient;
     use crate::types::{ApiKind, ModelCapabilities};
     use crate::{
-        AiStreamEvent, ChatMessage, ChatRequest, ContentPart, ModelClient, ModelSpec, ProviderId,
-        StopReason,
+        AiStreamEvent, ChatMessage, ChatRequest, ContentPart, MessagePhase, ModelClient, ModelSpec,
+        ProviderId, StopReason,
     };
     use futures::StreamExt;
     use serde_json::json;
@@ -472,6 +472,7 @@ mod tests {
         let client = FakeModelClient::new(vec![
             AiStreamEvent::MessageStart {
                 id: "m1".to_owned(),
+                phase: MessagePhase::Unknown,
             },
             AiStreamEvent::TextDelta {
                 text: "not-json-and-not-schema".to_owned(),
@@ -479,6 +480,7 @@ mod tests {
             AiStreamEvent::MessageEnd {
                 stop_reason: StopReason::EndTurn,
                 usage: None,
+                phase: MessagePhase::Unknown,
             },
         ]);
 

@@ -13,8 +13,9 @@ use neo_agent_core::{
     skills::{SkillStore, SkillStoreHandle},
 };
 use neo_ai::{
-    AiError, AiStreamEvent, ApiKind, ChatRequest, ModelCapabilities, ModelClient, ModelSpec,
-    ProviderId, ReasoningCapability, ReasoningEffort, ReasoningSelection, ThinkingKind, ToolSpec,
+    AiError, AiStreamEvent, ApiKind, ChatRequest, MessagePhase, ModelCapabilities, ModelClient,
+    ModelSpec, ProviderId, ReasoningCapability, ReasoningEffort, ReasoningSelection, ThinkingKind,
+    ToolSpec,
 };
 use serde_json::json;
 use std::{
@@ -166,6 +167,7 @@ fn revise_goal_with_feedback(request: &ApprovalRequest, feedback: &str) -> Appro
 async fn runtime_streams_one_turn_text_and_updates_context() {
     let harness = FakeHarness::from_events([
         AiStreamEvent::MessageStart {
+            phase: MessagePhase::Unknown,
             id: "msg_1".to_owned(),
         },
         AiStreamEvent::TextDelta {
@@ -175,6 +177,7 @@ async fn runtime_streams_one_turn_text_and_updates_context() {
             text: "lo".to_owned(),
         },
         AiStreamEvent::MessageEnd {
+            phase: MessagePhase::Unknown,
             stop_reason: neo_ai::StopReason::EndTurn,
             usage: None,
         },
@@ -210,6 +213,7 @@ async fn runtime_streams_one_turn_text_and_updates_context() {
             AgentEvent::MessageStarted {
                 turn: 1,
                 id: "msg_1".to_owned(),
+                phase: MessagePhase::Unknown,
             },
             AgentEvent::TextDelta {
                 turn: 1,
@@ -223,6 +227,7 @@ async fn runtime_streams_one_turn_text_and_updates_context() {
                 turn: 1,
                 id: "msg_1".to_owned(),
                 stop_reason: StopReason::EndTurn,
+                phase: MessagePhase::Unknown,
             },
             AgentEvent::MessageAppended {
                 message: AgentMessage::assistant(
@@ -266,12 +271,14 @@ async fn runtime_injects_workspace_context_into_model_request() {
         .expect("canonical workspace");
     let harness = FakeHarness::from_events([
         AiStreamEvent::MessageStart {
+            phase: MessagePhase::Unknown,
             id: "msg_1".to_owned(),
         },
         AiStreamEvent::TextDelta {
             text: "ok".to_owned(),
         },
         AiStreamEvent::MessageEnd {
+            phase: MessagePhase::Unknown,
             stop_reason: neo_ai::StopReason::EndTurn,
             usage: None,
         },
@@ -311,9 +318,11 @@ async fn runtime_injects_workspace_context_into_model_request() {
 async fn runtime_context_window_estimate_includes_effective_request_messages() {
     let harness = FakeHarness::from_events([
         AiStreamEvent::MessageStart {
+            phase: MessagePhase::Unknown,
             id: "msg_1".to_owned(),
         },
         AiStreamEvent::MessageEnd {
+            phase: MessagePhase::Unknown,
             stop_reason: neo_ai::StopReason::EndTurn,
             usage: None,
         },
@@ -355,9 +364,11 @@ async fn runtime_context_window_estimate_includes_effective_request_messages() {
 async fn runtime_context_window_estimate_includes_tool_schemas() {
     let harness = FakeHarness::from_events([
         AiStreamEvent::MessageStart {
+            phase: MessagePhase::Unknown,
             id: "msg_1".to_owned(),
         },
         AiStreamEvent::MessageEnd {
+            phase: MessagePhase::Unknown,
             stop_reason: neo_ai::StopReason::EndTurn,
             usage: None,
         },
@@ -409,12 +420,14 @@ async fn runtime_context_window_estimate_includes_tool_schemas() {
 async fn runtime_emits_provider_token_usage() {
     let harness = FakeHarness::from_events([
         AiStreamEvent::MessageStart {
+            phase: MessagePhase::Unknown,
             id: "msg_1".to_owned(),
         },
         AiStreamEvent::TextDelta {
             text: "hello".to_owned(),
         },
         AiStreamEvent::MessageEnd {
+            phase: MessagePhase::Unknown,
             stop_reason: neo_ai::StopReason::EndTurn,
             usage: Some(neo_ai::TokenUsage {
                 input_tokens: 123,
@@ -450,9 +463,11 @@ async fn runtime_emits_provider_token_usage() {
 async fn goal_mode_authoring_injects_exit_goal_mode_guidance() {
     let harness = FakeHarness::from_events([
         AiStreamEvent::MessageStart {
+            phase: MessagePhase::Unknown,
             id: "msg_1".to_owned(),
         },
         AiStreamEvent::MessageEnd {
+            phase: MessagePhase::Unknown,
             stop_reason: neo_ai::StopReason::EndTurn,
             usage: None,
         },
@@ -490,6 +505,7 @@ async fn goal_mode_authoring_injects_exit_goal_mode_guidance() {
 async fn runtime_yields_model_events_before_model_stream_finishes() {
     let harness = DelayedHarness::new(vec![
         DelayedStep::Event(AiStreamEvent::MessageStart {
+            phase: MessagePhase::Unknown,
             id: "msg_1".to_owned(),
         }),
         DelayedStep::Event(AiStreamEvent::TextDelta {
@@ -497,6 +513,7 @@ async fn runtime_yields_model_events_before_model_stream_finishes() {
         }),
         DelayedStep::Delay(Duration::from_secs(5)),
         DelayedStep::Event(AiStreamEvent::MessageEnd {
+            phase: MessagePhase::Unknown,
             stop_reason: neo_ai::StopReason::EndTurn,
             usage: None,
         }),
@@ -557,6 +574,7 @@ async fn runtime_yields_model_events_before_model_stream_finishes() {
         AgentEvent::MessageStarted {
             turn: 1,
             id: "msg_1".to_owned(),
+            phase: MessagePhase::Unknown,
         }
     );
     assert_eq!(
@@ -576,6 +594,7 @@ async fn runtime_yields_model_events_before_model_stream_finishes() {
 async fn runtime_cancels_in_flight_model_stream_and_emits_cancelled_barriers() {
     let harness = DelayedHarness::new(vec![
         DelayedStep::Event(AiStreamEvent::MessageStart {
+            phase: MessagePhase::Unknown,
             id: "msg_cancel".to_owned(),
         }),
         DelayedStep::Event(AiStreamEvent::TextDelta {
@@ -586,6 +605,7 @@ async fn runtime_cancels_in_flight_model_stream_and_emits_cancelled_barriers() {
             text: "late".to_owned(),
         }),
         DelayedStep::Event(AiStreamEvent::MessageEnd {
+            phase: MessagePhase::Unknown,
             stop_reason: neo_ai::StopReason::EndTurn,
             usage: None,
         }),
@@ -655,6 +675,7 @@ async fn runtime_cancels_in_flight_model_stream_and_emits_cancelled_barriers() {
 async fn agent_event_stream_cancels_only_when_abandoned() {
     let harness = DelayedHarness::new(vec![
         DelayedStep::Event(AiStreamEvent::MessageStart {
+            phase: MessagePhase::Unknown,
             id: "msg_1".to_owned(),
         }),
         DelayedStep::Event(AiStreamEvent::TextDelta {
@@ -665,6 +686,7 @@ async fn agent_event_stream_cancels_only_when_abandoned() {
             text: "late".to_owned(),
         }),
         DelayedStep::Event(AiStreamEvent::MessageEnd {
+            phase: MessagePhase::Unknown,
             stop_reason: neo_ai::StopReason::EndTurn,
             usage: None,
         }),
@@ -710,6 +732,7 @@ async fn agent_event_stream_cancels_only_when_abandoned() {
 async fn runtime_records_tool_calls_and_sends_tool_specs_to_model() {
     let harness = FakeHarness::from_events([
         AiStreamEvent::MessageStart {
+            phase: MessagePhase::Unknown,
             id: "msg_2".to_owned(),
         },
         AiStreamEvent::ToolCallStart {
@@ -725,6 +748,7 @@ async fn runtime_records_tool_calls_and_sends_tool_specs_to_model() {
             raw_arguments: json!({ "path": "README.md" }).to_string(),
         },
         AiStreamEvent::MessageEnd {
+            phase: MessagePhase::Unknown,
             stop_reason: neo_ai::StopReason::ToolUse,
             usage: None,
         },
@@ -805,6 +829,7 @@ async fn assert_runtime_rejects_unsupported_capability(
 #[tokio::test]
 async fn runtime_rejects_tools_when_model_lacks_tools_before_request() {
     let harness = FakeHarness::from_events([AiStreamEvent::MessageEnd {
+        phase: MessagePhase::Unknown,
         stop_reason: neo_ai::StopReason::EndTurn,
         usage: None,
     }]);
@@ -825,6 +850,7 @@ async fn runtime_rejects_tools_when_model_lacks_tools_before_request() {
 #[tokio::test]
 async fn runtime_rejects_image_content_when_model_lacks_images_before_request() {
     let harness = FakeHarness::from_events([AiStreamEvent::MessageEnd {
+        phase: MessagePhase::Unknown,
         stop_reason: neo_ai::StopReason::EndTurn,
         usage: None,
     }]);
@@ -846,6 +872,7 @@ async fn runtime_rejects_image_content_when_model_lacks_images_before_request() 
 #[tokio::test]
 async fn runtime_rejects_reasoning_selection_when_model_lacks_reasoning_before_request() {
     let harness = FakeHarness::from_events([AiStreamEvent::MessageEnd {
+        phase: MessagePhase::Unknown,
         stop_reason: neo_ai::StopReason::EndTurn,
         usage: None,
     }]);
@@ -867,6 +894,7 @@ async fn runtime_rejects_reasoning_selection_when_model_lacks_reasoning_before_r
 #[tokio::test]
 async fn runtime_rejects_unsupported_reasoning_selection_before_request() {
     let harness = FakeHarness::from_events([AiStreamEvent::MessageEnd {
+        phase: MessagePhase::Unknown,
         stop_reason: neo_ai::StopReason::EndTurn,
         usage: None,
     }]);
@@ -917,6 +945,7 @@ async fn runtime_rejects_unsupported_reasoning_selection_before_request() {
 #[tokio::test]
 async fn runtime_passes_reasoning_selection_into_chat_request_options() {
     let harness = FakeHarness::from_events([AiStreamEvent::MessageEnd {
+        phase: MessagePhase::Unknown,
         stop_reason: neo_ai::StopReason::EndTurn,
         usage: None,
     }]);
@@ -953,6 +982,7 @@ async fn runtime_passes_reasoning_selection_into_chat_request_options() {
 async fn runtime_streams_thinking_events_and_persists_thinking_content() {
     let harness = FakeHarness::from_events([
         AiStreamEvent::MessageStart {
+            phase: MessagePhase::Unknown,
             id: "msg_thinking".to_owned(),
         },
         AiStreamEvent::ThinkingStart {
@@ -973,6 +1003,7 @@ async fn runtime_streams_thinking_events_and_persists_thinking_content() {
             text: "final answer".to_owned(),
         },
         AiStreamEvent::MessageEnd {
+            phase: MessagePhase::Unknown,
             stop_reason: neo_ai::StopReason::EndTurn,
             usage: None,
         },
@@ -1023,6 +1054,7 @@ async fn runtime_streams_thinking_events_and_persists_thinking_content() {
 async fn runtime_preserves_multiple_thinking_parts_and_text_order() {
     let harness = FakeHarness::from_events([
         AiStreamEvent::MessageStart {
+            phase: MessagePhase::Unknown,
             id: "msg_multi_thinking".to_owned(),
         },
         AiStreamEvent::TextDelta {
@@ -1054,6 +1086,7 @@ async fn runtime_preserves_multiple_thinking_parts_and_text_order() {
             text: "outro".to_owned(),
         },
         AiStreamEvent::MessageEnd {
+            phase: MessagePhase::Unknown,
             stop_reason: neo_ai::StopReason::EndTurn,
             usage: None,
         },
@@ -1089,6 +1122,7 @@ async fn runtime_sends_persisted_thinking_content_back_to_model() {
     let harness = FakeHarness::from_turns([
         vec![
             AiStreamEvent::MessageStart {
+                phase: MessagePhase::Unknown,
                 id: "msg_thinking".to_owned(),
             },
             AiStreamEvent::ThinkingStart {
@@ -1106,18 +1140,21 @@ async fn runtime_sends_persisted_thinking_content_back_to_model() {
                 text: "answer".to_owned(),
             },
             AiStreamEvent::MessageEnd {
+                phase: MessagePhase::Unknown,
                 stop_reason: neo_ai::StopReason::EndTurn,
                 usage: None,
             },
         ],
         vec![
             AiStreamEvent::MessageStart {
+                phase: MessagePhase::Unknown,
                 id: "msg_followup".to_owned(),
             },
             AiStreamEvent::TextDelta {
                 text: "followup".to_owned(),
             },
             AiStreamEvent::MessageEnd {
+                phase: MessagePhase::Unknown,
                 stop_reason: neo_ai::StopReason::EndTurn,
                 usage: None,
             },
@@ -1171,6 +1208,7 @@ async fn runtime_can_disable_persisted_thinking_replay() {
     let harness = FakeHarness::from_turns([
         vec![
             AiStreamEvent::MessageStart {
+                phase: MessagePhase::Unknown,
                 id: "msg_thinking".to_owned(),
             },
             AiStreamEvent::ThinkingStart {
@@ -1188,18 +1226,21 @@ async fn runtime_can_disable_persisted_thinking_replay() {
                 text: "answer".to_owned(),
             },
             AiStreamEvent::MessageEnd {
+                phase: MessagePhase::Unknown,
                 stop_reason: neo_ai::StopReason::EndTurn,
                 usage: None,
             },
         ],
         vec![
             AiStreamEvent::MessageStart {
+                phase: MessagePhase::Unknown,
                 id: "msg_followup".to_owned(),
             },
             AiStreamEvent::TextDelta {
                 text: "followup".to_owned(),
             },
             AiStreamEvent::MessageEnd {
+                phase: MessagePhase::Unknown,
                 stop_reason: neo_ai::StopReason::EndTurn,
                 usage: None,
             },
@@ -1247,12 +1288,14 @@ async fn runtime_can_disable_persisted_thinking_replay() {
 async fn runtime_compaction_estimate_ignores_unsent_thinking_content() {
     let harness = FakeHarness::from_events([
         AiStreamEvent::MessageStart {
+            phase: MessagePhase::Unknown,
             id: "msg_after_thinking".to_owned(),
         },
         AiStreamEvent::TextDelta {
             text: "kept".to_owned(),
         },
         AiStreamEvent::MessageEnd {
+            phase: MessagePhase::Unknown,
             stop_reason: neo_ai::StopReason::EndTurn,
             usage: None,
         },
@@ -1292,12 +1335,14 @@ async fn runtime_can_compact_again_after_context_grows_past_threshold() {
     let harness = FakeHarness::from_turns([
         vec![
             AiStreamEvent::MessageStart {
+                phase: MessagePhase::Unknown,
                 id: "msg_1".to_owned(),
             },
             AiStreamEvent::TextDelta {
                 text: "first answer".to_owned(),
             },
             AiStreamEvent::MessageEnd {
+                phase: MessagePhase::Unknown,
                 stop_reason: neo_ai::StopReason::EndTurn,
                 usage: None,
             },
@@ -1305,24 +1350,28 @@ async fn runtime_can_compact_again_after_context_grows_past_threshold() {
         // Compaction summary call for the first compaction
         vec![
             AiStreamEvent::MessageStart {
+                phase: MessagePhase::Unknown,
                 id: "msg_compact_1".to_owned(),
             },
             AiStreamEvent::TextDelta {
                 text: "## Current Focus\nFirst compaction.".to_owned(),
             },
             AiStreamEvent::MessageEnd {
+                phase: MessagePhase::Unknown,
                 stop_reason: neo_ai::StopReason::EndTurn,
                 usage: None,
             },
         ],
         vec![
             AiStreamEvent::MessageStart {
+                phase: MessagePhase::Unknown,
                 id: "msg_2".to_owned(),
             },
             AiStreamEvent::TextDelta {
                 text: "second answer".to_owned(),
             },
             AiStreamEvent::MessageEnd {
+                phase: MessagePhase::Unknown,
                 stop_reason: neo_ai::StopReason::EndTurn,
                 usage: None,
             },
@@ -1330,24 +1379,28 @@ async fn runtime_can_compact_again_after_context_grows_past_threshold() {
         // Compaction summary call for the second compaction
         vec![
             AiStreamEvent::MessageStart {
+                phase: MessagePhase::Unknown,
                 id: "msg_compact_2".to_owned(),
             },
             AiStreamEvent::TextDelta {
                 text: "## Current Focus\nSecond compaction.".to_owned(),
             },
             AiStreamEvent::MessageEnd {
+                phase: MessagePhase::Unknown,
                 stop_reason: neo_ai::StopReason::EndTurn,
                 usage: None,
             },
         ],
         vec![
             AiStreamEvent::MessageStart {
+                phase: MessagePhase::Unknown,
                 id: "msg_3".to_owned(),
             },
             AiStreamEvent::TextDelta {
                 text: "third answer".to_owned(),
             },
             AiStreamEvent::MessageEnd {
+                phase: MessagePhase::Unknown,
                 stop_reason: neo_ai::StopReason::EndTurn,
                 usage: None,
             },
@@ -1398,11 +1451,15 @@ async fn runtime_can_compact_again_after_context_grows_past_threshold() {
 
 fn text_turn_events(id: &str, text: &str) -> Vec<AiStreamEvent> {
     vec![
-        AiStreamEvent::MessageStart { id: id.to_owned() },
+        AiStreamEvent::MessageStart {
+            phase: MessagePhase::Unknown,
+            id: id.to_owned(),
+        },
         AiStreamEvent::TextDelta {
             text: text.to_owned(),
         },
         AiStreamEvent::MessageEnd {
+            phase: MessagePhase::Unknown,
             stop_reason: neo_ai::StopReason::EndTurn,
             usage: None,
         },
@@ -1508,6 +1565,7 @@ async fn runtime_emits_compaction_lifecycle_events_before_applying_summary() {
 async fn manual_compaction_streams_progress_before_summary_finishes() {
     let harness = DelayedHarness::new(vec![
         DelayedStep::Event(AiStreamEvent::MessageStart {
+            phase: MessagePhase::Unknown,
             id: "summary".to_owned(),
         }),
         DelayedStep::Delay(Duration::from_secs(5)),
@@ -1515,6 +1573,7 @@ async fn manual_compaction_streams_progress_before_summary_finishes() {
             text: "summary".to_owned(),
         }),
         DelayedStep::Event(AiStreamEvent::MessageEnd {
+            phase: MessagePhase::Unknown,
             stop_reason: neo_ai::StopReason::EndTurn,
             usage: None,
         }),
@@ -1561,12 +1620,14 @@ async fn manual_compaction_streams_progress_before_summary_finishes() {
 async fn runtime_context_window_events_share_budget_snapshot() {
     let harness = FakeHarness::from_events([
         AiStreamEvent::MessageStart {
+            phase: MessagePhase::Unknown,
             id: "msg_1".to_owned(),
         },
         AiStreamEvent::TextDelta {
             text: "done".to_owned(),
         },
         AiStreamEvent::MessageEnd {
+            phase: MessagePhase::Unknown,
             stop_reason: neo_ai::StopReason::EndTurn,
             usage: None,
         },
@@ -1608,24 +1669,28 @@ async fn runtime_compacts_before_model_call_when_resume_exceeds_window() {
     let harness = FakeHarness::from_turns([
         vec![
             AiStreamEvent::MessageStart {
+                phase: MessagePhase::Unknown,
                 id: "summary".to_owned(),
             },
             AiStreamEvent::TextDelta {
                 text: "summary".to_owned(),
             },
             AiStreamEvent::MessageEnd {
+                phase: MessagePhase::Unknown,
                 stop_reason: neo_ai::StopReason::EndTurn,
                 usage: None,
             },
         ],
         vec![
             AiStreamEvent::MessageStart {
+                phase: MessagePhase::Unknown,
                 id: "msg_1".to_owned(),
             },
             AiStreamEvent::TextDelta {
                 text: "resumed".to_owned(),
             },
             AiStreamEvent::MessageEnd {
+                phase: MessagePhase::Unknown,
                 stop_reason: neo_ai::StopReason::EndTurn,
                 usage: None,
             },
@@ -1676,12 +1741,14 @@ async fn runtime_overflow_records_observed_window_and_retries_once() {
         })],
         vec![
             Ok(AiStreamEvent::MessageStart {
+                phase: MessagePhase::Unknown,
                 id: "summary".to_owned(),
             }),
             Ok(AiStreamEvent::TextDelta {
                 text: "summary".to_owned(),
             }),
             Ok(AiStreamEvent::MessageEnd {
+                phase: MessagePhase::Unknown,
                 stop_reason: neo_ai::StopReason::EndTurn,
                 usage: None,
             }),
@@ -1692,12 +1759,14 @@ async fn runtime_overflow_records_observed_window_and_retries_once() {
         })],
         vec![
             Ok(AiStreamEvent::MessageStart {
+                phase: MessagePhase::Unknown,
                 id: "retry".to_owned(),
             }),
             Ok(AiStreamEvent::TextDelta {
                 text: "recovered".to_owned(),
             }),
             Ok(AiStreamEvent::MessageEnd {
+                phase: MessagePhase::Unknown,
                 stop_reason: neo_ai::StopReason::EndTurn,
                 usage: None,
             }),
@@ -1761,24 +1830,28 @@ async fn retry_lifecycle_survives_context_overflow_recovery() {
         })],
         vec![
             Ok(AiStreamEvent::MessageStart {
+                phase: MessagePhase::Unknown,
                 id: "summary".to_owned(),
             }),
             Ok(AiStreamEvent::TextDelta {
                 text: "summary".to_owned(),
             }),
             Ok(AiStreamEvent::MessageEnd {
+                phase: MessagePhase::Unknown,
                 stop_reason: neo_ai::StopReason::EndTurn,
                 usage: None,
             }),
         ],
         vec![
             Ok(AiStreamEvent::MessageStart {
+                phase: MessagePhase::Unknown,
                 id: "recovered".to_owned(),
             }),
             Ok(AiStreamEvent::TextDelta {
                 text: "recovered".to_owned(),
             }),
             Ok(AiStreamEvent::MessageEnd {
+                phase: MessagePhase::Unknown,
                 stop_reason: neo_ai::StopReason::EndTurn,
                 usage: None,
             }),
@@ -1841,6 +1914,7 @@ async fn runtime_does_not_compact_mid_parallel_tool_group() {
     let harness = FakeHarness::from_turns([
         vec![
             AiStreamEvent::MessageStart {
+                phase: MessagePhase::Unknown,
                 id: "msg_1".to_owned(),
             },
             AiStreamEvent::ToolCallStart {
@@ -1868,30 +1942,35 @@ async fn runtime_does_not_compact_mid_parallel_tool_group() {
                 raw_arguments: "{}".to_owned(),
             },
             AiStreamEvent::MessageEnd {
+                phase: MessagePhase::Unknown,
                 stop_reason: neo_ai::StopReason::ToolUse,
                 usage: None,
             },
         ],
         vec![
             AiStreamEvent::MessageStart {
+                phase: MessagePhase::Unknown,
                 id: "summary".to_owned(),
             },
             AiStreamEvent::TextDelta {
                 text: "summary".to_owned(),
             },
             AiStreamEvent::MessageEnd {
+                phase: MessagePhase::Unknown,
                 stop_reason: neo_ai::StopReason::EndTurn,
                 usage: None,
             },
         ],
         vec![
             AiStreamEvent::MessageStart {
+                phase: MessagePhase::Unknown,
                 id: "msg_2".to_owned(),
             },
             AiStreamEvent::TextDelta {
                 text: "after tools".to_owned(),
             },
             AiStreamEvent::MessageEnd {
+                phase: MessagePhase::Unknown,
                 stop_reason: neo_ai::StopReason::EndTurn,
                 usage: None,
             },
@@ -1931,6 +2010,7 @@ async fn runtime_compacts_after_parallel_tool_group_before_followup() {
     let harness = FakeHarness::from_turns([
         vec![
             AiStreamEvent::MessageStart {
+                phase: MessagePhase::Unknown,
                 id: "msg_1".to_owned(),
             },
             AiStreamEvent::ToolCallStart {
@@ -1958,30 +2038,35 @@ async fn runtime_compacts_after_parallel_tool_group_before_followup() {
                 raw_arguments: "{}".to_owned(),
             },
             AiStreamEvent::MessageEnd {
+                phase: MessagePhase::Unknown,
                 stop_reason: neo_ai::StopReason::ToolUse,
                 usage: None,
             },
         ],
         vec![
             AiStreamEvent::MessageStart {
+                phase: MessagePhase::Unknown,
                 id: "summary".to_owned(),
             },
             AiStreamEvent::TextDelta {
                 text: "summary".to_owned(),
             },
             AiStreamEvent::MessageEnd {
+                phase: MessagePhase::Unknown,
                 stop_reason: neo_ai::StopReason::EndTurn,
                 usage: None,
             },
         ],
         vec![
             AiStreamEvent::MessageStart {
+                phase: MessagePhase::Unknown,
                 id: "msg_2".to_owned(),
             },
             AiStreamEvent::TextDelta {
                 text: "after compaction".to_owned(),
             },
             AiStreamEvent::MessageEnd {
+                phase: MessagePhase::Unknown,
                 stop_reason: neo_ai::StopReason::EndTurn,
                 usage: None,
             },
@@ -2022,12 +2107,14 @@ async fn runtime_compaction_keeps_valid_tool_result_boundaries() {
         // Compaction summary call
         vec![
             AiStreamEvent::MessageStart {
+                phase: MessagePhase::Unknown,
                 id: "msg_compact".to_owned(),
             },
             AiStreamEvent::TextDelta {
                 text: "## Current Focus\nInspecting files.".to_owned(),
             },
             AiStreamEvent::MessageEnd {
+                phase: MessagePhase::Unknown,
                 stop_reason: neo_ai::StopReason::EndTurn,
                 usage: None,
             },
@@ -2035,12 +2122,14 @@ async fn runtime_compaction_keeps_valid_tool_result_boundaries() {
         // Actual turn response
         vec![
             AiStreamEvent::MessageStart {
+                phase: MessagePhase::Unknown,
                 id: "msg_after_compaction".to_owned(),
             },
             AiStreamEvent::TextDelta {
                 text: "after compaction".to_owned(),
             },
             AiStreamEvent::MessageEnd {
+                phase: MessagePhase::Unknown,
                 stop_reason: neo_ai::StopReason::EndTurn,
                 usage: None,
             },
@@ -2158,12 +2247,14 @@ async fn runtime_external_cancellation_before_model_emits_cancelled_barriers() {
 async fn runtime_resumed_cancelled_turn_accepts_followup_prompt() {
     let harness = FakeHarness::from_events([
         AiStreamEvent::MessageStart {
+            phase: MessagePhase::Unknown,
             id: "msg_after_resume".to_owned(),
         },
         AiStreamEvent::TextDelta {
             text: "resumed".to_owned(),
         },
         AiStreamEvent::MessageEnd {
+            phase: MessagePhase::Unknown,
             stop_reason: neo_ai::StopReason::EndTurn,
             usage: None,
         },
@@ -2214,6 +2305,7 @@ async fn runtime_executes_tool_call_and_continues_until_end_turn() {
     let harness = FakeHarness::from_turns([
         vec![
             AiStreamEvent::MessageStart {
+                phase: MessagePhase::Unknown,
                 id: "msg_1".to_owned(),
             },
             AiStreamEvent::ToolCallStart {
@@ -2225,18 +2317,21 @@ async fn runtime_executes_tool_call_and_continues_until_end_turn() {
                 raw_arguments: json!({ "text": "neo" }).to_string(),
             },
             AiStreamEvent::MessageEnd {
+                phase: MessagePhase::Unknown,
                 stop_reason: neo_ai::StopReason::ToolUse,
                 usage: None,
             },
         ],
         vec![
             AiStreamEvent::MessageStart {
+                phase: MessagePhase::Unknown,
                 id: "msg_2".to_owned(),
             },
             AiStreamEvent::TextDelta {
                 text: "tool said: neo".to_owned(),
             },
             AiStreamEvent::MessageEnd {
+                phase: MessagePhase::Unknown,
                 stop_reason: neo_ai::StopReason::EndTurn,
                 usage: None,
             },
@@ -2295,11 +2390,13 @@ async fn runtime_executes_tool_call_and_continues_until_end_turn() {
         turn: 1,
         id: "msg_1".to_owned(),
         stop_reason: StopReason::ToolUse,
+        phase: MessagePhase::Unknown,
     }));
     assert!(events.contains(&AgentEvent::MessageFinished {
         turn: 2,
         id: "msg_2".to_owned(),
         stop_reason: StopReason::EndTurn,
+        phase: MessagePhase::Unknown,
     }));
     assert_eq!(
         events.last(),
@@ -2315,6 +2412,7 @@ async fn runtime_emits_todo_update_only_for_writes() {
     let harness = FakeHarness::from_turns([
         vec![
             AiStreamEvent::MessageStart {
+                phase: MessagePhase::Unknown,
                 id: "msg_1".to_owned(),
             },
             AiStreamEvent::ToolCallStart {
@@ -2329,12 +2427,14 @@ async fn runtime_emits_todo_update_only_for_writes() {
                 .to_string(),
             },
             AiStreamEvent::MessageEnd {
+                phase: MessagePhase::Unknown,
                 stop_reason: neo_ai::StopReason::ToolUse,
                 usage: None,
             },
         ],
         vec![
             AiStreamEvent::MessageStart {
+                phase: MessagePhase::Unknown,
                 id: "msg_2".to_owned(),
             },
             AiStreamEvent::ToolCallStart {
@@ -2346,18 +2446,21 @@ async fn runtime_emits_todo_update_only_for_writes() {
                 raw_arguments: json!({}).to_string(),
             },
             AiStreamEvent::MessageEnd {
+                phase: MessagePhase::Unknown,
                 stop_reason: neo_ai::StopReason::ToolUse,
                 usage: None,
             },
         ],
         vec![
             AiStreamEvent::MessageStart {
+                phase: MessagePhase::Unknown,
                 id: "msg_3".to_owned(),
             },
             AiStreamEvent::TextDelta {
                 text: "done".to_owned(),
             },
             AiStreamEvent::MessageEnd {
+                phase: MessagePhase::Unknown,
                 stop_reason: neo_ai::StopReason::EndTurn,
                 usage: None,
             },
@@ -2405,6 +2508,7 @@ async fn runtime_emits_empty_todo_update_for_clear() {
     let harness = FakeHarness::from_turns([
         vec![
             AiStreamEvent::MessageStart {
+                phase: MessagePhase::Unknown,
                 id: "msg_1".to_owned(),
             },
             AiStreamEvent::ToolCallStart {
@@ -2416,18 +2520,21 @@ async fn runtime_emits_empty_todo_update_for_clear() {
                 raw_arguments: json!({ "todos": [] }).to_string(),
             },
             AiStreamEvent::MessageEnd {
+                phase: MessagePhase::Unknown,
                 stop_reason: neo_ai::StopReason::ToolUse,
                 usage: None,
             },
         ],
         vec![
             AiStreamEvent::MessageStart {
+                phase: MessagePhase::Unknown,
                 id: "msg_2".to_owned(),
             },
             AiStreamEvent::TextDelta {
                 text: "cleared".to_owned(),
             },
             AiStreamEvent::MessageEnd {
+                phase: MessagePhase::Unknown,
                 stop_reason: neo_ai::StopReason::EndTurn,
                 usage: None,
             },
@@ -2475,12 +2582,14 @@ async fn stream_first_event_timeout_retries_same_request() {
         vec![DelayedStep::Delay(Duration::from_secs(2))],
         vec![
             DelayedStep::Event(AiStreamEvent::MessageStart {
+                phase: MessagePhase::Unknown,
                 id: "retry".to_owned(),
             }),
             DelayedStep::Event(AiStreamEvent::TextDelta {
                 text: "complete".to_owned(),
             }),
             DelayedStep::Event(AiStreamEvent::MessageEnd {
+                phase: MessagePhase::Unknown,
                 stop_reason: neo_ai::StopReason::EndTurn,
                 usage: None,
             }),
@@ -2531,6 +2640,7 @@ async fn stream_idle_timeout_retries_and_discards_partial_attempt() {
     let harness = DelayedHarness::from_turns([
         vec![
             DelayedStep::Event(AiStreamEvent::MessageStart {
+                phase: MessagePhase::Unknown,
                 id: "discarded".to_owned(),
             }),
             DelayedStep::Event(AiStreamEvent::TextDelta {
@@ -2540,12 +2650,14 @@ async fn stream_idle_timeout_retries_and_discards_partial_attempt() {
         ],
         vec![
             DelayedStep::Event(AiStreamEvent::MessageStart {
+                phase: MessagePhase::Unknown,
                 id: "winning".to_owned(),
             }),
             DelayedStep::Event(AiStreamEvent::TextDelta {
                 text: "winning answer".to_owned(),
             }),
             DelayedStep::Event(AiStreamEvent::MessageEnd {
+                phase: MessagePhase::Unknown,
                 stop_reason: neo_ai::StopReason::EndTurn,
                 usage: None,
             }),
@@ -2668,11 +2780,15 @@ async fn stream_retries_transport_error() {
             message: "eof".into(),
         })],
         vec![
-            Ok(AiStreamEvent::MessageStart { id: "b".into() }),
+            Ok(AiStreamEvent::MessageStart {
+                phase: MessagePhase::Unknown,
+                id: "b".into(),
+            }),
             Ok(AiStreamEvent::TextDelta {
                 text: "complete".into(),
             }),
             Ok(AiStreamEvent::MessageEnd {
+                phase: MessagePhase::Unknown,
                 stop_reason: neo_ai::StopReason::EndTurn,
                 usage: None,
             }),
@@ -2750,17 +2866,24 @@ async fn stream_retries_transport_error() {
 async fn retry_does_not_append_failed_attempt() {
     let harness = FakeHarness::from_result_turns([
         vec![
-            Ok(AiStreamEvent::MessageStart { id: "a".into() }),
+            Ok(AiStreamEvent::MessageStart {
+                phase: MessagePhase::Unknown,
+                id: "a".into(),
+            }),
             Ok(AiStreamEvent::TextDelta {
                 text: "partial".into(),
             }),
         ],
         vec![
-            Ok(AiStreamEvent::MessageStart { id: "b".into() }),
+            Ok(AiStreamEvent::MessageStart {
+                phase: MessagePhase::Unknown,
+                id: "b".into(),
+            }),
             Ok(AiStreamEvent::TextDelta {
                 text: "complete".into(),
             }),
             Ok(AiStreamEvent::MessageEnd {
+                phase: MessagePhase::Unknown,
                 stop_reason: neo_ai::StopReason::EndTurn,
                 usage: None,
             }),
@@ -2948,6 +3071,7 @@ async fn retry_backoff_is_cancellable() {
             message: "eof".into(),
         })],
         vec![Ok(AiStreamEvent::MessageEnd {
+            phase: MessagePhase::Unknown,
             stop_reason: neo_ai::StopReason::EndTurn,
             usage: None,
         })],
@@ -3000,21 +3124,25 @@ async fn runtime_stops_on_tool_use_with_empty_tool_calls() {
     let harness = FakeHarness::from_turns([
         vec![
             AiStreamEvent::MessageStart {
+                phase: MessagePhase::Unknown,
                 id: "msg_empty_tools".to_owned(),
             },
             AiStreamEvent::MessageEnd {
+                phase: MessagePhase::Unknown,
                 stop_reason: neo_ai::StopReason::ToolUse,
                 usage: None,
             },
         ],
         vec![
             AiStreamEvent::MessageStart {
+                phase: MessagePhase::Unknown,
                 id: "msg_should_not_run".to_owned(),
             },
             AiStreamEvent::TextDelta {
                 text: "followup".to_owned(),
             },
             AiStreamEvent::MessageEnd {
+                phase: MessagePhase::Unknown,
                 stop_reason: neo_ai::StopReason::EndTurn,
                 usage: None,
             },
@@ -3064,6 +3192,7 @@ async fn runtime_returns_tool_errors_to_model_for_retry_instead_of_aborting() {
     let harness = FakeHarness::from_turns([
         vec![
             AiStreamEvent::MessageStart {
+                phase: MessagePhase::Unknown,
                 id: "msg_1".to_owned(),
             },
             AiStreamEvent::ToolCallStart {
@@ -3075,18 +3204,21 @@ async fn runtime_returns_tool_errors_to_model_for_retry_instead_of_aborting() {
                 raw_arguments: json!({ "bad": true }).to_string(),
             },
             AiStreamEvent::MessageEnd {
+                phase: MessagePhase::Unknown,
                 stop_reason: neo_ai::StopReason::ToolUse,
                 usage: None,
             },
         ],
         vec![
             AiStreamEvent::MessageStart {
+                phase: MessagePhase::Unknown,
                 id: "msg_2".to_owned(),
             },
             AiStreamEvent::TextDelta {
                 text: "retry noted".to_owned(),
             },
             AiStreamEvent::MessageEnd {
+                phase: MessagePhase::Unknown,
                 stop_reason: neo_ai::StopReason::EndTurn,
                 usage: None,
             },
@@ -3152,6 +3284,7 @@ async fn runtime_cancels_in_flight_tool_execution_and_finishes_run() {
     let harness = FakeHarness::from_turns([
         vec![
             AiStreamEvent::MessageStart {
+                phase: MessagePhase::Unknown,
                 id: "msg_1".to_owned(),
             },
             AiStreamEvent::ToolCallStart {
@@ -3163,6 +3296,7 @@ async fn runtime_cancels_in_flight_tool_execution_and_finishes_run() {
                 raw_arguments: json!({}).to_string(),
             },
             AiStreamEvent::MessageEnd {
+                phase: MessagePhase::Unknown,
                 stop_reason: neo_ai::StopReason::ToolUse,
                 usage: None,
             },
@@ -3408,6 +3542,7 @@ async fn runtime_parallel_cancellation_finishes_all_started_tool_wrappers() {
     let harness = FakeHarness::from_turns([
         vec![
             AiStreamEvent::MessageStart {
+                phase: MessagePhase::Unknown,
                 id: "msg_1".to_owned(),
             },
             AiStreamEvent::ToolCallStart {
@@ -3427,6 +3562,7 @@ async fn runtime_parallel_cancellation_finishes_all_started_tool_wrappers() {
                 raw_arguments: json!({}).to_string(),
             },
             AiStreamEvent::MessageEnd {
+                phase: MessagePhase::Unknown,
                 stop_reason: neo_ai::StopReason::ToolUse,
                 usage: None,
             },
@@ -3510,6 +3646,7 @@ async fn runtime_parallel_cancellation_does_not_start_later_tool_calls() {
     let harness = FakeHarness::from_turns([
         vec![
             AiStreamEvent::MessageStart {
+                phase: MessagePhase::Unknown,
                 id: "msg_1".to_owned(),
             },
             AiStreamEvent::ToolCallStart {
@@ -3529,6 +3666,7 @@ async fn runtime_parallel_cancellation_does_not_start_later_tool_calls() {
                 raw_arguments: json!({}).to_string(),
             },
             AiStreamEvent::MessageEnd {
+                phase: MessagePhase::Unknown,
                 stop_reason: neo_ai::StopReason::ToolUse,
                 usage: None,
             },
@@ -3596,36 +3734,42 @@ async fn runtime_drains_queued_steering_before_followups() {
     let harness = FakeHarness::from_turns([
         vec![
             AiStreamEvent::MessageStart {
+                phase: MessagePhase::Unknown,
                 id: "msg_1".to_owned(),
             },
             AiStreamEvent::TextDelta {
                 text: "first".to_owned(),
             },
             AiStreamEvent::MessageEnd {
+                phase: MessagePhase::Unknown,
                 stop_reason: neo_ai::StopReason::EndTurn,
                 usage: None,
             },
         ],
         vec![
             AiStreamEvent::MessageStart {
+                phase: MessagePhase::Unknown,
                 id: "msg_2".to_owned(),
             },
             AiStreamEvent::TextDelta {
                 text: "second".to_owned(),
             },
             AiStreamEvent::MessageEnd {
+                phase: MessagePhase::Unknown,
                 stop_reason: neo_ai::StopReason::EndTurn,
                 usage: None,
             },
         ],
         vec![
             AiStreamEvent::MessageStart {
+                phase: MessagePhase::Unknown,
                 id: "msg_3".to_owned(),
             },
             AiStreamEvent::TextDelta {
                 text: "third".to_owned(),
             },
             AiStreamEvent::MessageEnd {
+                phase: MessagePhase::Unknown,
                 stop_reason: neo_ai::StopReason::EndTurn,
                 usage: None,
             },
@@ -3698,12 +3842,14 @@ async fn runtime_drains_queued_steering_before_followups() {
 async fn runtime_applies_context_append_transform_before_model_request() {
     let harness = FakeHarness::from_events([
         AiStreamEvent::MessageStart {
+            phase: MessagePhase::Unknown,
             id: "msg_1".to_owned(),
         },
         AiStreamEvent::TextDelta {
             text: "trimmed".to_owned(),
         },
         AiStreamEvent::MessageEnd {
+            phase: MessagePhase::Unknown,
             stop_reason: neo_ai::StopReason::EndTurn,
             usage: None,
         },
@@ -3854,6 +4000,7 @@ async fn runtime_emits_approval_request_for_ask_permission_and_skips_tool_execut
     let harness = FakeHarness::from_turns([
         vec![
             AiStreamEvent::MessageStart {
+                phase: MessagePhase::Unknown,
                 id: "msg_1".to_owned(),
             },
             AiStreamEvent::ToolCallStart {
@@ -3865,18 +4012,21 @@ async fn runtime_emits_approval_request_for_ask_permission_and_skips_tool_execut
                 raw_arguments: json!({ "text": "needs approval" }).to_string(),
             },
             AiStreamEvent::MessageEnd {
+                phase: MessagePhase::Unknown,
                 stop_reason: neo_ai::StopReason::ToolUse,
                 usage: None,
             },
         ],
         vec![
             AiStreamEvent::MessageStart {
+                phase: MessagePhase::Unknown,
                 id: "msg_2".to_owned(),
             },
             AiStreamEvent::TextDelta {
                 text: "done".to_owned(),
             },
             AiStreamEvent::MessageEnd {
+                phase: MessagePhase::Unknown,
                 stop_reason: neo_ai::StopReason::EndTurn,
                 usage: None,
             },
@@ -3984,6 +4134,7 @@ async fn runtime_executes_ask_permission_tool_after_approval_hook_allows_it() {
     let harness = FakeHarness::from_turns([
         vec![
             AiStreamEvent::MessageStart {
+                phase: MessagePhase::Unknown,
                 id: "msg_1".to_owned(),
             },
             AiStreamEvent::ToolCallStart {
@@ -3995,18 +4146,21 @@ async fn runtime_executes_ask_permission_tool_after_approval_hook_allows_it() {
                 raw_arguments: json!({ "text": "approved" }).to_string(),
             },
             AiStreamEvent::MessageEnd {
+                phase: MessagePhase::Unknown,
                 stop_reason: neo_ai::StopReason::ToolUse,
                 usage: None,
             },
         ],
         vec![
             AiStreamEvent::MessageStart {
+                phase: MessagePhase::Unknown,
                 id: "msg_2".to_owned(),
             },
             AiStreamEvent::TextDelta {
                 text: "done".to_owned(),
             },
             AiStreamEvent::MessageEnd {
+                phase: MessagePhase::Unknown,
                 stop_reason: neo_ai::StopReason::EndTurn,
                 usage: None,
             },
@@ -4203,6 +4357,7 @@ async fn runtime_skips_ask_permission_tool_after_approval_hook_denies_it() {
     let harness = FakeHarness::from_turns([
         vec![
             AiStreamEvent::MessageStart {
+                phase: MessagePhase::Unknown,
                 id: "msg_1".to_owned(),
             },
             AiStreamEvent::ToolCallStart {
@@ -4214,18 +4369,21 @@ async fn runtime_skips_ask_permission_tool_after_approval_hook_denies_it() {
                 raw_arguments: json!({ "text": "denied" }).to_string(),
             },
             AiStreamEvent::MessageEnd {
+                phase: MessagePhase::Unknown,
                 stop_reason: neo_ai::StopReason::ToolUse,
                 usage: None,
             },
         ],
         vec![
             AiStreamEvent::MessageStart {
+                phase: MessagePhase::Unknown,
                 id: "msg_2".to_owned(),
             },
             AiStreamEvent::TextDelta {
                 text: "done".to_owned(),
             },
             AiStreamEvent::MessageEnd {
+                phase: MessagePhase::Unknown,
                 stop_reason: neo_ai::StopReason::EndTurn,
                 usage: None,
             },
@@ -4292,6 +4450,7 @@ fn echo_tool_harness(text: &str) -> FakeHarness {
     FakeHarness::from_turns([
         vec![
             AiStreamEvent::MessageStart {
+                phase: MessagePhase::Unknown,
                 id: "msg_1".to_owned(),
             },
             AiStreamEvent::ToolCallStart {
@@ -4303,6 +4462,7 @@ fn echo_tool_harness(text: &str) -> FakeHarness {
                 raw_arguments: json!({ "text": text }).to_string(),
             },
             AiStreamEvent::MessageEnd {
+                phase: MessagePhase::Unknown,
                 stop_reason: neo_ai::StopReason::ToolUse,
                 usage: None,
             },
@@ -4405,12 +4565,14 @@ fn set_config_permission_mode(config: &mut AgentConfig, mode: PermissionMode) {
 fn final_done_turn() -> Vec<AiStreamEvent> {
     vec![
         AiStreamEvent::MessageStart {
+            phase: MessagePhase::Unknown,
             id: "msg_2".to_owned(),
         },
         AiStreamEvent::TextDelta {
             text: "done".to_owned(),
         },
         AiStreamEvent::MessageEnd {
+            phase: MessagePhase::Unknown,
             stop_reason: neo_ai::StopReason::EndTurn,
             usage: None,
         },
@@ -4760,6 +4922,7 @@ fn parallel_write_and_glob_harness() -> FakeHarness {
     FakeHarness::from_turns([
         vec![
             AiStreamEvent::MessageStart {
+                phase: MessagePhase::Unknown,
                 id: "msg_1".to_owned(),
             },
             AiStreamEvent::ToolCallStart {
@@ -4779,6 +4942,7 @@ fn parallel_write_and_glob_harness() -> FakeHarness {
                 raw_arguments: json!({ "pattern": "*" }).to_string(),
             },
             AiStreamEvent::MessageEnd {
+                phase: MessagePhase::Unknown,
                 stop_reason: neo_ai::StopReason::ToolUse,
                 usage: None,
             },
@@ -4793,6 +4957,7 @@ async fn runtime_approval_handler_allows_file_write_tool_permission() {
     let harness = FakeHarness::from_turns([
         vec![
             AiStreamEvent::MessageStart {
+                phase: MessagePhase::Unknown,
                 id: "msg_1".to_owned(),
             },
             AiStreamEvent::ToolCallStart {
@@ -4804,18 +4969,21 @@ async fn runtime_approval_handler_allows_file_write_tool_permission() {
                 raw_arguments: json!({ "path": "approved.txt", "content": "ok" }).to_string(),
             },
             AiStreamEvent::MessageEnd {
+                phase: MessagePhase::Unknown,
                 stop_reason: neo_ai::StopReason::ToolUse,
                 usage: None,
             },
         ],
         vec![
             AiStreamEvent::MessageStart {
+                phase: MessagePhase::Unknown,
                 id: "msg_2".to_owned(),
             },
             AiStreamEvent::TextDelta {
                 text: "done".to_owned(),
             },
             AiStreamEvent::MessageEnd {
+                phase: MessagePhase::Unknown,
                 stop_reason: neo_ai::StopReason::EndTurn,
                 usage: None,
             },
@@ -4868,6 +5036,7 @@ async fn runtime_emits_shell_lifecycle_for_bash_tool() {
     let harness = FakeHarness::from_turns([
         vec![
             AiStreamEvent::MessageStart {
+                phase: MessagePhase::Unknown,
                 id: "msg_1".to_owned(),
             },
             AiStreamEvent::ToolCallStart {
@@ -4879,18 +5048,21 @@ async fn runtime_emits_shell_lifecycle_for_bash_tool() {
                 raw_arguments: json!({ "command": "printf shell-ok" }).to_string(),
             },
             AiStreamEvent::MessageEnd {
+                phase: MessagePhase::Unknown,
                 stop_reason: neo_ai::StopReason::ToolUse,
                 usage: None,
             },
         ],
         vec![
             AiStreamEvent::MessageStart {
+                phase: MessagePhase::Unknown,
                 id: "msg_2".to_owned(),
             },
             AiStreamEvent::TextDelta {
                 text: "done".to_owned(),
             },
             AiStreamEvent::MessageEnd {
+                phase: MessagePhase::Unknown,
                 stop_reason: neo_ai::StopReason::EndTurn,
                 usage: None,
             },
@@ -4941,6 +5113,7 @@ async fn runtime_does_not_replay_partial_tool_arguments_to_followup_request() {
     let harness = FakeHarness::from_turns([
         vec![
             AiStreamEvent::MessageStart {
+                phase: MessagePhase::Unknown,
                 id: "msg_1".to_owned(),
             },
             AiStreamEvent::ToolCallStart {
@@ -4952,18 +5125,21 @@ async fn runtime_does_not_replay_partial_tool_arguments_to_followup_request() {
                 raw_arguments: r#"{"command":"printf shell-ok","cwd":"#.to_owned(),
             },
             AiStreamEvent::MessageEnd {
+                phase: MessagePhase::Unknown,
                 stop_reason: neo_ai::StopReason::ToolUse,
                 usage: None,
             },
         ],
         vec![
             AiStreamEvent::MessageStart {
+                phase: MessagePhase::Unknown,
                 id: "msg_2".to_owned(),
             },
             AiStreamEvent::TextDelta {
                 text: "done".to_owned(),
             },
             AiStreamEvent::MessageEnd {
+                phase: MessagePhase::Unknown,
                 stop_reason: neo_ai::StopReason::EndTurn,
                 usage: None,
             },
@@ -5009,6 +5185,7 @@ async fn runtime_does_not_replay_partial_tool_arguments_to_followup_request() {
 async fn runtime_clamps_out_of_range_bash_timeout_and_returns_notice() {
     let harness = FakeHarness::from_turns([vec![
         AiStreamEvent::MessageStart {
+            phase: MessagePhase::Unknown,
             id: "msg_1".to_owned(),
         },
         AiStreamEvent::ToolCallStart {
@@ -5024,6 +5201,7 @@ async fn runtime_clamps_out_of_range_bash_timeout_and_returns_notice() {
             .to_string(),
         },
         AiStreamEvent::MessageEnd {
+            phase: MessagePhase::Unknown,
             stop_reason: neo_ai::StopReason::ToolUse,
             usage: None,
         },
@@ -5066,6 +5244,7 @@ async fn runtime_clamps_out_of_range_bash_timeout_and_returns_notice() {
 async fn runtime_marks_model_background_bash_as_backgrounded_shell_event() {
     let harness = FakeHarness::from_turns([vec![
         AiStreamEvent::MessageStart {
+            phase: MessagePhase::Unknown,
             id: "msg_1".to_owned(),
         },
         AiStreamEvent::ToolCallStart {
@@ -5082,6 +5261,7 @@ async fn runtime_marks_model_background_bash_as_backgrounded_shell_event() {
             .to_string(),
         },
         AiStreamEvent::MessageEnd {
+            phase: MessagePhase::Unknown,
             stop_reason: neo_ai::StopReason::ToolUse,
             usage: None,
         },
@@ -5138,6 +5318,7 @@ async fn runtime_events_and_session_jsonl_do_not_leak_capped_bash_output() {
     let harness = FakeHarness::from_turns([
         vec![
             AiStreamEvent::MessageStart {
+                phase: MessagePhase::Unknown,
                 id: "msg_1".to_owned(),
             },
             AiStreamEvent::ToolCallStart {
@@ -5153,18 +5334,21 @@ async fn runtime_events_and_session_jsonl_do_not_leak_capped_bash_output() {
                 .to_string(),
             },
             AiStreamEvent::MessageEnd {
+                phase: MessagePhase::Unknown,
                 stop_reason: neo_ai::StopReason::ToolUse,
                 usage: None,
             },
         ],
         vec![
             AiStreamEvent::MessageStart {
+                phase: MessagePhase::Unknown,
                 id: "msg_2".to_owned(),
             },
             AiStreamEvent::TextDelta {
                 text: "done".to_owned(),
             },
             AiStreamEvent::MessageEnd {
+                phase: MessagePhase::Unknown,
                 stop_reason: neo_ai::StopReason::EndTurn,
                 usage: None,
             },
@@ -5394,6 +5578,7 @@ fn blocking_then_terminating_tool_harness() -> FakeHarness {
     FakeHarness::from_turns([
         vec![
             AiStreamEvent::MessageStart {
+                phase: MessagePhase::Unknown,
                 id: "msg_1".to_owned(),
             },
             AiStreamEvent::ToolCallStart {
@@ -5413,18 +5598,21 @@ fn blocking_then_terminating_tool_harness() -> FakeHarness {
                 raw_arguments: json!({ "text": "stop" }).to_string(),
             },
             AiStreamEvent::MessageEnd {
+                phase: MessagePhase::Unknown,
                 stop_reason: neo_ai::StopReason::ToolUse,
                 usage: None,
             },
         ],
         vec![
             AiStreamEvent::MessageStart {
+                phase: MessagePhase::Unknown,
                 id: "msg_2".to_owned(),
             },
             AiStreamEvent::TextDelta {
                 text: "should not run".to_owned(),
             },
             AiStreamEvent::MessageEnd {
+                phase: MessagePhase::Unknown,
                 stop_reason: neo_ai::StopReason::EndTurn,
                 usage: None,
             },
@@ -5437,6 +5625,7 @@ async fn runtime_parallel_tool_mode_finishes_by_completion_but_appends_in_source
     let harness = FakeHarness::from_turns([
         vec![
             AiStreamEvent::MessageStart {
+                phase: MessagePhase::Unknown,
                 id: "msg_1".to_owned(),
             },
             AiStreamEvent::ToolCallStart {
@@ -5456,18 +5645,21 @@ async fn runtime_parallel_tool_mode_finishes_by_completion_but_appends_in_source
                 raw_arguments: json!({ "text": "fast", "delay_ms": 0 }).to_string(),
             },
             AiStreamEvent::MessageEnd {
+                phase: MessagePhase::Unknown,
                 stop_reason: neo_ai::StopReason::ToolUse,
                 usage: None,
             },
         ],
         vec![
             AiStreamEvent::MessageStart {
+                phase: MessagePhase::Unknown,
                 id: "msg_2".to_owned(),
             },
             AiStreamEvent::TextDelta {
                 text: "done".to_owned(),
             },
             AiStreamEvent::MessageEnd {
+                phase: MessagePhase::Unknown,
                 stop_reason: neo_ai::StopReason::EndTurn,
                 usage: None,
             },
@@ -5526,6 +5718,7 @@ async fn parallel_mode_serializes_non_background_ask_user_question() {
     let harness = FakeHarness::from_turns([
         vec![
             AiStreamEvent::MessageStart {
+                phase: MessagePhase::Unknown,
                 id: "msg_1".to_owned(),
             },
             AiStreamEvent::ToolCallStart {
@@ -5554,6 +5747,7 @@ async fn parallel_mode_serializes_non_background_ask_user_question() {
                 raw_arguments: json!({ "text": "should wait" }).to_string(),
             },
             AiStreamEvent::MessageEnd {
+                phase: MessagePhase::Unknown,
                 stop_reason: neo_ai::StopReason::ToolUse,
                 usage: None,
             },
@@ -5608,6 +5802,7 @@ async fn ask_mode_ask_user_question_dispatches_without_approval() {
     let harness = FakeHarness::from_turns([
         vec![
             AiStreamEvent::MessageStart {
+                phase: MessagePhase::Unknown,
                 id: "msg_1".to_owned(),
             },
             AiStreamEvent::ToolCallStart {
@@ -5628,6 +5823,7 @@ async fn ask_mode_ask_user_question_dispatches_without_approval() {
                 .to_string(),
             },
             AiStreamEvent::MessageEnd {
+                phase: MessagePhase::Unknown,
                 stop_reason: neo_ai::StopReason::ToolUse,
                 usage: None,
             },
@@ -5796,6 +5992,7 @@ Review the current change carefully.
     let harness = FakeHarness::from_turns([
         vec![
             AiStreamEvent::MessageStart {
+                phase: MessagePhase::Unknown,
                 id: "msg_1".to_owned(),
             },
             AiStreamEvent::ToolCallStart {
@@ -5807,6 +6004,7 @@ Review the current change carefully.
                 raw_arguments: json!({"skill": "review"}).to_string(),
             },
             AiStreamEvent::MessageEnd {
+                phase: MessagePhase::Unknown,
                 stop_reason: neo_ai::StopReason::ToolUse,
                 usage: None,
             },
@@ -5868,6 +6066,7 @@ async fn automatic_missing_skill_emits_failed_skill_invocation() {
     let harness = FakeHarness::from_turns([
         vec![
             AiStreamEvent::MessageStart {
+                phase: MessagePhase::Unknown,
                 id: "msg_1".to_owned(),
             },
             AiStreamEvent::ToolCallStart {
@@ -5879,6 +6078,7 @@ async fn automatic_missing_skill_emits_failed_skill_invocation() {
                 raw_arguments: json!({"skill": "missing"}).to_string(),
             },
             AiStreamEvent::MessageEnd {
+                phase: MessagePhase::Unknown,
                 stop_reason: neo_ai::StopReason::ToolUse,
                 usage: None,
             },
@@ -5923,6 +6123,7 @@ async fn enter_plan_mode_continues_model_loop_after_mode_switch() {
     let harness = FakeHarness::from_turns([
         vec![
             AiStreamEvent::MessageStart {
+                phase: MessagePhase::Unknown,
                 id: "msg_1".to_owned(),
             },
             AiStreamEvent::ToolCallStart {
@@ -5934,18 +6135,21 @@ async fn enter_plan_mode_continues_model_loop_after_mode_switch() {
                 raw_arguments: json!({}).to_string(),
             },
             AiStreamEvent::MessageEnd {
+                phase: MessagePhase::Unknown,
                 stop_reason: neo_ai::StopReason::ToolUse,
                 usage: None,
             },
         ],
         vec![
             AiStreamEvent::MessageStart {
+                phase: MessagePhase::Unknown,
                 id: "msg_2".to_owned(),
             },
             AiStreamEvent::TextDelta {
                 text: "continuing plan".to_owned(),
             },
             AiStreamEvent::MessageEnd {
+                phase: MessagePhase::Unknown,
                 stop_reason: neo_ai::StopReason::EndTurn,
                 usage: None,
             },
@@ -6035,6 +6239,7 @@ async fn runtime_auto_mode_denies_ask_user_question() {
     let harness = FakeHarness::from_turns([
         vec![
             AiStreamEvent::MessageStart {
+                phase: MessagePhase::Unknown,
                 id: "msg_1".to_owned(),
             },
             AiStreamEvent::ToolCallStart {
@@ -6052,6 +6257,7 @@ async fn runtime_auto_mode_denies_ask_user_question() {
                 .to_string(),
             },
             AiStreamEvent::MessageEnd {
+                phase: MessagePhase::Unknown,
                 stop_reason: neo_ai::StopReason::ToolUse,
                 usage: None,
             },
@@ -6104,6 +6310,7 @@ async fn runtime_ask_mode_read_runs_and_custom_tool_asks() {
     let harness = FakeHarness::from_turns([
         vec![
             AiStreamEvent::MessageStart {
+                phase: MessagePhase::Unknown,
                 id: "msg_1".to_owned(),
             },
             AiStreamEvent::ToolCallStart {
@@ -6123,6 +6330,7 @@ async fn runtime_ask_mode_read_runs_and_custom_tool_asks() {
                 raw_arguments: json!({ "text": "needs approval" }).to_string(),
             },
             AiStreamEvent::MessageEnd {
+                phase: MessagePhase::Unknown,
                 stop_reason: neo_ai::StopReason::ToolUse,
                 usage: None,
             },
@@ -6171,6 +6379,7 @@ async fn runtime_session_approval_persists_for_same_tool() {
     let harness = FakeHarness::from_turns([
         vec![
             AiStreamEvent::MessageStart {
+                phase: MessagePhase::Unknown,
                 id: "msg_1".to_owned(),
             },
             AiStreamEvent::ToolCallStart {
@@ -6190,6 +6399,7 @@ async fn runtime_session_approval_persists_for_same_tool() {
                 raw_arguments: json!({ "text": "second" }).to_string(),
             },
             AiStreamEvent::MessageEnd {
+                phase: MessagePhase::Unknown,
                 stop_reason: neo_ai::StopReason::ToolUse,
                 usage: None,
             },
@@ -6261,6 +6471,7 @@ async fn runtime_ask_mode_reviews_exit_plan_mode_with_non_empty_plan() {
     let harness = FakeHarness::from_turns([
         vec![
             AiStreamEvent::MessageStart {
+                phase: MessagePhase::Unknown,
                 id: "msg_1".to_owned(),
             },
             AiStreamEvent::ToolCallStart {
@@ -6272,6 +6483,7 @@ async fn runtime_ask_mode_reviews_exit_plan_mode_with_non_empty_plan() {
                 raw_arguments: json!({ "plan_summary": "Ready to execute" }).to_string(),
             },
             AiStreamEvent::MessageEnd {
+                phase: MessagePhase::Unknown,
                 stop_reason: neo_ai::StopReason::ToolUse,
                 usage: None,
             },
@@ -6350,6 +6562,7 @@ async fn exit_plan_mode_continues_loop_after_approval() {
     let harness = FakeHarness::from_turns([
         vec![
             AiStreamEvent::MessageStart {
+                phase: MessagePhase::Unknown,
                 id: "msg_1".to_owned(),
             },
             AiStreamEvent::ToolCallStart {
@@ -6361,18 +6574,21 @@ async fn exit_plan_mode_continues_loop_after_approval() {
                 raw_arguments: json!({ "plan_summary": "Ready to execute" }).to_string(),
             },
             AiStreamEvent::MessageEnd {
+                phase: MessagePhase::Unknown,
                 stop_reason: neo_ai::StopReason::ToolUse,
                 usage: None,
             },
         ],
         vec![
             AiStreamEvent::MessageStart {
+                phase: MessagePhase::Unknown,
                 id: "msg_2".to_owned(),
             },
             AiStreamEvent::TextDelta {
                 text: "starting work".to_owned(),
             },
             AiStreamEvent::MessageEnd {
+                phase: MessagePhase::Unknown,
                 stop_reason: neo_ai::StopReason::EndTurn,
                 usage: None,
             },
@@ -6444,6 +6660,7 @@ async fn exit_plan_mode_plan_selection_label_prefixes_tool_result() {
     let harness = FakeHarness::from_turns([
         vec![
             AiStreamEvent::MessageStart {
+                phase: MessagePhase::Unknown,
                 id: "msg_1".to_owned(),
             },
             AiStreamEvent::ToolCallStart {
@@ -6462,18 +6679,21 @@ async fn exit_plan_mode_plan_selection_label_prefixes_tool_result() {
                 .to_string(),
             },
             AiStreamEvent::MessageEnd {
+                phase: MessagePhase::Unknown,
                 stop_reason: neo_ai::StopReason::ToolUse,
                 usage: None,
             },
         ],
         vec![
             AiStreamEvent::MessageStart {
+                phase: MessagePhase::Unknown,
                 id: "msg_2".to_owned(),
             },
             AiStreamEvent::TextDelta {
                 text: "running option a".to_owned(),
             },
             AiStreamEvent::MessageEnd {
+                phase: MessagePhase::Unknown,
                 stop_reason: neo_ai::StopReason::EndTurn,
                 usage: None,
             },
@@ -6539,6 +6759,7 @@ async fn exit_goal_mode_starts_goal_and_ends_run_without_spinning() {
     let harness = FakeHarness::from_turns([
         vec![
             AiStreamEvent::MessageStart {
+                phase: MessagePhase::Unknown,
                 id: "msg_1".to_owned(),
             },
             AiStreamEvent::ToolCallStart {
@@ -6555,6 +6776,7 @@ async fn exit_goal_mode_starts_goal_and_ends_run_without_spinning() {
                 .to_string(),
             },
             AiStreamEvent::MessageEnd {
+                phase: MessagePhase::Unknown,
                 stop_reason: neo_ai::StopReason::ToolUse,
                 usage: None,
             },
@@ -6617,6 +6839,7 @@ async fn exit_plan_mode_generic_approval_has_no_selected_approach() {
     let harness = FakeHarness::from_turns([
         vec![
             AiStreamEvent::MessageStart {
+                phase: MessagePhase::Unknown,
                 id: "msg_1".to_owned(),
             },
             AiStreamEvent::ToolCallStart {
@@ -6628,6 +6851,7 @@ async fn exit_plan_mode_generic_approval_has_no_selected_approach() {
                 raw_arguments: json!({ "plan_summary": "Ready to execute" }).to_string(),
             },
             AiStreamEvent::MessageEnd {
+                phase: MessagePhase::Unknown,
                 stop_reason: neo_ai::StopReason::ToolUse,
                 usage: None,
             },
@@ -6706,6 +6930,7 @@ async fn exit_plan_mode_typed_selection_reaches_tool_result() {
     let harness = FakeHarness::from_turns([
         vec![
             AiStreamEvent::MessageStart {
+                phase: MessagePhase::Unknown,
                 id: "msg_1".to_owned(),
             },
             AiStreamEvent::ToolCallStart {
@@ -6724,6 +6949,7 @@ async fn exit_plan_mode_typed_selection_reaches_tool_result() {
                 .to_string(),
             },
             AiStreamEvent::MessageEnd {
+                phase: MessagePhase::Unknown,
                 stop_reason: neo_ai::StopReason::ToolUse,
                 usage: None,
             },
@@ -6796,6 +7022,7 @@ async fn exit_goal_mode_reject_and_revise_create_no_goal() {
         let harness = FakeHarness::from_turns([
             vec![
                 AiStreamEvent::MessageStart {
+                    phase: MessagePhase::Unknown,
                     id: "msg_1".to_owned(),
                 },
                 AiStreamEvent::ToolCallStart {
@@ -6807,6 +7034,7 @@ async fn exit_goal_mode_reject_and_revise_create_no_goal() {
                     raw_arguments: goal_payload.to_string(),
                 },
                 AiStreamEvent::MessageEnd {
+                    phase: MessagePhase::Unknown,
                     stop_reason: neo_ai::StopReason::ToolUse,
                     usage: None,
                 },
@@ -6909,6 +7137,7 @@ async fn exit_goal_mode_reject_and_revise_create_no_goal() {
         let harness = FakeHarness::from_turns([
             vec![
                 AiStreamEvent::MessageStart {
+                    phase: MessagePhase::Unknown,
                     id: "msg_1".to_owned(),
                 },
                 AiStreamEvent::ToolCallStart {
@@ -6920,6 +7149,7 @@ async fn exit_goal_mode_reject_and_revise_create_no_goal() {
                     raw_arguments: goal_payload.to_string(),
                 },
                 AiStreamEvent::MessageEnd {
+                    phase: MessagePhase::Unknown,
                     stop_reason: neo_ai::StopReason::ToolUse,
                     usage: None,
                 },
@@ -6993,6 +7223,7 @@ async fn runtime_allow_for_session_does_not_cache_exit_plan_mode() {
     let harness = FakeHarness::from_turns([
         vec![
             AiStreamEvent::MessageStart {
+                phase: MessagePhase::Unknown,
                 id: "msg_1".to_owned(),
             },
             AiStreamEvent::ToolCallStart {
@@ -7004,6 +7235,7 @@ async fn runtime_allow_for_session_does_not_cache_exit_plan_mode() {
                 raw_arguments: json!({ "plan_summary": "Ready to execute" }).to_string(),
             },
             AiStreamEvent::MessageEnd {
+                phase: MessagePhase::Unknown,
                 stop_reason: neo_ai::StopReason::ToolUse,
                 usage: None,
             },
@@ -7067,6 +7299,7 @@ async fn runtime_ask_mode_reviews_exit_goal_mode_and_emits_goal_started() {
     let harness = FakeHarness::from_turns([
         vec![
             AiStreamEvent::MessageStart {
+                phase: MessagePhase::Unknown,
                 id: "msg_1".to_owned(),
             },
             AiStreamEvent::ToolCallStart {
@@ -7083,6 +7316,7 @@ async fn runtime_ask_mode_reviews_exit_goal_mode_and_emits_goal_started() {
                 .to_string(),
             },
             AiStreamEvent::MessageEnd {
+                phase: MessagePhase::Unknown,
                 stop_reason: neo_ai::StopReason::ToolUse,
                 usage: None,
             },
@@ -7165,6 +7399,7 @@ async fn runtime_ask_mode_exit_plan_mode_reject_keeps_plan_active() {
     let harness = FakeHarness::from_turns([
         vec![
             AiStreamEvent::MessageStart {
+                phase: MessagePhase::Unknown,
                 id: "msg_1".to_owned(),
             },
             AiStreamEvent::ToolCallStart {
@@ -7176,6 +7411,7 @@ async fn runtime_ask_mode_exit_plan_mode_reject_keeps_plan_active() {
                 raw_arguments: json!({ "plan_summary": "Ready to execute" }).to_string(),
             },
             AiStreamEvent::MessageEnd {
+                phase: MessagePhase::Unknown,
                 stop_reason: neo_ai::StopReason::ToolUse,
                 usage: None,
             },
@@ -7246,6 +7482,7 @@ async fn runtime_plan_mode_guard_denies_write_outside_plan_file() {
     let harness = FakeHarness::from_turns([
         vec![
             AiStreamEvent::MessageStart {
+                phase: MessagePhase::Unknown,
                 id: "msg_1".to_owned(),
             },
             AiStreamEvent::ToolCallStart {
@@ -7257,6 +7494,7 @@ async fn runtime_plan_mode_guard_denies_write_outside_plan_file() {
                 raw_arguments: json!({ "path": "other.txt", "content": "x" }).to_string(),
             },
             AiStreamEvent::MessageEnd {
+                phase: MessagePhase::Unknown,
                 stop_reason: neo_ai::StopReason::ToolUse,
                 usage: None,
             },
@@ -7317,6 +7555,7 @@ async fn runtime_plan_mode_allows_writing_active_plan_file_outside_workspace() {
     let harness = FakeHarness::from_turns([
         vec![
             AiStreamEvent::MessageStart {
+                phase: MessagePhase::Unknown,
                 id: "msg_1".to_owned(),
             },
             AiStreamEvent::ToolCallStart {
@@ -7332,6 +7571,7 @@ async fn runtime_plan_mode_allows_writing_active_plan_file_outside_workspace() {
                 .to_string(),
             },
             AiStreamEvent::MessageEnd {
+                phase: MessagePhase::Unknown,
                 stop_reason: neo_ai::StopReason::ToolUse,
                 usage: None,
             },
@@ -7394,6 +7634,7 @@ async fn runtime_plan_mode_allows_editing_active_plan_file_outside_workspace() {
     let harness = FakeHarness::from_turns([
         vec![
             AiStreamEvent::MessageStart {
+                phase: MessagePhase::Unknown,
                 id: "msg_1".to_owned(),
             },
             AiStreamEvent::ToolCallStart {
@@ -7410,6 +7651,7 @@ async fn runtime_plan_mode_allows_editing_active_plan_file_outside_workspace() {
                 .to_string(),
             },
             AiStreamEvent::MessageEnd {
+                phase: MessagePhase::Unknown,
                 stop_reason: neo_ai::StopReason::ToolUse,
                 usage: None,
             },
@@ -7527,6 +7769,7 @@ async fn ask_mode_asks_for_bash() {
     let harness = FakeHarness::from_turns([
         vec![
             AiStreamEvent::MessageStart {
+                phase: MessagePhase::Unknown,
                 id: "msg_1".to_owned(),
             },
             AiStreamEvent::ToolCallStart {
@@ -7538,6 +7781,7 @@ async fn ask_mode_asks_for_bash() {
                 raw_arguments: json!({ "command": "mkdir test_dir" }).to_string(),
             },
             AiStreamEvent::MessageEnd {
+                phase: MessagePhase::Unknown,
                 stop_reason: neo_ai::StopReason::ToolUse,
                 usage: None,
             },
@@ -7596,6 +7840,7 @@ async fn auto_mode_approves_bash_without_approval() {
     let harness = FakeHarness::from_turns([
         vec![
             AiStreamEvent::MessageStart {
+                phase: MessagePhase::Unknown,
                 id: "msg_1".to_owned(),
             },
             AiStreamEvent::ToolCallStart {
@@ -7607,6 +7852,7 @@ async fn auto_mode_approves_bash_without_approval() {
                 raw_arguments: json!({ "command": "printf auto-ok" }).to_string(),
             },
             AiStreamEvent::MessageEnd {
+                phase: MessagePhase::Unknown,
                 stop_reason: neo_ai::StopReason::ToolUse,
                 usage: None,
             },
@@ -7656,6 +7902,7 @@ async fn yolo_mode_approves_write_without_approval() {
     let harness = FakeHarness::from_turns([
         vec![
             AiStreamEvent::MessageStart {
+                phase: MessagePhase::Unknown,
                 id: "msg_1".to_owned(),
             },
             AiStreamEvent::ToolCallStart {
@@ -7667,6 +7914,7 @@ async fn yolo_mode_approves_write_without_approval() {
                 raw_arguments: json!({ "path": "yolo.txt", "content": "yolo" }).to_string(),
             },
             AiStreamEvent::MessageEnd {
+                phase: MessagePhase::Unknown,
                 stop_reason: neo_ai::StopReason::ToolUse,
                 usage: None,
             },
@@ -7714,6 +7962,7 @@ async fn auto_exit_plan_mode_does_not_request_review() {
     let harness = FakeHarness::from_turns([
         vec![
             AiStreamEvent::MessageStart {
+                phase: MessagePhase::Unknown,
                 id: "msg_1".to_owned(),
             },
             AiStreamEvent::ToolCallStart {
@@ -7725,6 +7974,7 @@ async fn auto_exit_plan_mode_does_not_request_review() {
                 raw_arguments: json!({ "plan_summary": "Ready" }).to_string(),
             },
             AiStreamEvent::MessageEnd {
+                phase: MessagePhase::Unknown,
                 stop_reason: neo_ai::StopReason::ToolUse,
                 usage: None,
             },
@@ -7766,6 +8016,7 @@ async fn yolo_exit_plan_mode_with_non_empty_plan_requests_review() {
     let harness = FakeHarness::from_turns([
         vec![
             AiStreamEvent::MessageStart {
+                phase: MessagePhase::Unknown,
                 id: "msg_1".to_owned(),
             },
             AiStreamEvent::ToolCallStart {
@@ -7777,6 +8028,7 @@ async fn yolo_exit_plan_mode_with_non_empty_plan_requests_review() {
                 raw_arguments: json!({ "plan_summary": "Ready" }).to_string(),
             },
             AiStreamEvent::MessageEnd {
+                phase: MessagePhase::Unknown,
                 stop_reason: neo_ai::StopReason::ToolUse,
                 usage: None,
             },
@@ -8238,12 +8490,14 @@ fn capped_terminal_output_events_for_request(request: &ChatRequest) -> Vec<AiStr
         ),
         Some(_) if last.contains("status: cancelled") => vec![
             AiStreamEvent::MessageStart {
+                phase: MessagePhase::Unknown,
                 id: format!("msg_{turn_index}"),
             },
             AiStreamEvent::TextDelta {
                 text: "done".to_owned(),
             },
             AiStreamEvent::MessageEnd {
+                phase: MessagePhase::Unknown,
                 stop_reason: neo_ai::StopReason::EndTurn,
                 usage: None,
             },
@@ -8349,12 +8603,14 @@ fn terminal_lifecycle_events_for_request(request: &ChatRequest) -> Vec<AiStreamE
 fn end_turn_done(turn_index: usize) -> Vec<AiStreamEvent> {
     vec![
         AiStreamEvent::MessageStart {
+            phase: MessagePhase::Unknown,
             id: format!("msg_{turn_index}"),
         },
         AiStreamEvent::TextDelta {
             text: "done".to_owned(),
         },
         AiStreamEvent::MessageEnd {
+            phase: MessagePhase::Unknown,
             stop_reason: neo_ai::StopReason::EndTurn,
             usage: None,
         },
@@ -8369,6 +8625,7 @@ fn terminal_tool_turn(
 ) -> Vec<AiStreamEvent> {
     vec![
         AiStreamEvent::MessageStart {
+            phase: MessagePhase::Unknown,
             id: format!("msg_{turn_index}"),
         },
         AiStreamEvent::ToolCallStart {
@@ -8380,6 +8637,7 @@ fn terminal_tool_turn(
             raw_arguments: arguments.to_string(),
         },
         AiStreamEvent::MessageEnd {
+            phase: MessagePhase::Unknown,
             stop_reason: neo_ai::StopReason::ToolUse,
             usage: None,
         },
@@ -8513,12 +8771,14 @@ impl ModelClient for DelayedModelClient {
 async fn runtime_drains_live_steer_input_at_step_boundary() {
     let harness = FakeHarness::from_turns([vec![
         AiStreamEvent::MessageStart {
+            phase: MessagePhase::Unknown,
             id: "msg_1".to_owned(),
         },
         AiStreamEvent::TextDelta {
             text: "first".to_owned(),
         },
         AiStreamEvent::MessageEnd {
+            phase: MessagePhase::Unknown,
             stop_reason: neo_ai::StopReason::EndTurn,
             usage: None,
         },
@@ -8572,24 +8832,28 @@ async fn runtime_drains_live_follow_up_input_as_new_turn() {
     let harness = FakeHarness::from_turns([
         vec![
             AiStreamEvent::MessageStart {
+                phase: MessagePhase::Unknown,
                 id: "msg_1".to_owned(),
             },
             AiStreamEvent::TextDelta {
                 text: "first".to_owned(),
             },
             AiStreamEvent::MessageEnd {
+                phase: MessagePhase::Unknown,
                 stop_reason: neo_ai::StopReason::EndTurn,
                 usage: None,
             },
         ],
         vec![
             AiStreamEvent::MessageStart {
+                phase: MessagePhase::Unknown,
                 id: "msg_2".to_owned(),
             },
             AiStreamEvent::TextDelta {
                 text: "second".to_owned(),
             },
             AiStreamEvent::MessageEnd {
+                phase: MessagePhase::Unknown,
                 stop_reason: neo_ai::StopReason::EndTurn,
                 usage: None,
             },
@@ -8635,36 +8899,42 @@ async fn runtime_drains_multiple_live_follow_ups_all_by_default() {
     let harness = FakeHarness::from_turns([
         vec![
             AiStreamEvent::MessageStart {
+                phase: MessagePhase::Unknown,
                 id: "msg_1".to_owned(),
             },
             AiStreamEvent::TextDelta {
                 text: "first".to_owned(),
             },
             AiStreamEvent::MessageEnd {
+                phase: MessagePhase::Unknown,
                 stop_reason: neo_ai::StopReason::EndTurn,
                 usage: None,
             },
         ],
         vec![
             AiStreamEvent::MessageStart {
+                phase: MessagePhase::Unknown,
                 id: "msg_2".to_owned(),
             },
             AiStreamEvent::TextDelta {
                 text: "second".to_owned(),
             },
             AiStreamEvent::MessageEnd {
+                phase: MessagePhase::Unknown,
                 stop_reason: neo_ai::StopReason::EndTurn,
                 usage: None,
             },
         ],
         vec![
             AiStreamEvent::MessageStart {
+                phase: MessagePhase::Unknown,
                 id: "msg_3".to_owned(),
             },
             AiStreamEvent::TextDelta {
                 text: "third".to_owned(),
             },
             AiStreamEvent::MessageEnd {
+                phase: MessagePhase::Unknown,
                 stop_reason: neo_ai::StopReason::EndTurn,
                 usage: None,
             },
@@ -8735,36 +9005,42 @@ async fn runtime_drains_multiple_live_follow_ups_one_turn_at_a_time_when_configu
     let harness = FakeHarness::from_turns([
         vec![
             AiStreamEvent::MessageStart {
+                phase: MessagePhase::Unknown,
                 id: "msg_1".to_owned(),
             },
             AiStreamEvent::TextDelta {
                 text: "first".to_owned(),
             },
             AiStreamEvent::MessageEnd {
+                phase: MessagePhase::Unknown,
                 stop_reason: neo_ai::StopReason::EndTurn,
                 usage: None,
             },
         ],
         vec![
             AiStreamEvent::MessageStart {
+                phase: MessagePhase::Unknown,
                 id: "msg_2".to_owned(),
             },
             AiStreamEvent::TextDelta {
                 text: "second".to_owned(),
             },
             AiStreamEvent::MessageEnd {
+                phase: MessagePhase::Unknown,
                 stop_reason: neo_ai::StopReason::EndTurn,
                 usage: None,
             },
         ],
         vec![
             AiStreamEvent::MessageStart {
+                phase: MessagePhase::Unknown,
                 id: "msg_3".to_owned(),
             },
             AiStreamEvent::TextDelta {
                 text: "third".to_owned(),
             },
             AiStreamEvent::MessageEnd {
+                phase: MessagePhase::Unknown,
                 stop_reason: neo_ai::StopReason::EndTurn,
                 usage: None,
             },
@@ -8821,24 +9097,28 @@ async fn runtime_reclassifies_promoted_follow_up_as_steer_without_running_follow
     let harness = FakeHarness::from_turns([
         vec![
             AiStreamEvent::MessageStart {
+                phase: MessagePhase::Unknown,
                 id: "msg_1".to_owned(),
             },
             AiStreamEvent::TextDelta {
                 text: "first".to_owned(),
             },
             AiStreamEvent::MessageEnd {
+                phase: MessagePhase::Unknown,
                 stop_reason: neo_ai::StopReason::EndTurn,
                 usage: None,
             },
         ],
         vec![
             AiStreamEvent::MessageStart {
+                phase: MessagePhase::Unknown,
                 id: "msg_2".to_owned(),
             },
             AiStreamEvent::TextDelta {
                 text: "second".to_owned(),
             },
             AiStreamEvent::MessageEnd {
+                phase: MessagePhase::Unknown,
                 stop_reason: neo_ai::StopReason::EndTurn,
                 usage: None,
             },
@@ -8900,24 +9180,28 @@ async fn runtime_dequeues_follow_up_for_edit_without_running_it() {
     let harness = FakeHarness::from_turns([
         vec![
             AiStreamEvent::MessageStart {
+                phase: MessagePhase::Unknown,
                 id: "msg_1".to_owned(),
             },
             AiStreamEvent::TextDelta {
                 text: "first".to_owned(),
             },
             AiStreamEvent::MessageEnd {
+                phase: MessagePhase::Unknown,
                 stop_reason: neo_ai::StopReason::EndTurn,
                 usage: None,
             },
         ],
         vec![
             AiStreamEvent::MessageStart {
+                phase: MessagePhase::Unknown,
                 id: "msg_2".to_owned(),
             },
             AiStreamEvent::TextDelta {
                 text: "second".to_owned(),
             },
             AiStreamEvent::MessageEnd {
+                phase: MessagePhase::Unknown,
                 stop_reason: neo_ai::StopReason::EndTurn,
                 usage: None,
             },
@@ -8990,6 +9274,7 @@ async fn collect_approval_request_for_tool(
     let harness = FakeHarness::from_turns([
         vec![
             AiStreamEvent::MessageStart {
+                phase: MessagePhase::Unknown,
                 id: "msg_1".to_owned(),
             },
             AiStreamEvent::ToolCallStart {
@@ -9001,6 +9286,7 @@ async fn collect_approval_request_for_tool(
                 raw_arguments: raw_arguments.to_string(),
             },
             AiStreamEvent::MessageEnd {
+                phase: MessagePhase::Unknown,
                 stop_reason: neo_ai::StopReason::ToolUse,
                 usage: None,
             },
@@ -9118,6 +9404,7 @@ async fn layer1_bash_session_approval_exact_command_only() {
     let harness = FakeHarness::from_turns([
         vec![
             AiStreamEvent::MessageStart {
+                phase: MessagePhase::Unknown,
                 id: "msg_1".to_owned(),
             },
             AiStreamEvent::ToolCallStart {
@@ -9129,12 +9416,14 @@ async fn layer1_bash_session_approval_exact_command_only() {
                 raw_arguments: json!({ "command": "git status" }).to_string(),
             },
             AiStreamEvent::MessageEnd {
+                phase: MessagePhase::Unknown,
                 stop_reason: neo_ai::StopReason::ToolUse,
                 usage: None,
             },
         ],
         vec![
             AiStreamEvent::MessageStart {
+                phase: MessagePhase::Unknown,
                 id: "msg_2".to_owned(),
             },
             AiStreamEvent::ToolCallStart {
@@ -9146,6 +9435,7 @@ async fn layer1_bash_session_approval_exact_command_only() {
                 raw_arguments: json!({ "command": "python script.py" }).to_string(),
             },
             AiStreamEvent::MessageEnd {
+                phase: MessagePhase::Unknown,
                 stop_reason: neo_ai::StopReason::ToolUse,
                 usage: None,
             },
@@ -9194,6 +9484,7 @@ async fn allow_for_session_does_not_persist_prefix_rule() {
     let harness = FakeHarness::from_turns([
         vec![
             AiStreamEvent::MessageStart {
+                phase: MessagePhase::Unknown,
                 id: "msg_1".to_owned(),
             },
             AiStreamEvent::ToolCallStart {
@@ -9205,6 +9496,7 @@ async fn allow_for_session_does_not_persist_prefix_rule() {
                 raw_arguments: json!({ "command": "python script.py" }).to_string(),
             },
             AiStreamEvent::MessageEnd {
+                phase: MessagePhase::Unknown,
                 stop_reason: neo_ai::StopReason::ToolUse,
                 usage: None,
             },
@@ -9254,6 +9546,7 @@ async fn allow_for_prefix_persists_prefix_rule() {
     let harness = FakeHarness::from_turns([
         vec![
             AiStreamEvent::MessageStart {
+                phase: MessagePhase::Unknown,
                 id: "msg_1".to_owned(),
             },
             AiStreamEvent::ToolCallStart {
@@ -9265,6 +9558,7 @@ async fn allow_for_prefix_persists_prefix_rule() {
                 raw_arguments: json!({ "command": "python script.py" }).to_string(),
             },
             AiStreamEvent::MessageEnd {
+                phase: MessagePhase::Unknown,
                 stop_reason: neo_ai::StopReason::ToolUse,
                 usage: None,
             },
@@ -9308,6 +9602,7 @@ async fn layer3_safe_command_auto_approved() {
     let harness = FakeHarness::from_turns([
         vec![
             AiStreamEvent::MessageStart {
+                phase: MessagePhase::Unknown,
                 id: "msg_1".to_owned(),
             },
             AiStreamEvent::ToolCallStart {
@@ -9319,6 +9614,7 @@ async fn layer3_safe_command_auto_approved() {
                 raw_arguments: json!({ "command": "cat README.md" }).to_string(),
             },
             AiStreamEvent::MessageEnd {
+                phase: MessagePhase::Unknown,
                 stop_reason: neo_ai::StopReason::ToolUse,
                 usage: None,
             },
@@ -9363,6 +9659,7 @@ async fn layer3_dangerous_command_forces_prompt_no_scope() {
     let harness = FakeHarness::from_turns([
         vec![
             AiStreamEvent::MessageStart {
+                phase: MessagePhase::Unknown,
                 id: "msg_1".to_owned(),
             },
             AiStreamEvent::ToolCallStart {
@@ -9374,6 +9671,7 @@ async fn layer3_dangerous_command_forces_prompt_no_scope() {
                 raw_arguments: json!({ "command": "rm -rf /tmp/x" }).to_string(),
             },
             AiStreamEvent::MessageEnd {
+                phase: MessagePhase::Unknown,
                 stop_reason: neo_ai::StopReason::ToolUse,
                 usage: None,
             },
@@ -9423,6 +9721,7 @@ async fn runtime_invalid_tool_arguments_return_model_visible_error() {
     let harness = FakeHarness::from_turns([
         vec![
             AiStreamEvent::MessageStart {
+                phase: MessagePhase::Unknown,
                 id: "msg_1".to_owned(),
             },
             AiStreamEvent::ToolCallStart {
@@ -9434,18 +9733,21 @@ async fn runtime_invalid_tool_arguments_return_model_visible_error() {
                 raw_arguments: r#"{"text":"neo"#.into(),
             },
             AiStreamEvent::MessageEnd {
+                phase: MessagePhase::Unknown,
                 stop_reason: neo_ai::StopReason::ToolUse,
                 usage: None,
             },
         ],
         vec![
             AiStreamEvent::MessageStart {
+                phase: MessagePhase::Unknown,
                 id: "msg_2".to_owned(),
             },
             AiStreamEvent::TextDelta {
                 text: "retrying".to_owned(),
             },
             AiStreamEvent::MessageEnd {
+                phase: MessagePhase::Unknown,
                 stop_reason: neo_ai::StopReason::EndTurn,
                 usage: None,
             },
@@ -9640,6 +9942,7 @@ fn end_turn_events(text: &str) -> Vec<AiStreamEvent> {
             text: text.to_owned(),
         },
         AiStreamEvent::MessageEnd {
+            phase: MessagePhase::Unknown,
             stop_reason: neo_ai::StopReason::EndTurn,
             usage: None,
         },
@@ -10504,6 +10807,7 @@ fn preflight_runtime(fixture: &PreflightFixture, harness: &FakeHarness) -> Agent
 /// One assistant turn carrying `calls` as `(id, name, arguments)` triples.
 fn tool_call_turn(calls: &[(&str, &str, serde_json::Value)]) -> Vec<AiStreamEvent> {
     let mut events = vec![AiStreamEvent::MessageStart {
+        phase: MessagePhase::Unknown,
         id: "msg_tools".to_owned(),
     }];
     for (id, name, arguments) in calls {
@@ -10517,6 +10821,7 @@ fn tool_call_turn(calls: &[(&str, &str, serde_json::Value)]) -> Vec<AiStreamEven
         });
     }
     events.push(AiStreamEvent::MessageEnd {
+        phase: MessagePhase::Unknown,
         stop_reason: neo_ai::StopReason::ToolUse,
         usage: None,
     });

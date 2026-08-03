@@ -510,6 +510,7 @@ fn shell_and_committed_history_survive_live_updates_resize_and_exit() {
     assert_terminal_contains(&mut screen, "committed-lifecycle-row-29", "100x20 resize");
 
     pane.apply_agent_event(AgentEvent::MessageStarted {
+        phase: neo_ai::MessagePhase::Unknown,
         turn: 1,
         id: "msg-lifecycle".to_owned(),
     });
@@ -532,6 +533,7 @@ fn shell_and_committed_history_survive_live_updates_resize_and_exit() {
         workflow_origin: None,
     });
     pane.apply_agent_event(AgentEvent::MessageFinished {
+        phase: neo_ai::MessagePhase::Unknown,
         turn: 1,
         id: "msg-lifecycle".to_owned(),
         stop_reason: StopReason::EndTurn,

@@ -148,6 +148,7 @@ fn bash_tool_harness(command: &str) -> FakeHarness {
     let args = json!({ "command": command }).to_string();
     FakeHarness::from_events([
         AiStreamEvent::MessageStart {
+            phase: neo_ai::MessagePhase::Unknown,
             id: "msg".to_owned(),
         },
         AiStreamEvent::ToolCallStart {
@@ -163,6 +164,7 @@ fn bash_tool_harness(command: &str) -> FakeHarness {
             raw_arguments: args,
         },
         AiStreamEvent::MessageEnd {
+            phase: neo_ai::MessagePhase::Unknown,
             stop_reason: StopReason::ToolUse,
             usage: None,
         },

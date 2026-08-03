@@ -355,6 +355,7 @@ mod tests {
         let config = test_config(temp.path());
         let fake = FakeModelClient::new(vec![
             AiStreamEvent::MessageStart {
+                phase: neo_ai::MessagePhase::Unknown,
                 id: "msg-1".to_owned(),
             },
             AiStreamEvent::TextDelta {
@@ -364,6 +365,7 @@ mod tests {
                 text: "world".to_owned(),
             },
             AiStreamEvent::MessageEnd {
+                phase: neo_ai::MessagePhase::Unknown,
                 stop_reason: StopReason::EndTurn,
                 usage: None,
             },
@@ -396,12 +398,14 @@ mod tests {
         let config = test_config(temp.path());
         let fake = FakeModelClient::new(vec![
             AiStreamEvent::MessageStart {
+                phase: neo_ai::MessagePhase::Unknown,
                 id: "msg-1".to_owned(),
             },
             AiStreamEvent::TextDelta {
                 text: "ok".to_owned(),
             },
             AiStreamEvent::MessageEnd {
+                phase: neo_ai::MessagePhase::Unknown,
                 stop_reason: StopReason::EndTurn,
                 usage: None,
             },
@@ -445,12 +449,14 @@ mod tests {
         let config = test_config(temp.path());
         let fake = FakeModelClient::new(vec![
             AiStreamEvent::MessageStart {
+                phase: neo_ai::MessagePhase::Unknown,
                 id: "msg-1".to_owned(),
             },
             AiStreamEvent::TextDelta {
                 text: "side answer".to_owned(),
             },
             AiStreamEvent::MessageEnd {
+                phase: neo_ai::MessagePhase::Unknown,
                 stop_reason: StopReason::EndTurn,
                 usage: None,
             },

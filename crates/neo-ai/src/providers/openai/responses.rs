@@ -9,8 +9,8 @@ use crate::providers::common::sse::{SseFramer, StreamChunk};
 use crate::tool_assembly::{StreamingToolCallAssembler, ToolCallAssemblyEvent, ToolCallChunk};
 
 use crate::{
-    AiError, AiStreamEvent, CacheRetention, ChatMessage, ChatRequest, ContentPart, ModelClient,
-    ReasoningEffort, ReasoningSelection, StopReason, TokenUsage, ToolSpec,
+    AiError, AiStreamEvent, CacheRetention, ChatMessage, ChatRequest, ContentPart, MessagePhase,
+    ModelClient, ReasoningEffort, ReasoningSelection, StopReason, TokenUsage, ToolSpec,
 };
 
 #[derive(Clone)]
@@ -426,7 +426,10 @@ impl IncrementalSse {
 #[allow(clippy::struct_excessive_bools)]
 struct ParseState {
     events: Vec<AiStreamEvent>,
+    pending_events: Vec<AiStreamEvent>,
     started: bool,
+    message_id: Option<String>,
+    message_phase: MessagePhase,
     tool_calls: StreamingToolCallAssembler,
     item_call_ids: BTreeMap<String, String>,
     item_names: BTreeMap<String, String>,
@@ -456,7 +459,10 @@ impl Default for ParseState {
     fn default() -> Self {
         Self {
             events: Vec::new(),
+            pending_events: Vec::new(),
             started: false,
+            message_id: None,
+            message_phase: MessagePhase::Unknown,
             tool_calls: StreamingToolCallAssembler::new(),
             item_call_ids: BTreeMap::new(),
             item_names: BTreeMap::new(),
@@ -484,14 +490,14 @@ impl ParseState {
                     .and_then(Value::as_str)
                     .unwrap_or("response")
                     .to_owned();
-                self.ensure_started(id);
+                self.message_id = Some(id);
             }
             Some("response.output_text.delta") => {
-                self.ensure_started("response".to_owned());
+                self.defer_start("response".to_owned());
                 if let Some(text) = value.get("delta").and_then(Value::as_str)
                     && !text.is_empty()
                 {
-                    self.events.push(AiStreamEvent::TextDelta {
+                    self.queue_event(AiStreamEvent::TextDelta {
                         text: text.to_owned(),
                     });
                 }
@@ -528,12 +534,60 @@ impl ParseState {
         self.terminal
     }
 
+    fn defer_start(&mut self, id: String) {
+        if self.message_id.is_none() {
+            self.message_id = Some(id);
+        }
+    }
+
     fn ensure_started(&mut self, id: String) {
+        self.ensure_started_with_phase(id, MessagePhase::Unknown);
+    }
+
+    fn ensure_started_with_phase(&mut self, id: String, phase: MessagePhase) {
+        self.record_phase(phase);
         if self.started {
             return;
         }
-        self.events.push(AiStreamEvent::MessageStart { id });
+        self.defer_start(id);
+        let id = self
+            .message_id
+            .clone()
+            .expect("message id should be recorded before start");
+        self.events.push(AiStreamEvent::MessageStart {
+            id,
+            phase: self.message_phase,
+        });
         self.started = true;
+        self.events.append(&mut self.pending_events);
+    }
+
+    fn queue_event(&mut self, event: AiStreamEvent) {
+        if self.started {
+            self.events.push(event);
+        } else {
+            self.pending_events.push(event);
+        }
+    }
+
+    fn record_phase(&mut self, phase: MessagePhase) {
+        if phase != MessagePhase::Unknown {
+            self.message_phase = phase;
+        }
+    }
+
+    fn ingest_message_item(&mut self, item: &Value) {
+        if let Some(id) = item.get("id").and_then(Value::as_str)
+            && self.message_id.is_none()
+        {
+            self.message_id = Some(id.to_owned());
+        }
+        let phase = message_phase_from_item(item);
+        if phase == MessagePhase::Unknown {
+            self.defer_start("response".to_owned());
+        } else {
+            self.ensure_started_with_phase("response".to_owned(), phase);
+        }
     }
 
     fn tool_index_for_item(&mut self, item_id: &str) -> u64 {
@@ -547,8 +601,8 @@ impl ParseState {
     }
 
     fn push_tool_events(&mut self, events: Vec<ToolCallAssemblyEvent>) {
-        self.events
-            .extend(events.into_iter().map(|event| match event {
+        for event in events {
+            let event = match event {
                 ToolCallAssemblyEvent::Start { id, name } => {
                     AiStreamEvent::ToolCallStart { id, name }
                 }
@@ -559,16 +613,23 @@ impl ParseState {
                     self.saw_tool_call = true;
                     AiStreamEvent::ToolCallEnd { id, raw_arguments }
                 }
-            }));
+            };
+            self.queue_event(event);
+        }
     }
 
     fn ingest_item_added(&mut self, value: &Value) -> Result<(), ProviderError> {
         let item = value.get("item").unwrap_or(&Value::Null);
-        if item.get("type").and_then(Value::as_str) != Some("function_call") {
-            return Ok(());
+        match item.get("type").and_then(Value::as_str) {
+            Some("message") => {
+                self.ingest_message_item(item);
+                return Ok(());
+            }
+            Some("function_call") => {}
+            _ => return Ok(()),
         }
 
-        self.ensure_started("response".to_owned());
+        self.defer_start("response".to_owned());
         let item_id = item
             .get("id")
             .and_then(Value::as_str)
@@ -598,14 +659,14 @@ impl ParseState {
     }
 
     fn ingest_thinking_started(&mut self, value: &Value) {
-        self.ensure_started("response".to_owned());
+        self.defer_start("response".to_owned());
         let id = thinking_id(value);
         self.ensure_thinking_part(id);
         self.flush_thinking_ready();
     }
 
     fn ingest_thinking_delta(&mut self, value: &Value) {
-        self.ensure_started("response".to_owned());
+        self.defer_start("response".to_owned());
         let id = thinking_id(value);
         self.ensure_thinking_part(id.clone());
         if let Some(delta) = value.get("delta").and_then(Value::as_str)
@@ -621,7 +682,7 @@ impl ParseState {
     }
 
     fn ingest_thinking_text_done(&mut self, value: &Value) {
-        self.ensure_started("response".to_owned());
+        self.defer_start("response".to_owned());
         let id = thinking_id(value);
         self.ensure_thinking_part(id.clone());
         let Some(text) = value.get("text").and_then(Value::as_str) else {
@@ -666,8 +727,14 @@ impl ParseState {
     fn ingest_output_item_done(&mut self, value: &Value) -> Result<(), ProviderError> {
         let item = value.get("item").unwrap_or(&Value::Null);
 
+        if item.get("type").and_then(Value::as_str) == Some("message") {
+            self.ingest_message_item(item);
+            return Ok(());
+        }
+
         // Handle function_call items as authoritative final tool-call data.
         if item.get("type").and_then(Value::as_str) == Some("function_call") {
+            self.defer_start("response".to_owned());
             let item_id = item
                 .get("id")
                 .and_then(Value::as_str)
@@ -740,6 +807,7 @@ impl ParseState {
     }
 
     fn ingest_tool_delta(&mut self, value: &Value) -> Result<(), ProviderError> {
+        self.defer_start("response".to_owned());
         let item_id = value
             .get("item_id")
             .and_then(Value::as_str)
@@ -768,6 +836,7 @@ impl ParseState {
     }
 
     fn ingest_completed(&mut self, value: &Value) {
+        self.ensure_started("response".to_owned());
         let response = value.get("response").unwrap_or(&Value::Null);
         self.usage = response
             .get("usage")
@@ -878,6 +947,7 @@ impl ParseState {
             return Ok(Vec::new());
         }
         self.finished = true;
+        self.ensure_started("response".to_owned());
 
         for part in self.thinking_parts.values_mut() {
             part.done = true;
@@ -898,6 +968,7 @@ impl ParseState {
             self.events.push(AiStreamEvent::MessageEnd {
                 stop_reason: self.last_stop_reason.clone(),
                 usage: self.usage.clone(),
+                phase: self.message_phase,
             });
         }
 
@@ -918,31 +989,36 @@ impl ParseState {
                 if self.active_thinking_id.is_some() {
                     return;
                 }
-                self.events.push(AiStreamEvent::ThinkingStart {
+                self.queue_event(AiStreamEvent::ThinkingStart {
                     id: id.clone(),
                     kind: crate::ThinkingKind::Summary,
                 });
                 self.active_thinking_id = Some(id.clone());
             }
 
-            let mut is_done = false;
-            if let Some(part) = self.thinking_parts.get_mut(&id) {
-                if part.emitted_len < part.text.len() {
+            let (delta, is_done) = if let Some(part) = self.thinking_parts.get_mut(&id) {
+                let delta = if part.emitted_len < part.text.len() {
                     let delta = part.text[part.emitted_len..].to_owned();
                     part.emitted_len = part.text.len();
-                    if !delta.is_empty() {
-                        self.events
-                            .push(AiStreamEvent::ThinkingDelta { text: delta });
-                    }
-                }
-                is_done = part.done;
+                    Some(delta)
+                } else {
+                    None
+                };
+                (delta, part.done)
+            } else {
+                (None, false)
+            };
+            if let Some(delta) = delta
+                && !delta.is_empty()
+            {
+                self.queue_event(AiStreamEvent::ThinkingDelta { text: delta });
             }
 
             if !is_done {
                 return;
             }
 
-            self.events.push(AiStreamEvent::ThinkingEnd {
+            self.queue_event(AiStreamEvent::ThinkingEnd {
                 signature: self
                     .thinking_parts
                     .get(&id)
@@ -953,6 +1029,14 @@ impl ParseState {
             self.thinking_parts.remove(&id);
             self.thinking_order.pop_front();
         }
+    }
+}
+
+fn message_phase_from_item(item: &Value) -> MessagePhase {
+    match item.get("phase").and_then(Value::as_str) {
+        Some("commentary") => MessagePhase::Commentary,
+        Some("final_answer") => MessagePhase::FinalAnswer,
+        _ => MessagePhase::Unknown,
     }
 }
 
@@ -1041,6 +1125,361 @@ mod tests {
         assert_eq!(
             body["text"]["format"],
             format.to_openai_responses_text_format()
+        );
+    }
+
+    fn message_item(phase: Option<&str>) -> Value {
+        let mut item = json!({"id": "message-1", "type": "message"});
+        if let Some(phase) = phase {
+            item["phase"] = Value::String(phase.to_owned());
+        }
+        item
+    }
+
+    fn parse_message_item_events(
+        added_phase: Option<&str>,
+        done_phase: Option<&str>,
+    ) -> Vec<AiStreamEvent> {
+        let mut parser = ParseState::default();
+        parser
+            .ingest(&json!({
+                "type": "response.created",
+                "response": {"id": "response-1"}
+            }))
+            .expect("response.created should parse");
+        parser
+            .ingest(&json!({
+                "type": "response.output_item.added",
+                "item": message_item(added_phase)
+            }))
+            .expect("output item added should parse");
+        parser
+            .ingest(&json!({
+                "type": "response.output_text.delta",
+                "delta": "text"
+            }))
+            .expect("output text delta should parse");
+        parser
+            .ingest(&json!({
+                "type": "response.output_item.done",
+                "item": message_item(done_phase)
+            }))
+            .expect("output item done should parse");
+        parser
+            .ingest(&json!({
+                "type": "response.completed",
+                "response": {"status": "completed"}
+            }))
+            .expect("response.completed should parse");
+        parser.finish_events().expect("stream should finish")
+    }
+
+    #[test]
+    fn response_message_item_phase_maps_explicit_values_without_duplicate_start() {
+        for (wire_phase, phase) in [
+            ("commentary", MessagePhase::Commentary),
+            ("final_answer", MessagePhase::FinalAnswer),
+        ] {
+            let events = parse_message_item_events(Some(wire_phase), Some(wire_phase));
+            assert_eq!(
+                events,
+                vec![
+                    AiStreamEvent::MessageStart {
+                        id: "response-1".to_owned(),
+                        phase,
+                    },
+                    AiStreamEvent::TextDelta {
+                        text: "text".to_owned(),
+                    },
+                    AiStreamEvent::MessageEnd {
+                        stop_reason: StopReason::EndTurn,
+                        usage: None,
+                        phase,
+                    },
+                ]
+            );
+            assert_eq!(
+                events
+                    .iter()
+                    .filter(|event| matches!(event, AiStreamEvent::MessageStart { .. }))
+                    .count(),
+                1
+            );
+        }
+    }
+
+    #[test]
+    fn response_message_item_done_phase_promotes_buffered_text_start() {
+        let events = parse_message_item_events(None, Some("final_answer"));
+        assert_eq!(
+            events,
+            vec![
+                AiStreamEvent::MessageStart {
+                    id: "response-1".to_owned(),
+                    phase: MessagePhase::FinalAnswer,
+                },
+                AiStreamEvent::TextDelta {
+                    text: "text".to_owned(),
+                },
+                AiStreamEvent::MessageEnd {
+                    stop_reason: StopReason::EndTurn,
+                    usage: None,
+                    phase: MessagePhase::FinalAnswer,
+                },
+            ]
+        );
+    }
+
+    fn ingest_buffered_reasoning_tool_text(parser: &mut ParseState) {
+        for value in [
+            json!({
+                "type": "response.created",
+                "response": {"id": "response-1"}
+            }),
+            json!({
+                "type": "response.reasoning_summary_part.added",
+                "item_id": "reasoning-1",
+                "summary_index": 0
+            }),
+            json!({
+                "type": "response.reasoning_summary_text.delta",
+                "item_id": "reasoning-1",
+                "summary_index": 0,
+                "delta": "think"
+            }),
+            json!({
+                "type": "response.reasoning_summary_part.done",
+                "item_id": "reasoning-1",
+                "summary_index": 0,
+                "part": {"text": "think"},
+                "item": {"id": "reasoning-1", "type": "reasoning"}
+            }),
+            json!({
+                "type": "response.output_item.added",
+                "item": {
+                    "id": "function-1",
+                    "type": "function_call",
+                    "call_id": "call-1",
+                    "name": "lookup"
+                }
+            }),
+            json!({
+                "type": "response.function_call_arguments.delta",
+                "item_id": "function-1",
+                "delta": "{\"query\":\"neo\"}"
+            }),
+            json!({
+                "type": "response.output_item.done",
+                "item": {
+                    "id": "function-1",
+                    "type": "function_call",
+                    "call_id": "call-1",
+                    "name": "lookup",
+                    "arguments": "{\"query\":\"neo\"}"
+                }
+            }),
+            json!({
+                "type": "response.output_item.added",
+                "item": message_item(None)
+            }),
+            json!({
+                "type": "response.output_text.delta",
+                "delta": "answer"
+            }),
+        ] {
+            parser
+                .ingest(&value)
+                .expect("buffered response event should parse");
+        }
+    }
+
+    fn event_kinds(events: &[AiStreamEvent]) -> Vec<&'static str> {
+        events
+            .iter()
+            .map(|event| match event {
+                AiStreamEvent::MessageStart { .. } => "message_start",
+                AiStreamEvent::ThinkingStart { .. } => "thinking_start",
+                AiStreamEvent::ThinkingDelta { .. } => "thinking_delta",
+                AiStreamEvent::ThinkingEnd { .. } => "thinking_end",
+                AiStreamEvent::TextDelta { .. } => "text_delta",
+                AiStreamEvent::ToolCallStart { .. } => "tool_call_start",
+                AiStreamEvent::ToolCallArgsDelta { .. } => "tool_call_args_delta",
+                AiStreamEvent::ToolCallEnd { .. } => "tool_call_end",
+                AiStreamEvent::MessageEnd { .. } => "message_end",
+            })
+            .collect()
+    }
+
+    #[test]
+    fn response_message_item_done_phase_promotes_buffered_reasoning_tool_text_in_order() {
+        let mut parser = ParseState::default();
+        ingest_buffered_reasoning_tool_text(&mut parser);
+        parser
+            .ingest(&json!({
+                "type": "response.output_item.done",
+                "item": message_item(Some("final_answer"))
+            }))
+            .expect("message item done should parse");
+        parser
+            .ingest(&json!({
+                "type": "response.completed",
+                "response": {"status": "completed"}
+            }))
+            .expect("response.completed should parse");
+
+        let events = parser.finish_events().expect("stream should finish");
+        assert_eq!(
+            event_kinds(&events),
+            vec![
+                "message_start",
+                "thinking_start",
+                "thinking_delta",
+                "thinking_end",
+                "tool_call_start",
+                "tool_call_args_delta",
+                "tool_call_end",
+                "text_delta",
+                "message_end",
+            ]
+        );
+        assert_eq!(
+            events
+                .iter()
+                .filter(|event| matches!(event, AiStreamEvent::MessageStart { .. }))
+                .count(),
+            1
+        );
+        assert!(matches!(
+            events.first(),
+            Some(AiStreamEvent::MessageStart {
+                phase: MessagePhase::FinalAnswer,
+                ..
+            })
+        ));
+        assert!(matches!(
+            events.last(),
+            Some(AiStreamEvent::MessageEnd {
+                phase: MessagePhase::FinalAnswer,
+                ..
+            })
+        ));
+    }
+
+    #[test]
+    fn finish_events_is_idempotent() {
+        let mut parser = ParseState::default();
+        parser
+            .ingest(&json!({
+                "type": "response.output_text.delta",
+                "delta": "text"
+            }))
+            .expect("output text delta should parse");
+
+        let first = parser.finish_events().expect("first finish should succeed");
+        let second = parser
+            .finish_events()
+            .expect("second finish should succeed");
+
+        assert_eq!(
+            first
+                .iter()
+                .filter(|event| matches!(event, AiStreamEvent::MessageEnd { .. }))
+                .count(),
+            1
+        );
+        assert!(second.is_empty());
+    }
+
+    #[test]
+    fn buffered_terminal_events_fall_back_to_unknown_phase() {
+        let mut parser = ParseState::default();
+        ingest_buffered_reasoning_tool_text(&mut parser);
+
+        let events = parser.finish_events().expect("stream should finish");
+        assert_eq!(
+            event_kinds(&events),
+            vec![
+                "message_start",
+                "thinking_start",
+                "thinking_delta",
+                "thinking_end",
+                "tool_call_start",
+                "tool_call_args_delta",
+                "tool_call_end",
+                "text_delta",
+                "message_end",
+            ]
+        );
+        let starts = events
+            .iter()
+            .filter_map(|event| match event {
+                AiStreamEvent::MessageStart { phase, .. } => Some(phase.clone()),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        let ends = events
+            .iter()
+            .filter_map(|event| match event {
+                AiStreamEvent::MessageEnd { phase, .. } => Some(phase.clone()),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(starts, vec![MessagePhase::Unknown]);
+        assert_eq!(ends, vec![MessagePhase::Unknown]);
+    }
+
+    #[test]
+    fn response_message_item_missing_or_unknown_phase_stays_unknown() {
+        for done_phase in [None, Some("draft")] {
+            let events = parse_message_item_events(None, done_phase);
+            assert_eq!(
+                events,
+                vec![
+                    AiStreamEvent::MessageStart {
+                        id: "response-1".to_owned(),
+                        phase: MessagePhase::Unknown,
+                    },
+                    AiStreamEvent::TextDelta {
+                        text: "text".to_owned(),
+                    },
+                    AiStreamEvent::MessageEnd {
+                        stop_reason: StopReason::EndTurn,
+                        usage: None,
+                        phase: MessagePhase::Unknown,
+                    },
+                ]
+            );
+        }
+
+        let event: AiStreamEvent = serde_json::from_value(json!({
+            "MessageStart": {"id": "historical"}
+        }))
+        .expect("missing phase should deserialize");
+        assert_eq!(
+            event,
+            AiStreamEvent::MessageStart {
+                id: "historical".to_owned(),
+                phase: MessagePhase::Unknown,
+            }
+        );
+    }
+
+    #[test]
+    fn historical_message_end_without_phase_defaults_to_unknown() {
+        let event: AiStreamEvent = serde_json::from_value(json!({
+            "MessageEnd": {
+                "stop_reason": "EndTurn",
+                "usage": null
+            }
+        }))
+        .expect("missing phase should deserialize");
+        assert_eq!(
+            event,
+            AiStreamEvent::MessageEnd {
+                stop_reason: StopReason::EndTurn,
+                usage: None,
+                phase: MessagePhase::Unknown,
+            }
         );
     }
 }

@@ -17,12 +17,14 @@ use tempfile::tempdir;
 fn registry_with_children() -> (ToolRegistry, ToolContext, tempfile::TempDir) {
     let turn_done = vec![
         AiStreamEvent::MessageStart {
+            phase: neo_ai::MessagePhase::Unknown,
             id: "msg_x".to_owned(),
         },
         AiStreamEvent::TextDelta {
             text: "done".to_owned(),
         },
         AiStreamEvent::MessageEnd {
+            phase: neo_ai::MessagePhase::Unknown,
             stop_reason: StopReason::EndTurn,
             usage: None,
         },

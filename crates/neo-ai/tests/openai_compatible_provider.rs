@@ -9,8 +9,8 @@ use std::time::Duration;
 use futures::StreamExt;
 use neo_ai::{
     AiStreamEvent, ApiKind, CacheRetention, ChatMessage, ChatRequest, ContentPart, ImageData,
-    ModelCapabilities, ModelClient, ModelSpec, ProviderId, ReasoningEffort, ReasoningSelection,
-    RequestMetadata, RequestOptions, StopReason, ThinkingKind, ToolSpec,
+    MessagePhase, ModelCapabilities, ModelClient, ModelSpec, ProviderId, ReasoningEffort,
+    ReasoningSelection, RequestMetadata, RequestOptions, StopReason, ThinkingKind, ToolSpec,
     providers::openai::compatible::OpenAiCompatibleClient,
 };
 use serde_json::{Value, json};
@@ -570,6 +570,7 @@ async fn openai_rejects_budget_reasoning_selection_without_posting() {
 fn expected_tool_events() -> Vec<AiStreamEvent> {
     vec![
         AiStreamEvent::MessageStart {
+            phase: MessagePhase::Unknown,
             id: "chatcmpl-1".to_owned(),
         },
         AiStreamEvent::TextDelta {
@@ -595,6 +596,7 @@ fn expected_tool_events() -> Vec<AiStreamEvent> {
             raw_arguments: r#"{"path":"Cargo.toml"}"#.to_owned(),
         },
         AiStreamEvent::MessageEnd {
+            phase: MessagePhase::Unknown,
             stop_reason: StopReason::ToolUse,
             usage: Some(neo_ai::TokenUsage {
                 input_tokens: 7,

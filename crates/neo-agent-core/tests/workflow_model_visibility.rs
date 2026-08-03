@@ -88,6 +88,7 @@ fn inline_workflow_input() -> Value {
 fn tool_call_turn(id: &str, name: &str, arguments: Value, message_id: &str) -> Vec<AiStreamEvent> {
     vec![
         AiStreamEvent::MessageStart {
+            phase: neo_ai::MessagePhase::Unknown,
             id: message_id.to_owned(),
         },
         AiStreamEvent::ToolCallStart {
@@ -99,6 +100,7 @@ fn tool_call_turn(id: &str, name: &str, arguments: Value, message_id: &str) -> V
             raw_arguments: arguments.to_string(),
         },
         AiStreamEvent::MessageEnd {
+            phase: neo_ai::MessagePhase::Unknown,
             stop_reason: StopReason::ToolUse,
             usage: None,
         },
@@ -107,11 +109,15 @@ fn tool_call_turn(id: &str, name: &str, arguments: Value, message_id: &str) -> V
 
 fn done_turn(id: &str, text: &str) -> Vec<AiStreamEvent> {
     vec![
-        AiStreamEvent::MessageStart { id: id.to_owned() },
+        AiStreamEvent::MessageStart {
+            phase: neo_ai::MessagePhase::Unknown,
+            id: id.to_owned(),
+        },
         AiStreamEvent::TextDelta {
             text: text.to_owned(),
         },
         AiStreamEvent::MessageEnd {
+            phase: neo_ai::MessagePhase::Unknown,
             stop_reason: StopReason::EndTurn,
             usage: None,
         },

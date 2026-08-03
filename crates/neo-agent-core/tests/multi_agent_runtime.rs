@@ -793,6 +793,7 @@ async fn failed_child_run_discards_partial_model_attempt_from_agent_wire() {
     let runtime = MultiAgentRuntime::new().with_session_directory(session_dir.to_path_buf());
     let harness = FakeHarness::from_result_turns([vec![
         Ok(AiStreamEvent::MessageStart {
+            phase: neo_ai::MessagePhase::Unknown,
             id: "child_partial".to_owned(),
         }),
         Ok(AiStreamEvent::TextDelta {
@@ -959,6 +960,7 @@ async fn foreground_delegate_cancel_marks_child_cancelled_when_tool_future_is_dr
     let model = Arc::new(DelayedTurnModel::new(vec![
         vec![
             DelayedStep::Event(AiStreamEvent::MessageStart {
+                phase: neo_ai::MessagePhase::Unknown,
                 id: "parent".to_owned(),
             }),
             DelayedStep::Event(AiStreamEvent::ToolCallStart {
@@ -974,6 +976,7 @@ async fn foreground_delegate_cancel_marks_child_cancelled_when_tool_future_is_dr
                 raw_arguments: r#"{"task":"slow child"}"#.to_owned(),
             }),
             DelayedStep::Event(AiStreamEvent::MessageEnd {
+                phase: neo_ai::MessagePhase::Unknown,
                 stop_reason: StopReason::ToolUse,
                 usage: None,
             }),
@@ -1353,6 +1356,7 @@ async fn delegate_emits_foreground_events() {
     let harness = FakeHarness::from_turns([
         vec![
             AiStreamEvent::MessageStart {
+                phase: neo_ai::MessagePhase::Unknown,
                 id: "msg_1".to_owned(),
             },
             AiStreamEvent::ToolCallStart {
@@ -1368,18 +1372,21 @@ async fn delegate_emits_foreground_events() {
                 raw_arguments: json!({ "task": "test task" }).to_string(),
             },
             AiStreamEvent::MessageEnd {
+                phase: neo_ai::MessagePhase::Unknown,
                 stop_reason: StopReason::ToolUse,
                 usage: None,
             },
         ],
         vec![
             AiStreamEvent::MessageStart {
+                phase: neo_ai::MessagePhase::Unknown,
                 id: "child_msg_1".to_owned(),
             },
             AiStreamEvent::TextDelta {
                 text: "child inspected queue".to_owned(),
             },
             AiStreamEvent::MessageEnd {
+                phase: neo_ai::MessagePhase::Unknown,
                 stop_reason: StopReason::EndTurn,
                 usage: Some(neo_ai::TokenUsage {
                     input_tokens: 11,
@@ -1430,6 +1437,7 @@ fn foreground_delegate_harness() -> FakeHarness {
     FakeHarness::from_turns([
         vec![
             AiStreamEvent::MessageStart {
+                phase: neo_ai::MessagePhase::Unknown,
                 id: "parent_msg".to_owned(),
             },
             AiStreamEvent::ToolCallStart {
@@ -1452,18 +1460,21 @@ fn foreground_delegate_harness() -> FakeHarness {
                 .to_string(),
             },
             AiStreamEvent::MessageEnd {
+                phase: neo_ai::MessagePhase::Unknown,
                 stop_reason: StopReason::ToolUse,
                 usage: None,
             },
         ],
         vec![
             AiStreamEvent::MessageStart {
+                phase: neo_ai::MessagePhase::Unknown,
                 id: "child_msg".to_owned(),
             },
             AiStreamEvent::TextDelta {
                 text: "queue is safe".to_owned(),
             },
             AiStreamEvent::MessageEnd {
+                phase: neo_ai::MessagePhase::Unknown,
                 stop_reason: StopReason::EndTurn,
                 usage: Some(neo_ai::TokenUsage {
                     input_tokens: 13,
@@ -1564,6 +1575,7 @@ fn delegate_activity_harness() -> FakeHarness {
     FakeHarness::from_turns([
         vec![
             AiStreamEvent::MessageStart {
+                phase: neo_ai::MessagePhase::Unknown,
                 id: "parent_msg".to_owned(),
             },
             AiStreamEvent::ToolCallStart {
@@ -1575,12 +1587,14 @@ fn delegate_activity_harness() -> FakeHarness {
                 raw_arguments: json!({ "task": "inspect lib" }).to_string(),
             },
             AiStreamEvent::MessageEnd {
+                phase: neo_ai::MessagePhase::Unknown,
                 stop_reason: StopReason::ToolUse,
                 usage: None,
             },
         ],
         vec![
             AiStreamEvent::MessageStart {
+                phase: neo_ai::MessagePhase::Unknown,
                 id: "child_msg".to_owned(),
             },
             AiStreamEvent::ToolCallStart {
@@ -1592,18 +1606,21 @@ fn delegate_activity_harness() -> FakeHarness {
                 raw_arguments: json!({ "path": "crates/neo-agent-core/src/lib.rs" }).to_string(),
             },
             AiStreamEvent::MessageEnd {
+                phase: neo_ai::MessagePhase::Unknown,
                 stop_reason: StopReason::ToolUse,
                 usage: None,
             },
         ],
         vec![
             AiStreamEvent::MessageStart {
+                phase: neo_ai::MessagePhase::Unknown,
                 id: "child_msg_2".to_owned(),
             },
             AiStreamEvent::TextDelta {
                 text: "34 lines".to_owned(),
             },
             AiStreamEvent::MessageEnd {
+                phase: neo_ai::MessagePhase::Unknown,
                 stop_reason: StopReason::EndTurn,
                 usage: Some(neo_ai::TokenUsage {
                     input_tokens: 20,
@@ -1669,6 +1686,7 @@ async fn subagent_request_hides_and_blocks_parent_orchestration_tools() {
     let harness = FakeHarness::from_turns([
         vec![
             AiStreamEvent::MessageStart {
+                phase: neo_ai::MessagePhase::Unknown,
                 id: "parent_msg".to_owned(),
             },
             AiStreamEvent::ToolCallStart {
@@ -1680,18 +1698,21 @@ async fn subagent_request_hides_and_blocks_parent_orchestration_tools() {
                 raw_arguments: json!({ "task": "try recursive delegation" }).to_string(),
             },
             AiStreamEvent::MessageEnd {
+                phase: neo_ai::MessagePhase::Unknown,
                 stop_reason: StopReason::ToolUse,
                 usage: None,
             },
         ],
         vec![
             AiStreamEvent::MessageStart {
+                phase: neo_ai::MessagePhase::Unknown,
                 id: "child_msg".to_owned(),
             },
             AiStreamEvent::TextDelta {
                 text: "blocked recursive delegate".to_owned(),
             },
             AiStreamEvent::MessageEnd {
+                phase: neo_ai::MessagePhase::Unknown,
                 stop_reason: StopReason::EndTurn,
                 usage: None,
             },
@@ -1763,6 +1784,7 @@ async fn subagent_cannot_force_call_hidden_parent_tools() {
     let harness = FakeHarness::from_turns([
         vec![
             AiStreamEvent::MessageStart {
+                phase: neo_ai::MessagePhase::Unknown,
                 id: "parent_msg".to_owned(),
             },
             AiStreamEvent::ToolCallStart {
@@ -1774,12 +1796,14 @@ async fn subagent_cannot_force_call_hidden_parent_tools() {
                 raw_arguments: json!({ "task": "try hidden task output" }).to_string(),
             },
             AiStreamEvent::MessageEnd {
+                phase: neo_ai::MessagePhase::Unknown,
                 stop_reason: StopReason::ToolUse,
                 usage: None,
             },
         ],
         vec![
             AiStreamEvent::MessageStart {
+                phase: neo_ai::MessagePhase::Unknown,
                 id: "child_msg".to_owned(),
             },
             AiStreamEvent::ToolCallStart {
@@ -1791,6 +1815,7 @@ async fn subagent_cannot_force_call_hidden_parent_tools() {
                 raw_arguments: json!({}).to_string(),
             },
             AiStreamEvent::MessageEnd {
+                phase: neo_ai::MessagePhase::Unknown,
                 stop_reason: StopReason::ToolUse,
                 usage: None,
             },
@@ -2282,6 +2307,7 @@ fn latest_tool_files(
 fn named_swarm_harness() -> FakeHarness {
     FakeHarness::from_turns([vec![
         AiStreamEvent::MessageStart {
+            phase: neo_ai::MessagePhase::Unknown,
             id: "parent_msg".to_owned(),
         },
         AiStreamEvent::ToolCallStart {
@@ -2306,39 +2332,46 @@ fn named_swarm_harness() -> FakeHarness {
             }).to_string(),
         },
         AiStreamEvent::MessageEnd {
+            phase: neo_ai::MessagePhase::Unknown,
             stop_reason: StopReason::ToolUse,
             usage: None,
         },
     ], vec![
         AiStreamEvent::MessageStart {
+            phase: neo_ai::MessagePhase::Unknown,
             id: "child_api".to_owned(),
         },
         AiStreamEvent::TextDelta {
             text: "api ok".to_owned(),
         },
         AiStreamEvent::MessageEnd {
+            phase: neo_ai::MessagePhase::Unknown,
             stop_reason: StopReason::EndTurn,
             usage: None,
         },
     ], vec![
         AiStreamEvent::MessageStart {
+            phase: neo_ai::MessagePhase::Unknown,
             id: "child_tui".to_owned(),
         },
         AiStreamEvent::TextDelta {
             text: "tui ok".to_owned(),
         },
         AiStreamEvent::MessageEnd {
+            phase: neo_ai::MessagePhase::Unknown,
             stop_reason: StopReason::EndTurn,
             usage: None,
         },
     ], vec![
         AiStreamEvent::MessageStart {
+            phase: neo_ai::MessagePhase::Unknown,
             id: "child_runtime".to_owned(),
         },
         AiStreamEvent::TextDelta {
             text: "runtime ok".to_owned(),
         },
         AiStreamEvent::MessageEnd {
+            phase: neo_ai::MessagePhase::Unknown,
             stop_reason: StopReason::EndTurn,
             usage: None,
         },
@@ -2447,6 +2480,7 @@ async fn delegate_swarm_substitutes_canonical_placeholders_only() {
     let harness = FakeHarness::from_turns([
         vec![
             AiStreamEvent::MessageStart {
+                phase: neo_ai::MessagePhase::Unknown,
                 id: "parent_msg".to_owned(),
             },
             AiStreamEvent::ToolCallStart {
@@ -2467,6 +2501,7 @@ async fn delegate_swarm_substitutes_canonical_placeholders_only() {
                 .to_string(),
             },
             AiStreamEvent::MessageEnd {
+                phase: neo_ai::MessagePhase::Unknown,
                 stop_reason: StopReason::ToolUse,
                 usage: None,
             },
@@ -2606,12 +2641,14 @@ async fn delegate_tools_reject_empty_tasks_bad_context_and_zero_concurrency() {
 fn child_text_turn(text: &str) -> Vec<AiStreamEvent> {
     vec![
         AiStreamEvent::MessageStart {
+            phase: neo_ai::MessagePhase::Unknown,
             id: format!("msg_{text}"),
         },
         AiStreamEvent::TextDelta {
             text: text.to_owned(),
         },
         AiStreamEvent::MessageEnd {
+            phase: neo_ai::MessagePhase::Unknown,
             stop_reason: StopReason::EndTurn,
             usage: None,
         },
@@ -2680,12 +2717,14 @@ impl ModelClient for DelayedTurnModel {
 fn registry_with_multi_agent() -> (ToolRegistry, ToolContext) {
     let turn_done = vec![
         AiStreamEvent::MessageStart {
+            phase: neo_ai::MessagePhase::Unknown,
             id: "msg_x".to_owned(),
         },
         AiStreamEvent::TextDelta {
             text: "done".to_owned(),
         },
         AiStreamEvent::MessageEnd {
+            phase: neo_ai::MessagePhase::Unknown,
             stop_reason: StopReason::EndTurn,
             usage: None,
         },
@@ -3535,6 +3574,7 @@ async fn cancel_agent_stops_active_child_stream() {
     let runtime = MultiAgentRuntime::new();
     let model = Arc::new(DelayedTurnModel::new(vec![vec![
         DelayedStep::Event(AiStreamEvent::MessageStart {
+            phase: neo_ai::MessagePhase::Unknown,
             id: "child".to_owned(),
         }),
         DelayedStep::Event(AiStreamEvent::ThinkingStart {

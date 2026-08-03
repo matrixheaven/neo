@@ -389,10 +389,21 @@ pub enum ThinkingKind {
     Unknown,
 }
 
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum MessagePhase {
+    Commentary,
+    FinalAnswer,
+    #[default]
+    Unknown,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub enum AiStreamEvent {
     MessageStart {
         id: String,
+        #[serde(default)]
+        phase: MessagePhase,
     },
     ThinkingStart {
         id: String,
@@ -424,6 +435,8 @@ pub enum AiStreamEvent {
     MessageEnd {
         stop_reason: StopReason,
         usage: Option<TokenUsage>,
+        #[serde(default)]
+        phase: MessagePhase,
     },
 }
 

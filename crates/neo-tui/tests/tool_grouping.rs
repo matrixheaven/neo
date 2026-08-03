@@ -369,6 +369,7 @@ fn finished_tool_block_is_separated_from_streaming_assistant_text() {
     });
     // Now a live assistant message streams in after the tool finished.
     runtime.apply_agent_event(AgentEvent::MessageStarted {
+        phase: neo_ai::MessagePhase::Unknown,
         turn: 1,
         id: "a-1".to_owned(),
     });

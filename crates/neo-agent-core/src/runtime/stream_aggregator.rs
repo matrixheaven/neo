@@ -1,7 +1,7 @@
 use std::{sync::Arc, time::Duration};
 
 use futures::StreamExt;
-use neo_ai::{AiStreamEvent, ChatRequest, ModelClient, ThinkingKind};
+use neo_ai::{AiStreamEvent, ChatRequest, MessagePhase, ModelClient, ThinkingKind};
 use tokio_util::sync::CancellationToken;
 
 use super::config::AgentConfig;
@@ -68,6 +68,7 @@ struct ModelTurnState {
     tool_calls: Vec<AgentToolCall>,
     tool_names: std::collections::HashMap<String, String>,
     current_message_id: Option<String>,
+    current_message_phase: MessagePhase,
     stop_reason: StopReason,
 }
 
@@ -80,13 +81,16 @@ impl ModelTurnState {
             tool_calls: Vec::new(),
             tool_names: std::collections::HashMap::new(),
             current_message_id: None,
+            current_message_phase: MessagePhase::Unknown,
             stop_reason: StopReason::EndTurn,
         }
     }
 
     fn apply_model_event(&mut self, turn: u32, event: AiStreamEvent, emitter: &mut EventEmitter) {
         match event {
-            AiStreamEvent::MessageStart { id } => self.start_message(turn, id, emitter),
+            AiStreamEvent::MessageStart { id, phase } => {
+                self.start_message(turn, id, phase, emitter);
+            }
             AiStreamEvent::TextDelta { text } => self.apply_text_delta(turn, text, emitter),
             AiStreamEvent::ThinkingStart { id, kind } => {
                 self.start_thinking(turn, id, kind, emitter);
@@ -111,19 +115,30 @@ impl ModelTurnState {
             AiStreamEvent::ToolCallEnd { id, raw_arguments } => {
                 self.finish_tool_call(turn, id, raw_arguments, emitter);
             }
-            AiStreamEvent::MessageEnd { stop_reason, usage } => {
+            AiStreamEvent::MessageEnd {
+                stop_reason,
+                usage,
+                phase,
+            } => {
                 if let Some(usage) = usage {
                     let usage = AgentTokenUsage::from(usage);
                     emitter.emit(AgentEvent::TokenUsage { turn, usage });
                 }
-                self.finish_current_message(turn, stop_reason.into(), emitter);
+                self.finish_current_message(turn, stop_reason.into(), phase, emitter);
             }
         }
     }
 
-    fn start_message(&mut self, turn: u32, id: String, emitter: &mut EventEmitter) {
+    fn start_message(
+        &mut self,
+        turn: u32,
+        id: String,
+        phase: MessagePhase,
+        emitter: &mut EventEmitter,
+    ) {
         self.current_message_id = Some(id.clone());
-        emitter.emit(AgentEvent::MessageStarted { turn, id });
+        self.current_message_phase = phase;
+        emitter.emit(AgentEvent::MessageStarted { turn, id, phase });
     }
 
     fn apply_text_delta(&mut self, turn: u32, text: String, emitter: &mut EventEmitter) {
@@ -213,14 +228,20 @@ impl ModelTurnState {
         &mut self,
         turn: u32,
         stop_reason: StopReason,
+        phase: MessagePhase,
         emitter: &mut EventEmitter,
     ) {
         self.stop_reason = stop_reason;
+        if phase != MessagePhase::Unknown {
+            self.current_message_phase = phase;
+        }
+        let phase = self.current_message_phase;
         if let Some(id) = self.current_message_id.take() {
             emitter.emit(AgentEvent::MessageFinished {
                 turn,
                 id,
                 stop_reason,
+                phase,
             });
         }
     }
@@ -293,6 +314,7 @@ mod tests {
         for iteration in 0..32 {
             let mut stream = futures::stream::iter([Ok(AiStreamEvent::MessageStart {
                 id: "ready".to_owned(),
+                phase: MessagePhase::Unknown,
             })])
             .boxed();
             let cancel_token = CancellationToken::new();
@@ -305,5 +327,84 @@ mod tests {
                 "ready event won cancellation race at iteration {iteration}"
             );
         }
+    }
+
+    #[test]
+    fn message_phase_flows_through_runtime_message_lifecycle() {
+        let (sender, mut receiver) = tokio::sync::mpsc::unbounded_channel();
+        let mut emitter = EventEmitter::new(sender, crate::AgentContext::new());
+        let mut state = ModelTurnState::new();
+
+        state.apply_model_event(
+            1,
+            AiStreamEvent::MessageStart {
+                id: "message".to_owned(),
+                phase: MessagePhase::Commentary,
+            },
+            &mut emitter,
+        );
+        state.apply_model_event(
+            1,
+            AiStreamEvent::MessageEnd {
+                stop_reason: neo_ai::StopReason::EndTurn,
+                usage: None,
+                phase: MessagePhase::Unknown,
+            },
+            &mut emitter,
+        );
+
+        assert_eq!(
+            receiver
+                .try_recv()
+                .expect("message start event")
+                .expect("event should succeed"),
+            AgentEvent::MessageStarted {
+                turn: 1,
+                id: "message".to_owned(),
+                phase: MessagePhase::Commentary,
+            }
+        );
+        assert_eq!(
+            receiver
+                .try_recv()
+                .expect("message finish event")
+                .expect("event should succeed"),
+            AgentEvent::MessageFinished {
+                turn: 1,
+                id: "message".to_owned(),
+                stop_reason: StopReason::EndTurn,
+                phase: MessagePhase::Commentary,
+            }
+        );
+
+        let historical_started: AgentEvent = serde_json::from_value(serde_json::json!({
+            "MessageStarted": {"turn": 1, "id": "historical"}
+        }))
+        .expect("historical MessageStarted should deserialize");
+        assert_eq!(
+            historical_started,
+            AgentEvent::MessageStarted {
+                turn: 1,
+                id: "historical".to_owned(),
+                phase: MessagePhase::Unknown,
+            }
+        );
+        let historical_finished: AgentEvent = serde_json::from_value(serde_json::json!({
+            "MessageFinished": {
+                "turn": 1,
+                "id": "historical",
+                "stop_reason": "EndTurn"
+            }
+        }))
+        .expect("historical MessageFinished should deserialize");
+        assert_eq!(
+            historical_finished,
+            AgentEvent::MessageFinished {
+                turn: 1,
+                id: "historical".to_owned(),
+                stop_reason: StopReason::EndTurn,
+                phase: MessagePhase::Unknown,
+            }
+        );
     }
 }

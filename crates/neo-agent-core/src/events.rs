@@ -137,11 +137,15 @@ pub enum AgentEvent {
     MessageStarted {
         turn: u32,
         id: String,
+        #[serde(default)]
+        phase: neo_ai::MessagePhase,
     },
     MessageFinished {
         turn: u32,
         id: String,
         stop_reason: StopReason,
+        #[serde(default)]
+        phase: neo_ai::MessagePhase,
     },
     TextDelta {
         turn: u32,

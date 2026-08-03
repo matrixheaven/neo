@@ -1,6 +1,6 @@
 use neo_ai::{
-    AiStreamEvent, ChatMessage, ContentPart, ImageData, StopReason, ToolCall, ToolSpec,
-    collect_tool_arguments, providers::openai::compatible::normalize_openai_chat_sse,
+    AiStreamEvent, ChatMessage, ContentPart, ImageData, MessagePhase, StopReason, ToolCall,
+    ToolSpec, collect_tool_arguments, providers::openai::compatible::normalize_openai_chat_sse,
 };
 use serde_json::{Value, json};
 
@@ -156,7 +156,8 @@ fn openai_chat_sse_normalizer_keeps_tool_deltas_tied_to_stream_index() {
         events,
         vec![
             AiStreamEvent::MessageStart {
-                id: "chatcmpl-1".to_owned()
+                id: "chatcmpl-1".to_owned(),
+                phase: MessagePhase::Unknown,
             },
             AiStreamEvent::ToolCallStart {
                 id: "call-1".to_owned(),
@@ -181,7 +182,8 @@ fn openai_chat_sse_normalizer_keeps_tool_deltas_tied_to_stream_index() {
                     output_tokens: 3,
                     input_cache_read_tokens: 0,
                     input_cache_write_tokens: 0,
-                })
+                }),
+                phase: MessagePhase::Unknown,
             },
         ]
     );
@@ -221,6 +223,7 @@ fn chat_message_stream_event_and_tool_spec_serialize_stably() {
     let event = AiStreamEvent::MessageEnd {
         stop_reason: StopReason::ToolUse,
         usage: None,
+        phase: MessagePhase::Unknown,
     };
     let tool = ToolSpec::string_arg("read_file", "Read a file", "path", "Path to read");
 

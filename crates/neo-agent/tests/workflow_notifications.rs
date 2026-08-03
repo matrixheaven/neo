@@ -17,7 +17,8 @@ use neo_agent_core::{
     BackgroundTaskManager, MessageOrigin, SteerInputHandle, WorkflowNotification,
 };
 use neo_ai::{
-    AiError, AiStreamEvent, ChatMessage, ChatRequest, ContentPart, ModelClient, StopReason,
+    AiError, AiStreamEvent, ChatMessage, ChatRequest, ContentPart, MessagePhase, ModelClient,
+    StopReason,
 };
 use tokio::sync::Notify;
 use tokio_util::sync::CancellationToken;
@@ -80,6 +81,7 @@ impl ModelClient for CompletingWorkflowClient {
         };
         let id = format!("turn-{request_index}");
         let end = AiStreamEvent::MessageEnd {
+            phase: MessagePhase::Unknown,
             stop_reason: StopReason::EndTurn,
             usage: None,
         };
@@ -102,12 +104,22 @@ impl ModelClient for CompletingWorkflowClient {
                 })
                 .await
                 .expect("workflow notification queued during first request");
-                Ok(AiStreamEvent::MessageStart { id })
+                Ok(AiStreamEvent::MessageStart {
+                    phase: MessagePhase::Unknown,
+                    id,
+                })
             })
             .chain(stream::iter([Ok(end)]))
             .boxed();
         }
-        stream::iter([Ok(AiStreamEvent::MessageStart { id }), Ok(end)]).boxed()
+        stream::iter([
+            Ok(AiStreamEvent::MessageStart {
+                phase: MessagePhase::Unknown,
+                id,
+            }),
+            Ok(end),
+        ])
+        .boxed()
     }
 }
 
@@ -169,18 +181,22 @@ async fn terminal_workflow_notification_waits_for_natural_turn() {
     let harness = FakeHarness::from_turns([
         vec![
             AiStreamEvent::MessageStart {
+                phase: MessagePhase::Unknown,
                 id: "injected-turn".to_owned(),
             },
             AiStreamEvent::MessageEnd {
+                phase: MessagePhase::Unknown,
                 stop_reason: StopReason::EndTurn,
                 usage: None,
             },
         ],
         vec![
             AiStreamEvent::MessageStart {
+                phase: MessagePhase::Unknown,
                 id: "natural-turn".to_owned(),
             },
             AiStreamEvent::MessageEnd {
+                phase: MessagePhase::Unknown,
                 stop_reason: StopReason::EndTurn,
                 usage: None,
             },

@@ -2143,12 +2143,14 @@ mod tests {
         let session_path = temp.path().join("session.jsonl");
         let fake = FakeModelClient::new(vec![
             AiStreamEvent::MessageStart {
+                phase: neo_ai::MessagePhase::Unknown,
                 id: "msg-workflow".to_owned(),
             },
             AiStreamEvent::TextDelta {
                 text: "done".to_owned(),
             },
             AiStreamEvent::MessageEnd {
+                phase: neo_ai::MessagePhase::Unknown,
                 stop_reason: StopReason::EndTurn,
                 usage: None,
             },
@@ -2241,6 +2243,7 @@ type = "object"
         let harness = FakeHarness::from_turns([
             vec![
                 AiStreamEvent::MessageStart {
+                    phase: neo_ai::MessagePhase::Unknown,
                     id: "workflow-call".to_owned(),
                 },
                 AiStreamEvent::ToolCallStart {
@@ -2257,18 +2260,21 @@ type = "object"
                     .to_string(),
                 },
                 AiStreamEvent::MessageEnd {
+                    phase: neo_ai::MessagePhase::Unknown,
                     stop_reason: StopReason::ToolUse,
                     usage: None,
                 },
             ],
             vec![
                 AiStreamEvent::MessageStart {
+                    phase: neo_ai::MessagePhase::Unknown,
                     id: "workflow-answer".to_owned(),
                 },
                 AiStreamEvent::TextDelta {
                     text: "done".to_owned(),
                 },
                 AiStreamEvent::MessageEnd {
+                    phase: neo_ai::MessagePhase::Unknown,
                     stop_reason: StopReason::EndTurn,
                     usage: None,
                 },
@@ -2368,12 +2374,14 @@ type = "object"
             .expect("replay context");
         let fake = FakeModelClient::new(vec![
             AiStreamEvent::MessageStart {
+                phase: neo_ai::MessagePhase::Unknown,
                 id: "msg-2".to_owned(),
             },
             AiStreamEvent::TextDelta {
                 text: "continued answer".to_owned(),
             },
             AiStreamEvent::MessageEnd {
+                phase: neo_ai::MessagePhase::Unknown,
                 stop_reason: StopReason::EndTurn,
                 usage: None,
             },
@@ -2436,12 +2444,14 @@ type = "object"
         );
         let fake = FakeModelClient::new(vec![
             AiStreamEvent::MessageStart {
+                phase: neo_ai::MessagePhase::Unknown,
                 id: "msg-1".to_owned(),
             },
             AiStreamEvent::TextDelta {
                 text: "answer".to_owned(),
             },
             AiStreamEvent::MessageEnd {
+                phase: neo_ai::MessagePhase::Unknown,
                 stop_reason: StopReason::EndTurn,
                 usage: None,
             },
@@ -2677,9 +2687,11 @@ type = "object"
         );
         let first_fake = FakeModelClient::new(vec![
             AiStreamEvent::MessageStart {
+                phase: neo_ai::MessagePhase::Unknown,
                 id: "msg-1".to_owned(),
             },
             AiStreamEvent::MessageEnd {
+                phase: neo_ai::MessagePhase::Unknown,
                 stop_reason: StopReason::EndTurn,
                 usage: None,
             },
@@ -2707,9 +2719,11 @@ type = "object"
             .expect("replay context");
         let resumed_fake = FakeModelClient::new(vec![
             AiStreamEvent::MessageStart {
+                phase: neo_ai::MessagePhase::Unknown,
                 id: "msg-2".to_owned(),
             },
             AiStreamEvent::MessageEnd {
+                phase: neo_ai::MessagePhase::Unknown,
                 stop_reason: StopReason::EndTurn,
                 usage: None,
             },
@@ -2778,9 +2792,11 @@ type = "object"
         );
         let first_fake = FakeModelClient::new(vec![
             AiStreamEvent::MessageStart {
+                phase: neo_ai::MessagePhase::Unknown,
                 id: "msg-1".to_owned(),
             },
             AiStreamEvent::MessageEnd {
+                phase: neo_ai::MessagePhase::Unknown,
                 stop_reason: StopReason::EndTurn,
                 usage: None,
             },
@@ -2809,9 +2825,11 @@ type = "object"
             .expect("replay updated context");
         let resumed_fake = FakeModelClient::new(vec![
             AiStreamEvent::MessageStart {
+                phase: neo_ai::MessagePhase::Unknown,
                 id: "msg-3".to_owned(),
             },
             AiStreamEvent::MessageEnd {
+                phase: neo_ai::MessagePhase::Unknown,
                 stop_reason: StopReason::EndTurn,
                 usage: None,
             },
@@ -2884,9 +2902,11 @@ type = "object"
             .expect("replay removed context");
         let removed_fake = FakeModelClient::new(vec![
             AiStreamEvent::MessageStart {
+                phase: neo_ai::MessagePhase::Unknown,
                 id: "msg-4".to_owned(),
             },
             AiStreamEvent::MessageEnd {
+                phase: neo_ai::MessagePhase::Unknown,
                 stop_reason: StopReason::EndTurn,
                 usage: None,
             },
@@ -3005,6 +3025,7 @@ type = "object"
         let harness = FakeHarness::from_turns([
             vec![
                 AiStreamEvent::MessageStart {
+                    phase: neo_ai::MessagePhase::Unknown,
                     id: "msg-1".to_owned(),
                 },
                 AiStreamEvent::ToolCallStart {
@@ -3016,12 +3037,14 @@ type = "object"
                     raw_arguments: read_arguments.clone(),
                 },
                 AiStreamEvent::MessageEnd {
+                    phase: neo_ai::MessagePhase::Unknown,
                     stop_reason: StopReason::ToolUse,
                     usage: None,
                 },
             ],
             vec![
                 AiStreamEvent::MessageStart {
+                    phase: neo_ai::MessagePhase::Unknown,
                     id: "msg-2".to_owned(),
                 },
                 AiStreamEvent::ToolCallStart {
@@ -3033,18 +3056,21 @@ type = "object"
                     raw_arguments: read_arguments,
                 },
                 AiStreamEvent::MessageEnd {
+                    phase: neo_ai::MessagePhase::Unknown,
                     stop_reason: StopReason::ToolUse,
                     usage: None,
                 },
             ],
             vec![
                 AiStreamEvent::MessageStart {
+                    phase: neo_ai::MessagePhase::Unknown,
                     id: "msg-3".to_owned(),
                 },
                 AiStreamEvent::TextDelta {
                     text: "done".to_owned(),
                 },
                 AiStreamEvent::MessageEnd {
+                    phase: neo_ai::MessagePhase::Unknown,
                     stop_reason: StopReason::EndTurn,
                     usage: None,
                 },

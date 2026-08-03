@@ -738,6 +738,7 @@ mod tests {
             neo_ai::AiStreamEvent::MessageEnd {
                 stop_reason: neo_ai::StopReason::EndTurn,
                 usage: None,
+                phase: neo_ai::MessagePhase::Unknown,
             },
         ]);
         let mut config = fake_compaction_config();
@@ -824,6 +825,7 @@ mod tests {
             neo_ai::AiStreamEvent::MessageEnd {
                 stop_reason: neo_ai::StopReason::EndTurn,
                 usage: None,
+                phase: neo_ai::MessagePhase::Unknown,
             },
         ]);
         let mut config = fake_compaction_config();

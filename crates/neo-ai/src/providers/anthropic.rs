@@ -650,7 +650,10 @@ impl ParseState {
         if self.started {
             return;
         }
-        self.events.push(AiStreamEvent::MessageStart { id });
+        self.events.push(AiStreamEvent::MessageStart {
+            id,
+            phase: crate::MessagePhase::Unknown,
+        });
         self.started = true;
     }
 
@@ -810,6 +813,7 @@ impl ParseState {
             self.events.push(AiStreamEvent::MessageEnd {
                 stop_reason: self.last_stop_reason.clone(),
                 usage: self.usage.clone(),
+                phase: crate::MessagePhase::Unknown,
             });
         }
 

@@ -1874,6 +1874,7 @@ fn retry_keeps_working_mode_until_turn_finishes() {
 
     let mut ordinary = NeoChromeState::new("neo", "ordinary", "openai/gpt-4.1", "/tmp/neo-ws");
     ordinary.apply_agent_event(neo_agent_core::AgentEvent::MessageStarted {
+        phase: neo_ai::MessagePhase::Unknown,
         turn: 2,
         id: "ordinary-error".to_owned(),
     });

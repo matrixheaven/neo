@@ -174,6 +174,7 @@ mod tests {
         FakeHarness::from_events([
             AiStreamEvent::MessageStart {
                 id: "summary".to_owned(),
+                phase: neo_ai::MessagePhase::Unknown,
             },
             AiStreamEvent::TextDelta {
                 text: "summary".to_owned(),
@@ -181,6 +182,7 @@ mod tests {
             AiStreamEvent::MessageEnd {
                 stop_reason: neo_ai::StopReason::EndTurn,
                 usage: None,
+                phase: neo_ai::MessagePhase::Unknown,
             },
         ])
     }

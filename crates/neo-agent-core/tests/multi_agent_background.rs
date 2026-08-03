@@ -24,12 +24,14 @@ use tokio::sync::{Notify, oneshot};
 fn registry_with_multi_agent() -> (ToolRegistry, ToolContext) {
     let turn_done = vec![
         AiStreamEvent::MessageStart {
+            phase: neo_ai::MessagePhase::Unknown,
             id: "msg_x".to_owned(),
         },
         AiStreamEvent::TextDelta {
             text: "done".to_owned(),
         },
         AiStreamEvent::MessageEnd {
+            phase: neo_ai::MessagePhase::Unknown,
             stop_reason: StopReason::EndTurn,
             usage: None,
         },
@@ -54,6 +56,7 @@ fn registry_with_multi_agent() -> (ToolRegistry, ToolContext) {
 async fn swarm_text_deltas_are_bounded_and_background_updates_stay_ordered() {
     let harness = FakeHarness::from_turns([vec![
         AiStreamEvent::MessageStart {
+            phase: neo_ai::MessagePhase::Unknown,
             id: "msg_1".to_owned(),
         },
         AiStreamEvent::TextDelta {
@@ -63,6 +66,7 @@ async fn swarm_text_deltas_are_bounded_and_background_updates_stay_ordered() {
             text: "latest".to_owned(),
         },
         AiStreamEvent::MessageEnd {
+            phase: neo_ai::MessagePhase::Unknown,
             stop_reason: StopReason::EndTurn,
             usage: None,
         },
@@ -239,6 +243,7 @@ async fn background_manager_lists_swarm_tasks() {
 async fn delegate_background_registers_task() {
     let harness = FakeHarness::from_turns([vec![
         AiStreamEvent::MessageStart {
+            phase: neo_ai::MessagePhase::Unknown,
             id: "msg_1".to_owned(),
         },
         AiStreamEvent::ToolCallStart {
@@ -254,6 +259,7 @@ async fn delegate_background_registers_task() {
             raw_arguments: json!({ "task": "bg task", "mode": "background" }).to_string(),
         },
         AiStreamEvent::MessageEnd {
+            phase: neo_ai::MessagePhase::Unknown,
             stop_reason: StopReason::ToolUse,
             usage: None,
         },
@@ -899,6 +905,7 @@ async fn message_delegate_delivers_to_running_background_delegate_as_live_steer(
     let harness = FakeHarness::from_turns([
         vec![
             AiStreamEvent::MessageStart {
+                phase: neo_ai::MessagePhase::Unknown,
                 id: "child_msg_1".to_owned(),
             },
             AiStreamEvent::ToolCallStart {
@@ -910,18 +917,21 @@ async fn message_delegate_delivers_to_running_background_delegate_as_live_steer(
                 raw_arguments: json!({}).to_string(),
             },
             AiStreamEvent::MessageEnd {
+                phase: neo_ai::MessagePhase::Unknown,
                 stop_reason: StopReason::ToolUse,
                 usage: None,
             },
         ],
         vec![
             AiStreamEvent::MessageStart {
+                phase: neo_ai::MessagePhase::Unknown,
                 id: "child_msg_2".to_owned(),
             },
             AiStreamEvent::TextDelta {
                 text: "saw live steer".to_owned(),
             },
             AiStreamEvent::MessageEnd {
+                phase: neo_ai::MessagePhase::Unknown,
                 stop_reason: StopReason::EndTurn,
                 usage: None,
             },
@@ -1674,6 +1684,7 @@ impl neo_ai::ModelClient for BlockingChildModel {
                 sent_start = true;
                 return Some((
                     Ok(neo_ai::AiStreamEvent::MessageStart {
+                        phase: neo_ai::MessagePhase::Unknown,
                         id: "blocking-child".to_owned(),
                     }),
                     sent_start,
@@ -1912,12 +1923,14 @@ async fn interrupt_delegate_stops_running_swarm_children() {
 fn normal_turn_events() -> Vec<AiStreamEvent> {
     vec![
         AiStreamEvent::MessageStart {
+            phase: neo_ai::MessagePhase::Unknown,
             id: "msg_panic_test".to_owned(),
         },
         AiStreamEvent::TextDelta {
             text: "working".to_owned(),
         },
         AiStreamEvent::MessageEnd {
+            phase: neo_ai::MessagePhase::Unknown,
             stop_reason: StopReason::EndTurn,
             usage: None,
         },

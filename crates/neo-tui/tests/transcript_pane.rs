@@ -1136,6 +1136,7 @@ fn transcript_pane_keeps_streaming_assistant_in_transcript_until_finished() {
 
     transcript_pane.push_user_message("hello");
     transcript_pane.apply_agent_event(neo_agent_core::AgentEvent::MessageStarted {
+        phase: neo_ai::MessagePhase::Unknown,
         turn: 1,
         id: "assistant-1".to_owned(),
     });
@@ -1160,6 +1161,7 @@ fn transcript_pane_keeps_streaming_assistant_in_transcript_until_finished() {
     );
 
     transcript_pane.apply_agent_event(neo_agent_core::AgentEvent::MessageFinished {
+        phase: neo_ai::MessagePhase::Unknown,
         turn: 1,
         id: "assistant-1".to_owned(),
         stop_reason: neo_agent_core::StopReason::EndTurn,
@@ -1180,6 +1182,7 @@ fn message_started_does_not_create_empty_assistant_entry() {
     let mut transcript_pane = TranscriptPane::new(80, 12);
 
     transcript_pane.apply_agent_event(neo_agent_core::AgentEvent::MessageStarted {
+        phase: neo_ai::MessagePhase::Unknown,
         turn: 1,
         id: "assistant-1".to_owned(),
     });
@@ -1195,6 +1198,7 @@ fn text_after_tool_starts_a_new_assistant_entry_after_the_tool() {
     let mut transcript_pane = TranscriptPane::new(80, 16);
 
     transcript_pane.apply_agent_event(neo_agent_core::AgentEvent::MessageStarted {
+        phase: neo_ai::MessagePhase::Unknown,
         turn: 1,
         id: "assistant-1".to_owned(),
     });
@@ -1311,6 +1315,7 @@ fn finishing_streaming_assistant_preserves_body_row_shape() {
 
     transcript_pane.push_user_message("hello");
     transcript_pane.apply_agent_event(neo_agent_core::AgentEvent::MessageStarted {
+        phase: neo_ai::MessagePhase::Unknown,
         turn: 1,
         id: "assistant-1".to_owned(),
     });
@@ -1336,6 +1341,7 @@ fn finishing_streaming_assistant_preserves_body_row_shape() {
     assert_eq!(live[live_user + 1], "");
 
     transcript_pane.apply_agent_event(neo_agent_core::AgentEvent::MessageFinished {
+        phase: neo_ai::MessagePhase::Unknown,
         turn: 1,
         id: "assistant-1".to_owned(),
         stop_reason: neo_agent_core::StopReason::EndTurn,
@@ -1730,6 +1736,7 @@ fn transcript_pane_finishes_streaming_assistant_once_without_duplicate() {
     let mut transcript_pane = TranscriptPane::new(80, 12);
 
     transcript_pane.apply_agent_event(neo_agent_core::AgentEvent::MessageStarted {
+        phase: neo_ai::MessagePhase::Unknown,
         turn: 1,
         id: "assistant-1".to_owned(),
     });
@@ -1747,6 +1754,7 @@ fn transcript_pane_finishes_streaming_assistant_once_without_duplicate() {
     );
 
     transcript_pane.apply_agent_event(neo_agent_core::AgentEvent::MessageFinished {
+        phase: neo_ai::MessagePhase::Unknown,
         turn: 1,
         id: "assistant-1".to_owned(),
         stop_reason: neo_agent_core::StopReason::EndTurn,
@@ -2152,6 +2160,7 @@ fn retry_status_mutates_original_position() {
     let mut pane = TranscriptPane::new(80, 20);
     pane.push_user_message("question");
     pane.apply_agent_event(neo_agent_core::AgentEvent::MessageStarted {
+        phase: neo_ai::MessagePhase::Unknown,
         turn: 1,
         id: "attempt-1".to_owned(),
     });
@@ -2185,6 +2194,7 @@ fn retry_status_mutates_original_position() {
 
     pane.apply_agent_event(neo_agent_core::AgentEvent::RetryResumed { turn: 1, retry: 1 });
     pane.apply_agent_event(neo_agent_core::AgentEvent::MessageStarted {
+        phase: neo_ai::MessagePhase::Unknown,
         turn: 1,
         id: "attempt-2".to_owned(),
     });
@@ -2250,6 +2260,7 @@ fn retry_status_mutates_original_position() {
 fn retry_attempt_stays_out_of_terminal_history_until_message_finishes() {
     let mut pane = TranscriptPane::new(40, 8);
     pane.apply_agent_event(neo_agent_core::AgentEvent::MessageStarted {
+        phase: neo_ai::MessagePhase::Unknown,
         turn: 1,
         id: "attempt-1".to_owned(),
     });
@@ -2291,6 +2302,7 @@ fn retry_attempt_stays_out_of_terminal_history_until_message_finishes() {
 
     schedule_and_resume_retry(&mut pane, 1);
     pane.apply_agent_event(neo_agent_core::AgentEvent::MessageStarted {
+        phase: neo_ai::MessagePhase::Unknown,
         turn: 1,
         id: "attempt-2".to_owned(),
     });
@@ -2299,6 +2311,7 @@ fn retry_attempt_stays_out_of_terminal_history_until_message_finishes() {
         text: "winning answer".to_owned(),
     });
     pane.apply_agent_event(neo_agent_core::AgentEvent::MessageFinished {
+        phase: neo_ai::MessagePhase::Unknown,
         turn: 1,
         id: "attempt-2".to_owned(),
         stop_reason: neo_agent_core::StopReason::EndTurn,
@@ -2403,10 +2416,12 @@ fn retry_tool_first_reuses_anchor_before_intervening_finalized_entry() {
 fn provider_message_finished_error_renders_one_terminal_error_row() {
     let mut pane = TranscriptPane::new(80, 20);
     pane.apply_agent_event(neo_agent_core::AgentEvent::MessageStarted {
+        phase: neo_ai::MessagePhase::Unknown,
         turn: 1,
         id: "assistant-1".to_owned(),
     });
     pane.apply_agent_event(neo_agent_core::AgentEvent::MessageFinished {
+        phase: neo_ai::MessagePhase::Unknown,
         turn: 1,
         id: "assistant-1".to_owned(),
         stop_reason: neo_agent_core::StopReason::Error,
@@ -2605,6 +2620,7 @@ fn retry_reset_preserves_earlier_turn_live_entry() {
     });
     let older_id = pane.transcript().entry_ids()[0];
     pane.apply_agent_event(neo_agent_core::AgentEvent::MessageStarted {
+        phase: neo_ai::MessagePhase::Unknown,
         turn: 2,
         id: "attempt-2".to_owned(),
     });

@@ -27,6 +27,7 @@ fn valid_input(name: &str) -> Value {
 
 fn harness_for_calls(calls: &[(&str, Value)]) -> FakeHarness {
     let mut first = vec![AiStreamEvent::MessageStart {
+        phase: neo_ai::MessagePhase::Unknown,
         id: "msg_1".to_owned(),
     }];
     for (id, arguments) in calls {
@@ -40,6 +41,7 @@ fn harness_for_calls(calls: &[(&str, Value)]) -> FakeHarness {
         });
     }
     first.push(AiStreamEvent::MessageEnd {
+        phase: neo_ai::MessagePhase::Unknown,
         stop_reason: neo_ai::StopReason::ToolUse,
         usage: None,
     });
@@ -47,9 +49,11 @@ fn harness_for_calls(calls: &[(&str, Value)]) -> FakeHarness {
         first,
         vec![
             AiStreamEvent::MessageStart {
+                phase: neo_ai::MessagePhase::Unknown,
                 id: "msg_2".to_owned(),
             },
             AiStreamEvent::MessageEnd {
+                phase: neo_ai::MessagePhase::Unknown,
                 stop_reason: neo_ai::StopReason::EndTurn,
                 usage: None,
             },

@@ -299,12 +299,14 @@ fn text_turn(text: &str, usage: Option<(u32, u32)>) -> Vec<neo_ai::AiStreamEvent
     use neo_ai::{AiStreamEvent, StopReason, TokenUsage};
     vec![
         AiStreamEvent::MessageStart {
+            phase: neo_ai::MessagePhase::Unknown,
             id: format!("msg_{text}"),
         },
         AiStreamEvent::TextDelta {
             text: text.to_owned(),
         },
         AiStreamEvent::MessageEnd {
+            phase: neo_ai::MessagePhase::Unknown,
             stop_reason: StopReason::EndTurn,
             usage: usage.map(|(input_tokens, output_tokens)| TokenUsage {
                 input_tokens,
@@ -324,6 +326,7 @@ fn todo_turn_with_usage(
     use neo_ai::{AiStreamEvent, StopReason, TokenUsage};
     vec![
         AiStreamEvent::MessageStart {
+            phase: neo_ai::MessagePhase::Unknown,
             id: format!("message_{id}"),
         },
         AiStreamEvent::ToolCallStart {
@@ -335,6 +338,7 @@ fn todo_turn_with_usage(
             raw_arguments: "{}".to_owned(),
         },
         AiStreamEvent::MessageEnd {
+            phase: neo_ai::MessagePhase::Unknown,
             stop_reason: StopReason::ToolUse,
             usage: Some(TokenUsage {
                 input_tokens,
@@ -354,12 +358,14 @@ fn error_turn_with_usage(
     use neo_ai::{AiStreamEvent, StopReason, TokenUsage};
     vec![
         AiStreamEvent::MessageStart {
+            phase: neo_ai::MessagePhase::Unknown,
             id: "usage_before_failure".to_owned(),
         },
         AiStreamEvent::TextDelta {
             text: message.to_owned(),
         },
         AiStreamEvent::MessageEnd {
+            phase: neo_ai::MessagePhase::Unknown,
             stop_reason: StopReason::Error,
             usage: Some(TokenUsage {
                 input_tokens,
