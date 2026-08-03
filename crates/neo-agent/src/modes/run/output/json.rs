@@ -696,6 +696,7 @@ fn stable_content(content: &[Content]) -> Vec<Value> {
                 signature,
                 redacted,
                 kind,
+                ..
             } => json!({
                 "type": "thinking",
                 "thinking": text,

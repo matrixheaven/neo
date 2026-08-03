@@ -12956,7 +12956,11 @@ async fn slash_new_preserves_model_permission_reasoning_and_plan_mode() {
         neo_ai::ReasoningSelection::On,
         "structured reasoning selection is preserved across /new"
     );
-    assert!(controller.chrome().thinking_enabled());
+    assert_eq!(
+        controller.chrome().reasoning_label(),
+        Some("on".to_owned()),
+        "reasoning indicator is preserved across /new"
+    );
     assert_eq!(controller.chrome().model_label(), "openai/gpt-4.1");
     assert!(
         controller.chrome().is_plan_mode(),
@@ -13140,12 +13144,9 @@ async fn permission_switch_does_not_split_streaming_thinking() {
     );
     let thinking = transcript_entries(&controller)
         .iter()
-        .filter_map(|entry| match entry {
-            TranscriptEntry::ThinkingBlock { content, .. } => Some(content.as_str()),
-            _ => None,
-        })
+        .filter_map(TranscriptEntry::thinking_content)
         .collect::<Vec<_>>();
-    assert_eq!(thinking, ["The CompactionSettings"]);
+    assert_eq!(thinking, vec!["The CompactionSettings".to_owned()]);
 
     controller.cancel_active_turn().await.expect("cancel turn");
 }
