@@ -3,6 +3,7 @@ use std::sync::Arc;
 
 use futures::{StreamExt, stream::FuturesUnordered};
 use neo_ai::ModelClient;
+use serde_json::json;
 use tokio_util::sync::CancellationToken;
 
 use super::config::{AgentConfig, BlockedInstructionScope, ToolExecutionMode};
@@ -732,7 +733,9 @@ fn recheck_prepared_mutations(
     authorized: &mut [AuthorizedToolCall<'_>],
 ) {
     for entry in authorized.iter_mut() {
-        if !matches!(entry.outcome, AuthorizedToolCallOutcome::Run { .. }) {
+        if entry.coalesced_into.is_some()
+            || !matches!(entry.outcome, AuthorizedToolCallOutcome::Run { .. })
+        {
             continue;
         }
         let Some(prepared) = entry.prepared.as_ref() else {
@@ -764,6 +767,7 @@ struct AuthorizedToolCall<'a> {
     tool_call: &'a AgentToolCall,
     prepared: Option<super::tool_arguments::PreparedToolCall>,
     class: ToolSchedulingClass,
+    coalesced_into: Option<usize>,
     outcome: AuthorizedToolCallOutcome,
 }
 
@@ -813,6 +817,7 @@ async fn authorize_tool_batch<'a>(
                 tool_call,
                 prepared: None,
                 class: ToolSchedulingClass::ParallelSafe,
+                coalesced_into: None,
                 outcome: AuthorizedToolCallOutcome::Terminal {
                     result: error,
                     permission_decision: None,
@@ -864,6 +869,7 @@ async fn authorize_tool_batch<'a>(
                     tool_call,
                     prepared: Some(prepared_call),
                     class,
+                    coalesced_into: None,
                     outcome,
                 }
             }
@@ -871,6 +877,80 @@ async fn authorize_tool_batch<'a>(
         authorized.push(entry);
     }
     authorized
+}
+
+fn coalesce_authorized_edit_groups(authorized: &mut [AuthorizedToolCall<'_>]) {
+    let mut group_start = 0;
+    while group_start < authorized.len() {
+        let Some(target) = authorized_edit_target(&authorized[group_start]) else {
+            group_start += 1;
+            continue;
+        };
+
+        let mut group_end = group_start + 1;
+        while group_end < authorized.len() {
+            let Some(next_target) = authorized_edit_target(&authorized[group_end]) else {
+                break;
+            };
+            if next_target != target {
+                break;
+            }
+            group_end += 1;
+        }
+
+        if group_end - group_start > 1 {
+            let coalesced = {
+                let edits = (group_start..group_end)
+                    .map(|index| {
+                        let prepared = authorized[index].prepared.as_ref()?;
+                        let super::tool_arguments::PreparedExecution::Edit(edit) =
+                            &prepared.execution
+                        else {
+                            return None;
+                        };
+                        Some(edit.as_ref())
+                    })
+                    .collect::<Option<Vec<_>>>();
+                edits.map(|edits| PreparedEdit::coalesce_same_file(&edits))
+            };
+
+            match coalesced {
+                Some(Ok(combined)) => {
+                    if let Some(prepared) = authorized[group_start].prepared.as_mut() {
+                        prepared.execution = PreparedExecution::Edit(combined);
+                    }
+                    for entry in &mut authorized[group_start + 1..group_end] {
+                        entry.coalesced_into = Some(group_start);
+                    }
+                }
+                Some(Err(result)) => {
+                    for entry in &mut authorized[group_start..group_end] {
+                        entry.coalesced_into = None;
+                        entry.outcome = AuthorizedToolCallOutcome::Terminal {
+                            result: result.clone(),
+                            permission_decision: None,
+                        };
+                    }
+                }
+                None => {}
+            }
+        }
+
+        group_start = group_end;
+    }
+}
+
+fn authorized_edit_target<'a>(entry: &'a AuthorizedToolCall<'_>) -> Option<&'a Path> {
+    if entry.tool_call.name.as_ref() != "Edit"
+        || !matches!(&entry.outcome, AuthorizedToolCallOutcome::Run { .. })
+    {
+        return None;
+    }
+    let prepared = entry.prepared.as_ref()?;
+    let PreparedExecution::Edit(edit) = &prepared.execution else {
+        return None;
+    };
+    edit.single_resolved_target()
 }
 
 // ---------------------------------------------------------------------------
@@ -1053,6 +1133,8 @@ pub(super) async fn execute_tool_calls(
     {
         return Ok(outcome);
     }
+
+    coalesce_authorized_edit_groups(&mut authorized);
 
     // Phase 6 — recheck every prepared Edit and Write target after approval and
     // instruction recheck. Stale targets become terminal results with zero writes.
@@ -1600,6 +1682,53 @@ fn uses_shell_admission(name: &str, arguments: &serde_json::Value) -> bool {
             && arguments.get("mode").and_then(serde_json::Value::as_str) == Some("start"))
 }
 
+fn coalesced_follower_result(primary_call_id: &str, primary: &ToolResult) -> ToolResult {
+    let primary_status = primary
+        .details
+        .as_ref()
+        .and_then(|details| details.get("status"))
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or(if primary.is_error {
+            "failed"
+        } else {
+            "committed"
+        });
+    let side_effect_occurred = primary
+        .details
+        .as_ref()
+        .and_then(|details| details.get("side_effect_occurred"))
+        .and_then(serde_json::Value::as_bool)
+        .unwrap_or(matches!(
+            primary_status,
+            "committed" | "committed_unsynced" | "durability_uncertain"
+        ));
+    let status = if primary.is_error {
+        "coalesced_failed"
+    } else {
+        "coalesced"
+    };
+    let message = if primary.is_error {
+        format!(
+            "Edit was part of same-file transaction led by {primary_call_id}; the transaction failed and no separate write was attempted."
+        )
+    } else {
+        format!("Edit committed as part of same-file transaction led by {primary_call_id}.")
+    };
+    let result = if primary.is_error {
+        ToolResult::error(message)
+    } else {
+        ToolResult::ok(message)
+    };
+    result.with_details(json!({
+        "kind": "edit",
+        "status": status,
+        "coalesced": true,
+        "primary_call_id": primary_call_id,
+        "primary_status": primary_status,
+        "side_effect_occurred": side_effect_occurred,
+    }))
+}
+
 async fn execute_authorized_sequential(
     config: &AgentConfig,
     registry: Arc<ToolRegistry>,
@@ -1610,8 +1739,40 @@ async fn execute_authorized_sequential(
     (emitter, cancel_token): (&mut EventEmitter, &CancellationToken),
 ) -> Result<(Vec<(AgentToolCall, ToolResult)>, bool), AgentRuntimeError> {
     let mut results = Vec::new();
+    let mut group_results = vec![None; authorized.len()];
     let mut executed_any = false;
-    for entry in authorized {
+    for (index, entry) in authorized.iter().enumerate() {
+        if let Some(primary_index) = entry.coalesced_into {
+            let primary_result = group_results
+                .get(primary_index)
+                .and_then(Option::as_ref)
+                .expect("coalesced Edit follower must follow its primary");
+            let primary_call_id = authorized[primary_index].tool_call.id.to_string();
+            let prepared_call = entry
+                .prepared
+                .as_ref()
+                .expect("coalesced Edit follower must be prepared");
+            let mut result = coalesced_follower_result(&primary_call_id, primary_result);
+            if !cancel_token.is_cancelled() {
+                result = after_tool_result(config, entry.tool_call, result, cancel_token).await;
+            }
+            result.terminate |= primary_result.terminate;
+            emit_authorized_call_result(
+                turn,
+                entry.tool_call,
+                Some(&prepared_call.arguments),
+                &result,
+                tool_context,
+                emitter,
+            );
+            results.push((entry.tool_call.clone(), result.clone()));
+            group_results[index] = Some(result);
+            if cancel_token.is_cancelled() {
+                break;
+            }
+            continue;
+        }
+
         let (tool_call, result, executed) = execute_one_authorized_tool(
             config,
             Arc::clone(&registry),
@@ -1623,6 +1784,7 @@ async fn execute_authorized_sequential(
         )
         .await?;
         executed_any |= executed;
+        group_results[index] = Some(result.clone());
         results.push((tool_call, result));
         if cancel_token.is_cancelled() {
             break;
@@ -2341,6 +2503,187 @@ mod tests {
                 Err(ToolError::Cancelled)
             })
         }
+    }
+
+    #[tokio::test]
+    async fn same_file_edit_batch_commits_once_and_returns_results_for_each_call() {
+        let workspace = tempfile::tempdir().expect("workspace");
+        std::fs::write(workspace.path().join("file.txt"), "one\ntwo\n").expect("seed file");
+        let config = AgentConfig::for_model(fake_model())
+            .with_workspace_root(workspace.path())
+            .expect("workspace root")
+            .with_permission_mode(PermissionMode::Yolo)
+            .with_tool_execution_mode(ToolExecutionMode::Parallel)
+            .with_after_tool_call(|_, result| result.terminate());
+        let model: Arc<dyn ModelClient> =
+            Arc::new(neo_ai::providers::fake::FakeModelClient::new(Vec::new()));
+        let registry = Arc::new(ToolRegistry::with_builtin_tools());
+        let calls = [
+            AgentToolCall {
+                id: "edit-1".into(),
+                name: "Edit".into(),
+                raw_arguments: r#"{"path":"file.txt","old":"one","new":"ONE"}"#.into(),
+            },
+            AgentToolCall {
+                id: "edit-2".into(),
+                name: "Edit".into(),
+                raw_arguments: r#"{"path":"file.txt","old":"two","new":"TWO"}"#.into(),
+            },
+        ];
+        let cancel = CancellationToken::new();
+        let supervisor = ProcessSupervisor::default();
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let mut emitter = EventEmitter::new(tx, AgentContext::new());
+
+        let outcome = execute_tool_calls(
+            ToolExecutionDeps {
+                config: &config,
+                model,
+                registry,
+                skills: None,
+                cancel_token: &cancel,
+                process_supervisor: &supervisor,
+            },
+            1,
+            &calls,
+            &mut emitter,
+        )
+        .await
+        .expect("tool dispatch");
+
+        assert_eq!(outcome.results.len(), 2);
+        assert_eq!(outcome.permission_decisions.len(), 2);
+        assert!(!outcome.results[0].1.is_error);
+        assert!(!outcome.results[1].1.is_error);
+        assert!(outcome.results[0].1.terminate);
+        assert!(outcome.results[1].1.terminate);
+        assert_eq!(
+            outcome.results[0]
+                .1
+                .details
+                .as_ref()
+                .expect("primary details")["status"],
+            "committed"
+        );
+        assert_eq!(
+            outcome.results[1]
+                .1
+                .details
+                .as_ref()
+                .expect("follower details")["status"],
+            "coalesced"
+        );
+        assert_eq!(
+            outcome.results[1]
+                .1
+                .details
+                .as_ref()
+                .expect("follower details")["primary_call_id"],
+            "edit-1"
+        );
+        assert_eq!(
+            std::fs::read_to_string(workspace.path().join("file.txt")).expect("read result"),
+            "ONE\nTWO\n"
+        );
+
+        let events = std::iter::from_fn(|| rx.try_recv().ok())
+            .collect::<Result<Vec<_>, _>>()
+            .expect("runtime events");
+        let started = events
+            .iter()
+            .filter(|event| {
+                matches!(
+                    event,
+                    AgentEvent::ToolExecutionStarted { name, .. } if name == "Edit"
+                )
+            })
+            .count();
+        let progress = events
+            .iter()
+            .filter(|event| {
+                matches!(
+                    event,
+                    AgentEvent::ToolExecutionUpdate { partial_result, .. }
+                        if partial_result
+                            .details
+                            .as_ref()
+                            .and_then(|details| details.get("kind"))
+                            .and_then(serde_json::Value::as_str)
+                            == Some("edit_progress")
+                )
+            })
+            .count();
+        assert_eq!(started, 1);
+        assert_eq!(progress, 1);
+    }
+
+    #[tokio::test]
+    async fn same_file_edit_batch_conflict_writes_nothing() {
+        let workspace = tempfile::tempdir().expect("workspace");
+        let path = workspace.path().join("file.txt");
+        std::fs::write(&path, "before\n").expect("seed file");
+        let config = AgentConfig::for_model(fake_model())
+            .with_workspace_root(workspace.path())
+            .expect("workspace root")
+            .with_permission_mode(PermissionMode::Yolo)
+            .with_tool_execution_mode(ToolExecutionMode::Parallel);
+        let model: Arc<dyn ModelClient> =
+            Arc::new(neo_ai::providers::fake::FakeModelClient::new(Vec::new()));
+        let registry = Arc::new(ToolRegistry::with_builtin_tools());
+        let calls = [
+            AgentToolCall {
+                id: "edit-1".into(),
+                name: "Edit".into(),
+                raw_arguments: r#"{"path":"file.txt","old":"before","new":"after"}"#.into(),
+            },
+            AgentToolCall {
+                id: "edit-2".into(),
+                name: "Edit".into(),
+                raw_arguments: r#"{"path":"file.txt","old":"before","new":"again"}"#.into(),
+            },
+        ];
+        let cancel = CancellationToken::new();
+        let supervisor = ProcessSupervisor::default();
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let mut emitter = EventEmitter::new(tx, AgentContext::new());
+
+        let outcome = execute_tool_calls(
+            ToolExecutionDeps {
+                config: &config,
+                model,
+                registry,
+                skills: None,
+                cancel_token: &cancel,
+                process_supervisor: &supervisor,
+            },
+            1,
+            &calls,
+            &mut emitter,
+        )
+        .await
+        .expect("tool dispatch");
+
+        assert_eq!(outcome.results.len(), 2);
+        assert!(outcome.results.iter().all(|(_, result)| result.is_error));
+        assert!(outcome.results.iter().all(|(_, result)| {
+            result
+                .details
+                .as_ref()
+                .and_then(|details| details.get("status"))
+                == Some(&json!("same_batch_conflict"))
+        }));
+        assert!(!outcome.executed_any);
+        assert_eq!(
+            std::fs::read_to_string(path).expect("read file"),
+            "before\n"
+        );
+
+        let events = std::iter::from_fn(|| rx.try_recv().ok())
+            .collect::<Result<Vec<_>, _>>()
+            .expect("runtime events");
+        assert!(!events.iter().any(|event| {
+            matches!(event, AgentEvent::ToolExecutionStarted { name, .. } if name == "Edit")
+        }));
     }
 
     #[tokio::test]

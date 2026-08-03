@@ -20,7 +20,7 @@ const fn default_expected_matches() -> usize {
     1
 }
 
-#[derive(Debug, Deserialize, JsonSchema)]
+#[derive(Debug, Clone, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 struct EditInput {
     #[schemars(
@@ -85,6 +85,8 @@ fn prepare_edit(
         requested_path: input.path.clone(),
         resolved_path: resolved,
         fingerprint,
+        original,
+        operations: vec![input.clone()],
         staged,
         replacements: 1,
         added,
@@ -251,6 +253,8 @@ struct PreparedEditFile {
     requested_path: PathBuf,
     resolved_path: PathBuf,
     fingerprint: EditFingerprint,
+    original: String,
+    operations: Vec<EditInput>,
     staged: String,
     replacements: usize,
     added: usize,
@@ -333,6 +337,109 @@ impl PreparedEdit {
         Ok(Arc::new(Self {
             files: prepared_files,
             replacements: 1,
+            added,
+            removed,
+        }))
+    }
+
+    pub(crate) fn single_resolved_target(&self) -> Option<&Path> {
+        (self.files.len() == 1).then(|| self.files[0].resolved_path.as_path())
+    }
+
+    /// Compose consecutive prepared edits for one target without touching disk.
+    /// The first prepared fingerprint remains the transaction's external CAS
+    /// guard; every operation after the first is applied to the prior staged
+    /// content and must still match there.
+    pub(crate) fn coalesce_same_file(edits: &[&PreparedEdit]) -> Result<Arc<Self>, ToolResult> {
+        let Some(first) = edits.first() else {
+            return Err(same_batch_conflict(
+                None,
+                None,
+                "same-file Edit group is empty",
+            ));
+        };
+        let Some(first_file) = first.files.first() else {
+            return Err(same_batch_conflict(
+                None,
+                None,
+                "same-file Edit group has no prepared target",
+            ));
+        };
+        if edits.iter().any(|edit| edit.files.len() != 1) {
+            return Err(same_batch_conflict(
+                None,
+                Some(first_file.requested_path.display().to_string()),
+                "same-file Edit group contains a multi-file prepared payload",
+            ));
+        }
+
+        let target = first_file.resolved_path.as_path();
+        let base_fingerprint = &first_file.fingerprint;
+        let mut staged = first_file.original.clone();
+        let mut operations = Vec::new();
+
+        for (edit_index, edit) in edits.iter().enumerate() {
+            let file = &edit.files[0];
+            if file.resolved_path.as_path() != target
+                || file.fingerprint != base_fingerprint.clone()
+            {
+                return Err(same_batch_conflict(
+                    Some(edit_index),
+                    Some(file.requested_path.display().to_string()),
+                    "same-file Edit calls were prepared from different file versions",
+                ));
+            }
+            for input in &file.operations {
+                let next = match apply_edit(input, &staged) {
+                    Ok(next) if next != staged => next,
+                    Ok(_) => {
+                        return Err(same_batch_conflict(
+                            Some(edit_index),
+                            Some(file.requested_path.display().to_string()),
+                            "Edit is a no-op after earlier same-file edits",
+                        ));
+                    }
+                    Err(_) => {
+                        return Err(same_batch_conflict(
+                            Some(edit_index),
+                            Some(file.requested_path.display().to_string()),
+                            "Edit.old no longer matches after earlier same-file edits",
+                        ));
+                    }
+                };
+                staged = next;
+                operations.push(input.clone());
+            }
+        }
+
+        if operations.is_empty() || staged == first_file.original {
+            return Err(same_batch_conflict(
+                None,
+                Some(first_file.requested_path.display().to_string()),
+                "same-file Edit group is a no-op",
+            ));
+        }
+
+        let display_path = first_file.requested_path.to_string_lossy();
+        let diff = unified_diff(&display_path, &first_file.original, &staged);
+        let (added, removed) = diff_stats(&diff);
+        let replacement_count = operations.len();
+        let prepared_file = PreparedEditFile {
+            requested_path: first_file.requested_path.clone(),
+            resolved_path: first_file.resolved_path.clone(),
+            fingerprint: first_file.fingerprint.clone(),
+            original: first_file.original.clone(),
+            operations,
+            staged,
+            replacements: replacement_count,
+            added,
+            removed,
+            diff,
+        };
+
+        Ok(Arc::new(Self {
+            files: vec![prepared_file],
+            replacements: replacement_count,
             added,
             removed,
         }))
@@ -855,6 +962,36 @@ fn stale_result(file_index: Option<usize>, path: Option<String>, message: &str) 
     ToolResult::error(content).with_details(details)
 }
 
+fn same_batch_conflict(
+    edit_index: Option<usize>,
+    path: Option<String>,
+    message: &str,
+) -> ToolResult {
+    let mut content = String::from("Edit failed · same-batch conflict · zero writes\n");
+    if let Some(path) = path.as_ref() {
+        content.push_str(path);
+        content.push('\n');
+    }
+    content.push_str(message);
+    content.push_str(
+        "\nNo side effect occurred. Re-read the affected file and submit a fresh Edit call.",
+    );
+    let mut details = json!({
+        "kind": "edit",
+        "status": "same_batch_conflict",
+        "reason": "same_batch_conflict",
+        "side_effect_occurred": false,
+        "message": message,
+    });
+    if let Some(edit_index) = edit_index {
+        details["edit_index"] = json!(edit_index);
+    }
+    if let Some(path) = path {
+        details["path"] = json!(path);
+    }
+    ToolResult::error(content).with_details(details)
+}
+
 fn file_change_json(
     file: &PreparedEditFile,
     status: &str,
@@ -1119,6 +1256,82 @@ mod workspace_policy_tests {
         assert_eq!(
             non_utf8.details.expect("non-UTF-8 details")["status"],
             "prepare_failed"
+        );
+    }
+
+    #[tokio::test]
+    async fn prepared_edit_coalesces_disjoint_same_file_operations() {
+        let workspace = tempfile::tempdir().expect("workspace");
+        let path = workspace.path().join("file.txt");
+        std::fs::write(&path, "one\ntwo\n").expect("seed file");
+        let context = ToolContext::new(workspace.path())
+            .expect("context")
+            .with_access(ToolAccess::all());
+        let first = PreparedEdit::prepare(
+            &context,
+            &json!({ "path": "file.txt", "old": "one", "new": "ONE" }),
+        )
+        .expect("first prepare");
+        let second = PreparedEdit::prepare(
+            &context,
+            &json!({ "path": "file.txt", "old": "two", "new": "TWO" }),
+        )
+        .expect("second prepare");
+
+        let coalesced =
+            PreparedEdit::coalesce_same_file(&[first.as_ref(), second.as_ref()]).expect("coalesce");
+        assert_eq!(coalesced.files[0].staged, "ONE\nTWO\n");
+        assert_eq!(coalesced.replacements, 2);
+
+        let mut writes = 0;
+        let mut on_progress = |_update| {};
+        let result = coalesced.commit_with_writer(
+            &context,
+            &CancellationToken::new(),
+            &mut on_progress,
+            |_, _, content| {
+                writes += 1;
+                assert_eq!(content, b"ONE\nTWO\n");
+                std::fs::write(&path, content)?;
+                Ok(AtomicWriteStatus::Durable)
+            },
+        );
+
+        assert!(!result.is_error);
+        assert_eq!(writes, 1);
+        assert_eq!(
+            std::fs::read_to_string(path).expect("read result"),
+            "ONE\nTWO\n"
+        );
+    }
+
+    #[tokio::test]
+    async fn prepared_edit_coalescing_rejects_conflicting_sequence() {
+        let workspace = tempfile::tempdir().expect("workspace");
+        let path = workspace.path().join("file.txt");
+        std::fs::write(&path, "before\n").expect("seed file");
+        let context = ToolContext::new(workspace.path())
+            .expect("context")
+            .with_access(ToolAccess::all());
+        let first = PreparedEdit::prepare(
+            &context,
+            &json!({ "path": "file.txt", "old": "before", "new": "after" }),
+        )
+        .expect("first prepare");
+        let second = PreparedEdit::prepare(
+            &context,
+            &json!({ "path": "file.txt", "old": "before", "new": "again" }),
+        )
+        .expect("second prepare");
+
+        let result = PreparedEdit::coalesce_same_file(&[first.as_ref(), second.as_ref()])
+            .expect_err("conflicting same-file edits");
+        let details = result.details.expect("conflict details");
+        assert_eq!(details["status"], "same_batch_conflict");
+        assert_eq!(details["side_effect_occurred"], false);
+        assert_eq!(
+            std::fs::read_to_string(path).expect("read file"),
+            "before\n"
         );
     }
 
