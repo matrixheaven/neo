@@ -136,7 +136,7 @@ pub(crate) fn stream_failure(code: Option<&str>, message: impl Into<String>) -> 
         Some(402)
     } else {
         match normalized.as_str() {
-            "408" => Some(408),
+            "408" | "stream_read_error" => Some(408),
             "429"
             | "rate_limit"
             | "rate_limit_error"
@@ -340,6 +340,15 @@ mod tests {
         assert!(matches!(
             ai,
             AiError::Transport { message } if message == "request timeout"
+        ));
+    }
+
+    #[test]
+    fn stream_read_error_maps_to_retryable_transport() {
+        let ai = stream_failure(Some("stream_read_error"), "stream_read_error").into_ai_error();
+        assert!(matches!(
+            ai,
+            AiError::Transport { message } if message == "stream_read_error"
         ));
     }
 
