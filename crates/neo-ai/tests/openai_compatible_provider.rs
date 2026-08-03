@@ -379,6 +379,28 @@ async fn openai_omits_reasoning_effort_when_reasoning_is_off() {
 }
 
 #[tokio::test]
+async fn openai_maps_explicit_reasoning_disable_to_none() {
+    let server = MockServer::start(vec![sse_response(&[json!({
+        "id": "chatcmpl-reasoning-disable",
+        "choices": [{ "delta": { "content": "title" }, "finish_reason": "stop" }]
+    })])]);
+    let client = OpenAiCompatibleClient::new(server.url.clone(), "test-key");
+    let mut request = request(RequestOptions::default());
+    request.options.disable_reasoning = true;
+
+    client
+        .stream_chat(request)
+        .collect::<Vec<_>>()
+        .await
+        .into_iter()
+        .collect::<Result<Vec<_>, _>>()
+        .unwrap();
+
+    let sent = server.requests().pop().unwrap();
+    assert_eq!(sent.body["reasoning_effort"], "none");
+}
+
+#[tokio::test]
 async fn openai_streams_reasoning_content_as_thinking_events() {
     let server = MockServer::start(vec![sse_response(&[
         json!({

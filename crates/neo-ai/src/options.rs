@@ -352,9 +352,10 @@ pub struct RequestOptions {
     pub replay_reasoning: bool,
     /// Explicitly disable reasoning even when the provider would otherwise
     /// default to emitting a reasoning/thinking block. Anthropic-compatible
-    /// providers serialize this as `thinking: {"type": "disabled"}`; other
-    /// providers ignore it. Used by background requests (e.g. session titles)
-    /// that must stay fast and deterministic.
+    /// providers serialize this as `thinking: {"type": "disabled"}` and
+    /// OpenAI-compatible providers serialize it as `reasoning_effort: "none"`;
+    /// other providers ignore it. Used by background requests (e.g. session
+    /// titles) that must stay fast and deterministic.
     #[serde(default)]
     pub disable_reasoning: bool,
     pub cache: CacheRetention,

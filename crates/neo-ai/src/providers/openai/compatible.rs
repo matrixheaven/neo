@@ -103,7 +103,9 @@ fn request_body(request: &ChatRequest) -> Result<Value, ProviderError> {
     if let Some(max_tokens) = request.options.max_tokens {
         body["max_tokens"] = json!(max_tokens);
     }
-    if let Some(effort) = openai_reasoning_selection(&request.options.reasoning)? {
+    if request.options.disable_reasoning {
+        body["reasoning_effort"] = json!("none");
+    } else if let Some(effort) = openai_reasoning_selection(&request.options.reasoning)? {
         body["reasoning_effort"] = json!(effort);
     }
     if !request.options.metadata.is_empty() {
