@@ -8,6 +8,7 @@ target
 .mimocode
 .grok/
 .codegraph/
+tools/__pycache__
 docs/aegis/work/
 docs/node_modules/
 docs/.vitepress/cache/
