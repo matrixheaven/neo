@@ -10,8 +10,7 @@ export default defineConfig({
   // Product docs intentionally link into the monorepo (crates/, examples/);
   // those paths are not VitePress routes.
   ignoreDeadLinks: [
-    /\.\.\/\.\.\/\.\.\/crates\//,
-    /\.\.\/\.\.\/\.\.\/examples\//,
+    /(\.\.\/)+(crates|examples)\//,
   ],
 
   head: [
@@ -22,59 +21,62 @@ export default defineConfig({
     zh: {
       label: '简体中文',
       lang: 'zh-CN',
-      link: '/zh/',
+      link: '/user_guide/zh/',
       title: 'Neo 文档',
       description: 'Neo — 交互式本地编程 Agent',
       themeConfig: {
         nav: [
-          { text: '指南', link: '/zh/guides/interaction', activeMatch: '/zh/guides/' },
-          { text: '配置', link: '/zh/configuration/config-files', activeMatch: '/zh/configuration/' },
-          { text: '定制化', link: '/zh/customization/mcp', activeMatch: '/zh/customization/' },
-          { text: '参考手册', link: '/zh/reference/tools', activeMatch: '/zh/reference/' },
+          { text: '指南', link: '/user_guide/zh/guides/interaction', activeMatch: '/user_guide/zh/guides/' },
+          { text: '配置', link: '/user_guide/zh/configuration/config-files', activeMatch: '/user_guide/zh/configuration/' },
+          { text: '定制化', link: '/user_guide/zh/customization/mcp', activeMatch: '/user_guide/zh/customization/' },
+          { text: '参考手册', link: '/user_guide/zh/reference/tools', activeMatch: '/user_guide/zh/reference/' },
         ],
         sidebar: {
-          '/zh/': [
+          '/user_guide/zh/': [
             {
               text: '快速开始',
               items: [
-                { text: '快速上手', link: '/zh/quickstart' },
+                { text: '快速上手', link: '/user_guide/zh/quickstart' },
               ],
             },
             {
               text: '指南',
               items: [
-                { text: '交互与输入', link: '/zh/guides/interaction' },
-                { text: '会话与上下文', link: '/zh/guides/sessions' },
-                { text: '使用目标模式', link: '/zh/guides/goals' },
-                { text: '使用计划模式', link: '/zh/guides/plan-mode' },
-                { text: '本地 Workflow', link: '/zh/guides/workflows' },
-                { text: '常见使用案例', link: '/zh/guides/use-cases' },
+                { text: '交互模式', link: '/user_guide/zh/guides/interaction' },
+                { text: '会话管理', link: '/user_guide/zh/guides/sessions' },
+                { text: '目标模式', link: '/user_guide/zh/guides/goals' },
+                { text: '计划模式', link: '/user_guide/zh/guides/plan-mode' },
+                { text: '本地工作流', link: '/user_guide/zh/guides/workflows' },
+                { text: '常见用例', link: '/user_guide/zh/guides/use-cases' },
+                { text: '常见问题', link: '/user_guide/zh/guides/faq' },
               ],
             },
             {
               text: '配置',
               items: [
-                { text: '配置文件', link: '/zh/configuration/config-files' },
-                { text: '平台与模型', link: '/zh/configuration/providers' },
-                { text: '权限模式', link: '/zh/configuration/permissions' },
-                { text: '数据路径', link: '/zh/configuration/data-locations' },
+                { text: '配置文件', link: '/user_guide/zh/configuration/config-files' },
+                { text: '服务商与模型', link: '/user_guide/zh/configuration/providers' },
+                { text: '权限模式', link: '/user_guide/zh/configuration/permissions' },
+                { text: '数据存储位置', link: '/user_guide/zh/configuration/data-locations' },
               ],
             },
             {
               text: '定制化',
               items: [
-                { text: 'Model Context Protocol', link: '/zh/customization/mcp' },
-                { text: 'Agent Skills', link: '/zh/customization/skills' },
-                { text: 'Agent 与子 Agent', link: '/zh/customization/agents' },
-                { text: '自定义主题', link: '/zh/customization/themes' },
+                { text: 'MCP 服务器', link: '/user_guide/zh/customization/mcp' },
+                { text: '技能（Skills）', link: '/user_guide/zh/customization/skills' },
+                { text: '子 Agent', link: '/user_guide/zh/customization/agents' },
+                { text: '项目指令（AGENTS.md）', link: '/user_guide/zh/customization/instructions' },
+                { text: '主题（Themes）', link: '/user_guide/zh/customization/themes' },
               ],
             },
             {
               text: '参考手册',
               items: [
-                { text: '内置工具', link: '/zh/reference/tools' },
-                { text: '斜杠命令', link: '/zh/reference/slash-commands' },
-                { text: '键盘快捷键', link: '/zh/reference/keyboard' },
+                { text: '内置工具', link: '/user_guide/zh/reference/tools' },
+                { text: '斜杠命令', link: '/user_guide/zh/reference/slash-commands' },
+                { text: '键盘快捷键', link: '/user_guide/zh/reference/keyboard' },
+                { text: '命令行参考', link: '/user_guide/zh/reference/cli' },
               ],
             },
           ],
@@ -84,59 +86,59 @@ export default defineConfig({
     en: {
       label: 'English',
       lang: 'en-US',
-      link: '/en/',
+      link: '/user_guide/en/',
       title: 'Neo Docs',
       description: 'Neo — Interactive Local Coding Agent',
       themeConfig: {
         nav: [
-          { text: 'Guides', link: '/en/guides/interaction', activeMatch: '/en/guides/' },
-          { text: 'Configuration', link: '/en/configuration/config-files', activeMatch: '/en/configuration/' },
-          { text: 'Customization', link: '/en/customization/mcp', activeMatch: '/en/customization/' },
-          { text: 'Reference', link: '/en/reference/tools', activeMatch: '/en/reference/' },
+          { text: 'Guides', link: '/user_guide/en/guides/interaction', activeMatch: '/user_guide/en/guides/' },
+          { text: 'Configuration', link: '/user_guide/en/configuration/config-files', activeMatch: '/user_guide/en/configuration/' },
+          { text: 'Customization', link: '/user_guide/en/customization/mcp', activeMatch: '/user_guide/en/customization/' },
+          { text: 'Reference', link: '/user_guide/en/reference/tools', activeMatch: '/user_guide/en/reference/' },
         ],
         sidebar: {
-          '/en/': [
+          '/user_guide/en/': [
             {
               text: 'Getting Started',
               items: [
-                { text: 'Quickstart', link: '/en/quickstart' },
+                { text: 'Quickstart', link: '/user_guide/en/quickstart' },
               ],
             },
             {
               text: 'Guides',
               items: [
-                { text: 'Interaction & Input', link: '/en/guides/interaction' },
-                { text: 'Sessions & Context', link: '/en/guides/sessions' },
-                { text: 'Using Goal Mode', link: '/en/guides/goals' },
-                { text: 'Using Plan Mode', link: '/en/guides/plan-mode' },
-                { text: 'Local Workflows', link: '/en/guides/workflows' },
-                { text: 'Common Use Cases', link: '/en/guides/use-cases' },
+                { text: 'Interaction & Input', link: '/user_guide/en/guides/interaction' },
+                { text: 'Sessions & Context', link: '/user_guide/en/guides/sessions' },
+                { text: 'Using Goal Mode', link: '/user_guide/en/guides/goals' },
+                { text: 'Using Plan Mode', link: '/user_guide/en/guides/plan-mode' },
+                { text: 'Local Workflows', link: '/user_guide/en/guides/workflows' },
+                { text: 'Common Use Cases', link: '/user_guide/en/guides/use-cases' },
               ],
             },
             {
               text: 'Configuration',
               items: [
-                { text: 'Config Files', link: '/en/configuration/config-files' },
-                { text: 'Providers & Models', link: '/en/configuration/providers' },
-                { text: 'Permission Modes', link: '/en/configuration/permissions' },
-                { text: 'Data Locations', link: '/en/configuration/data-locations' },
+                { text: 'Config Files', link: '/user_guide/en/configuration/config-files' },
+                { text: 'Providers & Models', link: '/user_guide/en/configuration/providers' },
+                { text: 'Permission Modes', link: '/user_guide/en/configuration/permissions' },
+                { text: 'Data Locations', link: '/user_guide/en/configuration/data-locations' },
               ],
             },
             {
               text: 'Customization',
               items: [
-                { text: 'Model Context Protocol', link: '/en/customization/mcp' },
-                { text: 'Agent Skills', link: '/en/customization/skills' },
-                { text: 'Agents & Sub-agents', link: '/en/customization/agents' },
-                { text: 'Custom Themes', link: '/en/customization/themes' },
+                { text: 'Model Context Protocol', link: '/user_guide/en/customization/mcp' },
+                { text: 'Agent Skills', link: '/user_guide/en/customization/skills' },
+                { text: 'Agents & Sub-agents', link: '/user_guide/en/customization/agents' },
+                { text: 'Custom Themes', link: '/user_guide/en/customization/themes' },
               ],
             },
             {
               text: 'Reference',
               items: [
-                { text: 'Built-in Tools', link: '/en/reference/tools' },
-                { text: 'Slash Commands', link: '/en/reference/slash-commands' },
-                { text: 'Keyboard Shortcuts', link: '/en/reference/keyboard' },
+                { text: 'Built-in Tools', link: '/user_guide/en/reference/tools' },
+                { text: 'Slash Commands', link: '/user_guide/en/reference/slash-commands' },
+                { text: 'Keyboard Shortcuts', link: '/user_guide/en/reference/keyboard' },
               ],
             },
           ],

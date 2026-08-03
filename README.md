@@ -52,7 +52,7 @@ neo models list        # inspect the resolved model catalog
 
 ### Update, rollback, and uninstall
 
-To update, rollback, or uninstall Neo, see the [quickstart guide](docs/en/quickstart.md#update-rollback-and-uninstall).
+To update, rollback, or uninstall Neo, see the [quickstart guide](docs/user_guide/en/quickstart.md#update-rollback-and-uninstall).
 
 ## Configuration
 
@@ -74,7 +74,7 @@ export OPENAI_API_KEY=sk-...
 neo run "explain this codebase"
 ```
 
-For Anthropic, Google, custom providers, model aliases, MCP servers, and all other options, see the **[Configuration Guide](docs/en/configuration/config-files.md)**.
+For Anthropic, Google, custom providers, model aliases, MCP servers, and all other options, see the **[Configuration Guide](docs/user_guide/en/configuration/config-files.md)**.
 
 ## Quick Start
 
@@ -103,16 +103,16 @@ neo --no-session run "answer without creating a session"
 
 | Topic | Link |
 |-------|------|
-| Quickstart | [docs/en/quickstart.md](docs/en/quickstart.md) |
-| Configuration | [docs/en/configuration/config-files.md](docs/en/configuration/config-files.md) |
-| Overview | [docs/en/index.md](docs/en/index.md) |
-| Providers | [docs/en/configuration/providers.md](docs/en/configuration/providers.md) |
-| Built-in Tools | [docs/en/reference/tools.md](docs/en/reference/tools.md) |
-| Sessions | [docs/en/guides/sessions.md](docs/en/guides/sessions.md) |
-| MCP | [docs/en/customization/mcp.md](docs/en/customization/mcp.md) |
-| Skills | [docs/en/customization/skills.md](docs/en/customization/skills.md) |
-| Goals | [docs/en/guides/goals.md](docs/en/guides/goals.md) |
-| Queue & Steer | [docs/en/guides/interaction.md](docs/en/guides/interaction.md) |
+| Quickstart | [docs/user_guide/en/quickstart.md](docs/user_guide/en/quickstart.md) |
+| Configuration | [docs/user_guide/en/configuration/config-files.md](docs/user_guide/en/configuration/config-files.md) |
+| Overview | [docs/user_guide/en/index.md](docs/user_guide/en/index.md) |
+| Providers | [docs/user_guide/en/configuration/providers.md](docs/user_guide/en/configuration/providers.md) |
+| Built-in Tools | [docs/user_guide/en/reference/tools.md](docs/user_guide/en/reference/tools.md) |
+| Sessions | [docs/user_guide/en/guides/sessions.md](docs/user_guide/en/guides/sessions.md) |
+| MCP | [docs/user_guide/en/customization/mcp.md](docs/user_guide/en/customization/mcp.md) |
+| Skills | [docs/user_guide/en/customization/skills.md](docs/user_guide/en/customization/skills.md) |
+| Goals | [docs/user_guide/en/guides/goals.md](docs/user_guide/en/guides/goals.md) |
+| Queue & Steer | [docs/user_guide/en/guides/interaction.md](docs/user_guide/en/guides/interaction.md) |
 
 ---
 

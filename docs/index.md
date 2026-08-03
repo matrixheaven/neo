@@ -4,7 +4,7 @@ layout: page
 
 <script setup>
 if (typeof window !== 'undefined') {
-  const lang = navigator.language.startsWith('zh') ? '/zh/' : '/en/';
+  const lang = navigator.language.startsWith('zh') ? '/user_guide/zh/' : '/user_guide/en/';
   window.location.href = lang;
 }
 </script>

@@ -70,7 +70,7 @@ export OPENAI_API_KEY=sk-...
 neo run "解释这个代码库"
 ```
 
-Anthropic、Google、自定义提供商、模型别名、MCP 服务器等所有选项，请参阅 **[配置指南](docs/zh/configuration/config-files.md)**。
+Anthropic、Google、自定义服务商、模型别名、MCP 服务器等所有选项，请参阅 **[配置指南](docs/user_guide/zh/configuration/config-files.md)**。
 
 ## 快速开始
 
@@ -99,16 +99,18 @@ neo --no-session run "不创建会话直接回答"
 
 | 主题 | 链接 |
 |------|------|
-| 快速开始 | [docs/zh/quickstart.md](docs/zh/quickstart.md) |
-| 配置 | [docs/zh/configuration/config-files.md](docs/zh/configuration/config-files.md) |
-| 概览 | [docs/zh/index.md](docs/zh/index.md) |
-| 提供商 | [docs/zh/configuration/providers.md](docs/zh/configuration/providers.md) |
-| 内置工具 | [docs/zh/reference/tools.md](docs/zh/reference/tools.md) |
-| 会话 | [docs/zh/guides/sessions.md](docs/zh/guides/sessions.md) |
-| MCP | [docs/zh/customization/mcp.md](docs/zh/customization/mcp.md) |
-| 技能 | [docs/zh/customization/skills.md](docs/zh/customization/skills.md) |
-| 目标 | [docs/zh/guides/goals.md](docs/zh/guides/goals.md) |
-| 交互 | [docs/zh/guides/interaction.md](docs/zh/guides/interaction.md) |
+| 快速开始 | [docs/user_guide/zh/quickstart.md](docs/user_guide/zh/quickstart.md) |
+| 配置 | [docs/user_guide/zh/configuration/config-files.md](docs/user_guide/zh/configuration/config-files.md) |
+| 概览 | [docs/user_guide/zh/index.md](docs/user_guide/zh/index.md) |
+| 服务商 | [docs/user_guide/zh/configuration/providers.md](docs/user_guide/zh/configuration/providers.md) |
+| 内置工具 | [docs/user_guide/zh/reference/tools.md](docs/user_guide/zh/reference/tools.md) |
+| 会话 | [docs/user_guide/zh/guides/sessions.md](docs/user_guide/zh/guides/sessions.md) |
+| MCP | [docs/user_guide/zh/customization/mcp.md](docs/user_guide/zh/customization/mcp.md) |
+| 技能 | [docs/user_guide/zh/customization/skills.md](docs/user_guide/zh/customization/skills.md) |
+| 目标 | [docs/user_guide/zh/guides/goals.md](docs/user_guide/zh/guides/goals.md) |
+| 交互 | [docs/user_guide/zh/guides/interaction.md](docs/user_guide/zh/guides/interaction.md) |
+| 常见问题 | [docs/user_guide/zh/guides/faq.md](docs/user_guide/zh/guides/faq.md) |
+| 命令行参考 | [docs/user_guide/zh/reference/cli.md](docs/user_guide/zh/reference/cli.md) |
 
 ---
 
