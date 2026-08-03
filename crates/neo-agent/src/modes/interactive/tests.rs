@@ -1490,6 +1490,140 @@ async fn completed_turn_drains_event_backlog_before_removal() {
 }
 
 #[tokio::test]
+async fn thinking_boundaries_render_before_the_completed_turn_is_drained() {
+    let run_turn: TurnDriver = Arc::new(|_request, channels| {
+        Box::pin(async move {
+            for (id, title) in [
+                ("summary-1", "Planning initial workspace inspection"),
+                ("summary-2", "Evaluating parallel subagent dispatch"),
+                ("summary-3", "Checking the final workspace state"),
+            ] {
+                channels.send_event(AgentEvent::ThinkingStarted {
+                    turn: 1,
+                    id: id.to_owned(),
+                    kind: neo_ai::ThinkingKind::Summary,
+                });
+                channels.send_event(AgentEvent::ThinkingDelta {
+                    turn: 1,
+                    text: format!("**{title}**"),
+                });
+                channels.send_event(AgentEvent::ThinkingFinished {
+                    turn: 1,
+                    signature: None,
+                    redacted: false,
+                });
+            }
+            channels.send_event(AgentEvent::TurnFinished {
+                turn: 1,
+                stop_reason: StopReason::EndTurn,
+            });
+            Ok(TurnOutcome::default())
+        })
+    });
+    let mut controller = InteractiveController::new(
+        "neo",
+        "test-session",
+        "openai/gpt-4.1",
+        test_workspace_root(),
+        PickerCatalogs::default(),
+        ControllerCallbacks {
+            run_turn,
+            load_session: Arc::new(|session_id| Box::pin(empty_session_loader(session_id))),
+            fork_session: Arc::new(|session_id| Box::pin(empty_session_forker(session_id))),
+        },
+    );
+
+    controller.type_text("stream");
+    controller
+        .handle_input_event(InputEvent::Submit)
+        .await
+        .expect("start turn");
+    for _ in 0..20 {
+        if controller
+            .active_turn
+            .as_ref()
+            .is_some_and(|turn| turn.task.is_finished())
+        {
+            break;
+        }
+        tokio::task::yield_now().await;
+    }
+
+    assert_eq!(
+        controller.drain_active_turn().await.expect("first drain"),
+        FrameRequest::Immediate
+    );
+    let first = controller
+        .tui
+        .render_terminal_frame(80, 24)
+        .live
+        .into_iter()
+        .map(|line| neo_tui::primitive::strip_ansi(&line))
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(
+        first.contains("Planning initial workspace inspection"),
+        "{first}"
+    );
+    assert!(
+        !first.contains("Evaluating parallel subagent dispatch"),
+        "{first}"
+    );
+
+    assert_eq!(
+        controller.drain_active_turn().await.expect("second drain"),
+        FrameRequest::Immediate
+    );
+    let second = controller
+        .tui
+        .render_terminal_frame(80, 24)
+        .live
+        .into_iter()
+        .map(|line| neo_tui::primitive::strip_ansi(&line))
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(
+        second.contains("Evaluating parallel subagent dispatch"),
+        "{second}"
+    );
+    assert!(
+        !second.contains("Planning initial workspace inspection"),
+        "{second}"
+    );
+
+    assert_eq!(
+        controller.drain_active_turn().await.expect("third drain"),
+        FrameRequest::Immediate
+    );
+    let third = controller
+        .tui
+        .render_terminal_frame(80, 24)
+        .live
+        .into_iter()
+        .map(|line| neo_tui::primitive::strip_ansi(&line))
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(
+        third.contains("Checking the final workspace state"),
+        "{third}"
+    );
+    assert!(
+        !third.contains("Evaluating parallel subagent dispatch"),
+        "{third}"
+    );
+
+    controller
+        .drain_active_turn()
+        .await
+        .expect("finish turn after final boundary");
+    controller
+        .drain_active_turn()
+        .await
+        .expect("remove completed turn after final frame");
+    assert!(controller.active_turn.is_none());
+}
+
+#[tokio::test]
 async fn completed_turn_drains_pending_approval_and_question_channels() {
     let approval_receiver = Arc::new(std::sync::Mutex::new(None));
     let question_receiver = Arc::new(std::sync::Mutex::new(None));

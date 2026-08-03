@@ -5,9 +5,10 @@ use std::time::Duration;
 
 use anyhow::Result;
 
-use neo_agent_core::{Content, MessageOrigin, PendingQuestion};
+use neo_agent_core::{AgentEvent, Content, MessageOrigin, PendingQuestion};
 
 use neo_tui::shell::{DevelopmentMode, GoalModeStatus, StreamUpdate};
+use neo_tui::transcript::{ThinkingPhase, TranscriptEntry};
 
 use tokio_util::sync::CancellationToken;
 
@@ -15,6 +16,11 @@ use super::InteractiveController;
 use super::{FrameRequest, RunningTurn, TurnChannels, TurnRequest};
 
 pub(super) const MAX_TURN_EVENTS_PER_TICK: usize = 256;
+
+struct TurnDrainResult {
+    frame_request: FrameRequest,
+    stopped_for_frame: bool,
+}
 
 impl InteractiveController {
     pub(super) fn start_turn_with_prompt_display(
@@ -153,10 +159,22 @@ impl InteractiveController {
         let Some(mut turn) = self.active_turn.take() else {
             return Ok(FrameRequest::None);
         };
-        let mut frame_request = self.drain_turn_channels(&mut turn, MAX_TURN_EVENTS_PER_TICK);
+        let first_drain = self.drain_turn_channels(&mut turn, MAX_TURN_EVENTS_PER_TICK);
+        let mut frame_request = first_drain.frame_request;
+        let mut stopped_for_frame = first_drain.stopped_for_frame;
+
+        if turn.task.is_finished() && !stopped_for_frame {
+            let remaining_drain = self.drain_turn_channels(&mut turn, usize::MAX);
+            frame_request = frame_request.merge(remaining_drain.frame_request);
+            stopped_for_frame = remaining_drain.stopped_for_frame;
+        }
+
+        if stopped_for_frame {
+            self.active_turn = Some(turn);
+            return Ok(frame_request);
+        }
 
         if turn.task.is_finished() {
-            frame_request = frame_request.merge(self.drain_turn_channels(&mut turn, usize::MAX));
             let turn_result = turn
                 .task
                 .await
@@ -257,7 +275,11 @@ impl InteractiveController {
         frame_request
     }
 
-    fn drain_turn_channels(&mut self, turn: &mut RunningTurn, event_limit: usize) -> FrameRequest {
+    fn drain_turn_channels(
+        &mut self,
+        turn: &mut RunningTurn,
+        event_limit: usize,
+    ) -> TurnDrainResult {
         let mut frame_request = FrameRequest::None;
 
         while let Ok(session_id) = turn.session_ids.try_recv() {
@@ -280,10 +302,33 @@ impl InteractiveController {
             self.register_pending_question(pending);
             frame_request = frame_request.merge(FrameRequest::Immediate);
         }
+        let mut stopped_for_frame = false;
         for _ in 0..event_limit {
             let Ok(event) = turn.events.try_recv() else {
                 break;
             };
+            let summary_delta = matches!(&event, Ok(AgentEvent::ThinkingDelta { .. }))
+                && self
+                    .tui
+                    .transcript()
+                    .transcript()
+                    .entries()
+                    .last()
+                    .is_some_and(|entry| {
+                        matches!(
+                            entry,
+                            TranscriptEntry::ThinkingBlock {
+                                kind: neo_ai::ThinkingKind::Summary,
+                                phase: ThinkingPhase::Streaming,
+                                ..
+                            }
+                        )
+                    });
+            let render_boundary = summary_delta
+                || matches!(
+                    &event,
+                    Ok(AgentEvent::MessageFinished { .. } | AgentEvent::TurnFinished { .. })
+                );
             match event {
                 Ok(event) => {
                     self.notify_for_event(&event);
@@ -294,8 +339,16 @@ impl InteractiveController {
                     frame_request = frame_request.merge(FrameRequest::Coalesced);
                 }
             }
+            if render_boundary {
+                stopped_for_frame = true;
+                frame_request = frame_request.merge(FrameRequest::Immediate);
+                break;
+            }
         }
-        frame_request
+        TurnDrainResult {
+            frame_request,
+            stopped_for_frame,
+        }
     }
 
     pub(super) async fn start_next_queued_after_turn(&mut self) -> Result<()> {
