@@ -40,6 +40,30 @@ pub enum PermissionOperation {
     WorkflowLaunch,
     PlanTransition,
     GoalTransition,
+    /// Host-owned theme save (`ThemeDraft` action `save`). A dedicated
+    /// operation so the permission layer can grant a one-time save approval
+    /// without ever producing a generic `file_write` grant or a session-wide
+    /// theme-save grant.
+    ThemeSave,
+}
+
+/// Wire classification of the `ThemeDraft` tool's tagged `action` field.
+///
+/// Lives in core so the permission layer branches on the typed action (never
+/// on UI labels) while keeping `neo-agent-core` independent of `neo-agent`.
+/// The `ThemeDraft` implementation in `neo-agent` re-validates the full typed
+/// input (including this action) before any side effect.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum ThemeDraftAction {
+    /// Non-mutating preview: materialize overrides, store a bounded in-memory
+    /// draft, return structured preview details. Runs without write approval
+    /// and is permitted in plan mode.
+    Preview,
+    /// Special mutation: persist a previously previewed draft inside
+    /// `$NEO_HOME/themes/`. Ask mode requires a one-time approval with no
+    /// session-wide grant; plan mode denies it.
+    Save,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

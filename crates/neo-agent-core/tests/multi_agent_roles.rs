@@ -102,3 +102,64 @@ fn delegate_and_swarm_schemas_surface_role_guide() {
         }
     }
 }
+
+/// Probe standing in for the host `ThemeDraft` tool (registered only in the
+/// root runtime registry; child/delegate registries must never inherit it).
+struct ThemeDraftProbeTool;
+
+impl neo_agent_core::tools::Tool for ThemeDraftProbeTool {
+    fn name(&self) -> &'static str {
+        "ThemeDraft"
+    }
+
+    fn description(&self) -> &'static str {
+        "probe ThemeDraft"
+    }
+
+    fn input_schema(&self) -> serde_json::Value {
+        serde_json::json!({ "type": "object" })
+    }
+
+    fn execute<'a>(
+        &'a self,
+        _ctx: &neo_agent_core::tools::ToolContext,
+        _input: serde_json::Value,
+    ) -> neo_agent_core::tools::ToolFuture<'a> {
+        Box::pin(async move { Ok(neo_agent_core::tools::ToolResult::ok("probe ok")) })
+    }
+}
+
+#[test]
+fn theme_draft_is_absent_from_every_child_role_registry() {
+    let mut registry = ToolRegistry::with_builtin_tools();
+    registry.register(ThemeDraftProbeTool);
+    assert!(registry.contains("ThemeDraft"));
+
+    for role in AgentRole::ALL {
+        let filtered = registry.filtered_for_agent_role(role);
+        assert!(
+            !filtered.contains("ThemeDraft"),
+            "role {role:?} must never inherit ThemeDraft"
+        );
+    }
+}
+
+#[test]
+fn theme_draft_is_absent_from_workflow_child_registries() {
+    let mut registry = ToolRegistry::with_builtin_tools();
+    registry.register(ThemeDraftProbeTool);
+
+    let workflow_child = registry.for_workflow_child(None);
+    assert!(
+        !workflow_child.contains("ThemeDraft"),
+        "workflow children must never inherit ThemeDraft"
+    );
+
+    // Even an explicit ceiling cannot resurrect ThemeDraft for a workflow
+    // child: the workflow-eligibility gate runs first.
+    let ceiling = registry.for_workflow_child(Some(&["ThemeDraft".to_owned()]));
+    assert!(
+        !ceiling.contains("ThemeDraft"),
+        "an explicit ThemeDraft ceiling must still be denied for workflow children"
+    );
+}

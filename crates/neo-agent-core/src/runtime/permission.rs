@@ -10,7 +10,7 @@ use super::tool_dispatch::{ask_user_runs_in_background, cancelled_tool_result};
 use crate::approval::{EditApprovalPresentation, WriteApprovalPresentation};
 use crate::permissions::{
     ApprovalRuleStore, PrefixApprovalRule, SessionApprovalKey, SessionApprovalScope,
-    command_might_be_dangerous, is_known_safe_command,
+    ThemeDraftAction, command_might_be_dangerous, is_known_safe_command,
 };
 use crate::tools::plan_mode::{
     ExitPlanModeInput, ExitPlanModeOption, ExitPlanModeSuggestion, prevalidate_exit_plan_mode,
@@ -24,6 +24,7 @@ use crate::{
     PlanModeGuard, PlanSelection, ToolAccess, ToolResult, check_plan_mode_guard,
 };
 
+#[derive(Debug)]
 pub(super) enum PermissionPreparation {
     Run(ToolAccess),
     Ask {
@@ -138,6 +139,16 @@ pub(super) fn permission_preparation_for_mode(
         return workflow_permission_preparation(config, tool_call, prepared_call, mode);
     }
 
+    // ThemeDraft routes through its own action-aware preparation: preview is a
+    // non-mutating tool action that never needs a write approval, while save is
+    // a special host-owned mutation with a one-time Ask approval and no
+    // session-wide grant. This branch returns before any cached ordinary
+    // tool/session approval is consulted, so a cached "approve this tool for
+    // the session" grant can never authorize a later ThemeDraft save.
+    if tool_call.name.as_ref() == "ThemeDraft" {
+        return theme_draft_permission_preparation(config, tool_call, prepared_call, mode);
+    }
+
     // 2-5. Mode/tool-specific early returns (auto mode, EnterPlanMode, background AskUser).
     if let Some(prep) = check_mode_early_returns(tool_call, arguments, mode) {
         return prep;
@@ -195,6 +206,64 @@ fn workflow_permission_preparation(
         unreachable!("Workflow calls are prepared before permission evaluation");
     };
     dispatch_workflow_permission(config, tool_call, prepared, mode)
+}
+
+/// Action-aware `ThemeDraft` preparation. Branches on the typed wire `action`
+/// (`preview` vs `save`), never on presentation labels:
+///
+/// - `preview` runs directly in every mode, including plan mode: it is
+///   non-mutating and only fills the bounded in-memory draft store.
+/// - `save` is denied in plan mode, opens a one-time `ThemeSave` approval in
+///   Ask mode with no session scope (only "Approve once" is offered), and runs
+///   directly in Auto/Yolo, matching the existing permission-mode contract.
+/// - An unparseable action runs the tool so its own strict input validation
+///   surfaces the typed error; no side effect can occur because `execute`
+///   validates before acting.
+fn theme_draft_permission_preparation(
+    config: &AgentConfig,
+    tool_call: &AgentToolCall,
+    prepared_call: &PreparedToolCall,
+    mode: PermissionMode,
+) -> PermissionPreparation {
+    let action = prepared_call
+        .arguments
+        .get("action")
+        .and_then(|value| serde_json::from_value::<ThemeDraftAction>(value.clone()).ok());
+    match action {
+        Some(ThemeDraftAction::Preview) => {
+            PermissionPreparation::Run(access_for_tool(tool_call, true))
+        }
+        Some(ThemeDraftAction::Save) => {
+            let plan_active = config
+                .plan_mode
+                .read()
+                .ok()
+                .is_some_and(|plan_mode| plan_mode.is_active());
+            if plan_active {
+                return PermissionPreparation::Deny(
+                    "blocked by plan mode: ThemeDraft save is not allowed while planning"
+                        .to_owned(),
+                );
+            }
+            let subject = prepared_call
+                .arguments
+                .get("draft_id")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or(tool_call.name.as_ref())
+                .to_owned();
+            if mode == PermissionMode::Ask {
+                PermissionPreparation::Ask {
+                    operation: PermissionOperation::ThemeSave,
+                    subject,
+                    session_scope: None,
+                    prefix_rule: None,
+                }
+            } else {
+                PermissionPreparation::Run(access_for_tool(tool_call, true))
+            }
+        }
+        None => PermissionPreparation::Run(access_for_tool(tool_call, true)),
+    }
 }
 
 fn dispatch_workflow_permission(
@@ -756,6 +825,13 @@ fn ordinary_approval_presentation(
         PermissionOperation::WorkflowSave | PermissionOperation::WorkflowLaunch => {
             unreachable!("Workflow save/launch use dedicated presentation builders")
         }
+        PermissionOperation::ThemeSave => ApprovalPresentation::Tool {
+            title: "Save theme draft?".to_owned(),
+            details: compact_details([
+                labeled_argument(arguments, "draft_id"),
+                labeled_argument(arguments, "overwrite"),
+            ]),
+        },
         PermissionOperation::PlanTransition | PermissionOperation::GoalTransition => {
             unreachable!("Plan/Goal use dedicated presentation builders")
         }
@@ -1454,6 +1530,7 @@ fn permission_error(
         PermissionOperation::UserQuestion => "user question",
         PermissionOperation::WorkflowSave => "workflow save",
         PermissionOperation::WorkflowLaunch => "workflow launch",
+        PermissionOperation::ThemeSave => "theme save",
         PermissionOperation::PlanTransition => "plan transition",
         PermissionOperation::GoalTransition => "goal transition",
     };
@@ -2058,5 +2135,162 @@ mod tests {
                 "save/run must be denied in plan mode: {arguments}"
             );
         }
+    }
+
+    fn theme_draft_prepared(arguments: serde_json::Value) -> (AgentToolCall, PreparedToolCall) {
+        let call = AgentToolCall {
+            id: "call-theme-draft".into(),
+            name: "ThemeDraft".into(),
+            raw_arguments: arguments.to_string().into(),
+        };
+        let prepared = PreparedToolCall {
+            id: call.id.to_string(),
+            name: call.name.to_string(),
+            raw_arguments: call.raw_arguments.to_string(),
+            arguments,
+            warning: None,
+            approval: None,
+            execution: PreparedExecution::Direct,
+        };
+        (call, prepared)
+    }
+
+    #[test]
+    fn theme_draft_preview_runs_directly_in_every_mode_including_plan() {
+        let preview = json!({
+            "action": "preview",
+            "name": "Aurora Night",
+            "colors": {"brand": "#58a6ff"},
+        });
+        for mode in [
+            PermissionMode::Ask,
+            PermissionMode::Auto,
+            PermissionMode::Yolo,
+        ] {
+            let config = workflow_config(mode);
+            let (call, prepared) = theme_draft_prepared(preview.clone());
+            let preparation = permission_preparation_for_mode(&config, &call, &prepared);
+            assert!(
+                matches!(preparation, PermissionPreparation::Run(_)),
+                "preview must run directly in {mode:?}"
+            );
+        }
+        let config = workflow_config(PermissionMode::Ask);
+        config
+            .plan_mode
+            .write()
+            .expect("plan mode lock")
+            .enter_in_memory();
+        let (call, prepared) = theme_draft_prepared(preview.clone());
+        let preparation = permission_preparation_for_mode(&config, &call, &prepared);
+        assert!(
+            matches!(preparation, PermissionPreparation::Run(_)),
+            "preview must run directly in plan mode"
+        );
+    }
+
+    #[test]
+    fn theme_draft_preview_never_grants_file_write_access() {
+        let preview = json!({
+            "action": "preview",
+            "name": "Aurora Night",
+        });
+        let config = workflow_config(PermissionMode::Ask);
+        let (call, prepared) = theme_draft_prepared(preview);
+        let preparation = permission_preparation_for_mode(&config, &call, &prepared);
+        let PermissionPreparation::Run(access) = preparation else {
+            panic!("preview must run: {preparation:?}");
+        };
+        assert!(access.tool, "preview carries the tool access grant");
+        assert!(
+            !access.file_write,
+            "ThemeDraft must never grant generic file_write"
+        );
+    }
+
+    #[test]
+    fn theme_draft_save_asks_with_typed_theme_save_operation_and_no_session_scope() {
+        let config = workflow_config(PermissionMode::Ask);
+        let (call, prepared) = theme_draft_prepared(json!({
+            "action": "save",
+            "draft_id": "draft-0001",
+            "overwrite": false,
+        }));
+        let preparation = permission_preparation_for_mode(&config, &call, &prepared);
+        assert!(
+            matches!(
+                preparation,
+                PermissionPreparation::Ask {
+                    operation: PermissionOperation::ThemeSave,
+                    session_scope: None,
+                    ..
+                }
+            ),
+            "save must open the typed ThemeSave review with no session scope in Ask mode"
+        );
+    }
+
+    #[test]
+    fn theme_draft_save_runs_directly_in_auto_and_yolo() {
+        for mode in [PermissionMode::Auto, PermissionMode::Yolo] {
+            let config = workflow_config(mode);
+            let (call, prepared) = theme_draft_prepared(json!({
+                "action": "save",
+                "draft_id": "draft-0001",
+            }));
+            let preparation = permission_preparation_for_mode(&config, &call, &prepared);
+            assert!(
+                matches!(preparation, PermissionPreparation::Run(_)),
+                "save must execute directly in {mode:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn theme_draft_save_is_denied_in_plan_mode() {
+        let config = workflow_config(PermissionMode::Ask);
+        config
+            .plan_mode
+            .write()
+            .expect("plan mode lock")
+            .enter_in_memory();
+        let (call, prepared) = theme_draft_prepared(json!({
+            "action": "save",
+            "draft_id": "draft-0001",
+        }));
+        let preparation = permission_preparation_for_mode(&config, &call, &prepared);
+        assert!(
+            matches!(preparation, PermissionPreparation::Deny(_)),
+            "save must be denied in plan mode"
+        );
+    }
+
+    #[test]
+    fn cached_tool_session_approval_never_authorizes_theme_draft_save() {
+        // A generic "approve this tool for the session" grant for a different
+        // tool must not leak into ThemeDraft: the ThemeDraft branch returns
+        // before cached approvals are consulted, and save never offers a scope.
+        let config = workflow_config(PermissionMode::Ask);
+        let mut approved = std::collections::HashSet::new();
+        approved.insert(SessionApprovalKey::Tool {
+            workspace: String::new(),
+            name: "ThemeDraft".to_owned(),
+        });
+        *config.session_approvals.lock().expect("session approvals") = approved;
+        let (call, prepared) = theme_draft_prepared(json!({
+            "action": "save",
+            "draft_id": "draft-0001",
+        }));
+        let preparation = permission_preparation_for_mode(&config, &call, &prepared);
+        assert!(
+            matches!(
+                preparation,
+                PermissionPreparation::Ask {
+                    operation: PermissionOperation::ThemeSave,
+                    ..
+                }
+            ),
+            "a cached tool session approval must not authorize a ThemeDraft save"
+        );
     }
 }

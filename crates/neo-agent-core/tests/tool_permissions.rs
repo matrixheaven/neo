@@ -225,3 +225,75 @@ async fn task_stop_requires_shell_permission_by_default() {
         ToolError::PermissionDenied { operation: "shell" }
     ));
 }
+
+// ---------------------------------------------------------------------------
+// ThemeDraft host tool: only the `tool` access grant runs it; generic
+// `file_write`/`shell`/`file_read` grants never substitute.
+// ---------------------------------------------------------------------------
+
+/// Probe standing in for the host `ThemeDraft` tool, mirroring its execution
+/// guard: it runs on the `tool` access grant and refuses anything else.
+struct ThemeDraftProbeTool;
+
+impl neo_agent_core::tools::Tool for ThemeDraftProbeTool {
+    fn name(&self) -> &'static str {
+        "ThemeDraft"
+    }
+
+    fn description(&self) -> &'static str {
+        "probe ThemeDraft"
+    }
+
+    fn input_schema(&self) -> serde_json::Value {
+        serde_json::json!({ "type": "object" })
+    }
+
+    fn execute<'a>(
+        &'a self,
+        ctx: &'a ToolContext,
+        _input: serde_json::Value,
+    ) -> neo_agent_core::tools::ToolFuture<'a> {
+        Box::pin(async move {
+            if !ctx.access.tool {
+                return Err(ToolError::PermissionDenied { operation: "tool" });
+            }
+            Ok(neo_agent_core::tools::ToolResult::ok("probe ok"))
+        })
+    }
+}
+
+#[tokio::test]
+async fn theme_draft_never_accepts_file_write_in_place_of_tool_access() {
+    // Requirement 6: the permission path never grants generic `file_write`
+    // for ThemeDraft — `tool` is the only grant the real tool runs under.
+    // Even a context carrying file_write + shell + file_read must be refused;
+    // the real unit tests in neo-agent only exercise the all-false context,
+    // so this covers the substitution vector at the registry boundary.
+    let workspace = tempfile::tempdir().expect("tempdir");
+    let mut registry = ToolRegistry::new();
+    registry.register(ThemeDraftProbeTool);
+
+    let context = ToolContext::new(workspace.path())
+        .expect("context")
+        .with_access(ToolAccess {
+            file_read: true,
+            file_write: true,
+            shell: true,
+            tool: false,
+            user_question: false,
+        });
+
+    let error = registry
+        .run(
+            "ThemeDraft",
+            &context,
+            json!({"action": "save", "draft_id": "draft-0001"}),
+        )
+        .await
+        .expect_err("ThemeDraft must require tool access even with file_write granted");
+
+    assert!(matches!(
+        error,
+        ToolError::PermissionDenied { operation: "tool" }
+    ));
+}

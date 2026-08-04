@@ -10,6 +10,7 @@ mod path_key;
 mod prompt;
 mod resources;
 mod rpc;
+mod theme_draft;
 mod themes;
 mod trust;
 mod trust_commands;

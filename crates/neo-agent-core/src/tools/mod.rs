@@ -1020,6 +1020,10 @@ pub fn is_workflow_tool_denied(name: &str) -> bool {
             | "WaitDelegate"
             | "InterruptDelegate"
             | "MessageDelegate"
+            // Host-owned root-runtime tool; workflow children never inherit it
+            // from the parent registry (save mutates $NEO_HOME, outside any
+            // workflow child's scope).
+            | "ThemeDraft"
     )
 }
 
@@ -1088,6 +1092,11 @@ fn is_builtin_tool_name(name: &str) -> bool {
             "CreateSkill",
             "MoveSkill",
             "SummarizeSessions",
+            // Host-owned root-runtime tool. Listed as a builtin name so
+            // role filtering (`filtered_for_agent_role`) subjects it to the
+            // per-role allowlist, which no role grants; child/delegate
+            // registries therefore never inherit it from the parent registry.
+            "ThemeDraft",
         ]
         .into_iter()
         .collect()

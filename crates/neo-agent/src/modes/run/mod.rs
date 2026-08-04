@@ -710,6 +710,10 @@ async fn runtime_for_config(
         );
         tools.register(SummarizeSessionsTool::new(home));
     }
+    // ThemeDraft is a root-runtime-only host tool: it mutates $NEO_HOME/themes/
+    // and is deliberately absent from `tool_registry_for_config`, so the Btw
+    // sidecar and child/delegate registries never acquire it.
+    tools.register(crate::theme_draft::ThemeDraftTool::default_with_store());
     let mut runtime =
         AgentRuntime::with_tools_and_skill_handle(agent_config, client, tools, skill_store_handle);
     runtime = runtime.with_steer_input(channels.map_or_else(SteerInputHandle::new, |channels| {

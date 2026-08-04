@@ -1417,8 +1417,11 @@ fn color_overrides_from_theme(theme: &TuiTheme) -> anyhow::Result<BTreeMap<Strin
     Ok(tokens)
 }
 
-#[allow(dead_code)]
-fn color_to_string(color: Color) -> anyhow::Result<String> {
+/// Canonical string form of a parsed color (`#rrggbb` for RGB, the named
+/// form for ANSI palette colors). `Indexed` colors cannot be represented in a
+/// persisted theme file. Public so the ThemeDraft adapter can normalize
+/// override values into the same canonical form the repository writes.
+pub fn color_to_string(color: Color) -> anyhow::Result<String> {
     match color {
         Color::Rgb(red, green, blue) => Ok(format!("#{red:02x}{green:02x}{blue:02x}")),
         Color::Reset => Ok("reset".to_owned()),
@@ -1445,7 +1448,6 @@ fn color_to_string(color: Color) -> anyhow::Result<String> {
 }
 
 /// Parse a canonical color string back into a `Color` value.
-#[allow(dead_code)]
 pub fn color_from_string(value: &str) -> anyhow::Result<Color> {
     parse_color(value)
 }

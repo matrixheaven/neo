@@ -1,8 +1,9 @@
 use crate::primitive::Style;
 use crate::primitive::theme::TuiTheme;
 use crate::primitive::wrap_width;
-use crate::primitive::{Component, Expandable, Finalization, Line, Span, strip_ansi};
+use crate::primitive::{Color, Component, Expandable, Finalization, Line, Span, strip_ansi};
 use crate::shell::ToolStatusKind;
+use crate::theme_preview::ThemePreviewRenderer;
 use crate::token_estimate::format_elapsed;
 use neo_agent_core::workflow::WorkflowExecutionOrigin;
 
@@ -451,6 +452,18 @@ impl ToolCallComponent {
             rows.extend(plan_box.render(width, theme));
         }
 
+        // ThemeDraft preview results render a structured, non-interactive card:
+        // name/status, color samples, a representative TUI sample rendered with
+        // the draft theme, and contrast warnings. There is deliberately no
+        // Apply action — application stays with the /theme command.
+        if self.state.name == "ThemeDraft"
+            && let Some(details) = &self.state.details
+            && details.get("kind").and_then(serde_json::Value::as_str)
+                == Some("theme_draft_preview")
+        {
+            rows.extend(render_theme_draft_preview_card(details, width, theme));
+        }
+
         if is_pending_or_running(self.state.status) && is_file_write_tool(&self.state.name) {
             rows.extend(render_streaming_preview(
                 &self.state,
@@ -511,6 +524,247 @@ fn wrap_live_rows(lines: &[String], width: usize, style: Style) -> Vec<Line> {
                 .map(move |segment| Line::styled(format!("{PREFIX}{segment}"), style))
         })
         .collect()
+}
+
+/// Rows for a `theme_draft_preview` tool-result card.
+///
+/// Branches on the typed details `kind` (never on presentation labels). The
+/// card is append-only transcript content: it renders the stored preview
+/// payload, samples a few normalized colors as swatches, renders a compact
+/// representative TUI surface with the draft theme via `ThemePreviewRenderer`,
+/// and lists deterministic contrast warnings. No Apply action is offered.
+fn render_theme_draft_preview_card(
+    details: &serde_json::Value,
+    width: usize,
+    theme: &TuiTheme,
+) -> Vec<Line> {
+    const SAMPLE_ROWS: usize = 7;
+    const PREFIX: &str = "  ";
+
+    let body_width = width.saturating_sub(PREFIX.len()).max(1);
+    let normalized = details
+        .get("normalized_colors")
+        .and_then(serde_json::Value::as_object);
+
+    let mut rows = Vec::new();
+    rows.extend(theme_draft_preview_header_lines(details, width, theme));
+    if let Some(samples) = theme_draft_preview_color_samples(details, normalized, theme) {
+        rows.push(samples.truncate_to_width(width));
+    }
+
+    // Representative TUI surface rendered with the draft theme. The renderer
+    // never mutates runtime chrome; it is a pure presentation of the payload.
+    if let Some(colors) = normalized {
+        let draft_theme = theme_from_normalized_colors(colors);
+        let preview = ThemePreviewRenderer::new(draft_theme, body_width, SAMPLE_ROWS, "draft");
+        for row in preview.render() {
+            rows.push(Line::styled(format!("{PREFIX}{row}"), Style::default()));
+        }
+    }
+    rows.extend(theme_draft_preview_warning_lines(details, width, theme));
+    rows
+}
+
+/// Status + name + draft id + destination + fingerprint lines.
+fn theme_draft_preview_header_lines(
+    details: &serde_json::Value,
+    width: usize,
+    theme: &TuiTheme,
+) -> Vec<Line> {
+    const PREFIX: &str = "  ";
+    let muted = Style::default().fg(theme.text_muted);
+    let display_name = details
+        .get("display_name")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or("theme");
+    let draft_id = details
+        .get("draft_id")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or("draft");
+    let candidate_id = details
+        .get("candidate_theme_id")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or("");
+    let fingerprint = details
+        .get("fingerprint")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or("");
+
+    let mut header_spans = vec![
+        Span::styled("●", Style::default().fg(theme.status_ok)),
+        Span::raw(" "),
+        Span::styled(display_name, Style::default().fg(theme.text_primary).bold()),
+        Span::styled("  preview", Style::default().fg(theme.status_ok)),
+        Span::styled(format!("  {draft_id}"), muted),
+    ];
+    if !candidate_id.is_empty() {
+        header_spans.push(Span::styled(format!("  → {candidate_id}"), muted));
+    }
+    let mut rows = vec![Line::from_spans(header_spans).truncate_to_width(width)];
+    if !fingerprint.is_empty() {
+        rows.push(
+            Line::styled(format!("{PREFIX}fingerprint {fingerprint}"), muted)
+                .truncate_to_width(width),
+        );
+    }
+    rows
+}
+
+/// One swatch line: overridden tokens first, then representative core tokens.
+fn theme_draft_preview_color_samples(
+    details: &serde_json::Value,
+    normalized: Option<&serde_json::Map<String, serde_json::Value>>,
+    theme: &TuiTheme,
+) -> Option<Line> {
+    const MAX_COLOR_SAMPLES: usize = 6;
+    let muted = Style::default().fg(theme.text_muted);
+    let overridden: Vec<&str> = details
+        .get("overridden_tokens")
+        .and_then(serde_json::Value::as_array)
+        .map(|tokens| {
+            tokens
+                .iter()
+                .filter_map(serde_json::Value::as_str)
+                .collect()
+        })
+        .unwrap_or_default();
+    let mut sample_tokens = overridden.clone();
+    for token in [
+        "brand",
+        "text_primary",
+        "text_muted",
+        "status_ok",
+        "status_error",
+        "status_warn",
+    ] {
+        if !sample_tokens.contains(&token) {
+            sample_tokens.push(token);
+        }
+    }
+    sample_tokens.truncate(MAX_COLOR_SAMPLES);
+    let mut sample_spans: Vec<Span> = Vec::new();
+    for token in sample_tokens {
+        let Some(hex) = normalized
+            .and_then(|colors| colors.get(token))
+            .and_then(serde_json::Value::as_str)
+        else {
+            continue;
+        };
+        let Some(color) = color_from_canonical_string(hex) else {
+            continue;
+        };
+        if !sample_spans.is_empty() {
+            sample_spans.push(Span::raw("  "));
+        }
+        sample_spans.push(Span::styled("██", Style::default().bg(color)));
+        sample_spans.push(Span::raw(" "));
+        sample_spans.push(Span::styled(format!("{token} {hex}"), muted));
+    }
+    if sample_spans.is_empty() {
+        None
+    } else {
+        Some(Line::from_spans(sample_spans))
+    }
+}
+
+/// Deterministic contrast warnings from the preview, wrapped to the width.
+fn theme_draft_preview_warning_lines(
+    details: &serde_json::Value,
+    width: usize,
+    theme: &TuiTheme,
+) -> Vec<Line> {
+    const PREFIX: &str = "  ";
+    let Some(warnings) = details
+        .get("contrast_warnings")
+        .and_then(serde_json::Value::as_array)
+    else {
+        return Vec::new();
+    };
+    let warn_style = Style::default().fg(theme.status_warn);
+    let mut rows = Vec::new();
+    for warning in warnings.iter().filter_map(serde_json::Value::as_str) {
+        for segment in wrap_width(&format!("{PREFIX}⚠ {warning}"), width) {
+            rows.push(Line::styled(segment, warn_style));
+        }
+    }
+    rows
+}
+
+/// Parse a canonical theme color string (`#rrggbb` or the existing named set)
+/// into a render color. Unknown values yield `None` and are skipped.
+fn color_from_canonical_string(value: &str) -> Option<Color> {
+    let value = value.trim();
+    if let Some(hex) = value.strip_prefix('#') {
+        if hex.len() != 6 || !hex.chars().all(|character| character.is_ascii_hexdigit()) {
+            return None;
+        }
+        let red = u8::from_str_radix(&hex[0..2], 16).ok()?;
+        let green = u8::from_str_radix(&hex[2..4], 16).ok()?;
+        let blue = u8::from_str_radix(&hex[4..6], 16).ok()?;
+        return Some(Color::Rgb(red, green, blue));
+    }
+    match value.to_ascii_lowercase().as_str() {
+        "reset" => Some(Color::Reset),
+        "black" => Some(Color::Black),
+        "red" => Some(Color::Red),
+        "green" => Some(Color::Green),
+        "yellow" => Some(Color::Yellow),
+        "blue" => Some(Color::Blue),
+        "magenta" => Some(Color::Magenta),
+        "cyan" => Some(Color::Cyan),
+        "gray" | "grey" => Some(Color::Gray),
+        "darkgray" | "dark_gray" | "dark-grey" => Some(Color::DarkGray),
+        "lightred" | "light_red" | "light-red" => Some(Color::LightRed),
+        "lightgreen" | "light_green" | "light-green" => Some(Color::LightGreen),
+        "lightyellow" | "light_yellow" | "light-yellow" => Some(Color::LightYellow),
+        "lightblue" | "light_blue" | "light-blue" => Some(Color::LightBlue),
+        "lightmagenta" | "light_magenta" | "light-magenta" => Some(Color::LightMagenta),
+        "lightcyan" | "light_cyan" | "light-cyan" => Some(Color::LightCyan),
+        "white" => Some(Color::White),
+        _ => None,
+    }
+}
+
+/// Build a `TuiTheme` from the normalized canonical color payload. Tokens the
+/// payload does not carry (or cannot parse) keep the built-in default value.
+fn theme_from_normalized_colors(colors: &serde_json::Map<String, serde_json::Value>) -> TuiTheme {
+    let mut theme = TuiTheme::default();
+    for (token, value) in colors {
+        let Some(color) = value.as_str().and_then(color_from_canonical_string) else {
+            continue;
+        };
+        match token.as_str() {
+            "text_primary" => theme.text_primary = color,
+            "prompt" => theme.prompt = color,
+            "brand" => theme.brand = color,
+            "status_ok" => theme.status_ok = color,
+            "status_error" => theme.status_error = color,
+            "status_warn" => theme.status_warn = color,
+            "text_muted" => theme.text_muted = color,
+            "user_message" => theme.user_message = color,
+            "diff_added" => theme.diff_added = color,
+            "diff_removed" => theme.diff_removed = color,
+            "diff_hunk" => theme.diff_hunk = color,
+            "diff_context" => theme.diff_context = color,
+            "selection_bg" => theme.selection_bg = color,
+            "status_pending" => theme.status_pending = color,
+            "status_cancelled" => theme.status_cancelled = color,
+            "approval_border" => theme.approval_border = color,
+            "selected_fg" => theme.selected_fg = color,
+            "selected_bg" => theme.selected_bg = color,
+            "overlay_border" => theme.overlay_border = color,
+            "footer_permission_allow" => theme.footer_permission_allow = color,
+            "footer_permission_ask" => theme.footer_permission_ask = color,
+            "footer_permission_deny" => theme.footer_permission_deny = color,
+            "footer_working" => theme.footer_working = color,
+            "footer_context_ok" => theme.footer_context_ok = color,
+            "footer_context_warn" => theme.footer_context_warn = color,
+            "footer_context_critical" => theme.footer_context_critical = color,
+            "shell_mode" => theme.shell_mode = color,
+            _ => {}
+        }
+    }
+    theme
 }
 
 #[cfg(test)]

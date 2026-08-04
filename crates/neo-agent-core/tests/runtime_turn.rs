@@ -12532,3 +12532,217 @@ async fn stored_workflow_handle_routes_nested_events_only_to_the_active_turn() {
                 && name == "NestedWorkflowEcho"
     )));
 }
+
+// ---------------------------------------------------------------------------
+// ThemeDraft permission routing: typed ThemeSave approval, no session grant,
+// preview without write approval, Auto/Yolo direct execution, plan-mode deny.
+// ---------------------------------------------------------------------------
+
+/// Probe standing in for the host `ThemeDraft` tool. Records executions so a
+/// test can prove preview/save reached execution (or did not).
+#[derive(Clone)]
+struct ThemeDraftProbe {
+    executed: Arc<Mutex<Vec<serde_json::Value>>>,
+}
+
+impl Tool for ThemeDraftProbe {
+    fn name(&self) -> &'static str {
+        "ThemeDraft"
+    }
+
+    fn description(&self) -> &'static str {
+        "probe ThemeDraft"
+    }
+
+    fn input_schema(&self) -> serde_json::Value {
+        json!({ "type": "object" })
+    }
+
+    fn execute<'a>(&'a self, _ctx: &'a ToolContext, input: serde_json::Value) -> ToolFuture<'a> {
+        let executed = Arc::clone(&self.executed);
+        Box::pin(async move {
+            executed.lock().expect("executed").push(input);
+            Ok(ToolResult::ok("probe ok"))
+        })
+    }
+}
+
+fn theme_draft_probe_runtime(
+    harness: &FakeHarness,
+    mode: PermissionMode,
+) -> (AgentRuntime, ThemeDraftProbe) {
+    let probe = ThemeDraftProbe {
+        executed: Arc::new(Mutex::new(Vec::new())),
+    };
+    let mut tools = ToolRegistry::new();
+    tools.register(probe.clone());
+    let runtime = AgentRuntime::with_tools(
+        AgentConfig::for_model(harness.model()).with_permission_mode(mode),
+        harness.client(),
+        tools,
+    );
+    (runtime, probe)
+}
+
+async fn run_theme_draft_turn(
+    runtime: AgentRuntime,
+    arguments: serde_json::Value,
+) -> Vec<AgentEvent> {
+    let mut context = AgentContext::new();
+    runtime
+        .run_turn(
+            &mut context,
+            AgentMessage::user_text(format!(
+                "theme draft call: {}",
+                serde_json::to_string(&arguments).expect("json")
+            )),
+        )
+        .collect::<Vec<_>>()
+        .await
+        .into_iter()
+        .collect::<Result<Vec<_>, _>>()
+        .expect("theme draft turn should succeed")
+}
+
+fn theme_draft_approval_events(events: &[AgentEvent]) -> Vec<&ApprovalRequest> {
+    events
+        .iter()
+        .filter_map(|event| match event {
+            AgentEvent::ApprovalRequested { request } => Some(request),
+            _ => None,
+        })
+        .collect()
+}
+
+#[tokio::test]
+async fn theme_draft_save_requires_typed_theme_save_approval_with_no_session_grant() {
+    let harness = FakeHarness::from_turns([
+        tool_call_turn(&[(
+            "call_td",
+            "ThemeDraft",
+            json!({"action": "save", "draft_id": "draft-0001", "overwrite": false}),
+        )]),
+        end_turn_events("done"),
+    ]);
+    let (runtime, probe) = theme_draft_probe_runtime(&harness, PermissionMode::Ask);
+    let events = run_theme_draft_turn(runtime, json!({"action": "save"})).await;
+
+    let approvals = theme_draft_approval_events(&events);
+    assert_eq!(
+        approvals.len(),
+        1,
+        "exactly one approval request: {events:?}"
+    );
+    let request = approvals[0];
+    assert_eq!(request.operation, PermissionOperation::ThemeSave);
+    assert_eq!(request.id, "call_td");
+    let offered = request
+        .options
+        .iter()
+        .map(|option| &option.action)
+        .collect::<Vec<_>>();
+    assert!(
+        offered
+            .iter()
+            .any(|action| **action == ApprovalAction::PermitOnce),
+        "Approve once must be offered: {offered:?}"
+    );
+    assert!(
+        !offered
+            .iter()
+            .any(|action| matches!(action, ApprovalAction::PermitForSession { .. })),
+        "ThemeSave must never offer a session-wide grant: {offered:?}"
+    );
+
+    // Without a handler the save is terminal with the typed permission error
+    // and the probe never executed.
+    assert_eq!(probe.executed.lock().unwrap().len(), 0);
+    let finished = finished_tool_results(&events, "call_td");
+    assert_eq!(finished.len(), 1);
+    assert!(finished[0].is_error);
+    assert!(
+        finished[0]
+            .content
+            .contains("approval required for theme save")
+    );
+}
+
+#[tokio::test]
+async fn theme_draft_preview_runs_without_any_approval_in_ask_mode() {
+    let harness = FakeHarness::from_turns([
+        tool_call_turn(&[(
+            "call_td",
+            "ThemeDraft",
+            json!({"action": "preview", "name": "Aurora Night"}),
+        )]),
+        end_turn_events("done"),
+    ]);
+    let (runtime, probe) = theme_draft_probe_runtime(&harness, PermissionMode::Ask);
+    let events = run_theme_draft_turn(runtime, json!({"action": "preview"})).await;
+
+    assert!(
+        theme_draft_approval_events(&events).is_empty(),
+        "preview must not require approval: {events:?}"
+    );
+    let executed = probe.executed.lock().unwrap();
+    assert_eq!(executed.len(), 1, "preview must reach execution");
+    assert_eq!(executed[0]["action"], "preview");
+}
+
+#[tokio::test]
+async fn theme_draft_save_executes_directly_in_auto_mode() {
+    let harness = FakeHarness::from_turns([
+        tool_call_turn(&[(
+            "call_td",
+            "ThemeDraft",
+            json!({"action": "save", "draft_id": "draft-0001"}),
+        )]),
+        end_turn_events("done"),
+    ]);
+    let (runtime, probe) = theme_draft_probe_runtime(&harness, PermissionMode::Auto);
+    let events = run_theme_draft_turn(runtime, json!({"action": "save"})).await;
+
+    assert!(
+        theme_draft_approval_events(&events).is_empty(),
+        "auto mode must not prompt for ThemeDraft save: {events:?}"
+    );
+    assert_eq!(probe.executed.lock().unwrap().len(), 1);
+}
+
+#[tokio::test]
+async fn theme_draft_save_is_denied_in_plan_mode_while_preview_runs() {
+    for (action, should_run) in [("save", false), ("preview", true)] {
+        let harness = FakeHarness::from_turns([
+            tool_call_turn(&[("call_td", "ThemeDraft", json!({"action": action}))]),
+            end_turn_events("done"),
+        ]);
+        let (runtime, probe) = theme_draft_probe_runtime(&harness, PermissionMode::Ask);
+        runtime
+            .config()
+            .plan_mode
+            .write()
+            .expect("plan mode lock")
+            .enter_in_memory();
+        let events = run_theme_draft_turn(runtime, json!({"action": action})).await;
+
+        assert_eq!(
+            probe.executed.lock().unwrap().len(),
+            usize::from(should_run),
+            "action {action} execution mismatch: {events:?}"
+        );
+        if should_run {
+            assert!(
+                theme_draft_approval_events(&events).is_empty(),
+                "preview must not prompt in plan mode: {events:?}"
+            );
+        } else {
+            let finished = finished_tool_results(&events, "call_td");
+            assert_eq!(finished.len(), 1, "{events:?}");
+            assert!(
+                finished[0].content.contains("blocked by plan mode"),
+                "save must be denied in plan mode: {}",
+                finished[0].content
+            );
+        }
+    }
+}

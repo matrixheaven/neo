@@ -3120,3 +3120,111 @@ fn shell_live_output_bounds_eviction_without_losing_partial_tail() {
         "eviction marker should be shown: {joined:?}"
     );
 }
+
+#[test]
+fn theme_draft_preview_card_shows_name_status_samples_and_warnings_without_apply() {
+    let mut card = ToolCallComponent::new(ToolCallState {
+        id: "theme-draft-1".to_owned(),
+        name: "ThemeDraft".to_owned(),
+        arguments: Some(serde_json::json!({"action": "preview"}).to_string()),
+        result: Some("Preview ready.".to_owned()),
+        details: Some(serde_json::json!({
+            "kind": "theme_draft_preview",
+            "draft_id": "draft-abc123",
+            "fingerprint": "sha256:deadbeef",
+            "display_name": "Aurora Night",
+            "candidate_theme_id": "aurora-night.json",
+            "base_theme_id": null,
+            "normalized_colors": {
+                "brand": "#58a6ff",
+                "text_primary": "#e6edf3",
+                "text_muted": "#8b949e",
+                "status_ok": "#3fb950",
+                "status_error": "#f85149",
+                "selection_bg": "#1f232b",
+                "shell_mode": "#56b4c2"
+            },
+            "overridden_tokens": ["brand", "text_primary"],
+            "contrast_warnings": [
+                "text_muted vs selection_bg: contrast 2.4 is below 3.0"
+            ],
+            "applied": false
+        })),
+        status: ToolStatusKind::Succeeded,
+        exit_code: None,
+    });
+
+    let rows = plain(card.render(100));
+    let joined = rows.join("\n");
+    assert!(
+        joined.contains("Aurora Night"),
+        "display name should appear: {joined:?}"
+    );
+    assert!(
+        joined.contains("preview"),
+        "status should appear: {joined:?}"
+    );
+    assert!(
+        joined.contains("draft-abc123"),
+        "opaque draft id should appear: {joined:?}"
+    );
+    assert!(
+        joined.contains("aurora-night.json"),
+        "candidate theme id should appear: {joined:?}"
+    );
+    assert!(
+        joined.contains("sha256:deadbeef"),
+        "fingerprint should appear: {joined:?}"
+    );
+    assert!(
+        joined.contains("brand") && joined.contains("#58a6ff"),
+        "color samples should appear: {joined:?}"
+    );
+    assert!(
+        joined.contains("Welcome back"),
+        "representative TUI sample should appear: {joined:?}"
+    );
+    assert!(
+        joined.contains("text_muted vs selection_bg"),
+        "contrast warnings should appear: {joined:?}"
+    );
+    assert!(
+        !joined.to_lowercase().contains("apply"),
+        "preview card must not offer an Apply action: {joined:?}"
+    );
+}
+
+#[test]
+fn theme_draft_preview_card_never_overflows_narrow_widths() {
+    let details = serde_json::json!({
+        "kind": "theme_draft_preview",
+        "draft_id": "draft-abc123",
+        "fingerprint": "sha256:deadbeef",
+        "display_name": "Aurora Night",
+        "candidate_theme_id": "aurora-night.json",
+        "base_theme_id": "default.json",
+        "normalized_colors": {"brand": "#58a6ff", "text_primary": "#e6edf3"},
+        "overridden_tokens": ["brand"],
+        "contrast_warnings": ["text_muted vs selection_bg: contrast 2.4 is below 3.0"],
+        "applied": false
+    });
+    for width in [10, 24, 40, 60, 80, 120] {
+        let mut card = ToolCallComponent::new(ToolCallState {
+            id: "theme-draft-2".to_owned(),
+            name: "ThemeDraft".to_owned(),
+            arguments: Some(serde_json::json!({"action": "preview"}).to_string()),
+            result: Some("Preview ready.".to_owned()),
+            details: Some(details.clone()),
+            status: ToolStatusKind::Succeeded,
+            exit_code: None,
+        });
+        let rows = card.render(width);
+        for row in rows {
+            assert!(
+                neo_tui::primitive::visible_width(&row.to_ansi()) <= width,
+                "width {width} overflow: {:?}",
+                row.text()
+            );
+        }
+    }
+}
