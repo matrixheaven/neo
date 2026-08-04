@@ -1624,6 +1624,125 @@ async fn thinking_boundaries_render_before_the_completed_turn_is_drained() {
 }
 
 #[tokio::test]
+async fn thinking_boundaries_render_incrementally_through_terminal_loop() {
+    struct Events {
+        events: VecDeque<Option<InputEvent>>,
+    }
+
+    impl TerminalEvents for Events {
+        fn next_input_event(&mut self) -> Result<InputEvent> {
+            self.poll_input_event(Duration::ZERO)?
+                .ok_or_else(|| anyhow::anyhow!("expected scripted input"))
+        }
+
+        fn poll_input_event(&mut self, _timeout: Duration) -> Result<Option<InputEvent>> {
+            Ok(self
+                .events
+                .pop_front()
+                .unwrap_or(Some(InputEvent::Interrupt)))
+        }
+    }
+
+    let titles = [
+        "Planning initial workspace inspection",
+        "Evaluating parallel subagent dispatch",
+        "Checking the final workspace state",
+    ];
+    let run_turn = {
+        let titles = titles.map(str::to_owned);
+        move |_request: TurnRequest| {
+            let titles = titles.clone();
+            async move {
+                let events = titles
+                    .into_iter()
+                    .enumerate()
+                    .flat_map(|(index, title)| {
+                        [
+                            AgentEvent::ThinkingStarted {
+                                turn: 1,
+                                id: format!("summary-{}", index + 1),
+                                kind: neo_ai::ThinkingKind::Summary,
+                            },
+                            AgentEvent::ThinkingDelta {
+                                turn: 1,
+                                text: format!("**{title}**"),
+                            },
+                            AgentEvent::ThinkingFinished {
+                                turn: 1,
+                                signature: None,
+                                redacted: false,
+                            },
+                        ]
+                    })
+                    .chain([AgentEvent::TurnFinished {
+                        turn: 1,
+                        stop_reason: StopReason::EndTurn,
+                    }])
+                    .collect();
+                Ok(events)
+            }
+        }
+    };
+    let mut controller = InteractiveController::new_for_test(
+        "neo",
+        "test-session",
+        "openai/gpt-4.1",
+        test_workspace_root(),
+        run_turn,
+    );
+    controller.type_text("stream");
+
+    let rendered = Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
+    let rendered_for_callback = Arc::clone(&rendered);
+    controller
+        .run_terminal_loop_with_suspend(
+            move |tui, _| {
+                let frame = tui.render_terminal_frame(80, 24);
+                let text = frame
+                    .live
+                    .into_iter()
+                    .map(|line| neo_tui::primitive::strip_ansi(&line))
+                    .collect::<Vec<_>>()
+                    .join("\n");
+                rendered_for_callback
+                    .lock()
+                    .expect("render lock")
+                    .push(text);
+                Ok(frame.next_animation_deadline)
+            },
+            || Ok(()),
+            Events {
+                events: VecDeque::from([
+                    Some(InputEvent::Submit),
+                    None,
+                    None,
+                    None,
+                    None,
+                    Some(InputEvent::Interrupt),
+                    Some(InputEvent::Interrupt),
+                ]),
+            },
+        )
+        .await
+        .expect("event loop should finish");
+
+    let rendered = rendered.lock().expect("render lock");
+    let title_frames = titles
+        .iter()
+        .map(|title| {
+            rendered
+                .iter()
+                .position(|frame| frame.contains(title))
+                .unwrap_or_else(|| panic!("missing {title} in frames: {rendered:?}"))
+        })
+        .collect::<Vec<_>>();
+    assert!(title_frames.windows(2).all(|pair| pair[0] < pair[1]));
+    assert!(rendered[title_frames[0]].contains(titles[0]));
+    assert!(!rendered[title_frames[0]].contains(titles[1]));
+    assert!(!rendered[title_frames[1]].contains(titles[2]));
+}
+
+#[tokio::test]
 async fn completed_turn_drains_pending_approval_and_question_channels() {
     let approval_receiver = Arc::new(std::sync::Mutex::new(None));
     let question_receiver = Arc::new(std::sync::Mutex::new(None));
