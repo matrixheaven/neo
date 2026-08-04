@@ -712,8 +712,19 @@ async fn runtime_for_config(
     }
     // ThemeDraft is a root-runtime-only host tool: it mutates $NEO_HOME/themes/
     // and is deliberately absent from `tool_registry_for_config`, so the Btw
-    // sidecar and child/delegate registries never acquire it.
-    tools.register(crate::theme_draft::ThemeDraftTool::default_with_store());
+    // sidecar and child/delegate registries never acquire it. The bounded draft
+    // store is session-scoped: the interactive controller shares one store
+    // across turns so a preview in turn N can be saved in turn N+1; headless
+    // call sites without a request get a fresh store.
+    let theme_draft = if let Some(request) = request {
+        crate::theme_draft::ThemeDraftTool::new(
+            crate::themes::ThemeRepository::default(),
+            Arc::clone(&request.theme_draft_store),
+        )
+    } else {
+        crate::theme_draft::ThemeDraftTool::default_with_store()
+    };
+    tools.register(theme_draft);
     let mut runtime =
         AgentRuntime::with_tools_and_skill_handle(agent_config, client, tools, skill_store_handle);
     runtime = runtime.with_steer_input(channels.map_or_else(SteerInputHandle::new, |channels| {

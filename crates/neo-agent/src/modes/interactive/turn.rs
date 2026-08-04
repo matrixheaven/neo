@@ -93,6 +93,7 @@ impl InteractiveController {
             .instruction_registry
             .clone_from(&instruction_registry);
         request.manual_compact_request = std::sync::Arc::clone(&self.manual_compact_request);
+        request.theme_draft_store = std::sync::Arc::clone(&self.theme_draft_store);
         let request = if let Some(skill_context) = self.pending_skill_context.take() {
             request.with_skill_context(skill_context)
         } else {

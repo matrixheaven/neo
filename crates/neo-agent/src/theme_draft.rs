@@ -971,6 +971,50 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn preview_then_save_across_tool_instances_shares_the_session_store() {
+        // The interactive session owns one bounded store threaded through every
+        // turn's runtime. A preview issued by instance A (turn N) must be
+        // savable by instance B (turn N+1) built from the same Arc; a fresh
+        // store (a different session) must reject the draft as expired.
+        let temp = TempDir::new().expect("tempdir");
+        let store = Arc::new(Mutex::new(ThemeDraftStore::new()));
+        let repo = repository_in(&temp);
+        let turn_a = ThemeDraftTool::new(repo.clone(), Arc::clone(&store));
+        let turn_b = ThemeDraftTool::new(repo.clone(), Arc::clone(&store));
+        let ctx = context(&temp);
+
+        let preview = turn_a
+            .execute(&ctx, preview_input("Aurora Night"))
+            .await
+            .expect("preview runs");
+        assert!(!preview.is_error, "{}", preview.content);
+        let draft_id = result_details(&preview)["draft_id"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+
+        let saved = turn_b
+            .execute(&ctx, json!({"action": "save", "draft_id": draft_id}))
+            .await
+            .expect("save runs");
+        assert!(
+            !saved.is_error,
+            "save across turns must succeed: {}",
+            saved.content
+        );
+        assert_eq!(result_details(&saved)["applied"], false);
+
+        // A different Arc (fresh session) cannot see the draft.
+        let other_session = ThemeDraftTool::new(repo, Arc::new(Mutex::new(ThemeDraftStore::new())));
+        let expired = other_session
+            .execute(&ctx, json!({"action": "save", "draft_id": draft_id}))
+            .await
+            .expect("save runs");
+        assert!(expired.is_error);
+        assert_eq!(result_details(&expired)["error"], "expired_draft");
+    }
+
+    #[tokio::test]
     async fn preview_rejects_unknown_tokens_and_invalid_colors() {
         let temp = TempDir::new().expect("tempdir");
         let tool = tool_in(&temp);

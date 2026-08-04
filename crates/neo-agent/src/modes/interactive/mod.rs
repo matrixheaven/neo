@@ -499,6 +499,11 @@ pub(crate) struct InteractiveController {
     /// `AgentConfig` so the runtime can read it at the top of every loop
     /// iteration.
     manual_compact_request: Arc<std::sync::Mutex<Option<String>>>,
+    /// Shared bounded ThemeDraft draft store for this interactive session. One
+    /// store lives for the whole controller lifetime and is threaded into every
+    /// turn's runtime, so a `ThemeDraft.preview` in one turn can be saved in a
+    /// later turn of the same session. Expires with the controller.
+    theme_draft_store: std::sync::Arc<std::sync::Mutex<crate::theme_draft::ThemeDraftStore>>,
     /// Stored text pastes referenced by composer `[paste ...]` placeholders.
     paste_store: std::collections::HashMap<usize, String>,
     next_paste_id: usize,
@@ -610,6 +615,11 @@ pub(crate) struct TurnRequest {
     /// compaction was requested with an optional custom instruction; `None`
     /// means no request is pending. Set by `/compact`, taken by the runtime.
     pub manual_compact_request: Arc<std::sync::Mutex<Option<String>>>,
+    /// Shared bounded ThemeDraft draft store for the interactive session. The
+    /// controller overrides this on real dispatches so drafts survive across
+    /// turns; `TurnRequest::new` seeds a fresh store for headless drivers and
+    /// tests.
+    pub theme_draft_store: std::sync::Arc<std::sync::Mutex<crate::theme_draft::ThemeDraftStore>>,
     /// When true, the turn should only run compaction and then finish without
     /// sending anything to the model. Used by the idle `/compact` path.
     pub compaction_only: bool,
@@ -641,6 +651,9 @@ impl TurnRequest {
             base_config: None,
             instruction_registry: None,
             manual_compact_request: Arc::new(std::sync::Mutex::new(None)),
+            theme_draft_store: std::sync::Arc::new(std::sync::Mutex::new(
+                crate::theme_draft::ThemeDraftStore::new(),
+            )),
             compaction_only: false,
         }
     }
@@ -982,6 +995,9 @@ impl InteractiveController {
             pending_workspace_mutation: None,
             pending_workspace_add_input: false,
             manual_compact_request: Arc::new(std::sync::Mutex::new(None)),
+            theme_draft_store: std::sync::Arc::new(std::sync::Mutex::new(
+                crate::theme_draft::ThemeDraftStore::new(),
+            )),
             paste_store: std::collections::HashMap::new(),
             next_paste_id: 1,
             image_attachment_store: neo_tui::paste::ImageAttachmentStore::new(),
@@ -2571,6 +2587,7 @@ impl InteractiveController {
                 .instruction_registry
                 .clone_from(&instruction_registry);
             request.manual_compact_request = Arc::clone(&self.manual_compact_request);
+            request.theme_draft_store = Arc::clone(&self.theme_draft_store);
             request.compaction_only = true;
             let future = (self.run_turn)(request, channels);
             let task = tokio::spawn(async move {

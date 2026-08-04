@@ -207,7 +207,8 @@ only so unrelated config refreshes do not replace the current runtime theme.
 
 A draft is an in-memory, canonicalized theme payload returned by
 `ThemeDraft.preview`. It is not a durable file and is not a second source of
-truth. It expires with the runtime or bounded draft-store eviction.
+truth. It expires with the interactive session runtime (spans turns) or
+bounded draft-store eviction.
 
 ## 7. Architecture and Ownership
 
@@ -491,8 +492,11 @@ registry construction. It is not a generic filesystem tool and is excluded
 from child/delegate registries.
 
 The tool uses the repository and an `Arc<Mutex<BoundedDraftStore>>` shared by
-the runtime. The store keeps a bounded number of canonical drafts and expires
-with the runtime.
+the interactive session runtime. One bounded store is created when the
+interactive controller starts and is threaded through every turn's runtime, so
+a `ThemeDraft.preview` in one turn can be saved in a later turn of the same
+session. The store keeps a bounded number of canonical drafts and expires with
+the interactive session runtime (spans turns).
 
 ### 13.2 Input
 
