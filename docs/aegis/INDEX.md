@@ -6,7 +6,6 @@ Entries are workspace records, not authoritative runtime decisions.
 | Date | Kind | Path | Title |
 | --- | --- | --- | --- |
 | 2026-08-04 | plan | docs/aegis/plans/2026-08-04-theme-manager.md | Neo Theme Manager and AI-Assisted Custom Theme Implementation Plan |
-| 2026-08-04 | spec | docs/aegis/specs/2026-08-04-assistant-streaming-native-history-design.md | Assistant Streaming Native-History Presentation Design |
 | 2026-08-04 | spec | docs/aegis/specs/2026-08-04-theme-manager-design.md | Neo Theme Manager and AI-Assisted Custom Theme Design |
 | 2026-08-03 | handoff | docs/aegis/handoffs/2026-08-03-workflow-output-reliability.md | Workflow Output Reliability Handoff |
 | 2026-08-03 | plan | docs/aegis/plans/2026-08-03-footer-reasoning-effort.md | Neo Footer Reasoning Effort Display Implementation Plan |
@@ -379,3 +378,20 @@ Entries are workspace records, not authoritative runtime decisions.
 | 2026-08-03 | work | docs/aegis/work/2026-08-03-compact-progress-display/20-checkpoint.md | Compact Progress Display checkpoint |
 | 2026-08-03 | work | docs/aegis/work/2026-08-03-compact-progress-display/90-evidence.md | Compact Progress Display evidence |
 | 2026-08-03 | work | docs/aegis/work/2026-08-03-compact-progress-display/99-reflection.md | Compact Progress Display reflection |
+| 2026-08-04 | work | docs/aegis/work/2026-08-04-fullscreen-transcript-document/10-intent.md | Fullscreen Transcript Document intent |
+| 2026-08-04 | work | docs/aegis/work/2026-08-04-fullscreen-transcript-document/20-checkpoint.md | Fullscreen Transcript Document checkpoint |
+| 2026-08-04 | work | docs/aegis/work/2026-08-04-fullscreen-transcript-document/90-evidence.md | Fullscreen Transcript Document evidence |
+| 2026-08-04 | work | docs/aegis/work/2026-08-04-fullscreen-transcript-document/99-reflection.md | Fullscreen Transcript Document reflection |
+| 2026-08-04 | artifact | docs/aegis/work/2026-08-04-fullscreen-transcript-document/task-intent-draft.json | Fullscreen Transcript Document task intent draft |
+| 2026-08-04 | artifact | docs/aegis/work/2026-08-04-fullscreen-transcript-document/baseline-read-set-hint.json | Fullscreen Transcript Document baseline read-set hint |
+| 2026-08-04 | artifact | docs/aegis/work/2026-08-04-fullscreen-transcript-document/baseline-usage-draft.json | Fullscreen Transcript Document baseline usage draft |
+| 2026-08-04 | artifact | docs/aegis/work/2026-08-04-fullscreen-transcript-document/impact-statement-draft.json | Fullscreen Transcript Document impact statement draft |
+| 2026-08-04 | artifact | docs/aegis/work/2026-08-04-fullscreen-transcript-document/todo-checkpoint-draft.json | Fullscreen Transcript Document todo checkpoint draft |
+| 2026-08-04 | artifact | docs/aegis/work/2026-08-04-fullscreen-transcript-document/drift-check-draft.json | Fullscreen Transcript Document drift check draft |
+| 2026-08-04 | spec | docs/aegis/specs/2026-08-04-fullscreen-transcript-document-design.md | Fullscreen Transcript Document Design |
+| 2026-08-04 | artifact | docs/aegis/work/2026-08-04-fullscreen-transcript-document/evidence-bundle-draft-current-transcript-loss.json | 2026-08-04-fullscreen-transcript-document evidence current-transcript-loss |
+| 2026-08-04 | artifact | docs/aegis/work/2026-08-04-fullscreen-transcript-document/evidence-bundle-draft-written-design-self-review.json | 2026-08-04-fullscreen-transcript-document evidence written-design-self-review |
+| 2026-08-04 | artifact | docs/aegis/work/2026-08-04-fullscreen-transcript-document/resume-state-hint.json | 2026-08-04-fullscreen-transcript-document resume state hint |
+| 2026-08-04 | artifact | docs/aegis/work/2026-08-04-fullscreen-transcript-document/gate-input-pack.json | 2026-08-04-fullscreen-transcript-document gate input pack |
+| 2026-08-04 | work | docs/aegis/work/2026-08-04-fullscreen-transcript-document/proof-bundle.md | 2026-08-04-fullscreen-transcript-document proof bundle |
+| 2026-08-04 | artifact | docs/aegis/work/2026-08-04-fullscreen-transcript-document/evidence-bundle-draft-workspace-structure-boundary.json | 2026-08-04-fullscreen-transcript-document evidence workspace-structure-boundary |
