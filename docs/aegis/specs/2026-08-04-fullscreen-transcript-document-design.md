@@ -2,8 +2,8 @@
 
 ## Status
 
-Direction approved in conversation on 2026-08-04. This written design awaits
-user review before implementation planning.
+Approved by the user on 2026-08-04. Implementation planning is authorized;
+runtime implementation remains a separate authorization boundary.
 
 After written approval and implementation verification, this design supersedes
 the ordinary-conversation presentation direction in:
