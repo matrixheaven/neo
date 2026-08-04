@@ -390,6 +390,7 @@ Entries are workspace records, not authoritative runtime decisions.
 | 2026-08-04 | artifact | docs/aegis/work/2026-08-04-fullscreen-transcript-document/drift-check-draft.json | Fullscreen Transcript Document drift check draft |
 | 2026-08-04 | spec | docs/aegis/specs/2026-08-04-fullscreen-transcript-document-design.md | Fullscreen Transcript Document Design |
 | 2026-08-04 | plan | docs/aegis/plans/2026-08-04-fullscreen-transcript-document.md | Fullscreen Transcript Document Implementation Plan |
+| 2026-08-04 | handoff | docs/aegis/handoffs/2026-08-04-fullscreen-transcript-document.md | Fullscreen Transcript Document Implementation Handoff |
 | 2026-08-04 | artifact | docs/aegis/work/2026-08-04-fullscreen-transcript-document/evidence-bundle-draft-current-transcript-loss.json | 2026-08-04-fullscreen-transcript-document evidence current-transcript-loss |
 | 2026-08-04 | artifact | docs/aegis/work/2026-08-04-fullscreen-transcript-document/evidence-bundle-draft-written-design-self-review.json | 2026-08-04-fullscreen-transcript-document evidence written-design-self-review |
 | 2026-08-04 | artifact | docs/aegis/work/2026-08-04-fullscreen-transcript-document/resume-state-hint.json | 2026-08-04-fullscreen-transcript-document resume state hint |
