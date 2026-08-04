@@ -48,6 +48,9 @@ impl InteractiveController {
             }
             return true;
         }
+        if self.handle_theme_slash_command(prompt).await {
+            return true;
+        }
         if self.handle_simple_slash_command(prompt).await {
             return true;
         }
@@ -61,6 +64,27 @@ impl InteractiveController {
             return true;
         }
         self.handle_goal_slash_prefix(prompt).await
+    }
+
+    /// Handle the `/theme` slash family. Recognized before any generic slash
+    /// handling; non-theme prompts fall through untouched. Bare `/theme`
+    /// clears the submitted prompt and opens the manager only when idle;
+    /// `/theme <reference>` applies directly even while a turn runs.
+    pub(super) async fn handle_theme_slash_command(&mut self, prompt: &str) -> bool {
+        let Some(request) = super::theme_manager::parse_theme_slash(prompt) else {
+            return false;
+        };
+        self.clear_submitted_prompt();
+        match request {
+            super::theme_manager::ThemeSlashRequest::Manager => {
+                self.open_theme_manager_if_idle();
+            }
+            super::theme_manager::ThemeSlashRequest::Reload => self.reload_theme_from_config(),
+            super::theme_manager::ThemeSlashRequest::Apply(reference) => {
+                self.apply_theme_from_slash(&reference);
+            }
+        }
+        true
     }
 
     pub(super) async fn handle_simple_slash_command(&mut self, prompt: &str) -> bool {

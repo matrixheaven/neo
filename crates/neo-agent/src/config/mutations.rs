@@ -92,7 +92,6 @@ pub fn set_model_selection(
 /// The id is validated at the logical boundary before anything is written; a
 /// failed validation or failed write leaves both the previous config file and
 /// the caller's current runtime state unchanged.
-#[allow(dead_code)]
 pub fn set_startup_theme(config_path: &Path, theme_id: &str) -> anyhow::Result<()> {
     crate::themes::ThemeId::new(theme_id).with_context(|| {
         format!("invalid theme id {theme_id:?}: use a relative path under $NEO_HOME/themes/")

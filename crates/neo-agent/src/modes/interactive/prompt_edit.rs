@@ -7,7 +7,7 @@ use super::{
     PromptCompletionPrefix, PromptEdit, frame_content_width, longest_common_completion_prefix,
     prompt_completion::{
         prompt_completions_from_catalog, prompt_completions_with_registry,
-        slash_completion_catalog_with_registry,
+        slash_completion_catalog_with_theme_config,
     },
     size,
 };
@@ -827,13 +827,14 @@ impl InteractiveController {
         }
         if self.slash_completion_catalog.is_none() {
             self.refresh_skill_store_for_completion();
-            self.slash_completion_catalog = Some(slash_completion_catalog_with_registry(
+            self.slash_completion_catalog = Some(slash_completion_catalog_with_theme_config(
                 &self.completion_root,
                 self.skill_store.as_ref(),
                 self.project_trusted(),
                 self.local_config
                     .as_ref()
                     .map(|config| &config.workflow_definitions),
+                self.config_path().as_deref(),
             )?);
         }
         prompt_completions_from_catalog(

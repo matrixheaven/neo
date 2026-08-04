@@ -11,6 +11,7 @@ impl InteractiveController {
         if !dialog_result_may_close(result) {
             return Ok(());
         }
+        self.handle_theme_manager_dialog_step();
         if self.process_model_dialog_result() {
             return Ok(());
         }
@@ -239,6 +240,7 @@ impl InteractiveController {
             neo_tui::dialogs::ChoiceResult::Cancelled => {
                 self.pending_interactive_workflow = None;
                 self.pending_preflight = None;
+                self.clear_pending_theme_import();
             }
         }
     }
@@ -273,6 +275,9 @@ impl InteractiveController {
             return;
         }
         if self.handle_catalog_choice_item(id) {
+            return;
+        }
+        if self.handle_theme_choice_item(id) {
             return;
         }
         self.handle_builtin_choice_item(id);
@@ -417,6 +422,9 @@ impl InteractiveController {
         let Some(result) = self.tui.chrome_mut().text_input_result().cloned() else {
             return;
         };
+        if self.handle_theme_manager_text_input_result(result.clone()) {
+            return;
+        }
         if self.handle_workspace_text_input_result(result.clone()) {
             return;
         }

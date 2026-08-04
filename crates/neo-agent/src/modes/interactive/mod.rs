@@ -136,6 +136,8 @@ mod sessions;
 mod mcp_manager;
 use mcp_manager::PendingMcpProbe;
 
+mod theme_manager;
+
 mod workspace_manager;
 
 mod catalog_fetch;
@@ -513,6 +515,21 @@ pub(crate) struct InteractiveController {
     captured_log_suppression_notified: bool,
     completion_notification: neo_tui::notify::NotificationMode,
     question_notification: neo_tui::notify::NotificationMode,
+    /// Logical id of the theme applied for the current session only. `Some`
+    /// keeps the chrome theme stable across config refreshes (the session
+    /// override wins until `/theme reload` clears it). Controller metadata
+    /// only — never serialized, never written to `config.toml`, never inserted
+    /// into session or transcript records.
+    session_theme_override: Option<crate::themes::ThemeId>,
+    /// An import whose destination id already exists, awaiting the user's
+    /// overwrite / save-as-new choice.
+    pending_theme_import: Option<theme_manager::PendingThemeImport>,
+    /// Whether the focused text-input dialog belongs to the theme manager
+    /// import-path flow.
+    theme_import_path_dialog: bool,
+    /// Whether the focused text-input dialog belongs to the theme manager
+    /// copy-name flow.
+    theme_copy_name_dialog: bool,
 }
 
 pub(crate) struct TurnChannels {
@@ -975,6 +992,10 @@ impl InteractiveController {
             captured_log_suppression_notified: false,
             completion_notification: neo_tui::notify::NotificationMode::Bell,
             question_notification: neo_tui::notify::NotificationMode::None,
+            session_theme_override: None,
+            pending_theme_import: None,
+            theme_import_path_dialog: false,
+            theme_copy_name_dialog: false,
         }
     }
 
@@ -1170,9 +1191,11 @@ impl InteractiveController {
     }
 
     /// Reloads configuration from disk and refreshes all derived state.
-    fn refresh_config(&mut self) {
+    /// Returns `true` when the config file was reloaded successfully and
+    /// `false` when there was no config or the reload failed.
+    fn refresh_config(&mut self) -> bool {
         let Some(mut current) = self.local_config.clone() else {
-            return;
+            return false;
         };
         current.permission_mode = self.permission_mode;
         let path = current.config_path.clone();
@@ -1188,12 +1211,19 @@ impl InteractiveController {
                 self.session_items = catalogs.session_items;
                 self.session_list_error = catalogs.session_error;
                 self.model_items = catalogs.model_items;
-                self.tui.chrome_mut().set_theme(config.theme.theme);
+                // A session theme override wins over the config theme until
+                // `/theme reload` clears it, so unrelated refreshes must not
+                // overwrite the current chrome.
+                if self.session_theme_override.is_none() {
+                    self.tui.chrome_mut().set_theme(config.theme.theme);
+                }
                 self.local_config = Some(config);
                 self.refresh_workflow_dispatch_model();
+                true
             }
             Err(error) => {
                 tracing::warn!("failed to reload config: {error}");
+                false
             }
         }
     }
@@ -1772,6 +1802,15 @@ impl InteractiveController {
                 return Ok(());
             }
             self.handle_permission_slash_command(&prompt);
+            return Ok(());
+        }
+
+        // `/theme` is a controller-side chrome command. Direct application
+        // works even while a turn runs; the bare manager entry degrades to a
+        // hint when busy (see `handle_theme_slash_command`), so it must be
+        // dispatched before the follow-up queue below.
+        if theme_manager::parse_theme_slash(&prompt).is_some() {
+            self.handle_theme_slash_command(&prompt).await;
             return Ok(());
         }
 

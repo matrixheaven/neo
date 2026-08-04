@@ -65,7 +65,58 @@ pub(super) fn slash_completion_catalog_with_registry(
         slash_prompts: slash_prompt_template_completion_items(root, &templates),
         prompt_packages: prompt_package_completion_items(root, &templates),
         session_commands: session_completion_items_with_registry(skill_store, workflow_registry),
+        theme_items: Vec::new(),
     })
+}
+
+/// Slash catalog variant that also seeds live `/theme` completions from the
+/// theme repository. `theme_config_path` is the config file whose sibling
+/// `themes/` directory is the repository root; `None` yields no theme items.
+pub(super) fn slash_completion_catalog_with_theme_config(
+    root: &Path,
+    skill_store: Option<&SkillStore>,
+    project_trusted: bool,
+    workflow_registry: Option<&WorkflowDefinitionRegistry>,
+    theme_config_path: Option<&Path>,
+) -> Result<CompletionCatalog> {
+    let mut catalog = slash_completion_catalog_with_registry(
+        root,
+        skill_store,
+        project_trusted,
+        workflow_registry,
+    )?;
+    catalog.theme_items = theme_completion_items(theme_config_path);
+    Ok(catalog)
+}
+
+/// Build `/theme <id>` and `/theme <display-name>` completions from the live
+/// repository catalog. Read-only: never mutates files, config, or chrome.
+fn theme_completion_items(config_path: Option<&Path>) -> Vec<PickerItem> {
+    let Some(config_path) = config_path else {
+        return Vec::new();
+    };
+    let repo = crate::themes::ThemeRepository::from_config_path(config_path);
+    let Ok(catalog) = repo.catalog() else {
+        return Vec::new();
+    };
+    let mut items = Vec::new();
+    for entry in catalog.valid_entries() {
+        items.push(PickerItem::new(
+            format!("/theme {}", entry.id.as_str()),
+            format!("/theme {}", entry.id.as_str()),
+            Some(format!("Theme: {}", entry.display_name())),
+        ));
+        if entry.display_name() != entry.id.as_str() {
+            items.push(PickerItem::new(
+                format!("/theme {}", entry.display_name()),
+                format!("/theme {}", entry.display_name()),
+                Some(format!("Theme: {}", entry.id.as_str())),
+            ));
+        }
+    }
+    items.sort_by(|left, right| left.value.cmp(&right.value));
+    items.truncate(100);
+    items
 }
 
 pub(super) fn prompt_completions_from_catalog(
@@ -122,6 +173,7 @@ static STATIC_SLASH_COMMANDS: &[(&str, &str)] = &[
     ("/auto", "auto permission mode"),
     ("/yolo", "yolo permission mode"),
     ("/btw", "Open a temporary side-question panel"),
+    ("/theme", "Open the theme manager or apply a theme"),
 ];
 
 #[cfg(test)]
@@ -265,6 +317,9 @@ pub(super) struct CompletionCatalog {
     pub(super) slash_prompts: Vec<PickerItem>,
     pub(super) prompt_packages: Vec<PickerItem>,
     pub(super) session_commands: Vec<PickerItem>,
+    /// Live `/theme <id>` / `/theme <display-name>` candidates sourced from
+    /// the theme repository; empty when no config path is available.
+    pub(super) theme_items: Vec<PickerItem>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -274,6 +329,7 @@ pub(super) enum CompletionSource {
     SlashPrompt,
     PromptPackage,
     SessionCommand,
+    Theme,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -434,6 +490,7 @@ fn collect_slash_candidates(catalog: &CompletionCatalog) -> Vec<SlashCandidate> 
         (&catalog.slash_prompts, CompletionSource::SlashPrompt),
         (&catalog.prompt_packages, CompletionSource::PromptPackage),
         (&catalog.session_commands, CompletionSource::SessionCommand),
+        (&catalog.theme_items, CompletionSource::Theme),
     ];
     sources
         .into_iter()
@@ -512,6 +569,7 @@ fn completion_source_rank(source: CompletionSource) -> u8 {
         CompletionSource::SlashPrompt => 2,
         CompletionSource::PromptPackage => 3,
         CompletionSource::SessionCommand => 4,
+        CompletionSource::Theme => 5,
     }
 }
 

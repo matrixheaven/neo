@@ -12,6 +12,7 @@ use crate::prompt::templates::load_project_prompt_templates;
 
 use super::InteractiveController;
 
+#[allow(clippy::too_many_lines)]
 fn command_specs(project_dir: &Path, project_trusted: bool) -> (Vec<CommandSpec>, Option<String>) {
     let mut commands = vec![
         CommandSpec::new("sessions", "Open sessions", Some("Browse local sessions")),
@@ -93,6 +94,11 @@ fn command_specs(project_dir: &Path, project_trusted: bool) -> (Vec<CommandSpec>
             "/btw sidecar",
             Some("Open a temporary side-question panel"),
         ),
+        CommandSpec::new(
+            "theme.manager",
+            "Theme manager",
+            Some("Open and manage themes"),
+        ),
     ];
     let mut templates = match load_project_prompt_templates(project_dir, project_trusted) {
         Ok(templates) => templates,
@@ -167,6 +173,7 @@ impl InteractiveController {
             "providers" => self.open_provider_picker(),
             "mcp" => self.open_mcp_manager().await,
             "add-workspace" => self.open_workspace_manager(),
+            "theme.manager" => self.open_theme_manager_if_idle(),
             _ => return false,
         }
         true

@@ -350,6 +350,47 @@ fn invalid_theme_in_config_reports_diagnostic_without_rewriting_config() {
 }
 
 #[test]
+fn theme_startup_default_id_persists_and_startup_is_read_only() {
+    let temp = TempDir::new().expect("tempdir");
+    let themes = neo_home_for_test().join("themes");
+    fs::create_dir_all(&themes).expect("create themes");
+    fs::write(
+        themes.join("zz-first.json"),
+        r##"{"name": "Sorted First", "colors": {"brand": "blue"}}"##,
+    )
+    .expect("write sorted-first theme");
+    fs::write(
+        themes.join("configured.json"),
+        r##"{"name": "Configured", "colors": {"brand": "red"}}"##,
+    )
+    .expect("write configured theme");
+
+    // The set-startup-default action persists exactly one logical id into the
+    // TUI section; nothing else in the config changes.
+    write_home_config("[tui]\ntheme = \"configured.json\"\n");
+    let config_bytes = fs::read_to_string(neo_home_for_test().join("config.toml")).expect("config");
+
+    let mut command = neo();
+    command.current_dir(temp.path()).arg("--verbose");
+
+    let stdout = run(command);
+
+    assert!(
+        stdout.contains("theme: Configured"),
+        "the persisted startup id must be honored, got:\n{stdout}"
+    );
+    assert!(
+        !stdout.contains("theme: Sorted First"),
+        "the persisted startup id must win over sorted discovery, got:\n{stdout}"
+    );
+    assert_eq!(
+        fs::read_to_string(neo_home_for_test().join("config.toml")).expect("config"),
+        config_bytes,
+        "a startup read must never rewrite the persisted config"
+    );
+}
+
+#[test]
 fn root_resume_flag_opens_real_local_session_picker() {
     let temp = TempDir::new().expect("tempdir");
     let sessions = session_bucket(temp.path());
