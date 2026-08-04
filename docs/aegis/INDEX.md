@@ -5,6 +5,8 @@ Entries are workspace records, not authoritative runtime decisions.
 
 | Date | Kind | Path | Title |
 | --- | --- | --- | --- |
+| 2026-08-04 | adr | docs/aegis/adr/ADR-0011-theme-manager-and-custom-theme.md | ADR-0011: Theme Repository, Manager, and Host-Guarded AI Theme Creation |
+| 2026-08-04 | baseline | docs/aegis/baseline/2026-08-04-theme-manager.md | Theme Manager and Custom Theme Landed Baseline |
 | 2026-08-04 | plan | docs/aegis/plans/2026-08-04-theme-manager.md | Neo Theme Manager and AI-Assisted Custom Theme Implementation Plan |
 | 2026-08-04 | spec | docs/aegis/specs/2026-08-04-theme-manager-design.md | Neo Theme Manager and AI-Assisted Custom Theme Design |
 | 2026-08-03 | handoff | docs/aegis/handoffs/2026-08-03-workflow-output-reliability.md | Workflow Output Reliability Handoff |
