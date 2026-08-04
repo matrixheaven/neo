@@ -13,6 +13,7 @@ mod select_list;
 mod session_picker;
 mod state;
 mod stream;
+mod theme_manager;
 
 pub use crate::primitive::theme::{ChromeMode, DevelopmentMode, GoalModeStatus, TuiTheme};
 
@@ -33,6 +34,10 @@ pub use select_list::{SelectItem, SelectListState, VisibleSelectItem};
 pub use session_picker::{SessionPickerItem, SessionPickerScope, SessionPickerState};
 pub use state::NeoChromeState;
 pub use stream::{StreamUpdate, ToolStatusKind};
+pub use theme_manager::{
+    ThemeCatalogEntrySnapshot, ThemeConflictPolicy, ThemeManagerAction, ThemeManagerFocus,
+    ThemeManagerPending, ThemeManagerState, ThemeManagerStatus,
+};
 
 use crate::dialogs::{QuestionDisplayData, QuestionStateMachine};
 use crate::tasks_browser::TaskBrowserState;
@@ -299,6 +304,7 @@ impl NeoChromeState {
                 | OverlayKind::TrustDialog(_)
                 | OverlayKind::HelpPanel(_)
                 | OverlayKind::TaskBrowser(_)
+                | OverlayKind::ThemeManager(_)
         )
     }
 
@@ -331,6 +337,23 @@ impl NeoChromeState {
         let id = self.focused_overlay?;
         let overlay = self.overlays.iter_mut().find(|overlay| overlay.id == id)?;
         let OverlayKind::TranscriptBrowser(state) = &mut overlay.kind else {
+            return None;
+        };
+        Some(state)
+    }
+
+    #[must_use]
+    pub fn theme_manager_state(&self) -> Option<&ThemeManagerState> {
+        let OverlayKind::ThemeManager(state) = &self.focused_overlay()?.kind else {
+            return None;
+        };
+        Some(state)
+    }
+
+    pub fn theme_manager_state_mut(&mut self) -> Option<&mut ThemeManagerState> {
+        let id = self.focused_overlay?;
+        let overlay = self.overlays.iter_mut().find(|overlay| overlay.id == id)?;
+        let OverlayKind::ThemeManager(state) = &mut overlay.kind else {
             return None;
         };
         Some(state)

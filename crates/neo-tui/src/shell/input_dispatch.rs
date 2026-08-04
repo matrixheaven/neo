@@ -7,6 +7,7 @@ use neo_agent_core::ApprovalResponse;
 
 use super::overlay::{Overlay, OverlayKind};
 use super::state::NeoChromeState;
+use super::theme_manager::ThemeManagerAction;
 
 impl NeoChromeState {
     /// Forward an input event to the focused rich dialog overlay.
@@ -50,6 +51,17 @@ impl NeoChromeState {
             OverlayKind::HelpPanel(state) => {
                 let result = state.handle_input(&input);
                 if matches!(result, InputResult::Submitted | InputResult::Cancelled) {
+                    close_overlay = true;
+                }
+                result
+            }
+            OverlayKind::ThemeManager(state) => {
+                let result = state.handle_input(&input);
+                if matches!(result, InputResult::Submitted | InputResult::Cancelled) {
+                    // Preserve any emitted action for the controller before the
+                    // overlay (and its transient state) is closed; mirrors the
+                    // `pending_question_result` drain in `QuestionDialog`.
+                    self.pending_theme_manager_action = state.take_action();
                     close_overlay = true;
                 }
                 result
@@ -146,6 +158,19 @@ impl NeoChromeState {
         &mut self,
     ) -> Option<crate::dialogs::WorkspaceManagerAction> {
         let OverlayKind::WorkspaceManager(state) = &mut self.focused_overlay_mut()?.kind else {
+            return None;
+        };
+        state.take_action()
+    }
+
+    /// Take the next emitted theme manager action (polled by the controller).
+    /// Actions drained when the overlay closes on submit/cancel are returned
+    /// first, so the controller never loses an apply/close result.
+    pub fn take_theme_manager_action(&mut self) -> Option<ThemeManagerAction> {
+        if let Some(action) = self.pending_theme_manager_action.take() {
+            return Some(action);
+        }
+        let OverlayKind::ThemeManager(state) = &mut self.focused_overlay_mut()?.kind else {
             return None;
         };
         state.take_action()

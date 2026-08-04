@@ -14,6 +14,7 @@ use super::context::{ContextWindow, MainAgentTokenUsage};
 use super::overlay::{Overlay, OverlayId};
 use super::pending_input::PendingInputState;
 use super::prompt::PromptState;
+use super::theme_manager::ThemeManagerAction;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 // Many independent toggle fields are stored on this central chrome state.
@@ -39,6 +40,9 @@ pub struct NeoChromeState {
     pub(super) focused_overlay: Option<OverlayId>,
     pub(super) pending_approvals: VecDeque<ApprovalRequestModal>,
     pub(super) pending_question_result: Option<crate::dialogs::QuestionResult>,
+    /// Action drained from a closing theme manager overlay so the controller
+    /// can still poll it after the overlay (and its state) is closed.
+    pub(super) pending_theme_manager_action: Option<ThemeManagerAction>,
     pub(super) image_render_policy: ImageRenderPolicy,
     pub(super) image_capabilities: TerminalImageCapabilities,
     pub(super) theme: TuiTheme,
@@ -94,6 +98,7 @@ impl NeoChromeState {
             focused_overlay: None,
             pending_approvals: VecDeque::new(),
             pending_question_result: None,
+            pending_theme_manager_action: None,
             image_render_policy: ImageRenderPolicy::default(),
             image_capabilities: TerminalImageCapabilities::default(),
             theme: TuiTheme::default(),

@@ -7,7 +7,7 @@ use neo_tui::primitive::theme::ChromeMode;
 use neo_tui::shell::{
     CommandPaletteState, CommandSpec, ContextWindow, ModelPickerState, NeoChromeState, Overlay,
     OverlayKind, PickerItem, PromptEdit, SessionPickerItem, SessionPickerScope, SessionPickerState,
-    StreamUpdate, ToolStatusKind,
+    StreamUpdate, ThemeCatalogEntrySnapshot, ToolStatusKind,
 };
 use neo_tui::tasks_browser::{
     TaskBrowserItem, TaskBrowserKind, TaskBrowserSnapshot, TaskBrowserState, TaskBrowserStatus,
@@ -135,6 +135,53 @@ fn task_browser_overlay_replaces_existing_transcript_body() {
 
     tui.chrome_mut().close_focused_overlay();
     assert!(!tui.render_terminal_frame(80, 20).mouse_capture);
+}
+
+#[test]
+fn theme_manager_overlay_blocks_composer_and_escape_closes() {
+    let mut app = NeoChromeState::new("neo", "test-session", "model", "/tmp/neo-ws");
+    app.prompt_mut()
+        .apply_edit(PromptEdit::Insert("draft prompt"));
+    let entry = ThemeCatalogEntrySnapshot {
+        id: "solarized-dark.json".to_owned(),
+        display_name: "Solarized Dark".to_owned(),
+        theme: Some(neo_tui::primitive::theme::TuiTheme::default()),
+        error: None,
+        active: false,
+        startup_default: false,
+    };
+    app.open_theme_manager(vec![entry]);
+
+    assert!(app.focused_overlay_blocks_prompt());
+    assert!(app.focused_overlay_is_rich_dialog());
+
+    // The full-screen frame hides the transcript and the composer entirely.
+    let mut transcript = TranscriptPane::new(80, 20);
+    transcript.push_status("composer must be hidden");
+    let mut tui = neo_tui::NeoTui::new(app, transcript);
+    let frame = tui.render_terminal_frame(80, 20);
+    assert!(frame.review_surface);
+    assert!(frame.cursor.is_none());
+    let rendered = frame
+        .live
+        .iter()
+        .map(|line| neo_tui::primitive::strip_ansi(line))
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(rendered.contains("THEME MANAGER"), "{rendered}");
+    assert!(!rendered.contains("composer must be hidden"), "{rendered}");
+    assert!(!rendered.contains("draft prompt"), "{rendered}");
+
+    // Esc closes through the chrome (Cancelled); no Close action is queued,
+    // so a later controller poll cannot act on a stale close.
+    assert_eq!(
+        tui.chrome_mut()
+            .handle_focused_dialog_input(InputEvent::Cancel),
+        neo_tui::primitive::InputResult::Cancelled
+    );
+    assert!(tui.chrome().focused_overlay().is_none());
+    assert!(tui.chrome_mut().take_theme_manager_action().is_none());
+    assert!(!tui.render_terminal_frame(80, 20).review_surface);
 }
 
 #[test]

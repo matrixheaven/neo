@@ -12,6 +12,7 @@ pub mod shell;
 pub mod tasks_browser;
 pub mod terminal_capabilities;
 pub mod terminal_image;
+pub mod theme_preview;
 pub mod token_estimate;
 pub mod transcript;
 pub mod widgets;

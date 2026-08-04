@@ -2,6 +2,7 @@ use super::command_palette::CommandPaletteState;
 use super::dialog_dispatch::handle_dialog_selection;
 use super::pickers::{ModelPickerState, PromptCompletionState};
 use super::session_picker::SessionPickerState;
+use super::theme_manager::ThemeManagerState;
 use crate::primitive::theme::TuiTheme;
 
 use crate::dialogs::QuestionStateMachine;
@@ -146,6 +147,7 @@ pub enum OverlayKind {
     HelpPanel(HelpPanelState),
     TaskBrowser(TaskBrowserState),
     TranscriptBrowser(TranscriptBrowserState),
+    ThemeManager(ThemeManagerState),
 }
 
 impl OverlayKind {
@@ -222,10 +224,13 @@ impl OverlayKind {
         height: usize,
         theme: &TuiTheme,
     ) -> Option<Vec<String>> {
-        let Self::TaskBrowser(state) = self else {
-            return None;
-        };
-        Some(TaskBrowserRenderer::new(state, *theme).render(width, height))
+        match self {
+            Self::TaskBrowser(state) => {
+                Some(TaskBrowserRenderer::new(state, *theme).render(width, height))
+            }
+            Self::ThemeManager(state) => Some(state.render_lines(width, height, theme)),
+            _ => None,
+        }
     }
 
     #[must_use]

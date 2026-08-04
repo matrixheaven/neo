@@ -6,6 +6,7 @@ use super::overlay::{Overlay, OverlayId, OverlayKind};
 use super::pickers::{ModelPickerState, PickerItem, PromptCompletionPrefix, PromptCompletionState};
 use super::session_picker::{SessionPickerItem, SessionPickerScope, SessionPickerState};
 use super::state::NeoChromeState;
+use super::theme_manager::{ThemeCatalogEntrySnapshot, ThemeManagerState};
 
 impl NeoChromeState {
     pub fn open_command_palette(
@@ -339,6 +340,14 @@ impl NeoChromeState {
         self.close_overlay(id)
     }
 
+    /// Open the theme manager with a catalog snapshot. The manager renders and
+    /// emits typed actions; it never touches the repository or config.
+    pub fn open_theme_manager(&mut self, entries: Vec<ThemeCatalogEntrySnapshot>) -> OverlayId {
+        let mut state = ThemeManagerState::new(self.model_label.clone());
+        state.apply_snapshot(entries);
+        self.push_overlay(Overlay::new("themes", OverlayKind::ThemeManager(state)))
+    }
+
     #[must_use]
     pub fn take_trust_dialog_result(&mut self) -> Option<crate::dialogs::TrustDialogResult> {
         let id = self.focused_overlay?;
@@ -398,6 +407,7 @@ impl NeoChromeState {
                 | OverlayKind::TrustDialog(_)
                 | OverlayKind::HelpPanel(_)
                 | OverlayKind::TaskBrowser(_)
+                | OverlayKind::ThemeManager(_)
         )
     }
 }
