@@ -4,6 +4,7 @@ use neo_tui::dialogs::{
 };
 use neo_tui::input::{InputEvent, KeybindingAction};
 use neo_tui::primitive::InputResult;
+use neo_tui::screen_output::CURSOR_MARKER;
 use neo_tui::shell::NeoChromeState;
 use neo_tui::transcript::TranscriptPane;
 use neo_tui::widgets::{TodoDisplayItem, TodoDisplayStatus, select_visible_todos};
@@ -307,6 +308,89 @@ fn focused_dialog_input_drives_question_dialog_other_text() {
     let state = app.question_dialog_state().unwrap();
     assert!(state.questions[0].other_selected);
     assert_eq!(state.questions[0].other_text, "custom answer");
+}
+
+#[test]
+fn other_text_supports_cursor_editing() {
+    let mut state = QuestionStateMachine::new("q-1", make_single_question());
+    state.cursor = 2;
+    state.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+
+    for character in "abcd".chars() {
+        state.handle_key(KeyEvent::new(KeyCode::Char(character), KeyModifiers::NONE));
+    }
+    assert_eq!(state.questions[0].other_text, "abcd");
+
+    state.handle_key(KeyEvent::new(KeyCode::Left, KeyModifiers::NONE));
+    state.handle_key(KeyEvent::new(KeyCode::Left, KeyModifiers::NONE));
+    state.handle_key(KeyEvent::new(KeyCode::Char('X'), KeyModifiers::NONE));
+    assert_eq!(state.questions[0].other_text, "abXcd");
+
+    state.handle_key(KeyEvent::new(KeyCode::Backspace, KeyModifiers::NONE));
+    assert_eq!(state.questions[0].other_text, "abcd");
+
+    state.handle_key(KeyEvent::new(KeyCode::Home, KeyModifiers::NONE));
+    state.handle_key(KeyEvent::new(KeyCode::Delete, KeyModifiers::NONE));
+    assert_eq!(state.questions[0].other_text, "bcd");
+
+    state.handle_key(KeyEvent::new(KeyCode::End, KeyModifiers::NONE));
+    state.handle_key(KeyEvent::new(KeyCode::Left, KeyModifiers::NONE));
+    state.handle_key(KeyEvent::new(KeyCode::Delete, KeyModifiers::NONE));
+    assert_eq!(state.questions[0].other_text, "bc");
+    assert!(
+        state
+            .render_lines(80)
+            .iter()
+            .any(|line| line.contains(CURSOR_MARKER))
+    );
+    for line in state.render_lines(16) {
+        assert!(
+            neo_tui::primitive::visible_width(&line) <= 16,
+            "narrow question row overflowed: {line:?}"
+        );
+    }
+}
+
+#[test]
+fn question_other_editing_exposes_terminal_cursor() {
+    let mut app = NeoChromeState::new("neo", "s1", "m1", "/tmp/ws");
+    app.push_question_overlay("q-1", make_single_question());
+    let mut transcript = TranscriptPane::new(80, 24);
+    transcript.upsert_question_prompt("q-1", make_single_question());
+    let mut tui = neo_tui::NeoTui::new(app, transcript);
+
+    for _ in 0..2 {
+        tui.chrome_mut()
+            .handle_focused_dialog_input(InputEvent::Action(KeybindingAction::SelectDown));
+    }
+    tui.chrome_mut()
+        .handle_focused_dialog_input(InputEvent::Submit);
+    let machine = tui
+        .chrome()
+        .question_dialog_state()
+        .cloned()
+        .expect("question stays focused");
+    tui.transcript_mut().sync_question_prompt(&machine);
+    let (_, cursor) = tui.render_frame(80, 24);
+    assert!(
+        cursor.is_some(),
+        "empty Other input exposes terminal cursor"
+    );
+
+    tui.chrome_mut()
+        .handle_focused_dialog_input(InputEvent::Paste("custom answer".into()));
+    let machine = tui
+        .chrome()
+        .question_dialog_state()
+        .cloned()
+        .expect("question stays focused");
+    tui.transcript_mut().sync_question_prompt(&machine);
+
+    let (lines, cursor) = tui.render_frame(80, 24);
+    let cursor = cursor.expect("question input exposes terminal cursor");
+    let row = lines.get(cursor.row).expect("cursor row is rendered");
+    assert!(neo_tui::primitive::strip_ansi(row).contains("Other: custom answer"));
+    assert!(lines.iter().all(|line| !line.contains(CURSOR_MARKER)));
 }
 
 #[test]

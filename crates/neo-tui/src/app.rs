@@ -3,6 +3,7 @@ use std::time::{Duration, Instant};
 
 use crate::screen_output::{CursorPos, TerminalFrame};
 use crate::shell::{NeoChromeState, OverlayKind};
+use crate::transcript::chrome_render::extract_cursor;
 use crate::transcript::{
     CHROME_GUTTER, ChromeRender, TranscriptPane, apply_gutter, frame_content_width,
     render_chrome_lines_mut, render_footer_only_lines,
@@ -290,13 +291,22 @@ fn append_chrome(
         chrome.lines.len(),
         height
     );
+    let body_cursor = extract_cursor(lines);
     let body_len = lines.len();
     lines.extend(chrome.lines);
     apply_gutter(lines);
-    let cursor = chrome.cursor.map(|cursor| CursorPos {
-        row: body_len + chrome.prompt_start_row + cursor.row,
-        col: cursor.col + CHROME_GUTTER,
-    });
+    let cursor = chrome
+        .cursor
+        .map(|cursor| CursorPos {
+            row: body_len + chrome.prompt_start_row + cursor.row,
+            col: cursor.col + CHROME_GUTTER,
+        })
+        .or_else(|| {
+            body_cursor.map(|cursor| CursorPos {
+                row: cursor.row,
+                col: cursor.col + CHROME_GUTTER,
+            })
+        });
     debug_assert!(
         cursor.is_none_or(|cursor| cursor.row < height && cursor.col < width),
         "terminal cursor must remain inside the rendered frame"

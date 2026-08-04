@@ -3,6 +3,7 @@ use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use crate::input::{InputEvent, KeybindingAction};
 use crate::primitive::InputResult;
 use crate::primitive::{Color, Style, paint, truncate_to_width, visible_width, wrap_text};
+use crate::screen_output::CURSOR_MARKER;
 
 /// Maximum number of option lines shown per question page.
 pub const MAX_OPTIONS_VISIBLE: usize = 6;
@@ -119,6 +120,8 @@ pub struct QuestionStateMachine {
     pub scroll: usize,
     /// Inline-edit buffer for "Other".
     pub other_input: String,
+    /// Character offset within the inline-edit buffer.
+    pub other_cursor: usize,
     /// Whether "Other" inline-edit is active.
     pub other_editing: bool,
 }
@@ -157,6 +160,7 @@ impl QuestionStateMachine {
             cursor: 0,
             scroll: 0,
             other_input: String::new(),
+            other_cursor: 0,
             other_editing: false,
         }
     }
@@ -322,7 +326,15 @@ impl QuestionStateMachine {
             styles.body
         };
         let label = if is_other {
-            if question.other_text.is_empty() {
+            if self.other_editing && is_cursor {
+                let byte_index = self.other_cursor_byte_index();
+                format!(
+                    "Other: {}{}{}",
+                    &self.other_input[..byte_index],
+                    CURSOR_MARKER,
+                    &self.other_input[byte_index..]
+                )
+            } else if question.other_text.is_empty() {
                 "Other".to_owned()
             } else {
                 format!("Other: {}", question.other_text)
@@ -445,6 +457,7 @@ impl QuestionStateMachine {
             self.cursor = 0;
             self.scroll = 0;
             self.other_editing = false;
+            self.other_cursor = 0;
         }
     }
 
@@ -454,6 +467,7 @@ impl QuestionStateMachine {
             self.cursor = 0;
             self.scroll = 0;
             self.other_editing = false;
+            self.other_cursor = 0;
         }
     }
 
@@ -466,6 +480,7 @@ impl QuestionStateMachine {
                 self.cursor = 0;
                 self.scroll = 0;
                 self.other_editing = false;
+                self.other_cursor = 0;
                 return;
             }
         }
@@ -474,6 +489,7 @@ impl QuestionStateMachine {
         self.cursor = 0;
         self.scroll = 0;
         self.other_editing = false;
+        self.other_cursor = 0;
     }
 
     fn sync_scroll(&mut self) {
@@ -506,8 +522,10 @@ impl QuestionStateMachine {
                 if q.other_selected {
                     self.other_editing = true;
                     self.other_input = q.other_text.clone();
+                    self.other_cursor = self.other_input.chars().count();
                 } else {
                     self.other_editing = false;
+                    self.other_cursor = 0;
                 }
             } else {
                 // Single-select: clear others, select "Other", enter edit mode.
@@ -517,6 +535,7 @@ impl QuestionStateMachine {
                 q.other_selected = true;
                 self.other_editing = true;
                 self.other_input = q.other_text.clone();
+                self.other_cursor = self.other_input.chars().count();
                 // Stay on this question so user can type custom answer.
                 // Auto-advance happens when they press Enter to confirm the text.
                 return;
@@ -570,8 +589,10 @@ impl QuestionStateMachine {
             if q.other_selected {
                 self.other_editing = true;
                 self.other_input = q.other_text.clone();
+                self.other_cursor = self.other_input.chars().count();
             } else {
                 self.other_editing = false;
+                self.other_cursor = 0;
             }
         } else {
             q.selected[self.cursor] = !q.selected[self.cursor];
@@ -580,22 +601,58 @@ impl QuestionStateMachine {
 
     // -- "Other" inline edit --------------------------------------------------
 
+    fn other_cursor_byte_index(&self) -> usize {
+        self.other_input
+            .char_indices()
+            .nth(self.other_cursor)
+            .map_or(self.other_input.len(), |(index, _)| index)
+    }
+
+    fn sync_other_text(&mut self) {
+        if !self.on_submit_tab() {
+            self.questions[self.active_tab].other_text = self.other_input.clone();
+        }
+    }
+
     pub fn insert_char(&mut self, c: char) {
         if self.other_editing {
-            self.other_input.push(c);
-            if !self.on_submit_tab() {
-                self.questions[self.active_tab].other_text = self.other_input.clone();
-            }
+            self.other_cursor = self.other_cursor.min(self.other_input.chars().count());
+            let byte_index = self.other_cursor_byte_index();
+            self.other_input.insert(byte_index, c);
+            self.other_cursor += 1;
+            self.sync_other_text();
         }
     }
 
     pub fn backspace(&mut self) {
-        if self.other_editing {
-            self.other_input.pop();
-            if !self.on_submit_tab() {
-                self.questions[self.active_tab].other_text = self.other_input.clone();
-            }
+        if self.other_editing && self.other_cursor > 0 {
+            let end = self.other_cursor_byte_index();
+            let start = self.other_input[..end]
+                .char_indices()
+                .next_back()
+                .map_or(0, |(index, _)| index);
+            self.other_input.replace_range(start..end, "");
+            self.other_cursor -= 1;
+            self.sync_other_text();
         }
+    }
+
+    fn delete_forward(&mut self) {
+        if !self.other_editing {
+            return;
+        }
+        self.other_cursor = self.other_cursor.min(self.other_input.chars().count());
+        let start = self.other_cursor_byte_index();
+        if start == self.other_input.len() {
+            return;
+        }
+        let end = self
+            .other_input
+            .char_indices()
+            .nth(self.other_cursor + 1)
+            .map_or(self.other_input.len(), |(index, _)| index);
+        self.other_input.replace_range(start..end, "");
+        self.sync_other_text();
     }
 
     // -- Enter / submit -------------------------------------------------------
@@ -639,9 +696,19 @@ impl QuestionStateMachine {
 
     fn handle_other_edit_key(&mut self, code: KeyCode) -> bool {
         match code {
-            KeyCode::Esc => self.other_editing = false,
+            KeyCode::Esc => {
+                self.other_editing = false;
+                self.other_cursor = 0;
+            }
             KeyCode::Enter => self.finish_other_editing(),
             KeyCode::Backspace => self.backspace(),
+            KeyCode::Delete => self.delete_forward(),
+            KeyCode::Left => self.other_cursor = self.other_cursor.saturating_sub(1),
+            KeyCode::Right => {
+                self.other_cursor = (self.other_cursor + 1).min(self.other_input.chars().count());
+            }
+            KeyCode::Home => self.other_cursor = 0,
+            KeyCode::End => self.other_cursor = self.other_input.chars().count(),
             KeyCode::Char(c) => self.insert_char(c),
             _ => return false,
         }
@@ -650,6 +717,7 @@ impl QuestionStateMachine {
 
     fn finish_other_editing(&mut self) {
         self.other_editing = false;
+        self.other_cursor = 0;
         if !self.on_submit_tab() && !self.questions[self.active_tab].multi_select {
             self.advance_to_next_unanswered();
         }
@@ -857,7 +925,12 @@ fn push_wrapped(
         .saturating_sub(visible_width(continuation_prefix))
         .max(1);
     let wrap_width = first_width.min(continuation_width).max(1);
-    for (index, line) in wrap_text(text, wrap_width).into_iter().enumerate() {
+    let wrapped = if text.contains(CURSOR_MARKER) {
+        crate::primitive::wrap_width(text, wrap_width)
+    } else {
+        wrap_text(text, wrap_width)
+    };
+    for (index, line) in wrapped.into_iter().enumerate() {
         let prefix = if index == 0 {
             first_prefix
         } else {

@@ -7379,7 +7379,19 @@ async fn question_dialog_prioritizes_real_keybindings_before_prompt_editing() {
     controller
         .handle_input_event(InputEvent::Key(KeyId::new("right").expect("valid key")))
         .await
-        .expect("right switches to submit");
+        .expect("right edits Other instead of switching tabs");
+    assert!(
+        !controller
+            .chrome()
+            .question_dialog_state()
+            .expect("question stays focused")
+            .on_submit_tab()
+    );
+
+    controller
+        .handle_input_event(InputEvent::Key(KeyId::new("tab").expect("valid key")))
+        .await
+        .expect("tab switches to submit");
     assert!(
         controller
             .chrome()
@@ -7399,18 +7411,6 @@ async fn question_dialog_prioritizes_real_keybindings_before_prompt_editing() {
             .expect("question stays focused")
             .active_tab,
         0
-    );
-
-    controller
-        .handle_input_event(InputEvent::Key(KeyId::new("tab").expect("valid key")))
-        .await
-        .expect("tab switches to submit");
-    assert!(
-        controller
-            .chrome()
-            .question_dialog_state()
-            .expect("question stays focused")
-            .on_submit_tab()
     );
 }
 

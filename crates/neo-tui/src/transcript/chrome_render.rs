@@ -536,11 +536,7 @@ fn render_prompt_lines(app: &NeoChromeState, width: usize) -> (Vec<String>, Opti
         box_draw::bottom_border(width, border_style)
     });
 
-    let cursor = find_cursor(&lines);
-    let lines = lines
-        .into_iter()
-        .map(|line| line.replace(CURSOR_MARKER, ""))
-        .collect();
+    let cursor = extract_cursor(&mut lines);
     (lines, cursor)
 }
 
@@ -743,14 +739,20 @@ fn expand_prompt_tabs(text: &str) -> String {
     text.replace('\t', "    ")
 }
 
-fn find_cursor(lines: &[String]) -> Option<CursorPos> {
-    for (row, line) in lines.iter().enumerate() {
+pub(crate) fn extract_cursor(lines: &mut [String]) -> Option<CursorPos> {
+    let mut cursor = None;
+    for (row, line) in lines.iter_mut().enumerate() {
         if let Some(byte_pos) = line.find(CURSOR_MARKER) {
-            let col = visible_width(&line[..byte_pos]);
-            return Some(CursorPos { row, col });
+            cursor.get_or_insert_with(|| CursorPos {
+                row,
+                col: visible_width(&line[..byte_pos]),
+            });
+        }
+        if line.contains(CURSOR_MARKER) {
+            *line = line.replace(CURSOR_MARKER, "");
         }
     }
-    None
+    cursor
 }
 
 fn render_footer_lines(app: &NeoChromeState, width: usize) -> Vec<String> {
