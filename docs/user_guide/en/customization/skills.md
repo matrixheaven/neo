@@ -86,12 +86,26 @@ Neo ships with the following skills (source in `crates/neo-agent-core/src/skills
 | `sub-skill` | Review, group, and reorganize the skill library into hierarchical sub-skill bundles |
 | `self-evo` | Summarize a concrete current, recent, session, or topic scope into reusable skills |
 | `create-skill` | Create a Neo skill from the user's requirements, including verification guidance |
+| `custom-theme` | AI-assisted theme creation: interview, preview the exact draft, confirm, and save through the theme repository — explicit-only and never auto-applied |
 
 Workflow-authoring built-ins such as `self-evo` and `create-skill` have `disableModelInvocation: true`, meaning they require explicit user invocation. Neo refreshes shipped built-ins under `~/.neo/skills/.builtin/` from the current binary; put custom copies outside `.builtin/`.
 
 `/skill:self-evo` without arguments asks for a distillation scope before creating skills. In Auto permission mode, Neo opens an interactive preflight before the model turn so the workflow does not block unattended execution later.
 
 `/skill:create-skill` creates one focused skill through the `CreateSkill` tool. If no requirement is provided, it asks for the desired capability before drafting. Created skills include verification guidance and are reloaded into the active skill store when `CreateSkill` succeeds.
+
+### `custom-theme` skill
+
+`custom-theme` creates a theme with AI assistance and is **explicit-only**: it declares `disableModelInvocation: true`, so the model never activates it on its own — invoke it as `/skill:custom-theme`.
+
+The flow is:
+
+1. The skill interviews you one focused question per turn, in order: the base theme (create from the built-in default or revise an existing ThemeId, which decides the light/dark direction), the brand/accent color, text contrast, status colors, the readability surfaces (user message, diff, selection, approval, footer, shell mode), and the display name. It never asks for internal field names.
+2. Once the interview is complete, it issues a **single** `ThemeDraft` preview call with all collected answers — never one preview per question or per token. The preview returns a stable draft id, a fingerprint, normalized colors, and contrast warnings, and is non-mutating: nothing is written and no write approval is required.
+3. You review the preview and confirm explicitly. Save is the only path that writes, and it accepts **only the existing draft id** — never new ad-hoc colors or an arbitrary path. Saving into `$NEO_HOME/themes/` follows repository validation; an existing destination requires an explicit overwrite choice, and a conflict returns without writing. Plan mode permits preview but denies save.
+4. A successful save writes the theme file and reports `applied: false` — `custom-theme` never applies a theme to the running TUI. Apply the saved theme later with `/theme <ThemeId>`.
+
+The skill cannot use ordinary `Write` to save theme files, and a failed preview or save is never reported as a successful save.
 
 ## agents/neo.yaml Host Metadata
 

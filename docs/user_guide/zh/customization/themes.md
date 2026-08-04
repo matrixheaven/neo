@@ -1,6 +1,6 @@
 # 主题（Themes）
 
-Neo TUI 的配色由 `TuiTheme` 结构定义（见 `crates/neo-tui/src/primitive/theme.rs`），可以通过 JSON 主题文件覆盖默认配色。把 `.json` 文件放进 `~/.neo/themes/`，Neo 启动时会自动发现并加载。示例：[`examples/config/magenta-dark.json`](../../../examples/config/magenta-dark.json)。
+Neo TUI 的配色由 `TuiTheme` 结构定义（见 `crates/neo-tui/src/primitive/theme.rs`），可以通过 JSON 主题文件覆盖默认配色。`$NEO_HOME/themes/`（默认 `~/.neo/themes/`）是**唯一**受管理的主题目录：把 `.json` 文件放进去，它就会成为目录条目，可被主题管理器、`/theme` 和启动解析使用。示例：[`examples/config/magenta-dark.json`](../../../../examples/config/magenta-dark.json) 展示了文件结构——注意该示例使用的是旧版键名，详见下方 token 表后的说明。
 
 ## JSON 主题格式
 
@@ -91,22 +91,43 @@ Neo TUI 的配色由 `TuiTheme` 结构定义（见 `crates/neo-tui/src/primitive
 }
 ```
 
-加载机制（`crates/neo-agent/src/themes.rs`）：
+主题仓库（`crates/neo-agent/src/themes.rs`）：
 
-- 扫描 `~/.neo/themes/` 下所有 `.json`，按文件名排序后取第一个；
-- 相对路径以 `$NEO_HOME` 为基准，支持 `~/` 展开；
-- 解析失败会在启动时报错，不会静默回退。
+- `$NEO_HOME/themes/` 是唯一主题位置；其中的每个 `*.json` 都是目录条目，格式错误的文件只是无效条目，不会隐藏其他有效主题。
+- `[tui].theme` 是相对 `$NEO_HOME/themes/` 的**逻辑 id**，绝不是绝对路径。启动时 Neo 解析该精确 id；如果缺失或无效，Neo 使用内置 `TuiTheme::default()` 启动并给出可见诊断——不会静默选择其他 JSON 文件，也不会自动改写配置。
+- 未设置 `[tui].theme` 时，Neo 保留旧版「按文件名排序取第一个」的发现逻辑，作为有边界的兼容回退。
+- 解析失败会明确报错，绝不静默回退。
 
-更多示例参见 [`examples/config/`](../../../examples/config/) 目录。
+更多示例参见 [`examples/config/`](../../../../examples/config/) 目录。
 
 ## /theme 命令
 
-| 操作 | 说明 |
+| 形式 | 行为 |
 | --- | --- |
-| `/theme <name>` | 切换到 `~/.neo/themes/<name>.json` |
-| `custom-theme` 技能 | 交互式引导：选基础色 → 选 token → 预览 → 保存（`/skill:custom-theme`） |
+| `/theme` | 打开主题管理器。需要主回合处于空闲状态；回合运行中时 Neo 会保持回合继续，并提示「需要空闲」。 |
+| `/theme <name-or-id>` | 立即应用到**当前会话**，包括模型回合运行期间。解析是精确的：先按逻辑 `ThemeId`，再按唯一的精确显示名。不做模糊或前缀匹配——未知或歧义名称会给出本地错误。 |
+| `/theme reload` | 清除当前会话的临时覆盖，重新应用由 `[tui].theme` 解析出的主题。 |
 
-主题切换在交互式 TUI 内即时生效；启动时默认主题由 `resolve_theme()` 决定，未发现任何 JSON 文件时使用内置 `TuiTheme::default()`（magenta 暗色调）。
+`/theme <name-or-id>` 只改变当前会话——不写 `config.toml`，也不改变启动默认主题。
+
+### 主题管理器
+
+裸 `/theme` 打开的管理器包含列表、过滤和预览面板。选中条目只预览，不做任何应用，直到你选择某个动作：
+
+| 动作 | 效果 |
+| --- | --- |
+| 应用到会话（Apply for session） | 把当前 TUI 会话切换到所选主题；不写配置。会话的临时覆盖在无关的配置刷新后仍然保留。 |
+| 设为启动默认（Set startup default） | 把逻辑 id 写入 `[tui].theme`；当前会话不变。 |
+| 导入（Import） | 校验并把外部主题文件复制进 `$NEO_HOME/themes/`。目标重名时必须显式选择——覆盖（Overwrite）或另存为新主题（Save as new）；不存在静默覆盖。 |
+| 复制（Copy） | 以新的显示名复制所选主题。 |
+| 删除（Delete） | 确认后删除受管理的主题。当前活动主题和启动默认主题受保护，直到你应用或设置其他主题。 |
+| 刷新（Refresh） | 重新扫描 `$NEO_HOME/themes/` 并重新解析目录。 |
+
+管理器适配窄终端：一次只渲染一个聚焦面板，焦点显示在标题行。
+
+### 启动默认
+
+启动时主题由 `[tui].theme` 解析（见 [配置文件总览](../configuration/config-files.md)）；字段缺失且不存在任何 JSON 文件时，使用内置 `TuiTheme::default()`（magenta 暗色调）。想用 AI 辅助创建主题，请使用显式调用的 `custom-theme` 技能——它先预览再保存，绝不自动应用，应用交由 `/theme` 完成。见 [技能系统](skills.md)。
 
 ## 下一步
 

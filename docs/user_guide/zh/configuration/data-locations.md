@@ -40,7 +40,7 @@ Neo 把所有持久化数据集中放在 `~/.neo/`（或 `$NEO_HOME`）下。会
 ├── workflows/               # 用户作用域工作流定义（配套 .lua + .workflow.toml）
 ├── prompts/                 # 全局 prompt 模板
 ├── skills/                  # 内置 + 用户技能
-├── themes/                  # 主题 JSON 文件（如 magenta-dark.json）
+├── themes/                  # 受管理的主题目录（$NEO_HOME/themes/，如 magenta-dark.json）
 └── ...
 ```
 
@@ -102,7 +102,7 @@ Workflow **run** 位于会话目录下，不属于对话记录或后台任务投
 | `~/.neo/prompts/` | 全局提示词模板 | `global_prompts_dir()` 返回的目录 |
 | `~/.neo/skills/` | 技能目录 | 加上 `config.toml` 中 `skill_path` / `extra_skill_dirs` 声明的额外目录 |
 | `~/.neo/workflows/` | 用户工作流定义 | 配套 `<name>.lua` + `<name>.workflow.toml`；项目副本在受信 `.neo/workflows/` |
-| `~/.neo/themes/*.json` | 主题 | 如 `magenta-dark.json`，TUI 启动时加载 |
+| `~/.neo/themes/*.json` | 主题 | 受管理的主题目录；`[tui].theme` 在此引用逻辑 id（见 [主题（Themes）](../customization/themes.md)） |
 
 `sessions_dir` 支持自定义位置（接受 `~` 展开），便于把会话放到外置磁盘或 tmpfs：
 

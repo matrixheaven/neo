@@ -245,6 +245,14 @@ swarm_concurrency = 4
 | `keybindings` | map<string, string[]> | `{}` | 自定义键位绑定（动作 → 按键列表） |
 | `completion_notification` | `none`\|`bell`\|`system`\|`all` | `bell` | 任务完成通知方式 |
 | `question_notification` | `none`\|`bell`\|`system`\|`all` | `none` | `AskUserQuestion` 触发通知方式 |
+| `theme` | string | — | 启动默认主题，为相对 `$NEO_HOME/themes/` 的逻辑 id（绝不是绝对路径）。未设置时保留旧版「排序取第一个」发现逻辑；设置了但缺失或无效时，使用内置默认主题并给出可见诊断 |
+
+```toml
+[tui]
+theme = "my-theme.json"
+```
+
+主题目录与管理器行为见 [主题（Themes）](../customization/themes.md)。
 
 ## `[defaults]` 表
 

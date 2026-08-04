@@ -40,7 +40,7 @@ Any path relative to `~/.neo/` in the documentation can be replaced with `$NEO_H
 ├── workflows/               # User-scoped workflow definitions (paired .lua + .workflow.toml)
 ├── prompts/                 # Global prompt templates
 ├── skills/                  # Built-in + user skills
-├── themes/                  # Theme JSON files (e.g. magenta-dark.json)
+├── themes/                  # Managed theme directory ($NEO_HOME/themes/, e.g. magenta-dark.json)
 └── ...
 ```
 
@@ -102,7 +102,7 @@ Precedence is `builtin < user < trusted project`. Historical sessions remain rea
 | `~/.neo/prompts/` | Global prompt templates | Directory returned by `global_prompts_dir()` |
 | `~/.neo/skills/` | Skill directory | Plus extra directories declared via `skill_path` / `extra_skill_dirs` in `config.toml` |
 | `~/.neo/workflows/` | User workflow definitions | Paired `<name>.lua` + `<name>.workflow.toml`; project copies under trusted `.neo/workflows/` |
-| `~/.neo/themes/*.json` | Themes | e.g. `magenta-dark.json`, loaded at TUI startup |
+| `~/.neo/themes/*.json` | Themes | Managed theme directory; `[tui].theme` references a logical id here (see [Themes](../customization/themes.md)) |
 
 `sessions_dir` supports a custom location (with `~` expansion), letting you place sessions on an external disk or tmpfs:
 

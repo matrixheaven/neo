@@ -1,7 +1,7 @@
 # Neo Theme Manager and AI-Assisted Custom Theme Design
 
 Date: `2026-08-04`
-Status: `design approved; written spec pending user review`
+Status: `design approved; planning and implementation landed — ADR and baseline pending final regression acceptance`
 
 Architecture review required: `yes`
 

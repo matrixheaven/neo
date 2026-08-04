@@ -86,12 +86,26 @@ Neo 自带以下技能（源码位于 `crates/neo-agent-core/src/skills/builtin/
 | `sub-skill` | 审视、分组、重组技能库为层级子技能包 |
 | `self-evo` | 把明确的当前、近期、会话或主题范围总结成可复用技能 |
 | `create-skill` | 按用户需求创建 Neo skill，并包含验证说明 |
+| `custom-theme` | AI 辅助主题创建：访谈、预览精确草稿、确认，并通过主题仓库保存——仅显式调用，绝不自动应用 |
 
 `self-evo` 和 `create-skill` 这类工作流创作型内置技能使用 `disableModelInvocation: true`，需要用户显式调用。Neo 会从当前二进制刷新 `~/.neo/skills/.builtin/` 下的内置技能；自定义副本应放在 `.builtin/` 之外。
 
 `/skill:self-evo` 不带参数时会先询问蒸馏范围，再创建技能。在 Auto 权限模式下，Neo 会在模型回合开始前打开交互预检，避免无人值守运行中途才停下来等待用户回答。
 
 `/skill:create-skill` 通过 `CreateSkill` 工具创建一个聚焦的 skill。如果没有提供需求，它会先询问要创建的能力再起草。创建出的 skill 会包含验证说明；`CreateSkill` 成功后会重新加载当前会话的 skill store。
+
+### `custom-theme` 技能
+
+`custom-theme` 用 AI 辅助创建主题，并且是**仅显式调用**的：它声明了 `disableModelInvocation: true`，模型绝不会自行激活它——请用 `/skill:custom-theme` 调用。
+
+流程如下：
+
+1. 技能每个回合只问一个聚焦的问题，按顺序进行：基础主题（从内置默认创建，或修订现有 ThemeId，由它决定明暗方向）、品牌/强调色、文字对比度、状态色、可读性表面（用户消息、diff、选区、审批、底栏、shell 模式）以及显示名。它从不询问内部字段名。
+2. 访谈结束后，它把所有答案合并进**一次** `ThemeDraft` preview 调用——绝不是每问一个问题就预览一次，也不是按 token 逐个预览。Preview 返回稳定的草稿 id、指纹、规范化颜色和对比度警告，且无副作用：不写入任何内容，也不需要写权限审批。
+3. 你查看预览并显式确认。Save 是唯一写入路径，且**只接受已有的草稿 id**——绝不接受临时拼凑的颜色或任意路径。保存进 `$NEO_HOME/themes/` 遵循仓库校验；目标重名时必须显式选择覆盖，冲突时直接返回、不写入。Plan 模式允许 preview 但拒绝 save。
+4. 保存成功后写入主题文件，并报告 `applied: false`——`custom-theme` 绝不会把主题应用到正在运行的 TUI。之后用 `/theme <ThemeId>` 应用保存的主题。
+
+该技能不能用普通 `Write` 保存主题文件；预览或保存失败也绝不会被描述成一次成功的保存。
 
 ## agents/neo.yaml 宿主元数据
 

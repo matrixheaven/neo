@@ -1,6 +1,6 @@
 # Themes
 
-The Neo TUI color scheme is defined by the `TuiTheme` struct (see `crates/neo-tui/src/primitive/theme.rs`) and can be overridden via JSON theme files. Drop a `.json` file into `~/.neo/themes/` to have it discovered and loaded. Example: [`examples/config/magenta-dark.json`](../../../../examples/config/magenta-dark.json).
+The Neo TUI color scheme is defined by the `TuiTheme` struct (see `crates/neo-tui/src/primitive/theme.rs`) and can be overridden via JSON theme files. `$NEO_HOME/themes/` (by default `~/.neo/themes/`) is the **only** managed theme directory: drop a `.json` file there and it becomes a catalog entry the manager, `/theme`, and startup resolution can use. [`examples/config/magenta-dark.json`](../../../../examples/config/magenta-dark.json) shows the file shape — note that example uses legacy keys; see the note under the token table below.
 
 ## JSON Theme Format
 
@@ -91,22 +91,43 @@ A complete dark theme (`~/.neo/themes/magenta-dark.json`):
 }
 ```
 
-Loading mechanism (`crates/neo-agent/src/themes.rs`):
+Theme repository (`crates/neo-agent/src/themes.rs`):
 
-- Scans all `.json` files under `~/.neo/themes/`, sorted by file name, and takes the first;
-- Relative paths are resolved against `$NEO_HOME`; `~/` expansion is supported;
-- Parse failures are reported at startup and do not silently fall back.
+- `$NEO_HOME/themes/` is the only theme location; every `*.json` file there is a catalog entry, and a malformed file is an invalid entry rather than a reason to hide the other valid themes.
+- `[tui].theme` is a **logical id** relative to `$NEO_HOME/themes/`, never an absolute path. At startup Neo resolves that exact id; if it is missing or invalid, Neo starts with the built-in `TuiTheme::default()` and emits a visible diagnostic — it does not silently pick another JSON file and does not rewrite the config.
+- If `[tui].theme` is absent, Neo keeps the legacy sorted-first discovery (the first `.json` file by name) as a bounded compatibility fallback.
+- Parse failures are reported and never silently fall back.
 
 See the [`examples/config/`](../../../../examples/config/) directory for more examples.
 
 ## /theme Command
 
-| Action | Description |
+| Form | Behavior |
 | --- | --- |
-| `/theme <name>` | Switch to `~/.neo/themes/<name>.json` |
-| `custom-theme` skill | Interactive guide: pick base color → pick token → preview → save (`/skill:custom-theme`) |
+| `/theme` | Open the theme manager. This requires the main turn to be idle; while a turn is running Neo keeps the turn active and shows the idle requirement. |
+| `/theme <name-or-id>` | Apply the theme to the **current session** immediately, including while a model turn is running. Resolution is exact: the logical `ThemeId` first, then a unique exact display name. There is no fuzzy or prefix matching — an unknown or ambiguous name produces a local error. |
+| `/theme reload` | Clear the current session override and re-apply the theme resolved from `[tui].theme`. |
 
-Theme switching takes effect immediately within the interactive TUI; at startup the default theme is decided by `resolve_theme()`, and when no JSON file is found the built-in `TuiTheme::default()` (magenta dark) is used.
+`/theme <name-or-id>` changes the current session only — it does not write `config.toml` and does not change the startup default.
+
+### Theme manager
+
+Bare `/theme` opens a manager with list, filter, and preview panels. Selecting an entry only previews it; nothing applies until you choose an action:
+
+| Action | Effect |
+| --- | --- |
+| Apply for session | Switches the current TUI session to the selected theme; no config write. The session override survives unrelated config refreshes. |
+| Set startup default | Writes the logical id to `[tui].theme`; the current session is unchanged. |
+| Import | Validates and copies an external theme file into `$NEO_HOME/themes/`. A same-name destination requires an explicit choice — Overwrite or Save as new; there is no silent overwrite. |
+| Copy | Duplicates the selected theme under a new display name. |
+| Delete | Removes a managed theme after confirmation. The currently active theme and the startup default are protected until you apply or set another one. |
+| Refresh | Rescans `$NEO_HOME/themes/` and reparses the catalog. |
+
+The manager adapts to narrow terminals by rendering one focused panel at a time, with the focus shown in the title line.
+
+### Startup default
+
+At startup the theme is resolved from `[tui].theme` (see [Configuration Files](../configuration/config-files.md)); when the field is absent and no JSON file exists, the built-in `TuiTheme::default()` (magenta dark) is used. To create a theme with AI assistance, use the explicit-only `custom-theme` skill — it previews before saving, never auto-applies, and hands application back to `/theme`. See [Skills](skills.md).
 
 ## Next Steps
 

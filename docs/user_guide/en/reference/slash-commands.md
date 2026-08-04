@@ -44,7 +44,18 @@ Slash matching is exact: `/workflowish` and prose containing `/workflow` are ord
 | `/yolo` | — | Switch to **Yolo** permission mode (skip confirmations). |
 | `/permissions` | `/permission` | Open the permission mode picker. |
 
-> `/ask`, `/auto`, and `/yolo` take effect immediately even while a turn is running (real-time switching). All other slash commands require the current turn to be interrupted first.
+> `/ask`, `/auto`, and `/yolo` take effect immediately even while a turn is running (real-time switching). `/theme <name-or-id>` may also be applied during a running turn. All other slash commands require the current turn to be interrupted first.
+
+## Theme Management
+
+| Command | Behavior |
+| --- | --- |
+| `/theme` | Open the theme manager. Requires the main turn to be idle; while busy, Neo keeps the turn active and shows the idle requirement. |
+| `/theme <name-or-id>` | Apply the theme to the current session immediately, even during a running turn. Resolution is exact: the logical `ThemeId` first, then a unique exact display name; no fuzzy matching. |
+| `/theme reload` | Clear the current session override and re-apply the theme resolved from `[tui].theme`. |
+| `/skill:custom-theme` | Explicit-only AI-assisted theme creation; previews before saving and never auto-applies. |
+
+The manager supports list, filter, preview, Apply for session, Set startup default, import (with Overwrite / Save as new conflict choices), copy, delete (the active and startup-default themes are protected), and refresh. `/theme <name-or-id>` affects the current session only — it does not change the startup default. See [Themes](../customization/themes.md).
 
 ## Information & Status
 
