@@ -4168,6 +4168,82 @@ amigo";
 }
 
 #[tokio::test]
+async fn custom_theme_skill_activates_only_via_explicit_slash() {
+    let requests = std::sync::Arc::new(std::sync::Mutex::new(Vec::<TurnRequest>::new()));
+    let seen_requests = std::sync::Arc::clone(&requests);
+    let mut controller = InteractiveController::new_for_test(
+        "neo",
+        "test-session",
+        "openai/gpt-4.1",
+        test_workspace_root(),
+        move |request| {
+            let seen_requests = std::sync::Arc::clone(&seen_requests);
+            async move {
+                seen_requests.lock().expect("requests lock").push(request);
+                Ok(vec![AgentEvent::MessageAppended {
+                    message: AgentMessage::user_text("theme work done".to_owned()),
+                }])
+            }
+        },
+    );
+    let builtins = neo_agent_core::skills::builtin::builtin_skills().expect("built-in skills load");
+    let custom_theme = builtins
+        .iter()
+        .find(|skill| skill.name == "custom-theme")
+        .expect("custom-theme must be registered as a built-in");
+    assert!(
+        !custom_theme.manifest.auto_invokable(),
+        "custom-theme must stay explicit-only"
+    );
+    controller.skill_store = Some(SkillStore::load(&[], &[], builtins));
+
+    controller.type_text("/skill:custom-theme\nI want a dark theme");
+    controller
+        .handle_input_event(InputEvent::Action(KeybindingAction::InputSubmit))
+        .await
+        .expect("explicit skill activation succeeds");
+
+    let entries = transcript_entries(&controller);
+    assert_eq!(
+        entries
+            .iter()
+            .filter(|entry| matches!(entry, TranscriptEntry::SkillActivation { .. }))
+            .count(),
+        1,
+        "explicit invocation should render exactly one semantic card"
+    );
+    assert!(matches!(
+        entries.last(),
+        Some(TranscriptEntry::SkillActivation {
+            names,
+            source: neo_agent_core::SkillInvocationSource::Manual,
+            outcome: neo_agent_core::SkillInvocationOutcome::Activated,
+            ..
+        }) if names == &["custom-theme".to_owned()]
+    ));
+
+    controller
+        .wait_for_active_turn()
+        .await
+        .expect("explicit skill turn completes");
+    let requests = requests.lock().expect("requests lock");
+    assert_eq!(requests.len(), 1);
+    let skill_context = requests[0].skill_context.as_deref().expect("skill context");
+    assert!(
+        skill_context.contains("User activated the skill \"custom-theme\""),
+        "{skill_context}"
+    );
+    assert!(
+        skill_context.contains("<neo-skill-loaded name=\"custom-theme\" source=\"builtin\""),
+        "{skill_context}"
+    );
+    assert!(
+        skill_context.contains("ThemeDraft"),
+        "activated custom-theme body must teach the ThemeDraft flow: {skill_context}"
+    );
+}
+
+#[tokio::test]
 async fn automatic_skill_invocation_renders_one_semantic_card() {
     use futures::StreamExt as _;
     use neo_agent_core::harness::FakeHarness;

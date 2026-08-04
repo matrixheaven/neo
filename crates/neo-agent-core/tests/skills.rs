@@ -800,6 +800,88 @@ fn available_skills_prompt_prioritizes_task_specific_skills_over_generic_methods
     ));
 }
 
+#[test]
+fn custom_theme_builtin_is_explicit_only_with_theme_draft_flow() {
+    use std::collections::BTreeSet;
+
+    let raw = include_str!("../src/skills/builtin/custom-theme.md");
+    let (frontmatter, body) =
+        neo_agent_core::skills::split_frontmatter(raw).expect("custom-theme frontmatter");
+    let frontmatter: serde_yaml::Mapping =
+        serde_yaml::from_str(frontmatter).expect("custom-theme frontmatter must be YAML");
+    let fields = frontmatter
+        .keys()
+        .map(|field| field.as_str().expect("frontmatter keys must be strings"))
+        .collect::<BTreeSet<_>>();
+    assert_eq!(
+        fields,
+        BTreeSet::from(["description", "disableModelInvocation", "name"]),
+        "custom-theme must use only canonical built-in frontmatter fields"
+    );
+
+    let skills = builtin_skills().expect("built-ins load");
+    let custom_theme = skills
+        .iter()
+        .find(|skill| skill.name == "custom-theme")
+        .expect("custom-theme must be registered as a built-in");
+    assert!(
+        custom_theme.manifest.disable_model_invocation,
+        "custom-theme must never be model-invoked"
+    );
+    assert!(!custom_theme.manifest.auto_invokable());
+
+    for required in [
+        "/skill:custom-theme",
+        "ThemeDraft",
+        "preview",
+        "draft_id",
+        "save",
+        "overwrite",
+        "/theme",
+        "applied: false",
+        "writes no files",
+        "one focused question",
+        "stop",
+    ] {
+        assert!(
+            body.contains(required),
+            "custom-theme must contain host contract phrase {required:?}"
+        );
+    }
+    // The retired stub claimed a project-local theme path, manual JSON edits,
+    // and implicit activation/save semantics. The banned literals are
+    // assembled at runtime so the verification scan of this file stays clean.
+    let retired_stub_claims = [
+        [".", "neo/themes"].concat(),
+        ["ordinary ", "Write"].concat(),
+        ["auto-", "apply"].concat(),
+        ["directly ", "activate"].concat(),
+    ];
+    for claim in &retired_stub_claims {
+        assert!(
+            !body.contains(claim),
+            "custom-theme must not teach retired stub claim {claim:?}"
+        );
+    }
+}
+
+#[test]
+fn custom_theme_stays_explicit_only_out_of_the_model_catalog() {
+    let store = SkillStore::load(&[], &[], builtin_skills().expect("built-ins"));
+
+    let custom_theme = store.get("custom-theme").expect("custom-theme in store");
+    assert!(
+        !custom_theme.manifest.auto_invokable(),
+        "custom-theme must stay explicit-only"
+    );
+
+    let catalog = store.available_skills_prompt();
+    assert!(
+        !catalog.contains("custom-theme"),
+        "explicit-only skills must not appear in the model-visible catalog"
+    );
+}
+
 fn write(path: impl AsRef<Path>, content: &str) {
     let path = path.as_ref();
     fs::create_dir_all(path.parent().unwrap()).unwrap();

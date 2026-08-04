@@ -15,6 +15,7 @@ const SELF_EVO: &str = include_str!("self-evo.md");
 const MCP_CONFIG: &str = include_str!("mcp-config.md");
 const CREATE_SKILL: &str = include_str!("create-skill.md");
 const CREATE_WORKFLOW: &str = include_str!("create-workflow.md");
+const CUSTOM_THEME: &str = include_str!("custom-theme.md");
 
 const BUILTIN_SOURCES: &[&str] = &[
     SUB_SKILL,
@@ -22,6 +23,7 @@ const BUILTIN_SOURCES: &[&str] = &[
     MCP_CONFIG,
     CREATE_SKILL,
     CREATE_WORKFLOW,
+    CUSTOM_THEME,
 ];
 const REMOVED_BUILTINS: &[&str] = &["define-goal"];
 
