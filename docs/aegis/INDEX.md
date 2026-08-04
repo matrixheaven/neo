@@ -5,6 +5,7 @@ Entries are workspace records, not authoritative runtime decisions.
 
 | Date | Kind | Path | Title |
 | --- | --- | --- | --- |
+| 2026-08-04 | spec | docs/aegis/specs/2026-08-04-theme-manager-design.md | Neo Theme Manager and AI-Assisted Custom Theme Design |
 | 2026-08-03 | handoff | docs/aegis/handoffs/2026-08-03-workflow-output-reliability.md | Workflow Output Reliability Handoff |
 | 2026-08-03 | plan | docs/aegis/plans/2026-08-03-footer-reasoning-effort.md | Neo Footer Reasoning Effort Display Implementation Plan |
 | 2026-08-03 | plan | docs/aegis/plans/2026-08-03-workflow-output-reliability.md | Workflow Output Reliability Implementation Plan |
