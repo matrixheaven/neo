@@ -23,6 +23,7 @@ pub(crate) mod mutations;
 mod paths;
 mod types;
 
+pub(crate) use crate::themes::ThemeResolution;
 pub(crate) use matching::scoped_models;
 #[allow(unused_imports)]
 pub(crate) use paths::{
@@ -105,6 +106,10 @@ pub struct AppConfig {
     pub tui: TuiConfig,
     #[serde(skip)]
     pub theme: ResolvedTheme,
+    /// Provenance of startup theme selection, including the bounded legacy
+    /// fallback marker and the diagnostic for an unusable explicit id.
+    #[serde(skip)]
+    pub theme_resolution: ThemeResolution,
     pub mcp: McpConfig,
     #[serde(skip)]
     pub prompt_templates: Vec<String>,
@@ -298,6 +303,12 @@ pub struct TuiConfig {
     pub completion_notification: NotificationMode,
     #[serde(default)]
     pub question_notification: NotificationMode,
+    /// Explicit startup theme id from the persisted config, kept as the raw
+    /// logical id string so an invalid id still resolves to the built-in
+    /// default with a visible diagnostic instead of silently re-entering
+    /// sorted-first discovery.
+    #[serde(default)]
+    pub theme: Option<String>,
 }
 
 impl Default for TuiConfig {
@@ -307,6 +318,7 @@ impl Default for TuiConfig {
             keybindings: BTreeMap::new(),
             completion_notification: NotificationMode::Bell,
             question_notification: NotificationMode::None,
+            theme: None,
         }
     }
 }
@@ -321,8 +333,9 @@ mod tests {
 
     use crate::config::{
         AppConfig, ConfigOverrides, PermissionMode, RuntimeCompactionConfig, RuntimeConfig,
-        TuiConfig,
+        ThemeResolution, TuiConfig,
     };
+    use crate::themes::ThemeId;
     use crate::trust::{ProjectTrustState, ProjectTrustStore};
 
     fn temp_project_config(content: &str) -> (TempDir, PathBuf, PathBuf) {
@@ -1154,5 +1167,155 @@ model = "gpt-4.1"
                 Some(PathBuf::from("/custom/neo/config.toml"))
             );
         });
+    }
+
+    fn config_with_theme(content: &str, theme: &str) -> String {
+        format!("{content}\n[tui]\ntheme = {theme:?}\n")
+    }
+
+    #[test]
+    fn config_explicit_theme_resolves_and_is_never_fuzzy() {
+        let temp = TempDir::new().expect("temp dir");
+        let config_path = temp.path().join("config.toml");
+        let themes_dir = temp.path().join("themes");
+        fs::create_dir_all(&themes_dir).expect("create themes");
+        fs::write(
+            themes_dir.join("night.json"),
+            r##"{"name": "Night", "colors": {"brand": "#123456"}}"##,
+        )
+        .expect("write theme");
+        // A sorted-first sibling with a different name must NOT be selected for
+        // the explicit id, and a partial-name reference must not fuzzy-match.
+        fs::write(
+            themes_dir.join("aaa.json"),
+            r##"{"name": "Aaa", "colors": {"brand": "#654321"}}"##,
+        )
+        .expect("write sibling");
+        fs::write(&config_path, config_with_theme("", "night.json")).expect("write config");
+        fs::create_dir_all(temp.path().join("project")).expect("create project");
+
+        let config = AppConfig::load(ConfigOverrides {
+            config_path: Some(config_path),
+            yolo: false,
+            auto: false,
+            trust_store: None,
+            project_dir: Some(temp.path().join("project")),
+        })
+        .expect("load config");
+
+        assert_eq!(config.theme.name, "Night");
+        assert_eq!(
+            config.theme.id.as_ref().map(ThemeId::as_str),
+            Some("night.json")
+        );
+        assert!(
+            matches!(config.theme_resolution, ThemeResolution::Explicit(_)),
+            "explicit id must not fall back to discovery"
+        );
+    }
+
+    #[test]
+    fn config_invalid_explicit_theme_uses_default_with_diagnostic() {
+        let temp = TempDir::new().expect("temp dir");
+        let config_path = temp.path().join("config.toml");
+        let themes_dir = temp.path().join("themes");
+        fs::create_dir_all(&themes_dir).expect("create themes");
+        fs::write(
+            themes_dir.join("aaa.json"),
+            r##"{"name": "Aaa", "colors": {}}"##,
+        )
+        .expect("write sibling");
+        fs::write(&config_path, config_with_theme("", "../escape.json")).expect("write config");
+        fs::create_dir_all(temp.path().join("project")).expect("create project");
+
+        let config = AppConfig::load(ConfigOverrides {
+            config_path: Some(config_path),
+            yolo: false,
+            auto: false,
+            trust_store: None,
+            project_dir: Some(temp.path().join("project")),
+        })
+        .expect("load config");
+
+        assert_eq!(config.theme.name, "default");
+        assert!(config.theme.id.is_none());
+        let diagnostic = config.theme_resolution.diagnostic().expect("diagnostic");
+        assert!(diagnostic.contains("../escape.json"), "{diagnostic}");
+        assert!(
+            !matches!(config.theme_resolution, ThemeResolution::Discovered(_)),
+            "an explicit invalid id must never re-enter sorted-first discovery"
+        );
+    }
+
+    #[test]
+    fn config_missing_explicit_theme_uses_default_with_diagnostic() {
+        let temp = TempDir::new().expect("temp dir");
+        let config_path = temp.path().join("config.toml");
+        let themes_dir = temp.path().join("themes");
+        fs::create_dir_all(&themes_dir).expect("create themes");
+        fs::write(
+            themes_dir.join("aaa.json"),
+            r##"{"name": "Aaa", "colors": {}}"##,
+        )
+        .expect("write sibling");
+        fs::write(&config_path, config_with_theme("", "missing.json")).expect("write config");
+        fs::create_dir_all(temp.path().join("project")).expect("create project");
+
+        let config = AppConfig::load(ConfigOverrides {
+            config_path: Some(config_path),
+            yolo: false,
+            auto: false,
+            trust_store: None,
+            project_dir: Some(temp.path().join("project")),
+        })
+        .expect("load config");
+
+        assert_eq!(config.theme.name, "default");
+        let diagnostic = config.theme_resolution.diagnostic().expect("diagnostic");
+        assert!(diagnostic.contains("missing.json"), "{diagnostic}");
+        assert!(
+            !matches!(config.theme_resolution, ThemeResolution::Discovered(_)),
+            "a missing explicit id must never fall back to another JSON file"
+        );
+    }
+
+    #[test]
+    fn config_absent_theme_keeps_sorted_first_discovery() {
+        let temp = TempDir::new().expect("temp dir");
+        let config_path = temp.path().join("config.toml");
+        let themes_dir = temp.path().join("themes");
+        fs::create_dir_all(&themes_dir).expect("create themes");
+        fs::write(
+            themes_dir.join("zz.json"),
+            r##"{"name": "Zed", "colors": {}}"##,
+        )
+        .expect("write theme");
+        fs::write(
+            themes_dir.join("aa.json"),
+            r##"{"name": "Alpha", "colors": {"brand": "#010203"}}"##,
+        )
+        .expect("write theme");
+        fs::write(&config_path, "default_model = \"x\"\n").expect("write config");
+        fs::create_dir_all(temp.path().join("project")).expect("create project");
+
+        let config = AppConfig::load(ConfigOverrides {
+            config_path: Some(config_path),
+            yolo: false,
+            auto: false,
+            trust_store: None,
+            project_dir: Some(temp.path().join("project")),
+        })
+        .expect("load config");
+
+        assert_eq!(config.theme.name, "Alpha");
+        assert!(
+            config.theme.id.is_none(),
+            "discovered themes carry no explicit id"
+        );
+        assert!(matches!(
+            config.theme_resolution,
+            ThemeResolution::Discovered(_)
+        ));
+        assert!(config.theme_resolution.diagnostic().is_none());
     }
 }

@@ -481,6 +481,7 @@ mod tests {
             multi_agent: neo_agent_core::multi_agent::MultiAgentRuntime::new(),
             tui: TuiConfig::default(),
             theme: crate::themes::ResolvedTheme::default(),
+            theme_resolution: crate::themes::ThemeResolution::Default,
             mcp: McpConfig::default(),
             prompt_templates: Vec::new(),
             system_prompt_file: None,

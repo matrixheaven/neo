@@ -130,7 +130,8 @@ impl AppConfig {
         configure_shell_runtime(&mut runtime, &config_path)?;
         let tui = tui_from_file(file_config.tui);
         validate_tui_config(&tui)?;
-        let theme = themes::resolve_theme()?;
+        let theme_resolution = themes::resolve_themes(&config_path, tui.theme.as_deref())?;
+        let theme = theme_resolution.to_resolved();
         let mcp = file_config.mcp.unwrap_or_default();
         let mode = file_config
             .defaults
@@ -157,6 +158,7 @@ impl AppConfig {
             multi_agent: MultiAgentRuntime::new(),
             tui,
             theme,
+            theme_resolution,
             mcp,
             prompt_templates,
             system_prompt_file,
@@ -394,6 +396,7 @@ fn tui_from_file(tui: Option<FileTuiConfig>) -> TuiConfig {
         keybindings: tui.keybindings.unwrap_or_default(),
         completion_notification: tui.completion_notification.unwrap_or_default(),
         question_notification: tui.question_notification.unwrap_or(NotificationMode::None),
+        theme: tui.theme,
     }
 }
 

@@ -936,6 +936,7 @@ mod tests {
             multi_agent: neo_agent_core::multi_agent::MultiAgentRuntime::new(),
             tui: crate::config::TuiConfig::default(),
             theme: crate::themes::ResolvedTheme::default(),
+            theme_resolution: crate::themes::ThemeResolution::Default,
             mcp: crate::config::McpConfig {
                 servers: vec![McpServerConfig {
                     id: "docs".to_owned(),
@@ -1014,6 +1015,7 @@ mod tests {
             multi_agent: neo_agent_core::multi_agent::MultiAgentRuntime::new(),
             tui: crate::config::TuiConfig::default(),
             theme: crate::themes::ResolvedTheme::default(),
+            theme_resolution: crate::themes::ThemeResolution::Default,
             mcp: crate::config::McpConfig {
                 servers: vec![McpServerConfig {
                     id: "linear".to_owned(),

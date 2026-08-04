@@ -86,6 +86,24 @@ pub fn set_model_selection(
     })
 }
 
+/// Set the startup theme id in config.toml through the managed atomic
+/// `update_file_config` path.
+///
+/// The id is validated at the logical boundary before anything is written; a
+/// failed validation or failed write leaves both the previous config file and
+/// the caller's current runtime state unchanged.
+#[allow(dead_code)]
+pub fn set_startup_theme(config_path: &Path, theme_id: &str) -> anyhow::Result<()> {
+    crate::themes::ThemeId::new(theme_id).with_context(|| {
+        format!("invalid theme id {theme_id:?}: use a relative path under $NEO_HOME/themes/")
+    })?;
+    update_file_config(config_path, |file_config| {
+        let tui = file_config.tui.get_or_insert_default();
+        tui.theme = Some(theme_id.to_owned());
+        Ok(())
+    })
+}
+
 /// Import a provider from the models.dev catalog into config.toml.
 ///
 /// Fetches the catalog, finds the provider, infers its type, and writes
@@ -1581,6 +1599,7 @@ model = "old"
             multi_agent: neo_agent_core::multi_agent::MultiAgentRuntime::new(),
             tui: TuiConfig::default(),
             theme: crate::themes::ResolvedTheme::default(),
+            theme_resolution: crate::themes::ThemeResolution::Default,
             mcp: McpConfig::default(),
             prompt_templates: Vec::new(),
             system_prompt_file: None,
@@ -1592,5 +1611,71 @@ model = "old"
             config_path: project_dir.join(".neo/config.toml"),
             config_file_exists: true,
         }
+    }
+
+    #[test]
+    fn set_startup_theme_persists_valid_id_through_update_file_config() {
+        let temp = TempDir::new().expect("temp dir");
+        let config_path = temp.path().join("config.toml");
+        fs::write(&config_path, "default_model = \"keep\"\n").unwrap();
+
+        super::set_startup_theme(&config_path, "night/solarized.json").unwrap();
+
+        let config = read_file_config(&config_path).unwrap();
+        let tui = config.tui.expect("tui table persisted");
+        assert_eq!(
+            tui.theme.as_deref(),
+            Some("night/solarized.json"),
+            "logical id persisted with forward slashes"
+        );
+        assert_eq!(config.default_model.as_deref(), Some("keep"));
+    }
+
+    #[test]
+    fn set_startup_theme_rejects_invalid_id_without_touching_config() {
+        let temp = TempDir::new().expect("temp dir");
+        let config_path = temp.path().join("config.toml");
+        fs::write(&config_path, "default_model = \"keep\"\n").unwrap();
+
+        for invalid in ["../escape.json", "/abs/theme.json", "a/../b.json"] {
+            assert!(
+                super::set_startup_theme(&config_path, invalid).is_err(),
+                "accepted {invalid:?}"
+            );
+        }
+
+        let config = read_file_config(&config_path).unwrap();
+        assert_eq!(config.default_model.as_deref(), Some("keep"));
+        assert!(
+            config.tui.is_none(),
+            "failed validation must not write config"
+        );
+    }
+
+    #[test]
+    fn failed_startup_theme_write_leaves_previous_config_unchanged() {
+        let temp = TempDir::new().expect("temp dir");
+        let config_path = temp.path().join("config.toml");
+        fs::write(&config_path, "default_model = \"original\"\n").unwrap();
+
+        let result = update_file_config_with_writer(
+            &config_path,
+            |config| {
+                config.tui.get_or_insert_default().theme = Some("draft.json".to_owned());
+                Ok(())
+            },
+            |file, _content| {
+                file.write_all(b"default_model = ")?;
+                anyhow::bail!("injected writer failure")
+            },
+        );
+        assert!(result.is_err());
+
+        let config = read_file_config(&config_path).unwrap();
+        assert_eq!(config.default_model.as_deref(), Some("original"));
+        assert!(
+            config.tui.is_none(),
+            "failed write must leave the previous config unchanged"
+        );
     }
 }

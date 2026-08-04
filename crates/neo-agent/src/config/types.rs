@@ -333,4 +333,8 @@ pub(crate) struct FileTuiConfig {
     pub(crate) completion_notification: Option<NotificationMode>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) question_notification: Option<NotificationMode>,
+    /// Explicit startup theme: a logical theme id (relative path under
+    /// `$NEO_HOME/themes/`), never an absolute path.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) theme: Option<String>,
 }

@@ -255,6 +255,101 @@ fn project_theme_auto_discovery_loads_theme_for_verbose_startup() {
 }
 
 #[test]
+fn explicit_theme_in_config_wins_over_sorted_discovery() {
+    let temp = TempDir::new().expect("tempdir");
+    let themes = neo_home_for_test().join("themes");
+    fs::create_dir_all(&themes).expect("create themes");
+    fs::write(
+        themes.join("zz-first.json"),
+        r##"{"name": "Sorted First", "colors": {"brand": "blue"}}"##,
+    )
+    .expect("write sorted-first theme");
+    fs::write(
+        themes.join("configured.json"),
+        r##"{"name": "Configured", "colors": {"brand": "red"}}"##,
+    )
+    .expect("write configured theme");
+    write_home_config("[tui]\ntheme = \"configured.json\"\n");
+
+    let mut command = neo();
+    command.current_dir(temp.path()).arg("--verbose");
+
+    let stdout = run(command);
+
+    assert!(
+        stdout.contains("theme: Configured"),
+        "explicit theme id must select the configured theme, got:\n{stdout}"
+    );
+    assert!(!stdout.contains("theme: Sorted First"));
+}
+
+#[test]
+fn missing_explicit_theme_falls_back_to_default_with_diagnostic() {
+    let temp = TempDir::new().expect("tempdir");
+    let themes = neo_home_for_test().join("themes");
+    fs::create_dir_all(&themes).expect("create themes");
+    fs::write(
+        themes.join("aaa-sorted-first.json"),
+        r##"{"name": "Sorted First", "colors": {"brand": "blue"}}"##,
+    )
+    .expect("write sorted-first theme");
+    write_home_config("[tui]\ntheme = \"missing-theme.json\"\n");
+
+    let mut command = neo();
+    command.current_dir(temp.path()).arg("--verbose");
+
+    let stdout = run(command);
+
+    assert!(
+        stdout.contains("theme: default"),
+        "a missing explicit id must use the built-in default, got:\n{stdout}"
+    );
+    assert!(
+        stdout.contains("missing-theme.json"),
+        "the startup diagnostic must name the unusable id, got:\n{stdout}"
+    );
+    assert!(
+        !stdout.contains("theme: Sorted First"),
+        "a missing explicit id must never fall back to another JSON file, got:\n{stdout}"
+    );
+}
+
+#[test]
+fn invalid_theme_in_config_reports_diagnostic_without_rewriting_config() {
+    let temp = TempDir::new().expect("tempdir");
+    let themes = neo_home_for_test().join("themes");
+    fs::create_dir_all(&themes).expect("create themes");
+    fs::write(
+        themes.join("aaa-sorted-first.json"),
+        r##"{"name": "Sorted First", "colors": {"brand": "blue"}}"##,
+    )
+    .expect("write sorted-first theme");
+    write_home_config("[tui]\ntheme = \"../escape.json\"\n");
+
+    let mut command = neo();
+    command.current_dir(temp.path()).arg("--verbose");
+
+    let stdout = run(command);
+
+    assert!(
+        stdout.contains("theme: default"),
+        "an invalid explicit id must use the built-in default, got:\n{stdout}"
+    );
+    assert!(
+        stdout.contains("../escape.json"),
+        "the startup diagnostic must name the invalid id, got:\n{stdout}"
+    );
+    assert!(!stdout.contains("theme: Sorted First"));
+
+    let config_path = neo_home_for_test().join("config.toml");
+    let config_content = fs::read_to_string(&config_path).expect("read config");
+    assert!(
+        config_content.contains("theme = \"../escape.json\""),
+        "startup must never auto-rewrite the persisted config"
+    );
+}
+
+#[test]
 fn root_resume_flag_opens_real_local_session_picker() {
     let temp = TempDir::new().expect("tempdir");
     let sessions = session_bucket(temp.path());

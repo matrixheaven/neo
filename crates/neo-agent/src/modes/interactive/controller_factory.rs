@@ -213,6 +213,9 @@ pub(super) fn startup_notices(config: &AppConfig) -> Vec<String> {
         ));
         notices.push("local config: tui.keybindings available".to_owned());
     }
+    if let Some(diagnostic) = config.theme_resolution.diagnostic() {
+        notices.push(diagnostic);
+    }
     notices
 }
 
