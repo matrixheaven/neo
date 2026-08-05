@@ -5,6 +5,7 @@ pub mod chrome_render;
 mod delegate_card;
 mod delegate_group;
 pub mod diff_preview;
+mod document;
 mod edit_tool_presentation;
 pub mod entry;
 mod event_handler;
@@ -45,6 +46,9 @@ pub use chrome_render::{
 };
 pub use delegate_card::DelegateCardComponent;
 pub use delegate_group::DelegateGroupComponent;
+pub use document::{
+    DocumentLayout, DocumentViewport, EntryLayout, TranscriptAnchor, TranscriptViewport,
+};
 pub use entry::{
     ApprovalDisplayState, ApprovalPromptData, BannerData, McpStartupPhase, McpStartupStatusData,
     QuestionPromptData, QuestionPromptState, StatusSeverity, ThinkingPart, ThinkingPhase,
@@ -58,7 +62,7 @@ pub use presentation::{
 };
 pub use progressive::{ProgressiveFact, ProgressiveFactId};
 pub use shell_run::{ShellRunComponent, ShellRunState};
-pub use store::{TranscriptEntryId, TranscriptSelection, TranscriptStore, TranscriptViewport};
+pub use store::{TranscriptEntryId, TranscriptSelection, TranscriptStore};
 pub use swarm_card::SwarmCardComponent;
 pub use tool_call::{ToolCallComponent, ToolCallState};
 pub use tool_group::{ToolGroup, render_tool_group};

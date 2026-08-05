@@ -74,95 +74,6 @@ impl TranscriptSelection {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct TranscriptViewport {
-    scroll_top_rows: usize,
-    content_rows: usize,
-    viewport_rows: usize,
-    follow_tail: bool,
-    selection: Option<TranscriptSelection>,
-}
-
-impl TranscriptViewport {
-    #[must_use]
-    pub const fn new() -> Self {
-        Self {
-            scroll_top_rows: 0,
-            content_rows: 0,
-            viewport_rows: 0,
-            follow_tail: true,
-            selection: None,
-        }
-    }
-
-    #[must_use]
-    pub const fn selection(&self) -> Option<&TranscriptSelection> {
-        self.selection.as_ref()
-    }
-
-    #[must_use]
-    pub fn scrollback(&self) -> usize {
-        self.max_scroll_top().saturating_sub(self.scroll_top_rows)
-    }
-
-    #[must_use]
-    pub const fn is_following_tail(&self) -> bool {
-        self.follow_tail
-    }
-
-    pub fn follow_bottom(&mut self) {
-        self.follow_tail = true;
-        self.scroll_top_rows = self.max_scroll_top();
-    }
-
-    pub fn scroll_up(&mut self, rows: usize) {
-        self.follow_tail = false;
-        self.scroll_top_rows = self.scroll_top_rows.saturating_sub(rows);
-    }
-
-    pub fn scroll_down(&mut self, rows: usize) {
-        self.scroll_top_rows = self
-            .scroll_top_rows
-            .saturating_add(rows)
-            .min(self.max_scroll_top());
-        if self.scroll_top_rows == self.max_scroll_top() {
-            self.follow_tail = true;
-        }
-    }
-
-    pub fn sync(&mut self, content_rows: usize, viewport_rows: usize) {
-        self.content_rows = content_rows;
-        self.viewport_rows = viewport_rows;
-        let max = self.max_scroll_top();
-        if self.follow_tail {
-            self.scroll_top_rows = max;
-        } else {
-            self.scroll_top_rows = self.scroll_top_rows.min(max);
-        }
-    }
-
-    #[must_use]
-    pub fn visible_row_range(&self, row_count: usize, height: usize) -> std::ops::Range<usize> {
-        if height == 0 || row_count == 0 {
-            return 0..0;
-        }
-        let window = height.min(row_count);
-        let max_start = row_count.saturating_sub(window);
-        let start = self.scroll_top_rows.min(max_start);
-        start..start + window
-    }
-
-    fn max_scroll_top(&self) -> usize {
-        self.content_rows.saturating_sub(self.viewport_rows)
-    }
-}
-
-impl Default for TranscriptViewport {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
 /// Cached render output for a single transcript entry. The cache is valid
 /// only while `width` matches the current terminal content width.
 #[derive(Debug, Clone)]
@@ -193,11 +104,13 @@ pub struct TranscriptStore {
     pending_assistant_phase: Option<MessagePhase>,
     active_thinking: Option<usize>,
     live_model_attempt: Option<(u32, usize)>,
-    viewport: TranscriptViewport,
     /// Per-entry render cache, parallel to `entries`. `None` means the entry
     /// needs re-rendering (new, mutated, or width changed).
     render_cache: Vec<Option<CachedRender>>,
-    first_dirty_entry: Option<usize>,
+    /// Legacy entry-index selection. The document owns visibility; this
+    /// index-based selection remains until document-coordinate selection
+    /// replaces it.
+    selection: Option<TranscriptSelection>,
     progressive_facts: Vec<ProgressiveFact>,
     next_progressive_sequence: u64,
 }
@@ -248,10 +161,6 @@ impl TranscriptStore {
     #[must_use]
     pub(crate) fn progressive_facts(&self) -> &[ProgressiveFact] {
         &self.progressive_facts
-    }
-
-    pub(crate) fn retain_progressive_facts(&mut self, keep: impl FnMut(&ProgressiveFact) -> bool) {
-        self.progressive_facts.retain(keep);
     }
 
     fn capture_delegate_snapshot_facts(
@@ -773,14 +682,23 @@ impl TranscriptStore {
         })
     }
 
+    /// Suppress a tool-run entry so it renders no placeholder card.
+    ///
+    /// Suppression is part of the entry's rendered state: flipping it
+    /// re-shapes the consecutive tool-run group (whose block is attributed to
+    /// the group's first member), so every member of the span is touched and
+    /// the document's revision-based invalidation re-measures their heights.
     pub fn suppress_tool_run(&mut self, id: &str) {
-        if !self
+        if self
             .suppressed_tool_run_ids
             .iter()
             .any(|existing| existing == id)
         {
-            self.suppressed_tool_run_ids.push(id.to_owned());
-            self.mark_dirty_from(0);
+            return;
+        }
+        self.suppressed_tool_run_ids.push(id.to_owned());
+        if let Some(index) = self.tool_run_index(id) {
+            self.touch_tool_run_span(index);
         }
     }
 
@@ -788,8 +706,37 @@ impl TranscriptStore {
         let before = self.suppressed_tool_run_ids.len();
         self.suppressed_tool_run_ids
             .retain(|existing| existing != id);
-        if self.suppressed_tool_run_ids.len() != before {
-            self.mark_dirty_from(0);
+        if self.suppressed_tool_run_ids.len() != before
+            && let Some(index) = self.tool_run_index(id)
+        {
+            self.touch_tool_run_span(index);
+        }
+    }
+
+    /// Touch every entry in the consecutive ToolRun span containing `index`.
+    /// Suppression changes group membership, and the group's rendered block
+    /// is attributed to its first member, so all members need re-measuring.
+    fn touch_tool_run_span(&mut self, index: usize) {
+        let mut first = index;
+        while first > 0
+            && matches!(
+                self.entries.get(first - 1),
+                Some(TranscriptEntry::ToolRun { .. })
+            )
+        {
+            first -= 1;
+        }
+        let mut last = index;
+        while last + 1 < self.entries.len()
+            && matches!(
+                self.entries.get(last + 1),
+                Some(TranscriptEntry::ToolRun { .. })
+            )
+        {
+            last += 1;
+        }
+        for entry_index in first..=last {
+            self.touch_entry(entry_index);
         }
     }
 
@@ -1519,68 +1466,51 @@ impl TranscriptStore {
         {
             *start -= 1;
         }
-        self.mark_dirty_from(index);
         Some(entry)
     }
 
-    #[must_use]
-    pub const fn viewport(&self) -> &TranscriptViewport {
-        &self.viewport
-    }
-
-    pub fn viewport_mut(&mut self) -> &mut TranscriptViewport {
-        &mut self.viewport
-    }
-
     pub fn select_visible_entry(&mut self) {
-        if self.viewport.is_following_tail() {
-            self.viewport.selection = self
-                .entries
-                .len()
-                .checked_sub(1)
-                .map(TranscriptSelection::new);
-            return;
-        }
-
-        let range = self.viewport.visible_row_range(self.entries.len(), 1);
-        let Some(index) = range.end.checked_sub(1) else {
-            self.viewport.selection = None;
-            return;
-        };
-        self.viewport.selection =
-            (index < self.entries.len()).then(|| TranscriptSelection::new(index));
+        // The document owns view visibility; entry-index selection is legacy
+        // behavior that document-coordinate selection replaces. Without view
+        // state the store selects the tail entry, which matches the default
+        // tail-following view.
+        self.selection = self
+            .entries
+            .len()
+            .checked_sub(1)
+            .map(TranscriptSelection::new);
     }
 
     pub fn clear_selection(&mut self) {
-        self.viewport.selection = None;
+        self.selection = None;
     }
 
     pub fn extend_selection_up(&mut self, count: usize) {
-        if self.viewport.selection.is_none() {
+        if self.selection.is_none() {
             self.select_visible_entry();
         }
-        if let Some(selection) = &mut self.viewport.selection {
+        if let Some(selection) = &mut self.selection {
             selection.extend_up(self.entries.len(), count);
         }
     }
 
     pub fn extend_selection_down(&mut self, count: usize) {
-        if self.viewport.selection.is_none() {
+        if self.selection.is_none() {
             self.select_visible_entry();
         }
-        if let Some(selection) = &mut self.viewport.selection {
+        if let Some(selection) = &mut self.selection {
             selection.extend_down(self.entries.len(), count);
         }
     }
 
     #[must_use]
     pub fn has_selection(&self) -> bool {
-        self.viewport.selection.is_some()
+        self.selection.is_some()
     }
 
     #[must_use]
     pub fn copy_selection(&self) -> Option<String> {
-        let range = self.viewport.selection?.range(self.entries.len())?;
+        let range = self.selection?.range(self.entries.len())?;
         let mut copied = String::new();
         for (offset, entry) in self.entries[range].iter().enumerate() {
             if offset > 0 {
@@ -1651,7 +1581,6 @@ impl TranscriptStore {
         self.entry_revisions.push(0);
         self.assistant_phases.push(MessagePhase::Unknown);
         self.render_cache.push(None);
-        self.mark_dirty_from(index);
         index
     }
 
@@ -1677,7 +1606,6 @@ impl TranscriptStore {
         {
             *start += 1;
         }
-        self.mark_dirty_from(index);
     }
 
     fn allocate_entry_id(&mut self) -> TranscriptEntryId {
@@ -1703,7 +1631,6 @@ impl TranscriptStore {
         if index < self.render_cache.len() {
             self.render_cache[index] = None;
         }
-        self.mark_dirty_from(index);
     }
 
     /// Invalidate all cached renders (e.g. on terminal resize).
@@ -1711,24 +1638,6 @@ impl TranscriptStore {
         for slot in &mut self.render_cache {
             *slot = None;
         }
-        if !self.entries.is_empty() {
-            self.mark_dirty_from(0);
-        }
-    }
-
-    pub(crate) const fn first_dirty_entry(&self) -> Option<usize> {
-        self.first_dirty_entry
-    }
-
-    pub(crate) fn clear_dirty_entries(&mut self) {
-        self.first_dirty_entry = None;
-    }
-
-    fn mark_dirty_from(&mut self, index: usize) {
-        self.first_dirty_entry = Some(
-            self.first_dirty_entry
-                .map_or(index, |current| current.min(index)),
-        );
     }
 
     /// Ensure `render_cache` has the same length as `entries`.
@@ -2200,7 +2109,6 @@ mod tests {
 
         let delegate_origin = workflow_origin_for_route_test("delegate-call");
         let delegate = delegate_snapshot_for_merge_test();
-        store.clear_dirty_entries();
         let before_delegate = store.entries()[0].clone();
         let before_delegate_revision = store.entry_revisions()[0];
 
@@ -2210,7 +2118,6 @@ mod tests {
         );
         assert_eq!(store.entries()[0], before_delegate);
         assert_eq!(store.entry_revisions()[0], before_delegate_revision);
-        assert_eq!(store.first_dirty_entry(), None);
         assert!(!store.is_tool_run_suppressed("delegate-call"));
 
         assert_eq!(
@@ -2246,7 +2153,6 @@ mod tests {
 
         let swarm_origin = workflow_origin_for_route_test("swarm-call");
         let swarm = swarm_snapshot_for_merge_test(delegate_snapshot_for_merge_test());
-        store.clear_dirty_entries();
         let before_swarm = store.entries()[0].clone();
         let before_swarm_revision = store.entry_revisions()[0];
 
@@ -2256,7 +2162,6 @@ mod tests {
         );
         assert_eq!(store.entries()[0], before_swarm);
         assert_eq!(store.entry_revisions()[0], before_swarm_revision);
-        assert_eq!(store.first_dirty_entry(), None);
         assert!(!store.is_tool_run_suppressed("swarm-call"));
 
         assert_eq!(
@@ -2392,7 +2297,6 @@ mod tests {
                 },
             )
             .expect("workflow tool");
-        store.clear_dirty_entries();
         let before_entry = store.entries()[0].clone();
         let before_revision = store.entry_revisions()[0];
         let before_cache = store.render_cache[0].is_some();
@@ -2411,7 +2315,6 @@ mod tests {
         assert_eq!(store.entries()[0], before_entry);
         assert_eq!(store.entry_revisions()[0], before_revision);
         assert_eq!(store.render_cache[0].is_some(), before_cache);
-        assert_eq!(store.first_dirty_entry(), None);
     }
 
     #[test]
@@ -2419,7 +2322,6 @@ mod tests {
         let mut store = TranscriptStore::new();
         store.upsert_workflow(workflow_snapshot_for_route_test());
         insert_failed_workflow_placeholder(&mut store, "delegate-call", "Delegate");
-        store.clear_dirty_entries();
         let revision = store.entry_revisions()[0];
         let agent = neo_agent_core::multi_agent::MultiAgentRuntime::new()
             .start_foreground_delegate_for_test("task");
@@ -2432,7 +2334,6 @@ mod tests {
 
         assert_eq!(result, Ok(false));
         assert_eq!(store.entry_revisions()[0], revision);
-        assert_eq!(store.first_dirty_entry(), None);
         assert!(!store.is_tool_run_suppressed("delegate-call"));
         let tool = store.tool("delegate-call").expect("failed placeholder");
         assert_eq!(tool.status(), ToolStatusKind::Failed);
@@ -2444,7 +2345,6 @@ mod tests {
         let mut store = TranscriptStore::new();
         store.upsert_workflow(workflow_snapshot_for_route_test());
         insert_failed_workflow_placeholder(&mut store, "swarm-call", "DelegateSwarm");
-        store.clear_dirty_entries();
         let revision = store.entry_revisions()[0];
         let agent = neo_agent_core::multi_agent::MultiAgentRuntime::new()
             .start_foreground_delegate_for_test("task");
@@ -2465,7 +2365,6 @@ mod tests {
 
         assert_eq!(result, Ok(false));
         assert_eq!(store.entry_revisions()[0], revision);
-        assert_eq!(store.first_dirty_entry(), None);
         assert!(!store.is_tool_run_suppressed("swarm-call"));
         let tool = store.tool("swarm-call").expect("failed placeholder");
         assert_eq!(tool.status(), ToolStatusKind::Failed);

@@ -266,6 +266,9 @@ pub(super) struct TranscriptPresentation {
     committed_entry_revisions: BTreeMap<TranscriptEntryId, u64>,
     assistant_offsets: BTreeMap<TranscriptEntryId, usize>,
     assistant_sources: BTreeMap<TranscriptEntryId, String>,
+    /// Facts already committed to history blocks. They stay attached to
+    /// their entry in the store and are never acknowledged away; this set
+    /// only prevents re-emitting them in the live stream.
     acknowledged_facts: BTreeSet<super::progressive::ProgressiveFactId>,
     observed_standalone_delegates: BTreeSet<TranscriptEntryId>,
     acknowledged_tail_owner: Option<TranscriptEntryId>,
@@ -701,10 +704,6 @@ impl TranscriptPresentation {
                 self.acknowledged_tail_owner = Some(owner);
             }
         }
-    }
-
-    pub(super) fn prune_acknowledged_facts(&self, transcript: &mut TranscriptStore) {
-        transcript.retain_progressive_facts(|fact| !self.acknowledged_facts.contains(&fact.id));
     }
 
     fn record_diagnostic(&mut self, diagnostic: String) {

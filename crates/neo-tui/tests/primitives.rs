@@ -2,7 +2,7 @@ use neo_tui::input::{KeyId, KeybindingAction, KeybindingsManager};
 use neo_tui::primitive::theme::TuiTheme;
 use neo_tui::primitive::{truncate_width, visible_width, wrap_width};
 use neo_tui::shell::{NeoChromeState, PromptEdit, PromptState, SelectItem, SelectListState};
-use neo_tui::transcript::{TranscriptEntry, TranscriptStore, TranscriptViewport};
+use neo_tui::transcript::{DocumentLayout, TranscriptEntry, TranscriptStore, TranscriptViewport};
 
 fn strip_ansi_escapes(text: &str) -> String {
     let mut visible = String::new();
@@ -217,20 +217,32 @@ fn transcript_viewport_clamp_after_shrink_keeps_manual_mode() {
 
 #[test]
 fn transcript_store_push_preserves_manual_scroll_state() {
+    // The document owns the scroll anchor: a locked view must not be yanked
+    // when the store grows below the anchor.
     let mut store = TranscriptStore::new();
     for index in 0..20 {
         store.push(TranscriptEntry::status(format!("line {index}")));
     }
-    store.viewport_mut().sync(20, 5);
-    store.viewport_mut().scroll_up(6);
-    assert_eq!(store.viewport().visible_row_range(20, 5), 9..14);
-    assert!(!store.viewport().is_following_tail());
+    let mut document = DocumentLayout::new();
+    document.sync_entries(store.entry_ids(), store.entry_revisions());
+    for index in 0..20 {
+        document.set_entry_height(index, 1);
+    }
+    document.visible_row_range(5);
+    document.scroll_up(6);
+    assert_eq!(document.visible_row_range(5), 28..33);
+    assert!(!document.is_following_tail());
 
     store.push(TranscriptEntry::status("new line"));
-    store.viewport_mut().sync(21, 5);
+    document.sync_entries(store.entry_ids(), store.entry_revisions());
+    document.set_entry_height(20, 1);
 
-    assert_eq!(store.viewport().visible_row_range(21, 5), 9..14);
-    assert!(!store.viewport().is_following_tail());
+    assert_eq!(
+        document.visible_row_range(5),
+        28..33,
+        "new content must not yank a manually scrolled viewport"
+    );
+    assert!(!document.is_following_tail());
 }
 
 #[test]
@@ -239,17 +251,23 @@ fn transcript_store_explicit_follow_bottom_restores_tail_after_push() {
     for index in 0..20 {
         store.push(TranscriptEntry::status(format!("line {index}")));
     }
-    store.viewport_mut().sync(20, 5);
-    store.viewport_mut().scroll_up(6);
-    assert!(!store.viewport().is_following_tail());
+    let mut document = DocumentLayout::new();
+    document.sync_entries(store.entry_ids(), store.entry_revisions());
+    for index in 0..20 {
+        document.set_entry_height(index, 1);
+    }
+    document.visible_row_range(5);
+    document.scroll_up(6);
+    assert!(!document.is_following_tail());
 
-    store.viewport_mut().follow_bottom();
+    document.follow_bottom();
     store.push(TranscriptEntry::status("new line"));
-    store.viewport_mut().sync(21, 5);
+    document.sync_entries(store.entry_ids(), store.entry_revisions());
+    document.set_entry_height(20, 1);
 
-    assert_eq!(store.viewport().visible_row_range(21, 5), 16..21);
-    assert_eq!(store.viewport().scrollback(), 0);
-    assert!(store.viewport().is_following_tail());
+    assert_eq!(document.visible_row_range(5), 36..41);
+    assert_eq!(document.total_rows(), 41);
+    assert!(document.is_following_tail());
 }
 
 #[test]

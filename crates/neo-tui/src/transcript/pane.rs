@@ -6,15 +6,15 @@ use neo_agent_core::{AgentEvent, AgentMessage, Content, ImageRef, skills::SkillS
 
 use crate::dialogs::question_dialog::{QuestionDisplayData, QuestionStateMachine};
 use crate::primitive::theme::TuiTheme;
-use crate::primitive::{Finalization, Line, next_sequence};
+use crate::primitive::{Finalization, next_sequence};
 use crate::shell::{StreamUpdate, ToolStatusKind};
 use crate::terminal_image::{
     ImageRenderPolicy, ImageSource, InlineImage, TerminalImageCapabilities,
 };
 use crate::transcript::{
-    McpStartupStatusData, QuestionPromptData, QuestionPromptState, ShellRunComponent,
-    ToolCallComponent, ToolCallState, TranscriptBrowserState, TranscriptEntry, TranscriptEntryId,
-    TranscriptStore,
+    DocumentLayout, McpStartupStatusData, QuestionPromptData, QuestionPromptState,
+    ShellRunComponent, ToolCallComponent, ToolCallState, TranscriptBrowserState, TranscriptEntry,
+    TranscriptEntryId, TranscriptStore,
 };
 
 use super::entry::RetryStatusData;
@@ -148,19 +148,18 @@ impl AbsorbedToolKind {
 }
 
 #[derive(Debug, Clone)]
-struct TranscriptBodyCache {
-    width: usize,
-    entry_count: usize,
-    rows: Vec<String>,
-    entry_row_starts: Vec<usize>,
-}
-
-#[derive(Debug, Clone)]
 pub struct TranscriptPane {
     width: usize,
     height: usize,
     live_chrome_height: usize,
     pub(super) transcript: TranscriptStore,
+    /// The incremental document: per-entry layout, logical anchor, and view
+    /// state. The physical terminal only receives a bounded visible slice
+    /// resolved against this document.
+    document: DocumentLayout,
+    /// Rendered blocks for entries re-rendered during the current layout
+    /// refresh, so composition reuses them instead of rendering twice.
+    frame_blocks: BTreeMap<usize, Vec<String>>,
     dirty: bool,
     tool_output_expanded: bool,
     pub(super) streaming_tool_args: BTreeMap<String, String>,
@@ -180,7 +179,6 @@ pub struct TranscriptPane {
     /// tests can inspect rendered output via [`frame_ansi_lines`] without
     /// recomposing unchanged rows.
     last_frame: Vec<String>,
-    body_cache: Option<TranscriptBodyCache>,
     #[cfg(test)]
     last_reused_prefix_rows: usize,
     /// Theme used to color the live transcript body. Mirrors [`NeoChromeState`]'s
@@ -215,7 +213,8 @@ impl TranscriptPane {
             workspace_root: None,
             neo_home: None,
             last_frame: Vec::new(),
-            body_cache: None,
+            document: DocumentLayout::new(),
+            frame_blocks: BTreeMap::new(),
             #[cfg(test)]
             last_reused_prefix_rows: 0,
             theme: TuiTheme::default(),
@@ -239,7 +238,7 @@ impl TranscriptPane {
             return;
         }
         self.theme = theme;
-        self.body_cache = None;
+        self.document.rebuild();
         self.transcript.invalidate_render_cache();
         self.mark_dirty();
     }
@@ -249,7 +248,7 @@ impl TranscriptPane {
             return;
         }
         self.image_render_policy = policy;
-        self.body_cache = None;
+        self.document.rebuild();
         self.transcript.invalidate_render_cache();
         self.mark_dirty();
     }
@@ -259,7 +258,7 @@ impl TranscriptPane {
             return;
         }
         self.image_capabilities = capabilities;
-        self.body_cache = None;
+        self.document.rebuild();
         self.transcript.invalidate_render_cache();
         self.mark_dirty();
     }
@@ -606,19 +605,13 @@ impl TranscriptPane {
     }
 
     pub fn scroll_transcript_up(&mut self, rows: usize) {
-        self.transcript.viewport_mut().scroll_up(rows);
+        self.document.scroll_up(rows);
         self.mark_dirty();
     }
 
     pub fn scroll_transcript_down(&mut self, rows: usize) {
-        self.transcript.viewport_mut().scroll_down(rows);
+        self.document.scroll_down(rows);
         self.mark_dirty();
-    }
-
-    pub fn sync_transcript_view(&mut self, content_rows: usize, viewport_rows: usize) {
-        self.transcript
-            .viewport_mut()
-            .sync(content_rows, viewport_rows);
     }
 
     pub fn select_visible_transcript_entry(&mut self) {
@@ -702,7 +695,7 @@ impl TranscriptPane {
 
     pub fn set_tool_output_expanded(&mut self, expanded: bool) {
         self.tool_output_expanded = expanded;
-        self.body_cache = None;
+        self.document.rebuild();
         for index in 0..self.transcript.entries().len() {
             self.transcript
                 .mutate_entry(index, |entry| entry.set_expanded(expanded));
@@ -753,7 +746,7 @@ impl TranscriptPane {
             return;
         }
         if self.width != width {
-            self.body_cache = None;
+            self.document.set_width(width);
         }
         self.width = width;
         self.height = height;
@@ -873,9 +866,10 @@ impl TranscriptPane {
     }
 
     pub fn acknowledge_history(&mut self, blocks: &[FinalizedBlock]) {
+        // History acknowledgement commits presentation state only.
+        // Progressive facts stay attached to their entry and are never
+        // acknowledged away after physical output.
         self.presentation.acknowledge(blocks);
-        self.presentation
-            .prune_acknowledged_facts(&mut self.transcript);
     }
 
     /// The earliest unresolved blocking entry (approval or question) in
@@ -1586,161 +1580,256 @@ impl TranscriptPane {
     }
 
     fn render_transcript_ansi_rows(&mut self, width: usize) -> Vec<String> {
+        self.refresh_layout(width);
+        let total = self.document.total_rows();
+        self.compose_rows(0, total, width)
+    }
+
+    /// Compose the bounded physical slice for a body viewport of `height`
+    /// rows, resolving the document's anchor/follow state against the new
+    /// document bottom. The frame composition itself is owned by the
+    /// fullscreen lifecycle; this is the document-powered resolution.
+    #[must_use]
+    pub fn render_visible_slice(&mut self, width: usize, height: usize) -> Vec<String> {
+        let content_width = super::chrome_render::frame_content_width(width);
+        self.refresh_layout(content_width);
+        let range = self.document.visible_row_range(height);
+        self.compose_rows(range.start, range.end, content_width)
+    }
+
+    /// Read access to the incremental document layout and view state.
+    #[must_use]
+    pub const fn document(&self) -> &DocumentLayout {
+        &self.document
+    }
+
+    /// Read and clear the document's one Boolean new-activity indicator.
+    #[must_use]
+    pub fn consume_new_activity(&mut self) -> bool {
+        self.document.consume_new_activity()
+    }
+
+    /// Reconcile the document with the store and feed fresh block heights for
+    /// exactly the entries the document invalidated: revision changes
+    /// (mutations, ticks, streaming deltas), explicit suppression transitions
+    /// (which touch the affected `ToolRun` span), and rebuilds (width/theme/
+    /// expansion). Unchanged cacheable entries keep their per-entry render
+    /// cache.
+    ///
+    /// Non-cacheable entries are NOT re-rendered unconditionally. An entry's
+    /// rendered height changes only when its revision changes, when
+    /// suppression toggles, or when a rebuild invalidates everything: every
+    /// entry kind in this codebase renders row-count-invariant animation
+    /// (spinners, progress bars, elapsed headers are in-place), time-based
+    /// live entries (Delegate family, Workflow, MCP/Retry status) tick and
+    /// bump their revision, and streaming content (assistant/thinking/tool
+    /// output) arrives through revision-bumping mutations. Visible
+    /// non-cacheable entries are re-rendered during composition for output;
+    /// off-screen ones keep their exact last measured height.
+    fn refresh_layout(&mut self, width: usize) {
+        self.document.set_width(width);
         self.transcript.ensure_cache_width(width);
-
-        let entry_count = self.transcript.entries().len();
-        let (mut rows, start_index, mut entry_row_starts, _reused_prefix_rows) =
-            self.cached_render_prefix(width, entry_count);
+        self.document.sync_entries(
+            self.transcript.entry_ids(),
+            self.transcript.entry_revisions(),
+        );
+        let re_render: BTreeSet<usize> = self.document.invalid_entries().into_iter().collect();
         #[cfg(test)]
-        #[allow(clippy::used_underscore_binding)]
         {
-            self.last_reused_prefix_rows = _reused_prefix_rows;
+            self.last_reused_prefix_rows = 0;
         }
-        let mut tool_run: Vec<ToolCallComponent> = Vec::new();
+        self.frame_blocks.clear();
+        for index in re_render {
+            let block = self.entry_block_lines(index, width);
+            if !block.is_empty() {
+                self.frame_blocks.insert(index, block.clone());
+            }
+            self.document.set_entry_height(index, block.len());
+        }
+    }
 
-        for (index, row_start) in entry_row_starts
-            .iter_mut()
-            .enumerate()
-            .take(entry_count)
-            .skip(start_index)
-        {
-            *row_start = rows.len();
+    /// Compose the virtual rows `[start_row, end_row)` from per-entry render
+    /// caches. Every entry contributes exactly its laid-out height (block
+    /// plus one separator row when a preceding non-empty block exists), so
+    /// the composed slice is a byte-exact window of the full document.
+    fn compose_rows(&mut self, start_row: usize, end_row: usize, width: usize) -> Vec<String> {
+        if start_row >= end_row || start_row >= self.document.total_rows() {
+            return Vec::new();
+        }
+        let Some(start_entry) = self.document.entry_at_row(start_row) else {
+            return Vec::new();
+        };
+        let mut rows: Vec<String> = Vec::new();
+        let mut tool_run: Vec<ToolCallComponent> = Vec::new();
+        let mut group_start: Option<usize> = None;
+        let entry_count = self.transcript.entries().len();
+        for index in start_entry..entry_count {
+            let (entry_start, entry_height) = match self.document.entry_layout(index) {
+                Some(layout) => (layout.start_row, layout.height),
+                None => break,
+            };
+            if entry_start >= end_row {
+                self.flush_group_block(&mut rows, &mut tool_run, group_start, width);
+                break;
+            }
             // Extract whether this is a ToolRun (and its id) in a short-lived
             // borrow scope so we can freely call &mut self methods afterward.
             let tool_run_id: Option<String> = match self.transcript.entries().get(index) {
                 Some(TranscriptEntry::ToolRun { component }) => Some(component.id().to_owned()),
                 _ => None,
             };
-
             if let Some(id) = tool_run_id {
                 if self.transcript.is_tool_run_suppressed(&id) {
-                    append_line_transcript_block(
-                        &mut rows,
-                        self.flush_tool_run(&mut tool_run, width),
-                    );
+                    self.flush_group_block(&mut rows, &mut tool_run, group_start, width);
+                    group_start = None;
                 } else if let Some(TranscriptEntry::ToolRun { component }) =
                     self.transcript.entries().get(index)
                 {
+                    if tool_run.is_empty() {
+                        group_start = Some(index);
+                    }
                     tool_run.push(component.clone());
                 }
             } else {
-                append_line_transcript_block(&mut rows, self.flush_tool_run(&mut tool_run, width));
-                let lines = self.transcript.render_entry_ansi_cached(
-                    index,
-                    width,
-                    &self.theme,
-                    self.activity_frame,
-                    self.image_render_policy,
-                    self.image_capabilities,
-                );
-                append_ansi_transcript_block(&mut rows, lines);
+                self.flush_group_block(&mut rows, &mut tool_run, group_start, width);
+                group_start = None;
+                let block = self.rendered_block(index, width);
+                if !block.is_empty() {
+                    if entry_height > block.len() {
+                        rows.push(String::new());
+                    }
+                    rows.extend(block);
+                }
             }
         }
-        append_line_transcript_block(&mut rows, self.flush_tool_run(&mut tool_run, width));
-        entry_row_starts[entry_count] = rows.len();
+        self.flush_group_block(&mut rows, &mut tool_run, group_start, width);
 
-        let viewport_rows = self.height.saturating_sub(self.live_chrome_height).max(1);
-        self.transcript
-            .viewport_mut()
-            .sync(rows.len(), viewport_rows);
-        self.transcript.clear_dirty_entries();
-        self.body_cache = Some(TranscriptBodyCache {
-            width,
-            entry_count,
-            rows: rows.clone(),
-            entry_row_starts,
-        });
+        // Slice the composed window down to the requested virtual range.
+        let base = self
+            .document
+            .entry_layout(start_entry)
+            .map_or(start_row, |layout| layout.start_row);
+        let offset = start_row.saturating_sub(base);
+        if offset > 0 {
+            rows.drain(..offset.min(rows.len()));
+        }
+        rows.truncate(end_row.saturating_sub(start_row));
         rows
     }
 
-    fn cached_render_prefix(
-        &self,
-        width: usize,
-        entry_count: usize,
-    ) -> (Vec<String>, usize, Vec<usize>, usize) {
-        let Some(cache) = &self.body_cache else {
-            return (Vec::new(), 0, vec![0; entry_count + 1], 0);
-        };
-        if cache.width != width
-            || cache.entry_count > entry_count
-            || cache.entry_row_starts.len() != cache.entry_count + 1
+    /// The rendered block for one entry: the per-entry render cache for
+    /// ordinary entries, the grouped tool-card block for the first member of
+    /// an unsuppressed tool-run group. Blocks re-rendered during this frame's
+    /// layout refresh are reused instead of rendered twice.
+    fn rendered_block(&mut self, index: usize, width: usize) -> Vec<String> {
+        if let Some(block) = self.frame_blocks.remove(&index) {
+            return block;
+        }
+        let block = self.entry_block_lines(index, width);
+        #[cfg(test)]
         {
-            return (Vec::new(), 0, vec![0; entry_count + 1], 0);
+            // The block came from a cached (unchanged) entry: count it as
+            // reused render work.
+            self.last_reused_prefix_rows = self.last_reused_prefix_rows.saturating_add(block.len());
         }
-        let dirty_start = self.transcript.first_dirty_entry().unwrap_or(0);
-        let start_index = self.safe_render_start(dirty_start.min(entry_count));
-        let Some(prefix_rows) = cache.entry_row_starts.get(start_index).copied() else {
-            return (Vec::new(), 0, vec![0; entry_count + 1], 0);
-        };
-        let prefix_rows = prefix_rows.min(cache.rows.len());
-        let mut entry_row_starts = vec![0; entry_count + 1];
-        let copied_starts = (start_index + 1).min(cache.entry_row_starts.len());
-        entry_row_starts[..copied_starts].copy_from_slice(&cache.entry_row_starts[..copied_starts]);
-        (
-            cache.rows[..prefix_rows].to_vec(),
-            start_index,
-            entry_row_starts,
-            prefix_rows,
-        )
+        block
     }
 
-    fn safe_render_start(&self, dirty_start: usize) -> usize {
-        let entries = self.transcript.entries();
-        let mut start = dirty_start.min(entries.len());
-        while start > 0 {
-            match entries.get(start - 1) {
-                Some(TranscriptEntry::ToolRun { component })
-                    if !self.transcript.is_tool_run_suppressed(component.id()) =>
-                {
-                    start -= 1;
-                }
-                _ => break,
-            }
-        }
-        start
-    }
-
-    fn flush_tool_run(&mut self, tool_run: &mut Vec<ToolCallComponent>, width: usize) -> Vec<Line> {
-        if tool_run.is_empty() {
+    /// Rendered block contribution of one entry: trimmed ANSI rows. Tool-run
+    /// group blocks are attributed to the group's first member; other members
+    /// and suppressed runs contribute nothing.
+    fn entry_block_lines(&mut self, index: usize, width: usize) -> Vec<String> {
+        let Some(entry) = self.transcript.entries().get(index) else {
             return Vec::new();
+        };
+        if let TranscriptEntry::ToolRun { component } = entry {
+            if self.transcript.is_tool_run_suppressed(component.id()) {
+                return Vec::new();
+            }
+            // Only the first member of an unsuppressed group carries the
+            // grouped tool-card block.
+            let preceded_by_group = index > 0
+                && matches!(
+                    self.transcript.entries().get(index - 1),
+                    Some(TranscriptEntry::ToolRun { component })
+                        if !self.transcript.is_tool_run_suppressed(component.id())
+                );
+            if preceded_by_group {
+                return Vec::new();
+            }
+            let mut group = Vec::new();
+            for entry in self.transcript.entries().iter().skip(index) {
+                match entry {
+                    TranscriptEntry::ToolRun { component }
+                        if !self.transcript.is_tool_run_suppressed(component.id()) =>
+                    {
+                        group.push(component.clone());
+                    }
+                    _ => break,
+                }
+            }
+            let mut ordered = group;
+            let lines =
+                super::chrome_render::render_ordered_tools(&mut ordered, width, &self.theme).lines;
+            let first = lines.iter().position(|line| !line.is_blank());
+            let last = lines.iter().rposition(|line| !line.is_blank());
+            let (Some(first), Some(last)) = (first, last) else {
+                return Vec::new();
+            };
+            lines
+                .into_iter()
+                .skip(first)
+                .take(last - first + 1)
+                .map(|line| line.to_ansi())
+                .collect()
+        } else {
+            let mut block = self.transcript.render_entry_ansi_cached(
+                index,
+                width,
+                &self.theme,
+                self.activity_frame,
+                self.image_render_policy,
+                self.image_capabilities,
+            );
+            trim_ansi_transcript_block(&mut block);
+            block
         }
-        let mut ordered = std::mem::take(tool_run);
-        super::chrome_render::render_ordered_tools(&mut ordered, width, &self.theme).lines
+    }
+
+    /// Append the grouped tool-card block for an accumulated tool run,
+    /// inserting the document-driven separator row.
+    fn flush_group_block(
+        &mut self,
+        rows: &mut Vec<String>,
+        tool_run: &mut Vec<ToolCallComponent>,
+        group_start: Option<usize>,
+        width: usize,
+    ) {
+        if tool_run.is_empty() {
+            return;
+        }
+        std::mem::take(tool_run);
+        let Some(start) = group_start else {
+            return;
+        };
+        let block = self.rendered_block(start, width);
+        if block.is_empty() {
+            return;
+        }
+        let separator = self
+            .document
+            .entry_layout(start)
+            .is_some_and(|layout| layout.height > block.len());
+        if separator {
+            rows.push(String::new());
+        }
+        rows.extend(block);
     }
 
     #[cfg(test)]
     fn cached_prefix_rows_reused_for_test(&self) -> usize {
         self.last_reused_prefix_rows
     }
-}
-
-fn append_line_transcript_block(rows: &mut Vec<String>, block: Vec<Line>) {
-    let first = block.iter().position(|line| !line.is_blank());
-    let last = block.iter().rposition(|line| !line.is_blank());
-    let (Some(first), Some(last)) = (first, last) else {
-        return;
-    };
-    if rows.last().is_some_and(|line| !ansi_line_is_blank(line)) {
-        rows.push(String::new());
-    }
-    rows.extend(
-        block
-            .into_iter()
-            .skip(first)
-            .take(last - first + 1)
-            .map(|line| line.to_ansi()),
-    );
-}
-
-fn append_ansi_transcript_block(rows: &mut Vec<String>, mut block: Vec<String>) {
-    trim_ansi_transcript_block(&mut block);
-    if block.is_empty() {
-        return;
-    }
-    if rows.last().is_some_and(|line| !ansi_line_is_blank(line)) {
-        rows.push(String::new());
-    }
-    rows.extend(block);
 }
 
 pub(super) fn trim_ansi_transcript_block(block: &mut Vec<String>) {

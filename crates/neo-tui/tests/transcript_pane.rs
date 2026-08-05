@@ -192,6 +192,51 @@ fn streaming_assistant_commits_stable_prefix_and_bounds_live_tail() {
 }
 
 #[test]
+fn streaming_assistant_grows_past_ten_viewports_without_omission() {
+    let mut pane = TranscriptPane::new(80, 10);
+    pane.start_assistant_message();
+    // Grow one streaming assistant far beyond ten viewports of body height.
+    for index in 0..200 {
+        pane.append_assistant_delta(&format!("complete paragraph {index}\n\n"));
+    }
+    // The physical slice stays bounded...
+    let slice = pane.render_visible_slice(80, 6);
+    assert_eq!(slice.len(), 6, "physical slice must stay bounded");
+    // ...while the document retained every row: full-frame composition must
+    // match the virtual geometry exactly.
+    let full = pane.render_frame(80, 10).expect("full frame");
+    assert_eq!(pane.document().total_rows(), full.len());
+    assert!(
+        pane.document().total_rows() > 6 * 10,
+        "content must grow far past ten viewports: {}",
+        pane.document().total_rows()
+    );
+    // Tail follow shows the newest content.
+    let tail_text = slice
+        .iter()
+        .map(|line| plain(line))
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(
+        tail_text.contains("complete paragraph 199"),
+        "tail:\n{tail_text}"
+    );
+    // Scrolling to the very top still finds the oldest content: nothing was
+    // omitted by the bounded physical slice.
+    pane.scroll_transcript_up(usize::MAX);
+    let top = pane.render_visible_slice(80, 6);
+    let top_text = top
+        .iter()
+        .map(|line| plain(line))
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(
+        top_text.contains("complete paragraph 0"),
+        "top:\n{top_text}"
+    );
+}
+
+#[test]
 fn long_unstable_assistant_tail_stays_bounded_and_commits_once() {
     let mut pane = TranscriptPane::new(30, 8);
     pane.start_assistant_message();
