@@ -3236,3 +3236,98 @@ fn theme_draft_preview_card_never_overflows_narrow_widths() {
         }
     }
 }
+
+#[test]
+fn completed_tool_expansion_reads_output_beyond_live_preview_limits() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let store = neo_agent_core::session::ToolOutputStore::new(dir.path().to_owned());
+    let output = (0..40)
+        .map(|index| format!("line {index:02}\n"))
+        .collect::<String>();
+    store
+        .append("main", "long-output", &output)
+        .expect("append");
+    let output_ref = store.finish("main", "long-output").expect("finish");
+    assert!(output_ref.complete);
+
+    let mut card = ToolCallComponent::new(ToolCallState {
+        id: "long-output".to_owned(),
+        name: "Bash".to_owned(),
+        arguments: Some(r#"{"command":"produce long output"}"#.to_owned()),
+        result: None,
+        details: None,
+        status: ToolStatusKind::Running,
+        exit_code: None,
+    });
+    assert!(card.attach_output_ref(Some(output_ref.clone())));
+    // Completion finalizes the six-line live preview but must not erase
+    // access to the output reference.
+    assert!(card.set_result(Some("bounded result".to_owned()), None, false, None,));
+
+    let theme = TuiTheme::default();
+    let mut cache = neo_tui::transcript::ExpandedOutputCache::default();
+    let rows = card.render_complete_output_range(80, &theme, &store, &mut cache, 18);
+    let rendered = plain(rows.clone());
+    assert!(
+        rendered.len() > 6,
+        "expansion must read beyond the six-line live preview: {rendered:?}"
+    );
+    assert!(
+        rendered.iter().any(|row| row.contains("line 12")),
+        "rows beyond the preview limit are served from the complete source: {rendered:?}"
+    );
+    assert!(
+        rendered.iter().any(|row| row.contains("22 lines remain")),
+        "bounded visible range footer: {rendered:?}"
+    );
+    assert!(
+        !rendered.iter().any(|row| row.contains("output incomplete")),
+        "finished artifact is complete: {rendered:?}"
+    );
+
+    // The derived wrap mapping is cached per width: a second render neither
+    // re-reads the file nor changes the rows.
+    let again = card.render_complete_output_range(80, &theme, &store, &mut cache, 18);
+    assert_eq!(again, rows, "cached range is stable across renders");
+}
+
+#[test]
+fn expanded_output_cache_invalidates_when_artifact_completes() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let store = neo_agent_core::session::ToolOutputStore::new(dir.path().to_owned());
+    store
+        .append("main", "flip-task", "alpha\nbeta\n")
+        .expect("append");
+
+    let mut card = ToolCallComponent::new(ToolCallState {
+        id: "flip-task".to_owned(),
+        name: "Bash".to_owned(),
+        arguments: Some(r#"{"command":"long running"}"#.to_owned()),
+        result: None,
+        details: None,
+        status: ToolStatusKind::Running,
+        exit_code: None,
+    });
+    let live_ref = store.metadata("main", "flip-task").expect("live metadata");
+    assert!(!live_ref.complete);
+    card.attach_output_ref(Some(live_ref));
+
+    let theme = TuiTheme::default();
+    let mut cache = neo_tui::transcript::ExpandedOutputCache::default();
+    let before = plain(card.render_complete_output_range(80, &theme, &store, &mut cache, 10));
+    assert!(
+        before.iter().any(|row| row.contains("output incomplete")),
+        "{before:?}"
+    );
+
+    // The artifact completes without any line growth: the width-keyed cache
+    // must not serve the stale incomplete footer.
+    let finished_ref = store.finish("main", "flip-task").expect("finish");
+    assert!(finished_ref.complete);
+    let after = plain(card.render_complete_output_range(80, &theme, &store, &mut cache, 10));
+    assert!(
+        !after.iter().any(|row| row.contains("output incomplete")),
+        "stale incomplete footer after completion: {after:?}"
+    );
+    assert_eq!(after, ["  alpha", "  beta"], "{after:?}");
+}

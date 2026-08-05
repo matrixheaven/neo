@@ -3,10 +3,10 @@ use std::time::Duration;
 use neo_agent_core::multi_agent::{
     AgentActivityEntry, AgentActivityKind, AgentDisplayName, AgentId, AgentLifecycleState,
     AgentPath, AgentProgressSnapshot, AgentRole, AgentRunMode, AgentSnapshot, AgentTerminalOutcome,
-    AgentToolActivityPhase, DelegateContext, SwarmAggregate, SwarmChildProgress,
-    SwarmChildSnapshot, SwarmSnapshot,
+    AgentTerminalReason, AgentToolActivityPhase, AgentToolOutputPreview, DelegateContext,
+    SwarmAggregate, SwarmChildProgress, SwarmChildSnapshot, SwarmSnapshot,
 };
-use neo_agent_core::session::{JsonlSessionReader, JsonlSessionWriter};
+use neo_agent_core::session::{JsonlSessionReader, JsonlSessionWriter, ToolOutputStore};
 use neo_agent_core::workflow::{
     WorkflowExecutionOrigin, WorkflowId, WorkflowSnapshot, WorkflowState,
 };
@@ -16,9 +16,13 @@ use neo_agent_core::{
     ShellCommandOrigin, ShellCommandOutcome, ToolResult,
 };
 use neo_tui::dialogs::{QuestionDisplayData, QuestionDisplayOption};
-use neo_tui::primitive::{Component, Finalization, Line, strip_ansi, visible_width};
+use neo_tui::primitive::theme::TuiTheme;
+use neo_tui::primitive::{Component, Expandable, Finalization, Line, strip_ansi, visible_width};
 use neo_tui::shell::{StreamUpdate, ToolStatusKind};
-use neo_tui::transcript::{BlockingEntryKind, TranscriptEntry, WorkflowCardComponent};
+use neo_tui::transcript::{
+    BlockingEntryKind, DelegateCardComponent, DelegateGroupComponent, SwarmCardComponent,
+    TranscriptEntry, WorkflowCardComponent,
+};
 
 fn snapshot(state: WorkflowState) -> WorkflowSnapshot {
     WorkflowSnapshot {
@@ -279,7 +283,7 @@ fn workflow_card_renders_paused_resource_limited_and_terminal_states() {
 }
 
 #[test]
-fn workflow_main_card_bounds_direct_tools_and_long_content() {
+fn workflow_main_card_truncates_long_content_without_leaking_raw_output() {
     let mut pane = neo_tui::transcript::TranscriptPane::new(48, 30);
     let mut workflow = snapshot(WorkflowState::Running);
     workflow.title = "宽字符工作流标题 with a deliberately long suffix".to_owned();
@@ -458,48 +462,355 @@ fn workflow_child_summaries_use_two_sibling_cards_and_one_row_per_agent() {
     )));
 }
 
+/// Frozen-fixture snapshot builders for the ordinary Delegate-family cards.
+///
+/// These mirror the option-b fixtures in `multi_agent_transcript.rs`: the
+/// fixtures must render the exact same rows, so the ordinary cards stay
+/// byte-identical across the Workflow outer-rendering change.
+fn frozen_delegate_terminal_reason(state: AgentLifecycleState) -> Option<AgentTerminalReason> {
+    match state {
+        AgentLifecycleState::Queued | AgentLifecycleState::Running => None,
+        AgentLifecycleState::Completed => Some(AgentTerminalReason::Completed),
+        AgentLifecycleState::Failed => Some(AgentTerminalReason::Error),
+        AgentLifecycleState::Cancelled => Some(AgentTerminalReason::CancelledByUser),
+        AgentLifecycleState::TimedOut => Some(AgentTerminalReason::TimedOut),
+        AgentLifecycleState::Interrupted => Some(AgentTerminalReason::ProcessExited),
+    }
+}
+
+fn frozen_delegate_option_b(
+    id_suffix: &str,
+    name: &str,
+    role: AgentRole,
+    state: AgentLifecycleState,
+    title: &str,
+) -> AgentSnapshot {
+    let display_name = AgentDisplayName::new(name);
+    AgentSnapshot {
+        id: AgentId::from_suffix_for_test(id_suffix),
+        display_name: display_name.clone(),
+        path: AgentPath::root_child(&display_name),
+        role,
+        mode: AgentRunMode::Foreground,
+        context: DelegateContext::Inherit,
+        state,
+        task: format!("{title}\n\nFull prompt that must not replace the display name."),
+        task_title: title.to_owned(),
+        created_at_ms: 1_000,
+        updated_at_ms: 1_000,
+        started_at_ms: matches!(state, AgentLifecycleState::Running).then_some(1_000),
+        terminal_at_ms: state.is_terminal().then_some(31_000),
+        detached_from_foreground: false,
+        terminal_reason: frozen_delegate_terminal_reason(state),
+        run_count: 1,
+        live_messages_received: 0,
+        previous_status: None,
+        terminal_status_history: Vec::new(),
+        resumed_from: None,
+        tool_count: 0,
+        token_count: 0,
+        cache_read_token_count: 0,
+        cache_write_token_count: 0,
+        elapsed: Duration::ZERO,
+        latest_text: None,
+        activity: Vec::new(),
+        prior_messages: Vec::new(),
+        outcome: None,
+    }
+}
+
+fn frozen_running_delegate() -> AgentSnapshot {
+    let mut snapshot = frozen_delegate_option_b(
+        "nova",
+        "Nova",
+        AgentRole::Coder,
+        AgentLifecycleState::Running,
+        "角色对比测试 coder",
+    );
+    snapshot.tool_count = 3;
+    snapshot.token_count = 22_700;
+    snapshot.elapsed = Duration::from_secs(21);
+    snapshot.activity = vec![
+        AgentActivityEntry {
+            kind: AgentActivityKind::Tool {
+                id: "read-delegate".to_owned(),
+                name: "Read".to_owned(),
+                summary: Some("crates/neo-agent-core/src/tools/delegate.rs".to_owned()),
+                phase: AgentToolActivityPhase::Done,
+                output: None,
+                files: Vec::new(),
+                output_ref: None,
+            },
+        },
+        AgentActivityEntry {
+            kind: AgentActivityKind::Tool {
+                id: "bash-nextest".to_owned(),
+                name: "Bash".to_owned(),
+                summary: Some("cargo nextest run -p neo-agent-core ...".to_owned()),
+                phase: AgentToolActivityPhase::Ongoing,
+                output: Some(AgentToolOutputPreview {
+                    text: "running: cargo nextest run -p neo-agent-core ...\nCompiling neo-agent-core v0.1.0"
+                        .to_owned(),
+                    is_error: false,
+                    truncated: true,
+                    tail: true,
+                }),
+                files: Vec::new(),
+                output_ref: None,
+            },
+        },
+        AgentActivityEntry {
+            kind: AgentActivityKind::Text {
+                text: "Let me verify the state mutation path before editing.".to_owned(),
+                thinking: true,
+            },
+        },
+        AgentActivityEntry {
+            kind: AgentActivityKind::Text {
+                text: "I found the foreground aggregation issue. Next I will make the renderer change."
+                    .to_owned(),
+                thinking: false,
+            },
+        },
+    ];
+    snapshot.latest_text = Some(
+        "I found the foreground aggregation issue. Next I will make the renderer change."
+            .to_owned(),
+    );
+    snapshot
+}
+
 #[test]
 fn non_workflow_delegate_family_cards_remain_unchanged() {
-    let mut pane = neo_tui::transcript::TranscriptPane::new(120, 30);
-    for (turn, id) in [
-        (1, "single-one"),
-        (2, "single-two"),
-        (3, "group-one"),
-        (3, "group-two"),
-    ] {
-        pane.apply_agent_event(AgentEvent::DelegateStarted {
-            turn,
-            agent: agent_snapshot(id),
-            workflow_origin: None,
-        });
-    }
-    pane.apply_agent_event(AgentEvent::DelegateSwarmStarted {
-        turn: 4,
-        swarm: swarm_snapshot("ordinary-swarm", agent_snapshot("ordinary-swarm-child")),
-        workflow_origin: None,
-    });
+    // Frozen output fixtures: ordinary Delegate-family cards render exactly
+    // through their existing components. The rows below are the frozen
+    // component output; any change to these cards' rendered rows is a
+    // compatibility break.
+    let theme = TuiTheme::default();
 
-    let entries = pane.transcript().entries();
-    assert!(
-        entries
-            .iter()
-            .any(|entry| matches!(entry, TranscriptEntry::Delegate { .. }))
+    let delegate = DelegateCardComponent::new(frozen_running_delegate());
+    let delegate_rows = frozen_rows(delegate.render_with_theme(160, &theme));
+    assert_eq!(
+        delegate_rows,
+        vec![
+            "● Nova  [Coder] · Delegate · 角色对比测试 coder · running · 3 tools · 21s · 22.7k tok",
+            "│ agent_nova",
+            "  Press Ctrl+B to run in background",
+            "  • Used Read (crates/neo-agent-core/src/tools/delegate.rs)",
+            "  • Using Bash (cargo nextest run -p neo-agent-core ...)",
+            "      running: cargo nextest run -p neo-agent-core ...",
+            "      Compiling neo-agent-core v0.1.0",
+            "  ◌ thinking",
+            "    Let me verify the state mutation path before editing.",
+            "  │ I found the foreground aggregation issue. Next I will make the renderer change.",
+        ],
+        "ordinary Delegate card fixture"
     );
-    assert!(
-        entries
-            .iter()
-            .any(|entry| matches!(entry, TranscriptEntry::DelegateGroup { .. }))
+
+    let mut nova = frozen_running_delegate();
+    nova.state = AgentLifecycleState::Completed;
+    nova.terminal_at_ms = Some(31_000);
+    nova.terminal_reason = Some(AgentTerminalReason::Completed);
+    nova.outcome = Some(AgentTerminalOutcome {
+        summary: "All edits applied.".to_owned(),
+        is_error: false,
+    });
+    let vega = frozen_delegate_option_b(
+        "vega",
+        "Vega",
+        AgentRole::Explorer,
+        AgentLifecycleState::Queued,
+        "queued task",
     );
-    assert!(
-        entries
-            .iter()
-            .any(|entry| matches!(entry, TranscriptEntry::DelegateSwarm { .. }))
+    let group = DelegateGroupComponent::new(1, vec![nova, vega]);
+    let group_rows = frozen_rows(group.render_with_theme(160, &theme));
+    assert_eq!(
+        group_rows,
+        vec![
+            "● Delegate group · Running 2 agents (1 waiting) · 21s",
+            "  ├─ Nova  [Coder]  角色对比测试 coder · 3 tools · 21s · 22.7k tok",
+            "  │      • Used Read (crates/neo-agent-core/src/tools/delegate.rs)",
+            "  │      • Using Bash (cargo nextest run -p neo-agent-core ...)",
+            "  │          running: cargo nextest run -p neo-agent-core ...",
+            "  │          Compiling neo-agent-core v0.1.0",
+            "  │      ◌ thinking",
+            "  │        Let me verify the state mutation path before editing.",
+            "  │      │ I found the foreground aggregation issue. Next I will make the renderer change.",
+            "  │      └ All edits applied.",
+            "  └─ Vega  [Explorer]  queued task",
+            "         ◌ Waiting for scheduler slot",
+        ],
+        "DelegateGroup card fixture"
     );
-    assert!(
-        !entries
-            .iter()
-            .any(|entry| matches!(entry, TranscriptEntry::Workflow { .. }))
+
+    let mut iris = frozen_delegate_option_b(
+        "iris",
+        "Iris",
+        AgentRole::Planner,
+        AgentLifecycleState::Completed,
+        "planner item",
     );
+    iris.tool_count = 3;
+    iris.token_count = 8_200;
+    iris.elapsed = Duration::from_secs(12);
+    iris.terminal_at_ms = Some(12_000);
+    iris.terminal_reason = Some(AgentTerminalReason::Completed);
+    iris.outcome = Some(AgentTerminalOutcome {
+        summary: "Plan is ready".to_owned(),
+        is_error: false,
+    });
+    let children = vec![
+        SwarmChildSnapshot {
+            item_index: 0,
+            item: "coder item".to_owned(),
+            agent: frozen_running_delegate(),
+        },
+        SwarmChildSnapshot {
+            item_index: 1,
+            item: "planner item".to_owned(),
+            agent: iris,
+        },
+        SwarmChildSnapshot {
+            item_index: 2,
+            item: "explorer item".to_owned(),
+            agent: frozen_delegate_option_b(
+                "vega",
+                "Vega",
+                AgentRole::Explorer,
+                AgentLifecycleState::Running,
+                "搜索历史卡片回归点",
+            ),
+        },
+        SwarmChildSnapshot {
+            item_index: 3,
+            item: "queued item".to_owned(),
+            agent: frozen_delegate_option_b(
+                "rune",
+                "Rune",
+                AgentRole::Coder,
+                AgentLifecycleState::Queued,
+                "queued renderer task",
+            ),
+        },
+    ];
+    let aggregate = SwarmAggregate::from_states(children.iter().map(|child| child.agent.state));
+    let swarm_snapshot = SwarmSnapshot {
+        swarm_id: "option-b-swarm".to_owned(),
+        description: "角色对比测试".to_owned(),
+        role: AgentRole::Coder,
+        mode: AgentRunMode::Foreground,
+        state: aggregate.status(),
+        max_concurrency: 2,
+        aggregate,
+        children,
+    };
+    let collapsed_rows =
+        frozen_rows(SwarmCardComponent::new(swarm_snapshot).render_with_theme(160, &theme));
+    assert_eq!(
+        collapsed_rows,
+        vec![
+            "● DelegateSwarm · running · 角色对比测试 · 4 agents · 2 run · 1 done · 1 wait · progress [■■■■■·············] 25% · max 2",
+            "│ option-b-swarm",
+            "├─ Nova  [Coder] ● [■·······]  running · 3 tools · 21s · 22.7k tok · Using Bash (cargo nextest run -p neo-agent-core ...)",
+            "├─ Iris  [Planner] ✓ [■■■■■■■■]  done · 3 tools · 12s · 8.2k tok · Plan is ready",
+            "├─ Vega  [Explorer] ● [········]  running · 0 tools · 0s · 0 tok · 搜索历史卡片回归点",
+            "└─ Rune  [Coder] ◌ [········]  queued · 0 tools · 0s · 0 tok · queued renderer task",
+            "Scheduling: 2/4 running · max concurrency 2 · 1 queued",
+            "",
+            "● Working... 25% ━━━━━━━━┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄",
+        ],
+        "collapsed DelegateSwarm fixture"
+    );
+
+    let mut nova = frozen_running_delegate();
+    nova.activity.push(AgentActivityEntry {
+        kind: AgentActivityKind::Text {
+            text: "All edits applied. Now let me verify the paths.".to_owned(),
+            thinking: false,
+        },
+    });
+    let mut iris = frozen_delegate_option_b(
+        "iris-expanded",
+        "Iris",
+        AgentRole::Planner,
+        AgentLifecycleState::Completed,
+        "Plan renderer work",
+    );
+    iris.tool_count = 2;
+    iris.token_count = 8_200;
+    iris.elapsed = Duration::from_secs(12);
+    iris.activity = vec![AgentActivityEntry {
+        kind: AgentActivityKind::Tool {
+            id: "read-plan".to_owned(),
+            name: "Read".to_owned(),
+            summary: Some("docs/aegis/plans/...".to_owned()),
+            phase: AgentToolActivityPhase::Done,
+            output: None,
+            files: Vec::new(),
+            output_ref: None,
+        },
+    }];
+    iris.outcome = Some(AgentTerminalOutcome {
+        summary: "The implementation should stay inside transcript cards.".to_owned(),
+        is_error: false,
+    });
+    let children = vec![
+        SwarmChildSnapshot {
+            item_index: 0,
+            item: "nova".to_owned(),
+            agent: nova,
+        },
+        SwarmChildSnapshot {
+            item_index: 1,
+            item: "iris".to_owned(),
+            agent: iris,
+        },
+    ];
+    let aggregate = SwarmAggregate::from_states(children.iter().map(|child| child.agent.state));
+    let expanded_snapshot = SwarmSnapshot {
+        swarm_id: "option-b-expanded".to_owned(),
+        description: "角色对比测试".to_owned(),
+        role: AgentRole::Coder,
+        mode: AgentRunMode::Foreground,
+        state: aggregate.status(),
+        max_concurrency: 2,
+        aggregate,
+        children,
+    };
+    let mut expanded_card = SwarmCardComponent::new(expanded_snapshot);
+    expanded_card.set_expanded(true);
+    let expanded_rows = frozen_rows(expanded_card.render_with_theme(160, &theme));
+    assert_eq!(
+        expanded_rows,
+        vec![
+            "● DelegateSwarm · running · 角色对比测试 · 2 agents · 1 run · 1 done · 0 wait · progress [■■■■■■■■■·········] 51% · max 2",
+            "│ option-b-expanded",
+            "├─ Nova  [Coder] ● [■·······]  running · 3 tools · 21s · 22.7k tok · Using Bash (cargo nextest run -p neo-agent-core ...)",
+            "└─ Iris  [Planner] ✓ [■■■■■■■■]  done · 2 tools · 12s · 8.2k tok · The implementation should stay inside transcript cards.",
+            "Scheduling: 1/2 running · max concurrency 2 · 0 queued",
+            "",
+            "● Working... 51% ━━━━━━━━━━━━━━━┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄",
+            "  ├─ Nova  [Coder]  running · 21s · 3 tools · 22.7k tok",
+            "  │   • Used Read (crates/neo-agent-core/src/tools/delegate.rs)",
+            "  │   • Using Bash (cargo nextest run -p neo-agent-core ...)",
+            "  │       running: cargo nextest run -p neo-agent-core ...",
+            "  │       Compiling neo-agent-core v0.1.0",
+            "  │   ◌ thinking",
+            "  │     Let me verify the state mutation path before editing.",
+            "  │   │ All edits applied. Now let me verify the paths.",
+            "  └─ Iris  [Planner]  done · 12s · 2 tools · 8.2k tok",
+            "      • Used Read (docs/aegis/plans/...)",
+            "      └ The implementation should stay inside transcript cards.",
+        ],
+        "expanded DelegateSwarm fixture"
+    );
+}
+
+fn frozen_rows(lines: Vec<Line>) -> Vec<String> {
+    lines
+        .into_iter()
+        .map(|line| strip_ansi(&line.to_ansi()))
+        .collect()
 }
 
 #[test]
@@ -1406,4 +1717,402 @@ fn assert_finalized_workflow_tool(
     let tool = &component.direct_tools()[0];
     assert_eq!(tool.result(), Some("final"));
     assert_eq!(tool.status(), ToolStatusKind::Succeeded);
+}
+
+fn workflow_toggle_and_render(
+    pane: &mut neo_tui::transcript::TranscriptPane,
+    tool_id: &str,
+    rows: usize,
+) -> String {
+    assert!(
+        pane.toggle_workflow_direct_tool_expansion(tool_id),
+        "toggle {tool_id}"
+    );
+    terminal_text(&pane.render_visible_slice(120, rows))
+}
+
+#[test]
+fn workflow_document_renders_every_row_without_viewport_omissions() {
+    let mut pane = neo_tui::transcript::TranscriptPane::new(120, 8);
+    pane.apply_agent_event(AgentEvent::WorkflowStarted {
+        turn: 1,
+        workflow: snapshot(WorkflowState::Running),
+    });
+    for index in 0..12 {
+        let id = format!("completed-read-{index}");
+        let read_origin = workflow_tool_started(
+            &mut pane,
+            &id,
+            "Read",
+            serde_json::json!({"path": format!("/tmp/{index}.md")}),
+        );
+        pane.apply_agent_event(AgentEvent::ToolExecutionFinished {
+            turn: 1,
+            id,
+            name: "Read".to_owned(),
+            result: tool_result("read content", false),
+            workflow_origin: Some(read_origin),
+            output_ref: None,
+        });
+    }
+    workflow_tool_started(
+        &mut pane,
+        "running-bash",
+        "Bash",
+        serde_json::json!({"command": "cargo check"}),
+    );
+    let mut euclid = agent_snapshot("delegate-euclid");
+    euclid.display_name = AgentDisplayName::new("Euclid");
+    euclid.role = AgentRole::Explorer;
+    euclid.state = AgentLifecycleState::Completed;
+    euclid.terminal_at_ms = Some(4_000);
+    euclid.elapsed = Duration::from_secs(3);
+    euclid.outcome = Some(AgentTerminalOutcome {
+        summary: "scan completed".to_owned(),
+        is_error: false,
+    });
+    workflow_delegate_started(&mut pane, "delegate-euclid-call", euclid);
+    let mut alpha = agent_snapshot("swarm-alpha");
+    alpha.display_name = AgentDisplayName::new("Alpha");
+    alpha.state = AgentLifecycleState::Completed;
+    alpha.terminal_at_ms = Some(4_000);
+    alpha.elapsed = Duration::from_secs(2);
+    alpha.outcome = Some(AgentTerminalOutcome {
+        summary: "verify completed".to_owned(),
+        is_error: false,
+    });
+    let mut beta = agent_snapshot("swarm-beta");
+    beta.display_name = AgentDisplayName::new("Beta");
+    beta.state = AgentLifecycleState::Running;
+    let children = vec![
+        SwarmChildSnapshot {
+            item_index: 0,
+            item: "alpha item".to_owned(),
+            agent: alpha,
+        },
+        SwarmChildSnapshot {
+            item_index: 1,
+            item: "beta item".to_owned(),
+            agent: beta,
+        },
+    ];
+    let aggregate = SwarmAggregate::from_states(children.iter().map(|child| child.agent.state));
+    workflow_swarm_started(
+        &mut pane,
+        "swarm-call",
+        SwarmSnapshot {
+            swarm_id: "swarm-audit".to_owned(),
+            description: "audit swarm".to_owned(),
+            role: AgentRole::Reviewer,
+            mode: AgentRunMode::Foreground,
+            state: aggregate.status(),
+            max_concurrency: 2,
+            aggregate,
+            children,
+        },
+    );
+
+    let full = terminal_text(&pane.render_frame(120, 200).expect("dirty frame"));
+    assert!(
+        full.contains("Workflow  Runtime audit and fix"),
+        "main card:\n{full}"
+    );
+    for index in 0..12 {
+        assert!(
+            full.contains(&format!("/tmp/{index}.md")),
+            "completed direct tool {index} must render:\n{full}"
+        );
+    }
+    assert!(full.contains("Using Bash"), "running direct tool:\n{full}");
+    for name in ["Euclid", "Alpha", "Beta"] {
+        assert!(full.contains(name), "child row {name}:\n{full}");
+    }
+    assert!(
+        full.contains("Workflow Delegates") && full.contains("Workflow Swarms"),
+        "both summaries render:\n{full}"
+    );
+    assert!(full.contains("Report") && full.contains("Log"), "{full}");
+    for banned in [
+        "direct tools omitted",
+        "agents omitted",
+        "child rows omitted",
+        "more rows",
+    ] {
+        assert!(
+            !full.contains(banned),
+            "omission marker {banned:?}:\n{full}"
+        );
+    }
+
+    // A small viewport slices the same complete document; scrolling reaches
+    // every structural row.
+    let tail_slice = pane.render_visible_slice(120, 8);
+    assert!(tail_slice.len() <= 8, "window rows:\n{tail_slice:?}");
+    let tail = terminal_text(&tail_slice);
+    assert!(tail.contains("Log"), "tail window:\n{tail}");
+    pane.scroll_transcript_up(10_000);
+    let top = terminal_text(&pane.render_visible_slice(120, 8));
+    assert!(
+        top.contains("Workflow  Runtime audit and fix"),
+        "top window:\n{top}"
+    );
+}
+
+#[test]
+fn workflow_direct_tool_expands_inline_and_collapses_to_one_row() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let store = ToolOutputStore::new(dir.path().to_owned());
+    let output = (1..=12)
+        .map(|index| format!("line {index:02}\n"))
+        .collect::<String>();
+    store
+        .append("main", "expanded-bash", &output)
+        .expect("append");
+    let output_ref = store.finish("main", "expanded-bash").expect("finish");
+    assert!(output_ref.complete);
+
+    let mut pane = neo_tui::transcript::TranscriptPane::new(120, 24);
+    pane.set_session_directory(Some(dir.path().to_owned()));
+    pane.apply_agent_event(AgentEvent::WorkflowStarted {
+        turn: 1,
+        workflow: snapshot(WorkflowState::Running),
+    });
+    let bash_origin = origin("wf-test", "expanded-bash");
+    pane.apply_agent_event(AgentEvent::ToolExecutionStarted {
+        turn: 1,
+        id: "expanded-bash".to_owned(),
+        name: "Bash".to_owned(),
+        arguments: serde_json::json!({"command": "printf lines"}),
+        workflow_origin: Some(bash_origin.clone()),
+        output_ref: Some(output_ref.clone()),
+    });
+    pane.apply_agent_event(AgentEvent::ShellCommandStarted {
+        turn: 1,
+        id: "expanded-bash".to_owned(),
+        command: "printf lines".to_owned(),
+        cwd: "/tmp".into(),
+        origin: ShellCommandOrigin::ModelBashTool,
+    });
+    pane.apply_agent_event(AgentEvent::ShellCommandFinished {
+        turn: 1,
+        id: "expanded-bash".to_owned(),
+        exit_code: Some(0),
+        signal: None,
+        stdout: "ok".to_owned(),
+        stderr: String::new(),
+        truncated: false,
+        origin: ShellCommandOrigin::ModelBashTool,
+        outcome: ShellCommandOutcome::Completed,
+        output_ref: Some(output_ref.clone()),
+    });
+
+    let collapsed = terminal_text(&pane.render_visible_slice(120, 24));
+    assert_eq!(
+        collapsed.matches("Used Bash").count(),
+        1,
+        "one line per tool by default:\n{collapsed}"
+    );
+    assert!(!collapsed.contains("line 07"), "collapsed:\n{collapsed}");
+
+    let expanded = workflow_toggle_and_render(&mut pane, "expanded-bash", 24);
+    assert!(
+        expanded.contains("line 07"),
+        "expansion reads beyond the six-line live preview:\n{expanded}"
+    );
+    assert!(expanded.contains("line 12"), "visible range:\n{expanded}");
+    assert!(
+        expanded.contains("printf lines"),
+        "command row:\n{expanded}"
+    );
+
+    let restored = workflow_toggle_and_render(&mut pane, "expanded-bash", 24);
+    assert!(
+        !restored.contains("line 07"),
+        "collapses to one row:\n{restored}"
+    );
+    assert!(
+        !pane.toggle_workflow_direct_tool_expansion("missing-tool"),
+        "unknown typed tool ID is rejected"
+    );
+}
+
+#[test]
+fn workflow_expansion_reports_output_states_honestly() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let store = ToolOutputStore::new(dir.path().to_owned());
+
+    // Corrupt index: the log exists but the derived index is garbage. The
+    // store rebuilds it; the completion marker is lost, so the card must not
+    // relabel the rebuilt artifact complete.
+    store
+        .append(
+            "main",
+            "corrupt-index",
+            "alpha\nbeta\ngamma\ndelta\nepsilon\nzeta\neta\n",
+        )
+        .expect("append");
+    store.finish("main", "corrupt-index").expect("finish");
+    std::fs::write(
+        dir.path()
+            .join("agents")
+            .join("main")
+            .join("tasks")
+            .join("corrupt-index.log.idx"),
+        b"garbage index",
+    )
+    .expect("corrupt index");
+
+    // Child-origin reference: the artifact resolves through the ref's own
+    // agent id, never an assumed main-agent path.
+    store
+        .append("agent-42", "child-task", "child one\nchild two\n")
+        .expect("append");
+    let child_ref = store.finish("agent-42", "child-task").expect("finish");
+
+    // Stale reference: claims two lines and incomplete, while the artifact
+    // has grown and finished. Expansion must re-read the store metadata.
+    let stale_ref = neo_agent_core::session::ToolOutputRef {
+        agent_id: "main".to_owned(),
+        task_id: "stale-task".to_owned(),
+        byte_len: 12,
+        line_count: 2,
+        complete: false,
+    };
+    store
+        .append(
+            "main",
+            "stale-task",
+            "stale one\nstale two\nstale three\nstale four\n",
+        )
+        .expect("append");
+    store.finish("main", "stale-task").expect("finish");
+
+    // Absent artifact: the ref exists but the log was never opened.
+    let absent_ref = neo_agent_core::session::ToolOutputRef {
+        agent_id: "main".to_owned(),
+        task_id: "missing-task".to_owned(),
+        byte_len: 10,
+        line_count: 3,
+        complete: true,
+    };
+
+    // Live artifact: appended but never finished (complete: false).
+    store
+        .append("main", "live-task", "live one\nlive two\n")
+        .expect("append");
+    let live_ref = store.metadata("main", "live-task").expect("live metadata");
+
+    let mut pane = neo_tui::transcript::TranscriptPane::new(120, 60);
+    pane.set_session_directory(Some(dir.path().to_owned()));
+    pane.apply_agent_event(AgentEvent::WorkflowStarted {
+        turn: 1,
+        workflow: snapshot(WorkflowState::Running),
+    });
+
+    let start_finished_bash =
+        |pane: &mut neo_tui::transcript::TranscriptPane,
+         id: &str,
+         output_ref: Option<neo_agent_core::session::ToolOutputRef>| {
+            let tool_origin = origin("wf-test", id);
+            pane.apply_agent_event(AgentEvent::ToolExecutionStarted {
+                turn: 1,
+                id: id.to_owned(),
+                name: "Bash".to_owned(),
+                arguments: serde_json::json!({"command": format!("printf {id}")}),
+                workflow_origin: Some(tool_origin.clone()),
+                output_ref: output_ref.clone(),
+            });
+            pane.apply_agent_event(AgentEvent::ShellCommandStarted {
+                turn: 1,
+                id: id.to_owned(),
+                command: format!("printf {id}"),
+                cwd: "/tmp".into(),
+                origin: ShellCommandOrigin::ModelBashTool,
+            });
+            pane.apply_agent_event(AgentEvent::ShellCommandFinished {
+                turn: 1,
+                id: id.to_owned(),
+                exit_code: Some(0),
+                signal: None,
+                stdout: "ok".to_owned(),
+                stderr: String::new(),
+                truncated: false,
+                origin: ShellCommandOrigin::ModelBashTool,
+                outcome: ShellCommandOutcome::Completed,
+                output_ref,
+            });
+        };
+
+    start_finished_bash(
+        &mut pane,
+        "corrupt-index",
+        Some(store.metadata("main", "corrupt-index").expect("ref")),
+    );
+    start_finished_bash(&mut pane, "child-origin", Some(child_ref));
+    start_finished_bash(&mut pane, "stale-task", Some(stale_ref));
+    start_finished_bash(&mut pane, "absent-artifact", Some(absent_ref));
+    start_finished_bash(&mut pane, "legacy-tool", None);
+    let live_origin = origin("wf-test", "live-task");
+    pane.apply_agent_event(AgentEvent::ToolExecutionStarted {
+        turn: 1,
+        id: "live-task".to_owned(),
+        name: "Bash".to_owned(),
+        arguments: serde_json::json!({"command": "printf live"}),
+        workflow_origin: Some(live_origin),
+        output_ref: Some(live_ref),
+    });
+    pane.apply_agent_event(AgentEvent::ShellCommandStarted {
+        turn: 1,
+        id: "live-task".to_owned(),
+        command: "printf live".to_owned(),
+        cwd: "/tmp".into(),
+        origin: ShellCommandOrigin::ModelBashTool,
+    });
+
+    let corrupt = workflow_toggle_and_render(&mut pane, "corrupt-index", 60);
+    for line in ["alpha", "beta", "gamma", "delta", "epsilon", "zeta", "eta"] {
+        assert!(
+            corrupt.contains(line),
+            "rebuilt index serves rows:\n{corrupt}"
+        );
+    }
+    assert!(
+        !corrupt.contains("complete output unavailable"),
+        "{corrupt}"
+    );
+
+    let child = workflow_toggle_and_render(&mut pane, "child-origin", 60);
+    assert!(
+        child.contains("child one") && child.contains("child two"),
+        "child-origin artifact resolves through the ref agent id:\n{child}"
+    );
+
+    let stale = workflow_toggle_and_render(&mut pane, "stale-task", 60);
+    assert!(
+        stale.contains("stale one") && stale.contains("stale four"),
+        "metadata re-read, never the stale reference:\n{stale}"
+    );
+
+    let absent = workflow_toggle_and_render(&mut pane, "absent-artifact", 60);
+    assert!(
+        absent.contains("complete output unavailable"),
+        "absent artifact is explicitly unavailable:\n{absent}"
+    );
+    assert!(!absent.contains("complete output not captured"), "{absent}");
+
+    let legacy = workflow_toggle_and_render(&mut pane, "legacy-tool", 60);
+    assert!(
+        legacy.contains("complete output not captured"),
+        "legacy tool without a ref is honest:\n{legacy}"
+    );
+
+    let live = workflow_toggle_and_render(&mut pane, "live-task", 60);
+    assert!(
+        live.contains("live one") && live.contains("live two"),
+        "live artifact serves the written-so-far range:\n{live}"
+    );
+    assert!(
+        live.contains("output incomplete"),
+        "unfinished artifact is never relabeled complete:\n{live}"
+    );
 }

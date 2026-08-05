@@ -2071,6 +2071,10 @@ impl InteractiveController {
         }
         self.active_session_id = Some(session_id.clone());
         self.tui.chrome_mut().set_session_label(session_id.clone());
+        let session_directory = self.active_session_directory();
+        self.tui
+            .transcript_mut()
+            .set_session_directory(session_directory);
         if changed {
             self.bind_idle_workflow_event_route(&session_id);
             self.bind_workflow_approval_route(&session_id);
@@ -2084,6 +2088,10 @@ impl InteractiveController {
             self.active_session_id = None;
             self.invalidate_workflow_event_generation();
         }
+        let session_directory = self.active_session_directory();
+        self.tui
+            .transcript_mut()
+            .set_session_directory(session_directory);
     }
 
     fn invalidate_workflow_event_generation(&mut self) {

@@ -1,13 +1,14 @@
 use std::path::PathBuf;
 
 use crate::primitive::theme::TuiTheme;
-use crate::primitive::{Component, Expandable, Finalization, Line};
+use crate::primitive::{Component, Expandable, Finalization, Line, Style, strip_ansi, wrap_width};
 use crate::shell::ToolStatusKind;
 use crate::terminal_image::{ImageRenderPolicy, TerminalImageCapabilities};
 use crate::transcript::{
     DelegateCardComponent, DelegateGroupComponent, InstructionCardComponent, ShellRunComponent,
     SwarmCardComponent, ToolCallComponent, ToolCallState, WorkflowCardComponent,
 };
+use neo_agent_core::session::{ToolOutputRef, ToolOutputStore};
 
 use super::entry::{
     ApprovalPromptData, RetryPhase, RetryStatusData, ThinkingPart, ThinkingPhase, TranscriptEntry,
@@ -57,6 +58,14 @@ pub struct TranscriptStore {
     render_cache: Vec<Option<CachedRender>>,
     progressive_facts: Vec<ProgressiveFact>,
     next_progressive_sequence: u64,
+    /// Complete-output artifacts for this session, resolved by typed
+    /// [`ToolOutputRef`] when an expanded Workflow direct tool reads its
+    /// visible range. `None` until the pane is wired to a session directory.
+    output_store: Option<ToolOutputStore>,
+    /// Width-specific wrap-row cache for expanded Workflow direct-tool
+    /// output. Bounded streaming reads only — the complete file is never
+    /// loaded into memory.
+    expanded_output_cache: ExpandedOutputCache,
 }
 
 /// Cached render output for a single transcript entry. The cache is valid
@@ -66,6 +75,128 @@ struct CachedRender {
     width: usize,
     lines: Vec<Line>,
     ansi_lines: Vec<String>,
+}
+
+/// Width-specific wrap-row cache for expanded Workflow direct-tool output.
+///
+/// The complete artifact is streamed through [`ToolOutputStore`] with bounded
+/// reads; the derived wrap mapping is cached per task and width so re-renders
+/// and resizes never re-read the file. `line_count` and `complete` participate
+/// in the key: a growing artifact re-reads fresh rows, and an artifact whose
+/// completion state flips (false → true) without line growth must not keep a
+/// stale `incomplete` footer. The complete file is never loaded into memory.
+#[derive(Debug, Clone, Default)]
+pub struct ExpandedOutputCache {
+    entries: Vec<ExpandedOutputEntry>,
+}
+
+#[derive(Debug, Clone)]
+struct ExpandedOutputEntry {
+    agent_id: String,
+    task_id: String,
+    width: usize,
+    max_lines: u64,
+    line_count: u64,
+    complete: bool,
+    read_all: bool,
+    read_lines: u64,
+    rows: Vec<Line>,
+}
+
+/// The derived visible range of one expanded tool's complete output.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct ExpandedOutputRange {
+    /// Wrapped display rows for the visible range.
+    pub(crate) rows: Vec<Line>,
+    /// Logical lines in the artifact at read time.
+    pub(crate) total_lines: u64,
+    /// The artifact is marked complete by the runtime.
+    pub(crate) complete: bool,
+    /// The bounded read reached the end of the file.
+    pub(crate) read_all: bool,
+    /// Logical lines covered by `rows`.
+    pub(crate) read_lines: u64,
+}
+
+impl ExpandedOutputCache {
+    const MAX_ENTRIES: usize = 8;
+
+    pub(crate) fn clear(&mut self) {
+        self.entries.clear();
+    }
+
+    /// Read the visible range of one task's complete output artifact through
+    /// the store, deriving the width-specific wrap rows.
+    ///
+    /// Metadata is re-read on every call — never the caller's possibly stale
+    /// reference — so backgrounded or resumed artifacts resolve their fresh
+    /// line counts and completion state. `None` when the artifact is absent
+    /// or the read fails; callers must render that as explicitly incomplete,
+    /// never as complete output.
+    pub(crate) fn visible_range(
+        &mut self,
+        output_store: &ToolOutputStore,
+        output_ref: &ToolOutputRef,
+        width: usize,
+        max_lines: u64,
+        theme: &TuiTheme,
+    ) -> Option<ExpandedOutputRange> {
+        let metadata = output_store
+            .metadata(&output_ref.agent_id, &output_ref.task_id)
+            .ok()?;
+        if let Some(entry) = self.entries.iter().find(|entry| {
+            entry.agent_id == output_ref.agent_id
+                && entry.task_id == output_ref.task_id
+                && entry.width == width
+                && entry.max_lines == max_lines
+                && entry.line_count == metadata.line_count
+                && entry.complete == metadata.complete
+        }) {
+            return Some(ExpandedOutputRange {
+                rows: entry.rows.clone(),
+                total_lines: entry.line_count,
+                complete: entry.complete,
+                read_all: entry.read_all,
+                read_lines: entry.read_lines,
+            });
+        }
+        let read = output_store
+            .read_range(&output_ref.agent_id, &output_ref.task_id, 0, max_lines)
+            .ok()?;
+        let muted = Style::default().fg(theme.text_muted);
+        let body_width = width.saturating_sub(2).max(1);
+        let rows = read
+            .text
+            .lines()
+            .flat_map(|line| {
+                wrap_width(&strip_ansi(line.trim_end_matches('\r')), body_width)
+                    .into_iter()
+                    .map(|segment| Line::styled(format!("  {segment}"), muted))
+            })
+            .collect::<Vec<_>>();
+        let read_lines = read.next_line.saturating_sub(read.start_line);
+        if self.entries.len() >= Self::MAX_ENTRIES {
+            self.entries.remove(0);
+        }
+        self.entries.push(ExpandedOutputEntry {
+            agent_id: output_ref.agent_id.clone(),
+            task_id: output_ref.task_id.clone(),
+            width,
+            max_lines,
+            line_count: metadata.line_count,
+            complete: metadata.complete,
+            read_all: read.reached_end,
+            read_lines,
+            rows: rows.clone(),
+        });
+        Some(ExpandedOutputRange {
+            rows,
+            total_lines: metadata.line_count,
+            complete: metadata.complete,
+            read_all: read.reached_end,
+            read_lines,
+        })
+    }
 }
 
 /// Stable identity for an entry in a [`TranscriptStore`].
@@ -1365,6 +1496,15 @@ impl TranscriptStore {
         self.invalidate_all_cache();
     }
 
+    /// Point the transcript at the session directory that owns complete
+    /// tool-output artifacts. Callers set this when a session becomes
+    /// active; expanded Workflow direct tools render against it.
+    pub fn set_session_directory(&mut self, session_dir: Option<PathBuf>) {
+        self.output_store = session_dir.map(ToolOutputStore::new);
+        self.expanded_output_cache.clear();
+        self.invalidate_render_cache();
+    }
+
     pub fn tick_live_entries(&mut self, now_ms: u64) -> bool {
         // Fast path: if no live-capable entries exist, skip the full scan.
         // This avoids an O(n) iteration over all entries every 50ms tick
@@ -1576,6 +1716,7 @@ impl TranscriptStore {
         width: usize,
         theme: &TuiTheme,
         activity_frame: usize,
+        viewport_rows: usize,
     ) -> Vec<Line> {
         self.sync_cache_len();
 
@@ -1598,6 +1739,7 @@ impl TranscriptStore {
             activity_frame,
             ImageRenderPolicy::default(),
             TerminalImageCapabilities::default(),
+            viewport_rows,
         );
 
         if cacheable && let Some(slot) = self.render_cache.get_mut(index) {
@@ -1615,6 +1757,10 @@ impl TranscriptStore {
     /// Render a single entry to final ANSI rows, using the same cache as
     /// [`Self::render_entry_cached`] so transcript body composition can avoid
     /// cloning cached `Line` spans and re-running `to_ansi()` on every frame.
+    ///
+    /// `viewport_rows` bounds the visible complete-output range an expanded
+    /// Workflow direct tool reads; other entry kinds ignore it.
+    #[allow(clippy::too_many_arguments)]
     pub fn render_entry_ansi_cached(
         &mut self,
         index: usize,
@@ -1623,6 +1769,7 @@ impl TranscriptStore {
         activity_frame: usize,
         image_render_policy: ImageRenderPolicy,
         image_capabilities: TerminalImageCapabilities,
+        viewport_rows: usize,
     ) -> Vec<String> {
         self.sync_cache_len();
 
@@ -1645,6 +1792,7 @@ impl TranscriptStore {
             activity_frame,
             image_render_policy,
             image_capabilities,
+            viewport_rows,
         );
         let ansi_lines = lines.iter().map(Line::to_ansi).collect::<Vec<_>>();
 
@@ -1659,16 +1807,30 @@ impl TranscriptStore {
         ansi_lines
     }
 
+    /// `viewport_rows` bounds the visible complete-output range an expanded
+    /// Workflow direct tool reads; other entry kinds ignore it.
+    #[allow(clippy::too_many_arguments)]
     fn render_entry_lines(
-        &self,
+        &mut self,
         index: usize,
         width: usize,
         theme: &TuiTheme,
         activity_frame: usize,
         image_render_policy: ImageRenderPolicy,
         image_capabilities: TerminalImageCapabilities,
+        viewport_rows: usize,
     ) -> Vec<Line> {
         match self.entries.get(index) {
+            Some(TranscriptEntry::Workflow { component }) => {
+                let output_store = self.output_store.as_ref();
+                component.render_with_output(
+                    width,
+                    theme,
+                    output_store,
+                    viewport_rows,
+                    &mut self.expanded_output_cache,
+                )
+            }
             Some(TranscriptEntry::AssistantMessage { content }) => {
                 Self::render_assistant_message(content, width, theme, self.assistant_phase(index))
             }
@@ -2286,6 +2448,7 @@ mod tests {
             0,
             ImageRenderPolicy::default(),
             TerminalImageCapabilities::default(),
+            24,
         );
 
         assert!(first.iter().any(|line| line.contains("cached answer")));
@@ -2299,6 +2462,7 @@ mod tests {
                 99,
                 ImageRenderPolicy::default(),
                 TerminalImageCapabilities::default(),
+                24,
             ),
             first
         );

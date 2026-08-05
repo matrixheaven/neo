@@ -5,12 +5,13 @@ use crate::primitive::{Color, Component, Expandable, Finalization, Line, Span, s
 use crate::shell::ToolStatusKind;
 use crate::theme_preview::ThemePreviewRenderer;
 use crate::token_estimate::format_elapsed;
-use neo_agent_core::session::ToolOutputRef;
+use neo_agent_core::session::{ToolOutputRef, ToolOutputStore};
 use neo_agent_core::workflow::WorkflowExecutionOrigin;
 
 use super::live_output::LiveOutput;
 use super::plan_box::PlanBoxComponent;
 use super::shell_tool_presentation;
+use super::store::{ExpandedOutputCache, ExpandedOutputRange};
 use super::tool_renderers::{
     is_file_write_tool, is_pending_or_running, render_streaming_preview, render_tool_body_themed,
     tool_header_spans_with_elapsed,
@@ -85,7 +86,7 @@ impl ToolCallComponent {
 
     /// Attach the typed output reference for this execution. A later `Some`
     /// wins; `None` never clears an already-attached reference.
-    pub(crate) fn attach_output_ref(&mut self, output_ref: Option<ToolOutputRef>) -> bool {
+    pub fn attach_output_ref(&mut self, output_ref: Option<ToolOutputRef>) -> bool {
         if output_ref.is_some() && self.output_ref != output_ref {
             self.output_ref = output_ref;
             return true;
@@ -532,6 +533,51 @@ impl ToolCallComponent {
         projected.state = state;
         projected.expanded = expanded;
         projected.render_with_theme(width, theme)
+    }
+
+    /// The bounded visible range of this execution's complete output
+    /// artifact, wrapped to `width` and cached per width in `output_cache`.
+    ///
+    /// Reads through [`ToolOutputStore`] — never the six-line live preview —
+    /// and appends honest footers for every state where the complete source
+    /// is unavailable or partial: no typed reference, a missing artifact, an
+    /// artifact that is still incomplete, or a file that continues beyond the
+    /// visible range. A missing source is always shown as explicitly
+    /// incomplete; it is never relabeled complete.
+    pub fn render_complete_output_range(
+        &self,
+        width: usize,
+        theme: &TuiTheme,
+        output_store: &ToolOutputStore,
+        output_cache: &mut ExpandedOutputCache,
+        max_lines: u64,
+    ) -> Vec<Line> {
+        let muted = Style::default().fg(theme.text_muted);
+        let range: Option<ExpandedOutputRange> = self.output_ref.as_ref().and_then(|output_ref| {
+            output_cache.visible_range(output_store, output_ref, width, max_lines, theme)
+        });
+        let Some(range) = range else {
+            let note = if self.output_ref.is_none() {
+                "  … complete output not captured"
+            } else {
+                "  … complete output unavailable"
+            };
+            return vec![Line::styled(note, muted).truncate_to_width(width)];
+        };
+        let mut rows = range.rows;
+        if !range.complete {
+            rows.push(Line::styled("  … output incomplete", muted).truncate_to_width(width));
+        } else if !range.read_all {
+            let remaining = range.total_lines.saturating_sub(range.read_lines);
+            rows.push(
+                Line::styled(
+                    format!("  … {remaining} lines remain in the output file"),
+                    muted,
+                )
+                .truncate_to_width(width),
+            );
+        }
+        rows
     }
 }
 

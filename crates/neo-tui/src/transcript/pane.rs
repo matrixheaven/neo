@@ -305,6 +305,37 @@ impl TranscriptPane {
         self.neo_home = neo_home;
     }
 
+    /// Point the pane at the active session directory so expanded Workflow
+    /// direct tools can read their complete output artifacts. Session-local
+    /// wiring only; `None` keeps expansion honest ("not captured").
+    pub fn set_session_directory(&mut self, session_dir: Option<PathBuf>) {
+        self.transcript.set_session_directory(session_dir);
+        self.mark_dirty();
+    }
+
+    /// Toggle inline expansion for one Workflow direct tool, keyed by its
+    /// typed tool ID. Expanding a tool collapses any other; toggling the same
+    /// ID again restores the one-line row. Entry-local view state, never
+    /// persisted.
+    pub fn toggle_workflow_direct_tool_expansion(&mut self, tool_id: &str) -> bool {
+        let Some(index) = self.transcript.entries().iter().position(|entry| {
+            matches!(entry, TranscriptEntry::Workflow { component }
+                if component.direct_tools().iter().any(|tool| tool.id() == tool_id))
+        }) else {
+            return false;
+        };
+        let changed = self.transcript.mutate_entry(index, |entry| {
+            let TranscriptEntry::Workflow { component } = entry else {
+                return false;
+            };
+            component.toggle_direct_tool_expansion(tool_id)
+        });
+        if changed {
+            self.mark_dirty();
+        }
+        changed
+    }
+
     #[must_use]
     pub fn neo_home(&self) -> Option<&Path> {
         self.neo_home.as_deref()
@@ -2091,6 +2122,7 @@ impl TranscriptPane {
                 self.activity_frame,
                 self.image_render_policy,
                 self.image_capabilities,
+                self.body_height.max(1),
             );
             trim_ansi_transcript_block(&mut block);
             block

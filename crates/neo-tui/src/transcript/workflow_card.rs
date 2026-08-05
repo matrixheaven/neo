@@ -1,5 +1,5 @@
 use crate::primitive::theme::TuiTheme;
-use crate::primitive::{Color, Component, Finalization, Line, Span, Style};
+use crate::primitive::{Color, Component, Expandable, Finalization, Line, Span, Style};
 use crate::shell::ToolStatusKind;
 use crate::transcript::format_elapsed;
 use crate::transcript::tool_renderers::tool_header_spans_with_elapsed;
@@ -8,7 +8,10 @@ use neo_agent_core::multi_agent::{
     AgentProgressSnapshot, AgentSnapshot, SwarmAggregate, SwarmChildProgress, SwarmSnapshot,
     apply_agent_progress, apply_swarm_child_progress,
 };
+use neo_agent_core::session::ToolOutputStore;
 use neo_agent_core::workflow::{WorkflowExecutionOrigin, WorkflowSnapshot, WorkflowState};
+
+use super::store::ExpandedOutputCache;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct WorkflowCardComponent {
@@ -18,6 +21,9 @@ pub struct WorkflowCardComponent {
     direct_tools: Vec<ToolCallComponent>,
     delegates: Vec<AgentSnapshot>,
     swarms: Vec<SwarmSnapshot>,
+    /// Typed tool ID of the one expanded direct tool. Entry-local view state:
+    /// toggled by typed tool ID, never persisted, one expansion at a time.
+    expanded_tool_id: Option<String>,
 }
 
 impl WorkflowCardComponent {
@@ -31,6 +37,7 @@ impl WorkflowCardComponent {
             direct_tools: Vec::new(),
             delegates: Vec::new(),
             swarms: Vec::new(),
+            expanded_tool_id: None,
         }
     }
 
@@ -65,6 +72,22 @@ impl WorkflowCardComponent {
             .iter_mut()
             .find(|tool| tool.id() == id)
             .is_some_and(mutate)
+    }
+
+    /// Toggle inline expansion for one direct tool by its typed tool ID.
+    ///
+    /// Expanding a tool collapses any previously expanded one; toggling the
+    /// same ID again restores the one-line row.
+    pub(crate) fn toggle_direct_tool_expansion(&mut self, tool_id: &str) -> bool {
+        if !self.direct_tools.iter().any(|tool| tool.id() == tool_id) {
+            return false;
+        }
+        self.expanded_tool_id = if self.expanded_tool_id.as_deref() == Some(tool_id) {
+            None
+        } else {
+            Some(tool_id.to_owned())
+        };
+        true
     }
 
     pub(crate) fn absorb_direct_tool(
@@ -271,7 +294,32 @@ impl WorkflowCardComponent {
 
     #[must_use]
     pub fn render_with_theme(&self, width: usize, theme: &TuiTheme) -> Vec<Line> {
-        super::workflow_group::render_workflow_group(self, width, usize::MAX, theme).into_lines()
+        let mut cache = ExpandedOutputCache::default();
+        super::workflow_group::render_workflow_group(self, width, theme, None, 0, &mut cache)
+            .into_lines()
+    }
+
+    /// Store-aware group render: expanded direct tools read their bounded
+    /// visible complete-output range through `output_store`, with the derived
+    /// wrap rows cached per width in `output_cache`.
+    #[must_use]
+    pub(crate) fn render_with_output(
+        &self,
+        width: usize,
+        theme: &TuiTheme,
+        output_store: Option<&ToolOutputStore>,
+        viewport_rows: usize,
+        output_cache: &mut ExpandedOutputCache,
+    ) -> Vec<Line> {
+        super::workflow_group::render_workflow_group(
+            self,
+            width,
+            theme,
+            output_store,
+            viewport_rows,
+            output_cache,
+        )
+        .into_lines()
     }
 
     #[must_use]
@@ -279,22 +327,21 @@ impl WorkflowCardComponent {
         self.now_ms
     }
 
+    /// Render every structural row of the main card: header, state action
+    /// lines, every direct tool (one line each; the expanded tool renders its
+    /// command/arguments/details and visible complete-output range inline),
+    /// the report, stats, running action lines, and the log line. No
+    /// terminal-height budget applies.
     #[must_use]
     pub(crate) fn render_main_with_theme(
         &self,
         width: usize,
-        max_rows: usize,
-        folded_child_counts: Option<&str>,
         theme: &TuiTheme,
-    ) -> (Vec<Line>, bool) {
-        if max_rows == 0 {
-            return (Vec::new(), false);
-        }
-        let compact = max_rows == 1;
-        let mut lines = vec![self.header_line(width, compact, folded_child_counts, theme)];
-        if compact {
-            return (lines, false);
-        }
+        output_store: Option<&ToolOutputStore>,
+        viewport_rows: usize,
+        output_cache: &mut ExpandedOutputCache,
+    ) -> Vec<Line> {
+        let mut lines = vec![self.header_line(width, theme)];
 
         let action_lines = self.actionable_lines(width, theme);
         let (state_action_lines, running_action_lines) =
@@ -304,11 +351,7 @@ impl WorkflowCardComponent {
                 (action_lines, None)
             };
         if let Some(action_lines) = state_action_lines {
-            lines.extend(
-                action_lines
-                    .into_iter()
-                    .take(max_rows.saturating_sub(lines.len())),
-            );
+            lines.extend(action_lines);
         }
 
         let (actionable_tool_indexes, completed_tool_indexes): (Vec<_>, Vec<_>) =
@@ -321,101 +364,75 @@ impl WorkflowCardComponent {
                         | ToolStatusKind::Failed
                 )
             });
-        let mut selected_tools = Vec::new();
 
         for index in actionable_tool_indexes
             .iter()
             .copied()
-            .take(max_rows.saturating_sub(lines.len()))
+            .chain(completed_tool_indexes)
         {
             lines.push(self.direct_tool_line(index, width, theme));
-            selected_tools.push(index);
-        }
-
-        if selected_tools.len() == actionable_tool_indexes.len() {
-            let mut report_line = self
-                .snapshot
-                .latest_report_summary
-                .as_deref()
-                .map(|report| self.summary_line("Report", report, width, theme));
-            let remaining = max_rows.saturating_sub(lines.len());
-            if completed_tool_indexes.len() > remaining {
-                let reserve_omission = usize::from(remaining >= 2);
-                let reserve_report = usize::from(report_line.is_some() && remaining >= 3);
-                let tool_slots = if remaining == 1 {
-                    1
-                } else {
-                    remaining
-                        .saturating_sub(reserve_omission)
-                        .saturating_sub(reserve_report)
-                };
-                for index in completed_tool_indexes.iter().copied().take(tool_slots) {
-                    lines.push(self.direct_tool_line(index, width, theme));
-                    selected_tools.push(index);
-                }
-                if reserve_report > 0 {
-                    lines.push(report_line.take().expect("report row was reserved"));
-                }
-                if reserve_omission > 0 {
-                    let omitted = self.direct_tools.len().saturating_sub(selected_tools.len());
-                    lines.push(
-                        Line::styled(
-                            format!("│ … {omitted} direct tools omitted"),
-                            Style::default().fg(theme.text_muted),
-                        )
-                        .truncate_to_width(width),
-                    );
-                }
-            } else {
-                for index in completed_tool_indexes {
-                    lines.push(self.direct_tool_line(index, width, theme));
-                    selected_tools.push(index);
-                }
-
-                let remaining = max_rows.saturating_sub(lines.len());
-                let reserve_running_action =
-                    usize::from(running_action_lines.is_some() && remaining > 0);
-                let context_slots = remaining.saturating_sub(reserve_running_action);
-                for line in [report_line, Some(self.stats_line(width, theme))]
-                    .into_iter()
-                    .flatten()
-                    .take(context_slots)
-                {
-                    lines.push(line);
-                }
-                if let Some(action_lines) = running_action_lines
-                    && lines.len() < max_rows
-                {
-                    lines.extend(
-                        action_lines
-                            .into_iter()
-                            .take(max_rows.saturating_sub(lines.len())),
-                    );
-                }
-                if let Some(log) = self.snapshot.latest_log_summary.as_deref()
-                    && lines.len() < max_rows
-                {
-                    lines.push(self.summary_line("Log", log, width, theme));
-                }
+            if self.expanded_tool_id.as_deref() == Some(self.direct_tools[index].id()) {
+                lines.extend(self.expanded_direct_tool_rows(
+                    index,
+                    width,
+                    theme,
+                    output_store,
+                    viewport_rows,
+                    output_cache,
+                ));
             }
         }
-        lines.truncate(max_rows);
-        let has_visible_animation = self.workflow_elapsed_ticks()
-            && lines.iter().any(|line| {
-                self.elapsed_ms()
-                    .is_some_and(|elapsed| line.text().contains(&format_elapsed(elapsed / 1_000)))
-            });
-        (lines, has_visible_animation)
+
+        if let Some(report) = self.snapshot.latest_report_summary.as_deref() {
+            lines.push(self.summary_line("Report", report, width, theme));
+        }
+        lines.push(self.stats_line(width, theme));
+        if let Some(action_lines) = running_action_lines {
+            lines.extend(action_lines);
+        }
+        if let Some(log) = self.snapshot.latest_log_summary.as_deref() {
+            lines.push(self.summary_line("Log", log, width, theme));
+        }
+        lines
     }
 
-    fn header_line(
+    /// Inline expansion rows for one direct tool: the tool's own
+    /// `ToolCallComponent` body (command/arguments, details, bounded live
+    /// preview) immediately beneath its one-line row, followed by the visible
+    /// complete-output range when the session output store is available.
+    fn expanded_direct_tool_rows(
         &self,
+        index: usize,
         width: usize,
-        compact: bool,
-        folded_child_counts: Option<&str>,
         theme: &TuiTheme,
-    ) -> Line {
-        let mut spans = vec![
+        output_store: Option<&ToolOutputStore>,
+        viewport_rows: usize,
+        output_cache: &mut ExpandedOutputCache,
+    ) -> Vec<Line> {
+        let mut tool = self.direct_tools[index].clone();
+        tool.set_expanded(true);
+        let mut rows = tool.render_with_theme(width, theme);
+        if rows.len() > 1 {
+            // The one-line row above already shows the header; drop the
+            // duplicated header row from the ToolCallComponent render.
+            rows.remove(0);
+        } else {
+            rows.clear();
+        }
+        if let Some(store) = output_store {
+            rows.extend(tool.render_complete_output_range(
+                width,
+                theme,
+                store,
+                output_cache,
+                u64::try_from(viewport_rows).unwrap_or(u64::MAX),
+            ));
+        }
+        rows
+    }
+
+    fn header_line(&self, width: usize, theme: &TuiTheme) -> Line {
+        let spans = vec![
             Span::styled("▸ Workflow  ", Style::default().fg(theme.brand)),
             Span::styled(
                 self.snapshot.title.as_str(),
@@ -426,24 +443,6 @@ impl WorkflowCardComponent {
                 workflow_state_style(self.snapshot.state, theme),
             ),
         ];
-        if compact {
-            spans.push(Span::styled(
-                format!(" · {} calls", self.snapshot.invocation_count),
-                Style::default().fg(theme.text_muted),
-            ));
-            if self.snapshot.failure_count > 0 {
-                spans.push(Span::styled(
-                    format!(" · {} failed", self.snapshot.failure_count),
-                    Style::default().fg(theme.status_error),
-                ));
-            }
-        }
-        if let Some(counts) = folded_child_counts {
-            spans.push(Span::styled(
-                format!(" · {counts}"),
-                Style::default().fg(theme.text_muted),
-            ));
-        }
         Line::from_spans(spans).truncate_to_width(width)
     }
 
@@ -734,51 +733,13 @@ mod tests {
         card
     }
 
-    fn render_text(card: &WorkflowCardComponent, rows: usize) -> String {
-        card.render_main_with_theme(120, rows, None, &TuiTheme::default())
-            .0
+    fn render_text(card: &WorkflowCardComponent) -> String {
+        let mut cache = ExpandedOutputCache::default();
+        card.render_main_with_theme(120, &TuiTheme::default(), None, 0, &mut cache)
             .iter()
             .map(Line::text)
             .collect::<Vec<_>>()
             .join("\n")
-    }
-
-    #[test]
-    fn compact_main_card_keeps_actionable_rows_ahead_of_context() {
-        let running = card(WorkflowState::Running);
-        for (rows, expected_tools) in [
-            (2, &["RunningTool"][..]),
-            (3, &["RunningTool", "QueuedTool"][..]),
-            (4, &["RunningTool", "QueuedTool", "FailedTool"][..]),
-            (
-                5,
-                &["RunningTool", "QueuedTool", "FailedTool", "CompletedTool"][..],
-            ),
-        ] {
-            let rendered = render_text(&running, rows);
-            for expected in expected_tools {
-                assert!(rendered.contains(expected), "{rows} rows:\n{rendered}");
-            }
-            assert!(
-                !rendered.contains("latest report"),
-                "{rows} rows:\n{rendered}"
-            );
-            assert!(
-                !rendered.contains("phase verify"),
-                "{rows} rows:\n{rendered}"
-            );
-            assert!(!rendered.contains("TaskPause"), "{rows} rows:\n{rendered}");
-        }
-
-        for (state, expected) in [
-            (WorkflowState::Queued, "waiting for a worker permit"),
-            (WorkflowState::Paused, "paused at an invocation boundary"),
-            (WorkflowState::Failed, "bounded terminal reason"),
-        ] {
-            let rendered = render_text(&card(state), 2);
-            assert!(rendered.contains(expected), "{state:?}:\n{rendered}");
-            assert!(!rendered.contains("RunningTool"), "{state:?}:\n{rendered}");
-        }
     }
 
     #[test]
@@ -789,7 +750,7 @@ mod tests {
                 .to_owned(),
         );
 
-        let rendered = render_text(&failed, 7);
+        let rendered = render_text(&failed);
         let lines = rendered.lines().collect::<Vec<_>>();
         assert_eq!(lines[1], "│ Reason  workflow failed: agent_id: agent-1");
         assert_eq!(lines[2], "│         name: Archimedes");
@@ -797,5 +758,10 @@ mod tests {
         assert_eq!(lines[4], "│         run_index: 1");
         assert_eq!(lines[5], "│         summary_scope: current_run");
         assert_eq!(lines[6], "│         context_mode: inherit");
+        assert_eq!(lines[7], "│ ● Using RunningTool", "{rendered}");
+        assert!(
+            rendered.contains("phase verify") && rendered.contains("latest report"),
+            "{rendered}"
+        );
     }
 }

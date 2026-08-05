@@ -59,7 +59,7 @@ pub use selection::{
     AutoScroll, DocumentPoint, DocumentSelection, MouseEvent, MouseKind, WHEEL_SCROLL_ROWS,
 };
 pub use shell_run::{ShellRunComponent, ShellRunState};
-pub use store::{TranscriptEntryId, TranscriptStore};
+pub use store::{ExpandedOutputCache, TranscriptEntryId, TranscriptStore};
 pub use swarm_card::SwarmCardComponent;
 pub use tool_call::{ToolCallComponent, ToolCallState};
 pub use tool_group::{ToolGroup, render_tool_group};

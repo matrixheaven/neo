@@ -18,11 +18,6 @@ pub(super) struct AgentCounts {
 
 impl AgentCounts {
     #[must_use]
-    pub(super) fn total(self) -> usize {
-        self.running + self.queued + self.failed + self.completed + self.stopped
-    }
-
-    #[must_use]
     pub(super) fn text(self) -> String {
         let mut parts = Vec::new();
         for (count, label) in [
@@ -69,11 +64,10 @@ pub(super) fn count_agents<'a>(agents: impl IntoIterator<Item = &'a AgentSnapsho
 pub(super) fn render_workflow_delegate_card(
     agents: &[AgentSnapshot],
     width: usize,
-    max_rows: usize,
     now_ms: Option<u64>,
     theme: &TuiTheme,
 ) -> Option<WorkflowSummaryRender> {
-    if agents.is_empty() || max_rows == 0 {
+    if agents.is_empty() {
         return None;
     }
     let counts = count_agents(agents);
@@ -84,25 +78,10 @@ pub(super) fn render_workflow_delegate_card(
         width,
         theme,
     )];
-    if max_rows == 1 {
-        return Some(WorkflowSummaryRender { lines });
-    }
-
-    let agent_refs = agents.iter().collect::<Vec<_>>();
-    let content_rows = max_rows - 1;
-    let pressured = content_rows < agent_refs.len();
-    let visible_rows = if pressured {
-        content_rows.saturating_sub(1)
-    } else {
-        content_rows
-    };
-    let indexes = selected_agent_indices(&agent_refs, visible_rows, pressured);
-    let omitted = agents.len().saturating_sub(indexes.len());
-    let visible_count = indexes.len();
-    for (visible_index, agent_index) in indexes.into_iter().enumerate() {
-        let is_last = visible_index + 1 == visible_count && omitted == 0;
+    for (index, agent) in agents.iter().enumerate() {
+        let is_last = index + 1 == agents.len();
         lines.push(render_agent_row(
-            agent_refs[agent_index],
+            agent,
             if is_last { "└─ " } else { "├─ " },
             "",
             width,
@@ -110,16 +89,6 @@ pub(super) fn render_workflow_delegate_card(
             theme,
         ));
     }
-    if omitted > 0 && lines.len() < max_rows {
-        lines.push(
-            Line::styled(
-                format!("└─ … {omitted} agents omitted"),
-                Style::default().fg(theme.text_muted),
-            )
-            .truncate_to_width(width),
-        );
-    }
-
     Some(WorkflowSummaryRender { lines })
 }
 
@@ -147,56 +116,6 @@ pub(super) fn render_summary_header(
         Style::default().fg(theme.text_muted),
     ));
     Line::from_spans(spans).truncate_to_width(width)
-}
-
-#[must_use]
-pub(super) fn selected_agent_indices(
-    agents: &[&AgentSnapshot],
-    max_rows: usize,
-    pressured: bool,
-) -> Vec<usize> {
-    if max_rows == 0 {
-        return Vec::new();
-    }
-    if !pressured || max_rows >= agents.len() {
-        return (0..agents.len()).collect();
-    }
-
-    let mut indexes = Vec::with_capacity(max_rows);
-    for states in [
-        &[AgentLifecycleState::Failed, AgentLifecycleState::TimedOut][..],
-        &[AgentLifecycleState::Running][..],
-        &[AgentLifecycleState::Queued][..],
-    ] {
-        for (index, agent) in agents.iter().enumerate() {
-            if states.contains(&agent.state) {
-                indexes.push(index);
-                if indexes.len() == max_rows {
-                    return indexes;
-                }
-            }
-        }
-    }
-    for (index, agent) in agents.iter().enumerate().rev() {
-        if agent.state == AgentLifecycleState::Completed {
-            indexes.push(index);
-            if indexes.len() == max_rows {
-                return indexes;
-            }
-        }
-    }
-    for (index, agent) in agents.iter().enumerate() {
-        if matches!(
-            agent.state,
-            AgentLifecycleState::Cancelled | AgentLifecycleState::Interrupted
-        ) {
-            indexes.push(index);
-            if indexes.len() == max_rows {
-                break;
-            }
-        }
-    }
-    indexes
 }
 
 #[must_use]
