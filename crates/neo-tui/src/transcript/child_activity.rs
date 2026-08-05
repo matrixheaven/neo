@@ -60,9 +60,13 @@ pub fn format_elapsed(seconds: u64) -> String {
 
 #[must_use]
 pub fn format_token_count(tokens: usize) -> String {
-    if tokens >= 1_000 {
+    if tokens >= 1_000_000 {
         // usize -> f64 is lossy for values above 2^53; token counts well under
         // that bound are safely represented and the precision loss is acceptable.
+        #[allow(clippy::cast_precision_loss)]
+        let scaled = tokens as f64 / 1_000_000.0;
+        format!("{scaled:.1}M")
+    } else if tokens >= 1_000 {
         #[allow(clippy::cast_precision_loss)]
         let scaled = tokens as f64 / 1_000.0;
         format!("{scaled:.1}k")
@@ -965,4 +969,16 @@ fn tail_non_empty_lines(text: &str, limit: usize) -> Vec<String> {
     let start = lines.len().saturating_sub(limit);
     lines.drain(0..start);
     lines
+}
+
+#[cfg(test)]
+mod tests {
+    use super::format_token_count;
+
+    #[test]
+    fn format_token_count_uses_millions_for_large_agent_usage() {
+        assert_eq!(format_token_count(999_999), "1000.0k");
+        assert_eq!(format_token_count(1_000_000), "1.0M");
+        assert_eq!(format_token_count(27_922_100), "27.9M");
+    }
 }
