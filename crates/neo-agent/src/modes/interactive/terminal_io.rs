@@ -78,6 +78,14 @@ pub(crate) trait TerminalEvents {
     fn poll_input_event(&mut self, _timeout: Duration) -> Result<Option<InputEvent>> {
         self.next_input_event().map(Some)
     }
+
+    /// Re-observe terminal geometry after a suspend/resume round trip. Must
+    /// go through the single stdin reader; a second crossterm reader would
+    /// race the background stdin thread for the CPR reply. Default impl
+    /// reports no observation (test fakes); callers fall back.
+    fn reobserve_terminal_geometry(&mut self) -> Result<Option<(u16, u16, u16, u16)>> {
+        Ok(None)
+    }
 }
 
 impl<T: TerminalEvents + ?Sized> TerminalEvents for &mut T {
@@ -87,6 +95,10 @@ impl<T: TerminalEvents + ?Sized> TerminalEvents for &mut T {
 
     fn poll_input_event(&mut self, timeout: Duration) -> Result<Option<InputEvent>> {
         (**self).poll_input_event(timeout)
+    }
+
+    fn reobserve_terminal_geometry(&mut self) -> Result<Option<(u16, u16, u16, u16)>> {
+        (**self).reobserve_terminal_geometry()
     }
 }
 
@@ -98,6 +110,41 @@ pub(super) struct RawStdinEvents {
     geometry: GeometryObservation,
     stdin_disconnected: bool,
 }
+
+/// CPR probe failure, distinguished from fatal I/O errors. The resume probe
+/// maps the recoverable variants to `Ok(None)` and falls back to the parked
+/// origin cursor; resize/startup probes keep them fatal.
+#[derive(Debug)]
+enum CursorProbeError {
+    Io(anyhow::Error),
+    TimedOut,
+    OutOfRange {
+        col: u16,
+        row: u16,
+        width: u16,
+        height: u16,
+    },
+}
+
+impl std::fmt::Display for CursorProbeError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Io(error) => write!(formatter, "{error}"),
+            Self::TimedOut => write!(formatter, "timed out waiting for cursor position report"),
+            Self::OutOfRange {
+                col,
+                row,
+                width,
+                height,
+            } => write!(
+                formatter,
+                "cursor position report ({col},{row}) outside screen {width}x{height}"
+            ),
+        }
+    }
+}
+
+impl std::error::Error for CursorProbeError {}
 
 impl RawStdinEvents {
     pub(super) fn new(keybindings: KeybindingsManager, geometry: GeometryObservation) -> Self {
@@ -160,12 +207,18 @@ impl RawStdinEvents {
         self.pending.push_back(event);
     }
 
-    fn observe_cursor_for_size(&mut self, width: u16, height: u16) -> Result<Option<(u16, u16)>> {
+    fn probe_cursor_position(
+        &mut self,
+        width: u16,
+        height: u16,
+    ) -> std::result::Result<Option<(u16, u16)>, CursorProbeError> {
         #[cfg(windows)]
         {
             let _ = (width, height);
             let (col, row) = crossterm::cursor::position().map_err(|error| {
-                anyhow::anyhow!("failed to read console cursor position: {error}")
+                CursorProbeError::Io(anyhow::anyhow!(
+                    "failed to read console cursor position: {error}"
+                ))
             })?;
             return Ok(Some((col, row)));
         }
@@ -175,29 +228,36 @@ impl RawStdinEvents {
             self.parser.discard_cursor_positions();
             {
                 let mut stdout = std::io::stdout().lock();
-                stdout.write_all(CSI_REQUEST_CURSOR)?;
-                stdout.flush()?;
+                stdout
+                    .write_all(CSI_REQUEST_CURSOR)
+                    .map_err(|error| CursorProbeError::Io(error.into()))?;
+                stdout
+                    .flush()
+                    .map_err(|error| CursorProbeError::Io(error.into()))?;
             }
             let deadline = Instant::now() + CURSOR_PROBE_TIMEOUT;
             loop {
                 if let Some((col, row)) = self.parser.take_cursor_position() {
                     if col >= width || row >= height {
-                        anyhow::bail!(
-                            "cursor position report ({col},{row}) outside screen {width}x{height}"
-                        );
+                        return Err(CursorProbeError::OutOfRange {
+                            col,
+                            row,
+                            width,
+                            height,
+                        });
                     }
                     return Ok(Some((col, row)));
                 }
                 let remaining = deadline.saturating_duration_since(Instant::now());
                 if remaining.is_zero() {
-                    anyhow::bail!("timed out waiting for cursor position report");
+                    return Err(CursorProbeError::TimedOut);
                 }
                 match self.rx.recv_timeout(remaining) {
                     Ok(bytes) => {
                         self.drain_parser_into_pending(&bytes);
                     }
                     Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
-                        anyhow::bail!("timed out waiting for cursor position report");
+                        return Err(CursorProbeError::TimedOut);
                     }
                     Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
                         self.stdin_disconnected = true;
@@ -217,7 +277,7 @@ impl RawStdinEvents {
             return Ok(None);
         }
         let generation = self.geometry.next_generation();
-        let Some((cursor_col, cursor_row)) = self.observe_cursor_for_size(current.0, current.1)?
+        let Some((cursor_col, cursor_row)) = self.probe_cursor_position(current.0, current.1)?
         else {
             return Ok(None);
         };
@@ -233,6 +293,29 @@ impl RawStdinEvents {
             columns: current.0,
             rows: current.1,
         }))
+    }
+
+    /// Re-observe geometry after a suspend/resume round trip, using only the
+    /// app's single stdin reader (never a second crossterm reader on stdin).
+    /// Returns `Ok(None)` when the probe cannot produce a trustworthy
+    /// observation (stdin disconnected, no usable size, CPR timeout, or an
+    /// out-of-range reply) so callers can fall back instead of failing the
+    /// session. Fatal I/O errors still propagate.
+    pub(super) fn reobserve_terminal_geometry(&mut self) -> Result<Option<(u16, u16, u16, u16)>> {
+        let (cols, rows) = match size() {
+            Ok(size) if size.0 > 0 && size.1 > 0 => size,
+            _ => return Ok(None),
+        };
+        let Some((cursor_col, cursor_row)) = (match self.probe_cursor_position(cols, rows) {
+            Ok(observed) => observed,
+            Err(CursorProbeError::Io(error)) => return Err(error),
+            Err(CursorProbeError::TimedOut | CursorProbeError::OutOfRange { .. }) => {
+                return Ok(None);
+            }
+        }) else {
+            return Ok(None);
+        };
+        Ok(Some((cols, rows, cursor_col, cursor_row)))
     }
 }
 
@@ -251,6 +334,10 @@ impl TerminalEvents for RawStdinEvents {
                 return Ok(input);
             }
         }
+    }
+
+    fn reobserve_terminal_geometry(&mut self) -> Result<Option<(u16, u16, u16, u16)>> {
+        RawStdinEvents::reobserve_terminal_geometry(self)
     }
 
     fn poll_input_event(&mut self, timeout: Duration) -> Result<Option<InputEvent>> {
@@ -404,10 +491,10 @@ impl NeoTerminal {
         Ok(())
     }
 
-    pub(super) fn reenter(&mut self) -> Result<()> {
+    pub(super) fn reenter(&mut self, geometry: (u16, u16, u16, u16)) -> Result<()> {
         // Force a full redraw on the next render so the resumed session paints
         // cleanly after the terminal state was disturbed by SIGTSTP.
-        let (cols, rows, cursor_col, cursor_row) = observe_terminal_geometry()?;
+        let (cols, rows, cursor_col, cursor_row) = geometry;
         let generation = self.geometry.next_generation();
         self.geometry
             .publish(cols, rows, cursor_col, cursor_row, generation);
@@ -475,7 +562,12 @@ impl Drop for NeoTerminal {
 }
 
 impl NeoTerminal {
-    pub(super) fn suspend(&mut self) -> Result<()> {
+    /// Prepare for suspend and stop the process group. The process resumes on
+    /// SIGCONT; the caller then re-observes geometry and calls `reenter`.
+    /// The geometry probe must NOT happen here: it reads the CPR reply through
+    /// the app's single stdin reader, and that reader is only reachable after
+    /// this function returns.
+    pub(super) fn suspend_prepare(&mut self) -> Result<()> {
         let mut output = std::io::stdout().lock();
         self.tui.suspend_prepare(&mut output)?;
         drop(output);
@@ -487,7 +579,7 @@ impl NeoTerminal {
         {
             eprintln!("Suspend to background is not supported on this platform");
         }
-        self.reenter()
+        Ok(())
     }
 }
 

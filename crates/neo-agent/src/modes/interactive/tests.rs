@@ -1763,6 +1763,7 @@ async fn thinking_boundaries_render_incrementally_through_terminal_loop() {
                 Ok(frame.next_animation_deadline)
             },
             || Ok(()),
+            |_| Ok(()),
             Events {
                 events: VecDeque::from([
                     Some(InputEvent::Submit),
@@ -1973,6 +1974,7 @@ async fn idle_terminal_polling_does_not_render_repeated_frames() {
                 Ok(None)
             },
             || Ok(()),
+            |_| Ok(()),
             IdleThenInterruptEvents {
                 remaining_idle_polls: 3,
             },
@@ -2040,6 +2042,7 @@ async fn animation_deadline_requests_one_follow_up_frame_without_input() {
                 Ok(deadline)
             },
             || Ok(()),
+            |_| Ok(()),
             IdleThenInterruptEvents {
                 remaining_idle_polls: 1,
             },
@@ -2104,6 +2107,7 @@ async fn cleared_animation_deadline_does_not_render_again_while_idle() {
                 Ok(frame.next_animation_deadline)
             },
             || Ok(()),
+            |_| Ok(()),
             IdleThenInterruptEvents {
                 remaining_idle_polls: 3,
             },
@@ -2176,6 +2180,7 @@ async fn chrome_only_btw_update_requests_a_frame() {
                 Ok(None)
             },
             || Ok(()),
+            |_| Ok(()),
             IdleThenInterrupt { idle: true },
         )
         .await
@@ -2474,6 +2479,7 @@ async fn ctrl_o_renders_before_queued_tool_finish() {
                 Ok(frame.next_animation_deadline)
             },
             || Ok(()),
+            |_| Ok(()),
             ScriptedEvents(VecDeque::from([
                 InputEvent::Key(KeyId::new("ctrl+o").expect("valid key")),
                 InputEvent::Interrupt,
@@ -2541,6 +2547,7 @@ async fn event_loop_types_submits_renders_and_exits_without_a_real_terminal() {
                 Ok(None)
             },
             || Ok(()),
+            |_| Ok(()),
             FakeEvents {
                 events: vec![
                     InputEvent::Insert('h'),
@@ -2654,6 +2661,7 @@ async fn event_loop_inserts_paste_newlines_without_submitting_until_enter() {
                 Ok(None)
             },
             || Ok(()),
+            |_| Ok(()),
             FakeEvents {
                 events: vec![
                     InputEvent::Paste("alpha\nbeta".to_owned()),
@@ -2706,6 +2714,7 @@ async fn event_loop_renders_after_terminal_resize_without_submitting_prompt() {
                 Ok(None)
             },
             || Ok(()),
+            |_| Ok(()),
             FakeEvents {
                 events: vec![
                     InputEvent::Insert('h'),
@@ -3410,6 +3419,7 @@ async fn event_loop_ctrl_d_cancels_active_shell_without_starting_queued_commands
         .run_terminal_loop_with_suspend(
             |_, _| Ok(None),
             || Ok(()),
+            |_| Ok(()),
             ScriptedEvents(VecDeque::from([
                 InputEvent::Key(KeyId::new("ctrl+d").expect("valid key")),
                 InputEvent::Key(KeyId::new("ctrl+d").expect("valid key")),
@@ -18375,6 +18385,7 @@ async fn startup_mcp_keeps_composer_responsive_and_escape_interrupts() {
                 Ok(None)
             },
             || Ok(()),
+            |_| Ok(()),
         ),
     )
     .await
@@ -18451,6 +18462,7 @@ async fn startup_trust_and_main_loop_share_one_terminal_event_source() {
         },
         |_, _| Ok(None),
         || Ok(()),
+        |_| Ok(()),
     )
     .await
     .expect("run startup and main terminal lifecycle");

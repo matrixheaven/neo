@@ -319,7 +319,8 @@ pub async fn execute_tty_with_startup(
         &startup,
         move |keybindings| input_events(keybindings, geometry),
         |tui, animation_due| terminal.borrow_mut().draw_tui(tui, animation_due),
-        || terminal.borrow_mut().suspend(),
+        || terminal.borrow_mut().suspend_prepare(),
+        |geometry| terminal.borrow_mut().reenter(geometry),
     )
     .await;
     let final_render_result = controller.finalize_and_render_terminal_exit(|tui| {
@@ -349,7 +350,8 @@ async fn run_tty_lifecycle_with_event_factory<E>(
     startup: &StartupAction,
     event_factory: impl FnOnce(KeybindingsManager) -> E,
     mut render: impl FnMut(&mut neo_tui::NeoTui, bool) -> Result<Option<Instant>>,
-    suspend: impl FnMut() -> Result<()>,
+    suspend_prepare: impl FnMut() -> Result<()>,
+    reenter: impl FnMut((u16, u16, u16, u16)) -> Result<()>,
 ) -> Result<()>
 where
     E: TerminalEvents,
@@ -372,7 +374,7 @@ where
     }
     controller.connect_mcp_at_startup().await?;
     controller
-        .run_terminal_loop_with_suspend(render, suspend, &mut events)
+        .run_terminal_loop_with_suspend(render, suspend_prepare, reenter, &mut events)
         .await
 }
 
@@ -1602,6 +1604,7 @@ impl InteractiveController {
                 Ok(None)
             },
             || Ok(()),
+            |_| Ok(()),
             &mut events,
         )
         .await
@@ -1611,6 +1614,7 @@ impl InteractiveController {
         &mut self,
         mut render: impl FnMut(&mut neo_tui::NeoTui, bool) -> Result<Option<Instant>>,
         mut suspend: impl FnMut() -> Result<()>,
+        mut reenter: impl FnMut((u16, u16, u16, u16)) -> Result<()>,
         mut events: impl TerminalEvents,
     ) -> Result<()> {
         const MIN_RENDER_INTERVAL: Duration = Duration::from_millis(33);
@@ -1643,7 +1647,14 @@ impl InteractiveController {
                         break;
                     }
                     if self.take_suspend_requested() {
-                        suspend()?;
+                        suspend()?; // prepare + SIGTSTP; the process stops and resumes on SIGCONT
+                        let observed = events.reobserve_terminal_geometry()?;
+                        let geometry = observed.unwrap_or_else(|| {
+                            // stdin disconnected: fall back to the parked origin cursor.
+                            let (cols, rows) = size().unwrap_or((0, 0));
+                            (cols, rows, 0, 0)
+                        });
+                        reenter(geometry)?;
                     }
                     render_due_frame(
                         &mut frame_scheduler,
