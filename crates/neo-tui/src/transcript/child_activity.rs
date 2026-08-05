@@ -165,7 +165,7 @@ const fn child_tool_verb(phase: AgentToolActivityPhase) -> &'static str {
 fn child_tool_phase_style(phase: AgentToolActivityPhase, theme: &TuiTheme) -> Style {
     let color = match phase {
         AgentToolActivityPhase::Queued { .. } => theme.status_pending,
-        AgentToolActivityPhase::Ongoing => theme.text_primary,
+        AgentToolActivityPhase::Ongoing => theme.status_ok,
         AgentToolActivityPhase::Done => theme.status_ok,
         AgentToolActivityPhase::Failed => theme.status_error,
     };

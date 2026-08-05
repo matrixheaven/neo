@@ -4033,7 +4033,7 @@ fn delegate_family_tool_activity_uses_theme_and_collapsed_file_hint() {
     assert_eq!(style(single, "single-edit.rs").fg, Some(theme.text_primary));
     assert_eq!(style(single, " +1").fg, Some(theme.diff_added));
     assert_eq!(style(single, " -1").fg, Some(theme.diff_removed));
-    assert_eq!(style(row("Agent1"), "Using").fg, Some(theme.text_primary));
+    assert_eq!(style(row("Agent1"), "Using").fg, Some(theme.status_ok));
     assert_eq!(style(row("Agent3"), "M").fg, Some(theme.status_error));
     assert_eq!(style(row("Agent4"), "! M").fg, Some(theme.status_warn));
     assert_eq!(style(row("Agent5"), "…").fg, Some(theme.status_pending));
