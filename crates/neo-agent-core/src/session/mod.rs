@@ -21,17 +21,19 @@ mod event_persistence;
 pub mod export;
 pub mod index;
 pub mod layout;
+pub mod tool_output;
 pub mod workspace;
 
 pub use agent_state::{SessionAgentKind, SessionAgentRecord, SessionState, SessionStateStore};
 pub use event_persistence::SessionEventPersistence;
 pub use index::{SessionIndex, SessionIndexEntry, SessionIndexError};
 pub use layout::{
-    AGENTS_DIR, GOALS_DIR, MAIN_AGENT_ID, PLANS_DIR, SESSION_STATE_FILE, TASKS_DIR, WIRE_FILE,
-    agent_goals_dir, agent_plans_dir, agent_record_dir, agent_tasks_dir, agent_wire_path,
-    agents_dir, main_agent_goals_dir, main_agent_plans_dir, main_agent_wire_path,
-    relative_agent_record_dir, session_state_path,
+    AGENTS_DIR, GOALS_DIR, MAIN_AGENT_ID, PLANS_DIR, SESSION_STATE_FILE, TASKS_DIR,
+    TOOL_OUTPUT_INDEX_EXT, TOOL_OUTPUT_LOG_EXT, WIRE_FILE, agent_goals_dir, agent_plans_dir,
+    agent_record_dir, agent_tasks_dir, agent_wire_path, agents_dir, main_agent_goals_dir,
+    main_agent_plans_dir, main_agent_wire_path, relative_agent_record_dir, session_state_path,
 };
+pub use tool_output::{ToolOutputRange, ToolOutputRef, ToolOutputStore};
 pub use workspace::{
     encode_workdir_key, hash_os_path_into, normalize_workdir, slugify_basename,
     workspace_sessions_dir,

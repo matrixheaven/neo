@@ -7,6 +7,8 @@ pub const WIRE_FILE: &str = "wire.jsonl";
 pub const TASKS_DIR: &str = "tasks";
 pub const PLANS_DIR: &str = "plans";
 pub const GOALS_DIR: &str = "goals";
+pub const TOOL_OUTPUT_LOG_EXT: &str = "log";
+pub const TOOL_OUTPUT_INDEX_EXT: &str = "log.idx";
 
 #[must_use]
 pub fn session_state_path(session_dir: &Path) -> PathBuf {
