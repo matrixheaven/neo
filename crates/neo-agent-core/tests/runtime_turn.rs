@@ -3372,6 +3372,7 @@ async fn runtime_cancels_in_flight_tool_execution_and_finishes_run() {
             terminate: false,
         },
         workflow_origin: None,
+        output_ref: None,
     }));
     assert_eq!(
         events.last(),
@@ -3544,6 +3545,7 @@ fn assert_async_hook_cancelled_cleanly(events: &[AgentEvent], context: &AgentCon
             terminate: false,
         },
         workflow_origin: None,
+        output_ref: None,
     }));
     assert_eq!(
         events.last(),
@@ -3636,6 +3638,7 @@ async fn runtime_parallel_cancellation_finishes_all_started_tool_wrappers() {
         name: "echo".to_owned(),
         result: ToolResult::ok("fast"),
         workflow_origin: None,
+        output_ref: None,
     }));
     assert!(events.contains(&AgentEvent::ToolExecutionFinished {
         turn: 1,
@@ -3648,6 +3651,7 @@ async fn runtime_parallel_cancellation_finishes_all_started_tool_wrappers() {
             terminate: false,
         },
         workflow_origin: None,
+        output_ref: None,
     }));
     assert_eq!(
         events.last(),
@@ -3730,6 +3734,7 @@ async fn runtime_parallel_cancellation_does_not_start_later_tool_calls() {
         name: "echo".to_owned(),
         result: ToolResult::ok("first"),
         workflow_origin: None,
+        output_ref: None,
     }));
     assert!(!events.iter().any(|event| {
         matches!(
@@ -3973,6 +3978,7 @@ async fn runtime_emits_tool_execution_events_and_honors_block_and_terminate_hook
             name: "echo".to_owned(),
             arguments: json!({ "text": "blocked" }),
             workflow_origin: None,
+            output_ref: None,
         }),
         "a hook-blocked call never starts execution"
     );
@@ -3982,6 +3988,7 @@ async fn runtime_emits_tool_execution_events_and_honors_block_and_terminate_hook
         name: "echo".to_owned(),
         arguments: json!({ "text": "stop" }),
         workflow_origin: None,
+        output_ref: None,
     }));
     assert!(events.contains(&AgentEvent::ToolExecutionFinished {
         turn: 1,
@@ -3989,6 +3996,7 @@ async fn runtime_emits_tool_execution_events_and_honors_block_and_terminate_hook
         name: "echo".to_owned(),
         result: ToolResult::error("blocked by policy").terminate(),
         workflow_origin: None,
+        output_ref: None,
     }));
     assert!(events.contains(&AgentEvent::ToolExecutionFinished {
         turn: 1,
@@ -3996,6 +4004,7 @@ async fn runtime_emits_tool_execution_events_and_honors_block_and_terminate_hook
         name: "echo".to_owned(),
         result: ToolResult::ok("stop").terminate(),
         workflow_origin: None,
+        output_ref: None,
     }));
     assert_eq!(harness.requests().len(), 1);
     assert_eq!(
@@ -4081,6 +4090,7 @@ async fn runtime_emits_approval_request_for_ask_permission_and_skips_tool_execut
             terminate: false,
         },
         workflow_origin: None,
+        output_ref: None,
     }));
     assert_eq!(
         context.messages()[2],
@@ -4223,6 +4233,7 @@ async fn runtime_executes_ask_permission_tool_after_approval_hook_allows_it() {
         name: "echo".to_owned(),
         result: ToolResult::ok("approved"),
         workflow_origin: None,
+        output_ref: None,
     }));
     assert_eq!(
         context.messages()[2],
@@ -4454,6 +4465,7 @@ async fn runtime_skips_ask_permission_tool_after_approval_hook_denies_it() {
             terminate: false,
         },
         workflow_origin: None,
+        output_ref: None,
     }));
 }
 
@@ -4647,6 +4659,7 @@ async fn runtime_executes_ask_permission_tool_after_async_approval_wait_allows_i
         name: "echo".to_owned(),
         result: ToolResult::ok("async approved"),
         workflow_origin: None,
+        output_ref: None,
     }));
     assert_eq!(
         context.messages()[2],
@@ -4712,6 +4725,7 @@ async fn runtime_skips_ask_permission_tool_after_async_approval_wait_denies_it()
             terminate: false,
         },
         workflow_origin: None,
+        output_ref: None,
     }));
     assert_eq!(
         context.messages()[2],
@@ -4769,6 +4783,7 @@ async fn runtime_cancels_while_waiting_for_async_approval_decision() {
             terminate: false,
         },
         workflow_origin: None,
+        output_ref: None,
     }));
     assert_eq!(
         events.last(),
@@ -6308,6 +6323,7 @@ async fn runtime_auto_mode_denies_ask_user_question() {
             "AskUserQuestion is disabled while auto permission mode is active"
         ),
         workflow_origin: None,
+        output_ref: None,
     }));
     assert!(
         question_rx.try_recv().is_err(),
@@ -7911,6 +7927,7 @@ async fn auto_mode_approves_bash_without_approval() {
         truncated: false,
         origin: ShellCommandOrigin::ModelBashTool,
         outcome: ShellCommandOutcome::Completed,
+        output_ref: None,
     }));
 }
 
@@ -12745,4 +12762,226 @@ async fn theme_draft_save_is_denied_in_plan_mode_while_preview_runs() {
             );
         }
     }
+}
+
+/// Recursively collect any key or string in a serialized request value that
+/// could leak the complete-display artifact: the typed reference, its
+/// metadata fields, or the artifact path.
+fn collect_request_artifact_leaks(
+    value: &serde_json::Value,
+    keys: &mut Vec<String>,
+    strings: &mut Vec<String>,
+) {
+    match value {
+        serde_json::Value::Object(map) => {
+            for (key, child) in map {
+                if matches!(
+                    key.as_str(),
+                    "output_ref" | "byte_len" | "line_count" | "complete" | "tool_output"
+                ) {
+                    keys.push(key.clone());
+                }
+                collect_request_artifact_leaks(child, keys, strings);
+            }
+        }
+        serde_json::Value::Array(items) => {
+            for item in items {
+                collect_request_artifact_leaks(item, keys, strings);
+            }
+        }
+        serde_json::Value::String(text)
+            if text.contains("agents/") || text.contains(".log") || text.contains(".idx") =>
+        {
+            strings.push(text.clone());
+        }
+        _ => {}
+    }
+}
+
+#[tokio::test]
+async fn display_output_never_enters_model_context() {
+    let workspace = tempfile::tempdir().expect("workspace");
+    let harness = FakeHarness::from_turns([
+        tool_call_turn(&[(
+            "tool_1",
+            "Bash",
+            json!({"command": "printf 'SECRET_DISPLAY_9f2a'"}),
+        )]),
+        end_turn_events("done"),
+    ]);
+    let runtime = AgentRuntime::with_tools(
+        AgentConfig::for_model(harness.model())
+            .with_permission_mode(PermissionMode::Yolo)
+            .with_workspace_root(workspace.path())
+            .expect("workspace config")
+            .with_session_directory(workspace.path().join("session")),
+        harness.client(),
+        ToolRegistry::with_builtin_tools(),
+    );
+    let mut context = AgentContext::new();
+    let events = runtime
+        .run_turn(&mut context, AgentMessage::user_text("run bash"))
+        .collect::<Vec<_>>()
+        .await
+        .into_iter()
+        .collect::<Result<Vec<_>, _>>()
+        .expect("turn should succeed");
+
+    // The finished events carry one typed reference shared by the
+    // `ToolExecutionFinished` and `ShellCommandFinished` projections.
+    let finished_ref = events
+        .iter()
+        .find_map(|event| match event {
+            AgentEvent::ToolExecutionFinished { id, output_ref, .. } if id == "tool_1" => {
+                output_ref.as_ref()
+            }
+            _ => None,
+        })
+        .expect("finished bash event must carry the captured reference");
+    let shell_ref = events
+        .iter()
+        .find_map(|event| match event {
+            AgentEvent::ShellCommandFinished { id, output_ref, .. } if id == "tool_1" => {
+                output_ref.as_ref()
+            }
+            _ => None,
+        })
+        .expect("shell finished event must carry the captured reference");
+    assert_eq!(finished_ref, shell_ref, "one artifact per bash execution");
+    assert!(finished_ref.complete, "{finished_ref:?}");
+    assert!(finished_ref.byte_len > 0, "{finished_ref:?}");
+
+    // Every request the model saw is byte-level free of the reference, its
+    // metadata, and the artifact path. Cache-prefix input derives from these
+    // same canonical messages, so it is covered by the same assertion.
+    let requests = harness.requests();
+    assert!(!requests.is_empty(), "model requests were recorded");
+    let mut leaks_keys = Vec::new();
+    let mut leaks_strings = Vec::new();
+    for request in &requests {
+        let serialized = serde_json::to_value(request).expect("serialize request");
+        collect_request_artifact_leaks(&serialized, &mut leaks_keys, &mut leaks_strings);
+    }
+    assert!(
+        leaks_keys.is_empty(),
+        "request JSON must not carry output-reference keys: {leaks_keys:?}"
+    );
+    assert!(
+        leaks_strings.is_empty(),
+        "request JSON must not carry artifact paths: {leaks_strings:?}"
+    );
+
+    // The complete display text may only ride inside the bounded tool-result
+    // preview, never in user/assistant/system text or tool arguments.
+    let mut tool_result_texts = Vec::new();
+    let mut other_texts = Vec::new();
+    for request in &requests {
+        for message in &request.messages {
+            match message {
+                neo_ai::ChatMessage::ToolResult { content, .. } => {
+                    for part in content {
+                        if let neo_ai::ContentPart::Text { text } = part {
+                            tool_result_texts.push(text);
+                        }
+                    }
+                }
+                neo_ai::ChatMessage::User { content, .. }
+                | neo_ai::ChatMessage::Assistant { content, .. } => {
+                    for part in content {
+                        if let neo_ai::ContentPart::Text { text } = part {
+                            other_texts.push(text);
+                        }
+                    }
+                }
+                neo_ai::ChatMessage::System { .. } => {}
+            }
+        }
+    }
+    assert!(
+        tool_result_texts
+            .iter()
+            .any(|text| text.contains("SECRET_DISPLAY_9f2a")),
+        "the bounded preview must reach the model as the tool result"
+    );
+    assert!(
+        !other_texts
+            .iter()
+            .any(|text| text.contains("SECRET_DISPLAY_9f2a")),
+        "complete display text must not leak into any other message part"
+    );
+}
+
+#[tokio::test]
+async fn background_bash_finished_event_carries_output_reference() {
+    let workspace = tempfile::tempdir().expect("workspace");
+    let harness = FakeHarness::from_turns([
+        tool_call_turn(&[(
+            "tool_bg",
+            "Bash",
+            json!({
+                "command": "printf background-captured",
+                "run_in_background": true,
+                "description": "background capture probe"
+            }),
+        )]),
+        end_turn_events("done"),
+    ]);
+    let runtime = AgentRuntime::with_tools(
+        AgentConfig::for_model(harness.model())
+            .with_permission_mode(PermissionMode::Yolo)
+            .with_workspace_root(workspace.path())
+            .expect("workspace config")
+            .with_session_directory(workspace.path().join("session")),
+        harness.client(),
+        ToolRegistry::with_builtin_tools(),
+    );
+    let mut context = AgentContext::new();
+    let events = runtime
+        .run_turn(&mut context, AgentMessage::user_text("run background bash"))
+        .collect::<Vec<_>>()
+        .await
+        .into_iter()
+        .collect::<Result<Vec<_>, _>>()
+        .expect("turn should succeed");
+
+    let (finished_ref, result) = events
+        .iter()
+        .find_map(|event| match event {
+            AgentEvent::ToolExecutionFinished {
+                id,
+                output_ref,
+                result,
+                ..
+            } if id == "tool_bg" => Some((output_ref, result)),
+            _ => None,
+        })
+        .expect("backgrounded bash finished event");
+    let reference = finished_ref
+        .as_ref()
+        .expect("backgrounded bash Finished must carry the typed reference");
+    assert_eq!(reference.agent_id, neo_agent_core::session::MAIN_AGENT_ID);
+    // The reference is keyed by the same task id the model-visible result
+    // reports, but the reference itself never enters the result payload.
+    let model_task_id = result
+        .details
+        .as_ref()
+        .and_then(|details| details.get("task_id"))
+        .and_then(serde_json::Value::as_str)
+        .expect("model-visible background task id");
+    assert_eq!(reference.task_id, model_task_id);
+    assert!(
+        !serde_json::to_string(&result)
+            .expect("serialize result")
+            .contains("output_ref"),
+        "the reference must not enter ToolResult"
+    );
+    // The artifact was opened before the start result returned.
+    let log = workspace
+        .path()
+        .join("session")
+        .join("agents")
+        .join(&reference.agent_id)
+        .join("tasks")
+        .join(format!("{}.log", reference.task_id));
+    assert!(log.exists(), "{}", log.display());
 }

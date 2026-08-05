@@ -826,6 +826,7 @@ fn default_shell_driver() -> ShellDriver {
                             terminate: false,
                         },
                         workflow_origin: None,
+                        output_ref: None,
                     });
                 })
             };

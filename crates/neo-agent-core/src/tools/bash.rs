@@ -196,6 +196,11 @@ pub struct ShellExecutionResult {
     /// Complete-output capture failure, if any. The process was stopped and
     /// partial side effects are possible.
     pub capture_error: Option<String>,
+    /// Typed complete-display-output artifact for this execution, when the
+    /// command ran under an agent-owned capture. Never serialized into the
+    /// model-visible `ToolResult`; the runtime attaches it to presentation
+    /// events only.
+    pub output_ref: Option<crate::session::ToolOutputRef>,
 }
 
 impl Tool for BashTool {
@@ -225,7 +230,7 @@ impl Tool for BashTool {
                             .to_owned(),
                     });
                 }
-                let result = start_background_command(
+                let (result, _output_ref) = start_background_command(
                     ctx,
                     &input.command,
                     input.cwd.as_deref(),
@@ -334,7 +339,7 @@ fn shell_execution_details(result: &ShellExecutionResult) -> serde_json::Value {
 pub async fn execute_model_bash_for_runtime(
     ctx: &ToolContext,
     input: serde_json::Value,
-) -> Result<ToolResult, ToolError> {
+) -> Result<(ToolResult, Option<crate::session::ToolOutputRef>), ToolError> {
     ctx.ensure_shell_allowed()?;
     let input: BashInput = parse_input("Bash", input)?;
     let timeout = parse_shell_timeout_secs(input.timeout_secs);
@@ -346,7 +351,7 @@ pub async fn execute_model_bash_for_runtime(
                 message: "description is required when run_in_background is true".to_owned(),
             });
         }
-        let result = start_background_command(
+        let (result, output_ref) = start_background_command(
             ctx,
             &input.command,
             input.cwd.as_deref(),
@@ -355,7 +360,7 @@ pub async fn execute_model_bash_for_runtime(
             max_output_bytes,
         )
         .await?;
-        return Ok(timeout.apply(result));
+        return Ok((timeout.apply(result), output_ref));
     }
 
     let result = run_command_without_error_mapping(
@@ -366,7 +371,8 @@ pub async fn execute_model_bash_for_runtime(
         max_output_bytes,
     )
     .await?;
-    Ok(timeout.apply(shell_command_result(&result)))
+    let output_ref = result.output_ref.clone();
+    Ok((timeout.apply(shell_command_result(&result)), output_ref))
 }
 
 async fn run_command(
@@ -456,9 +462,10 @@ async fn execute_shell_command_with_permit(
         .limits()
         .clamp_output_bytes(Some(request.max_output_bytes));
     emit_admission_started(request.admission_callback.as_ref());
+    let task_id = BackgroundTaskManager::next_bash_task_id();
     let client = GuardianClient::start_bash(BashStart {
         runtime: &request.shell_runtime,
-        task_id: BackgroundTaskManager::next_bash_task_id(),
+        task_id: task_id.clone(),
         command_text: request.command,
         cwd: &request.cwd,
         status_dir: request.shell_runtime.runtime_root(),
@@ -466,14 +473,16 @@ async fn execute_shell_command_with_permit(
         max_output_bytes,
         stream_update: request.stream_update,
         permit,
-        output_capture: request.tool_output_capture,
+        output_capture: request.tool_output_capture.clone(),
     })
     .await?;
     let result = tokio::select! {
         result = client.wait() => result,
         () = request.cancel_token.cancelled() => client.stop().await,
     };
-    Ok(shell_result_from_guarded(result, None, max_output_bytes))
+    let mut shell_result = shell_result_from_guarded(result, None, max_output_bytes);
+    shell_result.output_ref = capture_ref_for(request.tool_output_capture.as_ref(), &task_id);
+    Ok(shell_result)
 }
 
 async fn execute_manager_owned_shell_command(
@@ -507,7 +516,7 @@ async fn execute_manager_owned_shell_command(
         max_output_bytes,
         stream_update: request.stream_update.clone(),
         permit,
-        output_capture: request.tool_output_capture,
+        output_capture: request.tool_output_capture.clone(),
     })
     .await?;
     manager
@@ -521,14 +530,16 @@ async fn execute_manager_owned_shell_command(
         if manager.is_detached(&task_id).await {
             let snapshot = manager.snapshot(&task_id).await?;
             let output = snapshot.output.unwrap_or_else(empty_command_output);
-            return Ok(shell_result_from_output(
+            let mut result = shell_result_from_output(
                 output,
                 ShellCommandOutcome::Backgrounded {
                     task_id: task_id.clone().into(),
                 },
-                Some(task_id),
+                Some(task_id.clone()),
                 max_output_bytes,
-            ));
+            );
+            result.output_ref = capture_ref_for(request.tool_output_capture.as_ref(), &task_id);
+            return Ok(result);
         }
 
         let snapshot = manager.snapshot(&task_id).await?;
@@ -540,12 +551,10 @@ async fn execute_manager_owned_shell_command(
                 BackgroundTaskStatus::ResourceLimited => ShellCommandOutcome::ResourceLimited,
                 _ => ShellCommandOutcome::Completed,
             };
-            return Ok(shell_result_from_output(
-                output,
-                outcome,
-                Some(task_id.clone()),
-                max_output_bytes,
-            ));
+            let mut result =
+                shell_result_from_output(output, outcome, Some(task_id.clone()), max_output_bytes);
+            result.output_ref = capture_ref_for(request.tool_output_capture.as_ref(), &task_id);
+            return Ok(result);
         }
 
         tokio::select! {
@@ -553,12 +562,14 @@ async fn execute_manager_owned_shell_command(
                 let _ = manager.stop(&task_id, "Cancelled foreground shell command", max_output_bytes).await?;
                 let snapshot = manager.snapshot(&task_id).await?;
                 let output = snapshot.output.unwrap_or_else(empty_command_output);
-                return Ok(shell_result_from_output(
+                let mut result = shell_result_from_output(
                     output,
                     ShellCommandOutcome::Cancelled,
                     Some(task_id.clone()),
                     max_output_bytes,
-                ));
+                );
+                result.output_ref = capture_ref_for(request.tool_output_capture.as_ref(), &task_id);
+                return Ok(result);
             }
             () = tokio::time::sleep(Duration::from_millis(20)) => {}
         }
@@ -637,6 +648,7 @@ fn shell_result_from_output(
             foreground_task_id,
             resource_limit: output.resource_limit,
             capture_error: None,
+            output_ref: None,
         },
         max_output_bytes,
     )
@@ -660,7 +672,18 @@ fn cap_shell_result_output(
         foreground_task_id: result.foreground_task_id,
         resource_limit: result.resource_limit,
         capture_error: result.capture_error,
+        output_ref: result.output_ref,
     }
+}
+
+/// Resolve the typed output reference for a captured task from its artifact
+/// metadata. `None` when the execution had no capture target or the metadata
+/// is unreadable (the artifact was never opened).
+fn capture_ref_for(
+    capture: Option<&ToolOutputCapture>,
+    task_id: &str,
+) -> Option<crate::session::ToolOutputRef> {
+    capture.and_then(|capture| capture.metadata(task_id).ok())
 }
 
 async fn start_background_command(
@@ -670,7 +693,7 @@ async fn start_background_command(
     description: String,
     timeout: Option<Duration>,
     max_output_bytes: usize,
-) -> Result<ToolResult, ToolError> {
+) -> Result<(ToolResult, Option<crate::session::ToolOutputRef>), ToolError> {
     // Validate path before waiting for admission.
     let _ = match workdir {
         Some(path) => ctx.resolve_workspace_path(std::path::Path::new(path))?,
@@ -696,6 +719,7 @@ async fn start_background_command(
         .shell_runtime
         .limits()
         .clamp_output_bytes(Some(max_output_bytes));
+    let capture = output_capture_for(ctx);
     let client = GuardianClient::start_bash(BashStart {
         runtime: &ctx.shell_runtime,
         task_id: task_id.clone(),
@@ -709,18 +733,26 @@ async fn start_background_command(
         max_output_bytes,
         stream_update: ctx.tool_update.clone(),
         permit,
-        output_capture: output_capture_for(ctx),
+        output_capture: capture.clone(),
     })
     .await?;
 
-    ctx.background_tasks
+    let result = ctx
+        .background_tasks
         .start_bash_with_task_id(
-            task_id,
+            task_id.clone(),
             description,
             ManagedBackgroundCommand::new(client),
             max_output_bytes,
         )
-        .await
+        .await?;
+    // The guardian opened the artifact before launch and appends every
+    // display chunk, so this immediate start result resolves the typed
+    // reference (incomplete while the process runs). Backgrounded model Bash
+    // therefore keeps its artifact reference on the Finished event like every
+    // other agent-owned execution.
+    let output_ref = capture_ref_for(capture.as_ref(), &task_id);
+    Ok((result, output_ref))
 }
 
 #[cfg(test)]
@@ -741,6 +773,7 @@ mod tests {
             foreground_task_id: None,
             resource_limit: None,
             capture_error: None,
+            output_ref: None,
         };
 
         let tool_result = shell_command_result(&result);

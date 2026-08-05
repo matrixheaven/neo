@@ -5,6 +5,7 @@ use crate::primitive::{Color, Component, Expandable, Finalization, Line, Span, s
 use crate::shell::ToolStatusKind;
 use crate::theme_preview::ThemePreviewRenderer;
 use crate::token_estimate::format_elapsed;
+use neo_agent_core::session::ToolOutputRef;
 use neo_agent_core::workflow::WorkflowExecutionOrigin;
 
 use super::live_output::LiveOutput;
@@ -54,6 +55,11 @@ pub struct ToolCallComponent {
     queue: Option<QueueDisplayState>,
     workflow_origin: Option<WorkflowExecutionOrigin>,
     workflow_activity_route_error: bool,
+    /// Typed complete-display-output artifact for this execution, when the
+    /// runtime captured one. Presentation metadata only: the TUI resolves the
+    /// artifact by this typed reference, never by inferring it from text,
+    /// result JSON, or ids.
+    output_ref: Option<ToolOutputRef>,
 }
 
 const MAX_LIVE_OUTPUT_LINES: usize = 6;
@@ -73,7 +79,23 @@ impl ToolCallComponent {
             queue: None,
             workflow_origin: None,
             workflow_activity_route_error: false,
+            output_ref: None,
         }
+    }
+
+    /// Attach the typed output reference for this execution. A later `Some`
+    /// wins; `None` never clears an already-attached reference.
+    pub(crate) fn attach_output_ref(&mut self, output_ref: Option<ToolOutputRef>) -> bool {
+        if output_ref.is_some() && self.output_ref != output_ref {
+            self.output_ref = output_ref;
+            return true;
+        }
+        false
+    }
+
+    #[must_use]
+    pub const fn output_ref(&self) -> Option<&ToolOutputRef> {
+        self.output_ref.as_ref()
     }
 
     pub(crate) fn attach_workflow_origin(

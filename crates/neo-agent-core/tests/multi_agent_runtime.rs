@@ -99,6 +99,7 @@ fn agent_tool_activity_uses_explicit_phase_and_output_preview() {
             tail: true,
         }),
         files: Vec::new(),
+        output_ref: None,
     };
 
     let serialized = serde_json::to_value(&activity).expect("serialize activity");
@@ -505,6 +506,7 @@ fn compact_progress_preserves_live_shell_output() {
             name: "Bash".to_owned(),
             arguments: json!({"command": "cargo test"}),
             workflow_origin: None,
+            output_ref: None,
         },
     );
     let progress = runtime
@@ -517,6 +519,7 @@ fn compact_progress_preserves_live_shell_output() {
                 name: "Bash".to_owned(),
                 partial_result: ToolResult::ok("Compiling neo"),
                 workflow_origin: None,
+                output_ref: None,
             },
         )
         .expect("live progress");
@@ -1114,6 +1117,7 @@ fn child_activity_trim_preserves_visible_ongoing_tool_and_latest_text() {
             name: "Bash".to_owned(),
             arguments: json!({"cmd": "cargo nextest run -p neo-tui --test multi_agent_transcript"}),
             workflow_origin: None,
+            output_ref: None,
         },
     );
     for index in 0..32 {
@@ -1885,6 +1889,7 @@ async fn child_activity_keeps_same_name_tool_failures_on_their_own_ids() {
                 name: "Read".to_owned(),
                 arguments: json!({ "path": path }),
                 workflow_origin: None,
+                output_ref: None,
             },
         );
     }
@@ -1897,6 +1902,7 @@ async fn child_activity_keeps_same_name_tool_failures_on_their_own_ids() {
             name: "Read".to_owned(),
             result: neo_agent_core::ToolResult::error("missing file"),
             workflow_origin: None,
+            output_ref: None,
         },
     );
 
@@ -1940,6 +1946,7 @@ fn child_activity_projects_edit_write_file_rows() {
                 name: "Edit".to_owned(),
                 arguments: json!({ "path": "src/a.rs", "old": "a", "new": "b" }),
                 workflow_origin: None,
+                output_ref: None,
             },
         )
         .expect("Edit start update");
@@ -1976,6 +1983,7 @@ fn child_activity_projects_edit_write_file_rows() {
                     ]
                 })),
                 workflow_origin: None,
+                output_ref: None,
             },
         )
         .expect("Edit finish update");
@@ -1998,6 +2006,7 @@ fn child_activity_projects_edit_write_file_rows() {
                 name: "Write".to_owned(),
                 arguments: json!({ "path": "docs/new.md", "content": "new" }),
                 workflow_origin: None,
+                output_ref: None,
             },
         )
         .expect("Write start update");
@@ -2017,6 +2026,7 @@ fn child_activity_projects_edit_write_file_rows() {
                     ]
                 })),
                 workflow_origin: None,
+                output_ref: None,
             },
         )
         .expect("Write prepared update");
@@ -2035,6 +2045,7 @@ fn child_activity_projects_edit_write_file_rows() {
                     "latest_path": "docs/new.md"
                 })),
                 workflow_origin: None,
+                output_ref: None,
             },
         )
         .expect("Write progress update");
@@ -2064,6 +2075,7 @@ fn child_activity_projects_edit_write_file_rows() {
                     ]
                 })),
                 workflow_origin: None,
+                output_ref: None,
             },
         )
         .expect("Write finish update");
@@ -2098,6 +2110,7 @@ fn child_tool_events_preserve_ongoing_done_and_failed_phase() {
                 name: "Bash".to_owned(),
                 arguments: json!({ "command": "cargo nextest run -p neo-tui" }),
                 workflow_origin: None,
+                output_ref: None,
             },
         )
         .expect("started update");
@@ -2131,6 +2144,7 @@ fn child_tool_events_preserve_ongoing_done_and_failed_phase() {
                 name: "Bash".to_owned(),
                 partial_result: ToolResult::ok("Compiling neo-tui v0.1.0"),
                 workflow_origin: None,
+                output_ref: None,
             },
         )
         .expect("live output update");
@@ -2154,6 +2168,7 @@ fn child_tool_events_preserve_ongoing_done_and_failed_phase() {
                 name: "Bash".to_owned(),
                 result: ToolResult::ok("Finished test profile"),
                 workflow_origin: None,
+                output_ref: None,
             },
         )
         .expect("finished update");
@@ -2207,6 +2222,7 @@ fn child_shell_activity_keeps_command_and_output_with_or_without_queue() {
                 name: "Bash".to_owned(),
                 arguments: json!({"command": "cargo test"}),
                 workflow_origin: None,
+                output_ref: None,
             },
             AgentEvent::ToolExecutionUpdate {
                 turn: 1,
@@ -2214,6 +2230,7 @@ fn child_shell_activity_keeps_command_and_output_with_or_without_queue() {
                 name: "Bash".to_owned(),
                 partial_result: ToolResult::ok("test output"),
                 workflow_origin: None,
+                output_ref: None,
             },
             AgentEvent::ToolExecutionFinished {
                 turn: 1,
@@ -2221,6 +2238,7 @@ fn child_shell_activity_keeps_command_and_output_with_or_without_queue() {
                 name: "Bash".to_owned(),
                 result: ToolResult::ok("done"),
                 workflow_origin: None,
+                output_ref: None,
             },
         ]);
         for event in events {
@@ -4162,4 +4180,96 @@ async fn delegate_swarm_golden_card_contract_is_unchanged() {
     // Ordered by input index
     assert_eq!(items[0]["item"], "A");
     assert_eq!(items[1]["item"], "B");
+}
+
+#[tokio::test]
+async fn child_tool_output_reference_survives_wire_replay() {
+    use neo_agent_core::session::ToolOutputRef;
+    use neo_agent_core::session::{JsonlSessionReader, JsonlSessionWriter};
+
+    let dir = tempfile::tempdir().expect("tempdir");
+    let wire = dir.path().join("wire.jsonl");
+    let runtime = MultiAgentRuntime::new();
+    let child = runtime.start_foreground_delegate_for_test("run wire tests");
+    let started_at = std::time::Instant::now();
+    let reference = ToolOutputRef {
+        agent_id: child.id.as_str().to_owned(),
+        task_id: "bash-wire".to_owned(),
+        byte_len: 512,
+        line_count: 4,
+        complete: true,
+    };
+    let events = vec![
+        AgentEvent::ToolExecutionStarted {
+            turn: 1,
+            id: "call-wire".to_owned(),
+            name: "Bash".to_owned(),
+            arguments: json!({"command": "printf wire"}),
+            workflow_origin: None,
+            output_ref: Some(reference.clone()),
+        },
+        AgentEvent::ToolExecutionUpdate {
+            turn: 1,
+            id: "call-wire".to_owned(),
+            name: "Bash".to_owned(),
+            partial_result: ToolResult::ok("wire progress"),
+            workflow_origin: None,
+            output_ref: Some(reference.clone()),
+        },
+        AgentEvent::ToolExecutionFinished {
+            turn: 1,
+            id: "call-wire".to_owned(),
+            name: "Bash".to_owned(),
+            result: ToolResult::ok("wire done"),
+            workflow_origin: None,
+            output_ref: Some(reference.clone()),
+        },
+    ];
+
+    // The child wire JSONL round-trips the typed reference byte-for-byte.
+    let mut writer = JsonlSessionWriter::create(&wire)
+        .await
+        .expect("wire writer");
+    for event in &events {
+        writer.append(event).await.expect("append wire event");
+    }
+    writer.flush().await.expect("flush wire");
+    let replayed = JsonlSessionReader::read_all(&wire)
+        .await
+        .expect("read wire events");
+    assert_eq!(replayed, events, "typed references must survive the wire");
+
+    // The parent projects the replayed child events into root activity with
+    // the same typed reference.
+    for event in &replayed {
+        runtime
+            .apply_child_event(&child.id, started_at, event)
+            .expect("apply replayed child event");
+    }
+    let projected = runtime
+        .agent_snapshot(child.id.as_str())
+        .expect("child snapshot");
+    let entry_ref = projected
+        .activity
+        .iter()
+        .rev()
+        .find_map(|entry| match &entry.kind {
+            AgentActivityKind::Tool {
+                id,
+                output_ref,
+                phase,
+                ..
+            } if id == "call-wire" => Some((output_ref, *phase)),
+            AgentActivityKind::Text { .. } | AgentActivityKind::Tool { .. } => None,
+        })
+        .expect("tool row");
+    assert_eq!(entry_ref.0, &Some(reference.clone()));
+    assert_eq!(entry_ref.1, AgentToolActivityPhase::Done);
+
+    // The delegate progress projection retains the reference and the final
+    // metadata so swarm children and resume see the same artifact.
+    let progress = projected.progress_snapshot();
+    let last_tool = progress.last_tool.expect("last tool progress");
+    assert_eq!(last_tool.output_ref, Some(reference));
+    assert_eq!(last_tool.phase, AgentToolActivityPhase::Done);
 }

@@ -61,6 +61,13 @@ impl ToolOutputCapture {
         self.store().finish(&self.agent_id, task_id)
     }
 
+    /// Read the current metadata snapshot for a task artifact. The guardian
+    /// finishes the artifact before it exits, so a completed process resolves
+    /// a `complete` reference; a still-running one resolves incomplete.
+    pub fn metadata(&self, task_id: &str) -> io::Result<crate::session::ToolOutputRef> {
+        self.store().metadata(&self.agent_id, task_id)
+    }
+
     fn store(&self) -> crate::session::ToolOutputStore {
         crate::session::ToolOutputStore::new(self.session_dir.clone())
     }

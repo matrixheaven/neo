@@ -4,6 +4,7 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
 use crate::AgentMessage;
+use crate::session::ToolOutputRef;
 
 use super::{AgentDisplayName, AgentId, AgentPath, AgentRole};
 
@@ -142,6 +143,10 @@ pub enum AgentActivityKind {
         output: Option<AgentToolOutputPreview>,
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         files: Vec<AgentToolFileChange>,
+        /// Typed complete-display-output artifact for this tool execution,
+        /// when the child runtime captured one. Presentation metadata only.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        output_ref: Option<ToolOutputRef>,
     },
     Text {
         text: String,
@@ -250,6 +255,10 @@ pub struct DelegateToolProgress {
     pub output: Option<AgentToolOutputPreview>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub files: Vec<AgentToolFileChange>,
+    /// Typed complete-display-output artifact for this tool execution,
+    /// when the child runtime captured one. Presentation metadata only.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub output_ref: Option<ToolOutputRef>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
@@ -318,6 +327,7 @@ impl AgentProgressSnapshot {
                         phase,
                         output,
                         files,
+                        output_ref,
                     } => Some(DelegateToolProgress {
                         id: id.clone(),
                         name: name.clone(),
@@ -327,6 +337,7 @@ impl AgentProgressSnapshot {
                         phase: *phase,
                         output: output.clone(),
                         files: files.clone(),
+                        output_ref: output_ref.clone(),
                     }),
                     AgentActivityKind::Text { .. } => None,
                 }),
@@ -527,6 +538,7 @@ fn upsert_progress_tool(activity: &mut Vec<AgentActivityEntry>, tool: &DelegateT
             phase: tool.phase,
             output: tool.output.clone(),
             files: tool.files.clone(),
+            output_ref: tool.output_ref.clone(),
         };
         return;
     }
@@ -538,6 +550,7 @@ fn upsert_progress_tool(activity: &mut Vec<AgentActivityEntry>, tool: &DelegateT
             phase: tool.phase,
             output: tool.output.clone(),
             files: tool.files.clone(),
+            output_ref: tool.output_ref.clone(),
         },
     });
 }

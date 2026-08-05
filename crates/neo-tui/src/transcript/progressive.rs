@@ -4,6 +4,7 @@ use crate::primitive::theme::TuiTheme;
 use neo_agent_core::multi_agent::{
     AgentSnapshot, AgentToolActivityPhase, AgentToolFileChange, AgentToolOutputPreview,
 };
+use neo_agent_core::session::ToolOutputRef;
 
 use super::child_activity::{ChildToolRow, render_child_agent_summary, render_child_tool_row};
 use super::store::TranscriptEntryId;
@@ -73,6 +74,9 @@ pub(crate) struct ChildToolFact {
     pub phase: AgentToolActivityPhase,
     pub output: Option<AgentToolOutputPreview>,
     pub files: Vec<AgentToolFileChange>,
+    /// Typed complete-display-output artifact for this tool execution, when
+    /// the child runtime captured one. Presentation metadata only.
+    pub output_ref: Option<ToolOutputRef>,
 }
 
 impl ChildToolFact {

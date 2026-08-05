@@ -3678,6 +3678,7 @@ type = "object"
             name: "Bash".to_owned(),
             arguments: serde_json::json!({"command": "cargo --version"}),
             workflow_origin: None,
+            output_ref: None,
         };
         let (ingress, events) = tokio::sync::mpsc::unbounded_channel();
         let (persisted, mut deliveries) = tokio::sync::mpsc::unbounded_channel();

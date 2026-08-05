@@ -544,6 +544,7 @@ mod tests {
                 name: "bash".to_owned(),
                 result: neo_agent_core::ToolResult::error("nope"),
                 workflow_origin: None,
+                output_ref: None,
             })
         ));
         assert_eq!(

@@ -21,6 +21,7 @@ fn done_tool(id: &str, name: &str, summary: &str) -> AgentActivityEntry {
             phase: AgentToolActivityPhase::Done,
             output: None,
             files: Vec::new(),
+            output_ref: None,
         },
     }
 }
@@ -182,6 +183,7 @@ fn start_tool(pane: &mut TranscriptPane, id: &str, command: &str) {
         name: "Bash".to_owned(),
         arguments: serde_json::json!({ "command": command }),
         workflow_origin: None,
+        output_ref: None,
     });
 }
 
@@ -196,6 +198,7 @@ fn stream_tool_output(pane: &mut TranscriptPane, id: &str, lines: usize) {
         name: "Bash".to_owned(),
         partial_result: neo_agent_core::ToolResult::ok(body),
         workflow_origin: None,
+        output_ref: None,
     });
 }
 
@@ -206,6 +209,7 @@ fn finish_tool(pane: &mut TranscriptPane, id: &str, result: &str) {
         name: "Bash".to_owned(),
         result: neo_agent_core::ToolResult::ok(result),
         workflow_origin: None,
+        output_ref: None,
     });
 }
 
@@ -340,6 +344,7 @@ fn ordinary_delegate_commits_one_complete_card_with_header_before_child_tools() 
                 phase: AgentToolActivityPhase::Done,
                 output: None,
                 files: Vec::new(),
+                output_ref: None,
             },
         }],
         prior_messages: Vec::new(),
@@ -453,6 +458,7 @@ fn pending_approval_defers_later_facts_in_canonical_order() {
                 phase: AgentToolActivityPhase::Done,
                 output: None,
                 files: Vec::new(),
+                output_ref: None,
             },
         }],
         prior_messages: Vec::new(),
@@ -636,6 +642,7 @@ fn every_live_entry_family_is_bounded_and_commits_once() {
         name: "Bash".to_owned(),
         arguments: serde_json::json!({ "command": "make" }),
         workflow_origin: None,
+        output_ref: None,
     });
     assert_bounded_live(&mut pane, 100, 24);
     pane.apply_agent_event(neo_agent_core::AgentEvent::ToolExecutionFinished {
@@ -644,6 +651,7 @@ fn every_live_entry_family_is_bounded_and_commits_once() {
         name: "Bash".to_owned(),
         result: neo_agent_core::ToolResult::ok("built"),
         workflow_origin: None,
+        output_ref: None,
     });
     assert_one_canonical_commit(&mut pane, 100, 24);
 

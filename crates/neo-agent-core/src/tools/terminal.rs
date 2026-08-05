@@ -97,6 +97,13 @@ Use Terminal for interactive or persistent commands; use Bash for one-shot comma
 
 pub struct TerminalTool;
 
+/// The capture artifact key for a terminal session. One terminal process owns
+/// exactly one output artifact, derived from its session handle so every
+/// start/read/write/resize/stop tool call resolves the same reference.
+pub(crate) fn terminal_task_id(handle: &str) -> String {
+    format!("terminal-{handle}")
+}
+
 impl Tool for TerminalTool {
     fn name(&self) -> &'static str {
         "Terminal"
@@ -242,7 +249,7 @@ async fn start_terminal(
     let cols = cols.max(1);
     let rows = rows.max(1);
     let handle = Uuid::new_v4().to_string();
-    let task_id = format!("terminal-{handle}");
+    let task_id = terminal_task_id(&handle);
     let status_dir = ctx.background_tasks.persistence_dir().map_or(
         ctx.shell_runtime.runtime_root(),
         std::path::PathBuf::as_path,

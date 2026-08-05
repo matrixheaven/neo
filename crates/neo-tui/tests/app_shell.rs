@@ -1205,6 +1205,7 @@ fn transcript_pane_maps_shell_command_lifecycle_to_tool_run() {
         name: "Bash".to_owned(),
         arguments: serde_json::json!({ "command": "cargo test -p neo-tui" }),
         workflow_origin: None,
+        output_ref: None,
     });
     runtime.apply_agent_event(neo_agent_core::AgentEvent::ShellCommandStarted {
         turn: 1,
@@ -1223,6 +1224,7 @@ fn transcript_pane_maps_shell_command_lifecycle_to_tool_run() {
         truncated: false,
         origin: neo_agent_core::ShellCommandOrigin::ModelBashTool,
         outcome: neo_agent_core::ShellCommandOutcome::Completed,
+        output_ref: None,
     });
 
     let entries = runtime.transcript().entries();
@@ -1248,6 +1250,7 @@ fn transcript_pane_renders_bash_result_as_terminal_output_without_structural_lab
         arguments: serde_json::json!({ "command": "printf out; printf err >&2" }),
 
         workflow_origin: None,
+        output_ref: None,
     });
     runtime.apply_agent_event(neo_agent_core::AgentEvent::ToolExecutionFinished {
         turn: 1,
@@ -1263,6 +1266,7 @@ fn transcript_pane_renders_bash_result_as_terminal_output_without_structural_lab
         })),
 
         workflow_origin: None,
+        output_ref: None,
     });
 
     let joined = render_transcript(100, 12, &mut runtime).join("\n");
@@ -1284,6 +1288,7 @@ fn transcript_pane_running_tool_call_is_rendered_before_finish() {
         arguments: serde_json::json!({ "path": "crates/neo-tui/src" }),
 
         workflow_origin: None,
+        output_ref: None,
     });
 
     let entries = runtime.transcript().entries();
@@ -1321,6 +1326,7 @@ fn transcript_pane_preserves_tool_arguments_separately_from_result() {
         arguments: serde_json::json!({ "path": "README.md" }),
 
         workflow_origin: None,
+        output_ref: None,
     });
     runtime.apply_agent_event(neo_agent_core::AgentEvent::ToolExecutionFinished {
         turn: 1,
@@ -1329,6 +1335,7 @@ fn transcript_pane_preserves_tool_arguments_separately_from_result() {
         result: neo_agent_core::ToolResult::ok("read README"),
 
         workflow_origin: None,
+        output_ref: None,
     });
     runtime.apply_agent_event(neo_agent_core::AgentEvent::MessageAppended {
         message: neo_agent_core::AgentMessage::tool_result(
@@ -1415,6 +1422,7 @@ fn transcript_pane_replays_thinking_tool_assistant_in_order() {
         arguments: serde_json::json!({ "path": "." }),
 
         workflow_origin: None,
+        output_ref: None,
     });
     runtime.apply_agent_event(neo_agent_core::AgentEvent::ToolExecutionFinished {
         turn: 1,
@@ -1423,6 +1431,7 @@ fn transcript_pane_replays_thinking_tool_assistant_in_order() {
         result: neo_agent_core::ToolResult::ok("README.md"),
 
         workflow_origin: None,
+        output_ref: None,
     });
     runtime.apply_agent_event(neo_agent_core::AgentEvent::ThinkingStarted {
         turn: 1,

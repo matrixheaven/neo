@@ -259,7 +259,7 @@ async fn turn_cancellation_removes_queued_bash_without_spawning() {
 
     stop_terminal(&registry, &context, &handle).await;
 
-    let probe = execute_model_bash_for_runtime(
+    let (probe, _output_ref) = execute_model_bash_for_runtime(
         &context,
         json!({ "command": printf_command("probe-turn") }),
     )
@@ -335,7 +335,7 @@ async fn agent_cancellation_removes_queued_child_bash_without_spawning() {
     );
 
     stop_terminal(&registry, &hold_ctx, &handle).await;
-    let probe = execute_model_bash_for_runtime(
+    let (probe, _output_ref) = execute_model_bash_for_runtime(
         &hold_ctx,
         json!({ "command": printf_command("probe-agent") }),
     )
@@ -489,7 +489,7 @@ async fn swarm_cancellation_removes_all_queued_child_bash_without_spawning() {
     );
 
     stop_terminal(&registry, &hold_ctx, &handle).await;
-    let probe = execute_model_bash_for_runtime(
+    let (probe, _output_ref) = execute_model_bash_for_runtime(
         &hold_ctx,
         json!({ "command": printf_command("probe-swarm") }),
     )

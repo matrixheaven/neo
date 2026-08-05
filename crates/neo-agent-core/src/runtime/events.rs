@@ -164,6 +164,7 @@ pub(super) fn make_shell_admission_callback(
                 name: name.clone(),
                 arguments: arguments.as_ref().clone(),
                 workflow_origin: None,
+                output_ref: None,
             });
             if name == "Bash"
                 && let Some(command) = arguments.get("command").and_then(serde_json::Value::as_str)
@@ -312,6 +313,7 @@ pub(super) fn emit_shell_finished(
     turn: u32,
     tool_call: &AgentToolCall,
     result: &ToolResult,
+    output_ref: Option<crate::session::ToolOutputRef>,
     emitter: &mut impl EventPublisher,
 ) {
     if tool_call.name.as_ref() != "Bash" {
@@ -353,6 +355,7 @@ pub(super) fn emit_shell_finished(
         truncated,
         origin: ShellCommandOrigin::ModelBashTool,
         outcome,
+        output_ref,
     });
 }
 
@@ -385,6 +388,36 @@ fn shell_command_outcome_from_details(details: &serde_json::Value) -> ShellComma
     }
 }
 
+/// Typed complete-display-output reference for a terminal session, derived
+/// from the session handle the tool returned. One terminal process owns one
+/// artifact (`terminal-<handle>`), so every start/read/write/resize/stop call
+/// resolves the same reference. `None` when the session has no capture
+/// artifact (non-agent contexts) or the metadata is unreadable.
+pub(super) fn terminal_output_ref(
+    tool_context: &ToolContext,
+    handle: &str,
+) -> Option<crate::session::ToolOutputRef> {
+    let session_directory = tool_context.session_directory.clone()?;
+    let agent_id = tool_context.agent_id.clone()?;
+    crate::session::ToolOutputStore::new(session_directory)
+        .metadata(&agent_id, &crate::tools::terminal_task_id(handle))
+        .ok()
+}
+
+/// Terminal reference for a finished call, resolved from the session handle
+/// the tool returned in its result details.
+pub(super) fn terminal_output_ref_for_result(
+    tool_context: &ToolContext,
+    result: &ToolResult,
+) -> Option<crate::session::ToolOutputRef> {
+    let handle = result
+        .details
+        .as_ref()?
+        .get("handle")
+        .and_then(serde_json::Value::as_str)?;
+    terminal_output_ref(tool_context, handle)
+}
+
 pub(super) fn emit_terminal_events(
     turn: u32,
     arguments: Option<&serde_json::Value>,
@@ -406,6 +439,7 @@ pub(super) fn emit_terminal_events(
     else {
         return;
     };
+    let output_ref = terminal_output_ref(tool_context, &handle);
     let mode = arguments.get("mode").and_then(serde_json::Value::as_str);
     match mode {
         Some("start") => {
@@ -432,6 +466,7 @@ pub(super) fn emit_terminal_events(
                 cwd: tool_context.workspace_root().to_path_buf(),
                 cols,
                 rows,
+                output_ref: output_ref.clone(),
             });
         }
         Some("stop") => {
@@ -450,6 +485,7 @@ pub(super) fn emit_terminal_events(
                 handle: handle.clone(),
                 status,
                 exit_code,
+                output_ref: output_ref.clone(),
             });
         }
         _ => {}
@@ -472,6 +508,7 @@ pub(super) fn emit_terminal_events(
                 handle: handle.clone(),
                 output,
                 truncated,
+                output_ref: output_ref.clone(),
             });
         }
         let status = details
@@ -489,6 +526,7 @@ pub(super) fn emit_terminal_events(
                 handle,
                 status: status.to_owned(),
                 exit_code,
+                output_ref,
             });
         }
     }
@@ -515,6 +553,7 @@ pub(super) fn make_tool_update_callback(
                 terminate: false,
             },
             workflow_origin: None,
+            output_ref: None,
         });
     })
 }
@@ -594,6 +633,7 @@ mod tests {
                 handle: "terminal-1".to_owned(),
                 status: "completed".to_owned(),
                 exit_code: Some(0),
+                output_ref: None,
             }
         );
         assert!(rx.try_recv().is_err());

@@ -40,6 +40,7 @@ fn semantic_block_spacing_survives_history_live_partition_and_ack_boundaries() {
         arguments: serde_json::json!({ "command": "spacing-tool-command" }),
 
         workflow_origin: None,
+        output_ref: None,
     });
     let update = render_update(&mut inline, &mut screen, &mut pane, &mut output);
     assert_blank_rows_between(&mut screen, "spacing-user", "spacing-thinking", 1);
@@ -54,6 +55,7 @@ fn semantic_block_spacing_survives_history_live_partition_and_ack_boundaries() {
         result: ToolResult::ok("spacing-tool-result"),
 
         workflow_origin: None,
+        output_ref: None,
     });
     pane.start_assistant_message();
     pane.append_assistant_delta("spacing-assistant-stable\n\nspacing-assistant-live");
@@ -100,6 +102,7 @@ fn thinking_keeps_one_blank_row_after_tool_while_streaming_and_complete() {
         name: "Read".to_owned(),
         arguments: serde_json::json!({ "path": ".tmp/report.md" }),
         workflow_origin: None,
+        output_ref: None,
     });
     pane.apply_agent_event(AgentEvent::ToolExecutionFinished {
         turn: 1,
@@ -107,6 +110,7 @@ fn thinking_keeps_one_blank_row_after_tool_while_streaming_and_complete() {
         name: "Read".to_owned(),
         result: ToolResult::ok("report body"),
         workflow_origin: None,
+        output_ref: None,
     });
     let update = render_update(&mut inline, &mut screen, &mut pane, &mut output);
     let tool_tail = block_tail_containing(&update.history, "report body");
@@ -144,6 +148,7 @@ fn tool_keeps_one_blank_row_after_stable_content_while_running_and_complete() {
         name: "Bash".to_owned(),
         arguments: serde_json::json!({ "command": "true" }),
         workflow_origin: None,
+        output_ref: None,
     });
     render_update(&mut inline, &mut screen, &mut pane, &mut output);
     assert_blank_rows_between(&mut screen, &stable_tail, "● Using Bash", 1);
@@ -154,6 +159,7 @@ fn tool_keeps_one_blank_row_after_stable_content_while_running_and_complete() {
         name: "Bash".to_owned(),
         result: ToolResult::ok("done"),
         workflow_origin: None,
+        output_ref: None,
     });
     render_update(&mut inline, &mut screen, &mut pane, &mut output);
     assert_blank_rows_between(&mut screen, &stable_tail, "● Used Bash", 1);
@@ -531,6 +537,7 @@ fn shell_and_committed_history_survive_live_updates_resize_and_exit() {
         result: ToolResult::ok("final-tool-result-sentinel"),
 
         workflow_origin: None,
+        output_ref: None,
     });
     pane.apply_agent_event(AgentEvent::MessageFinished {
         phase: neo_ai::MessagePhase::Unknown,
@@ -643,6 +650,7 @@ fn committed_tool_review_does_not_duplicate_native_scrollback() {
         arguments: serde_json::json!({ "path": "review-committed-tool" }),
 
         workflow_origin: None,
+        output_ref: None,
     });
     pane.apply_agent_event(AgentEvent::ToolExecutionFinished {
         turn: 1,
@@ -651,6 +659,7 @@ fn committed_tool_review_does_not_duplicate_native_scrollback() {
         result: ToolResult::ok("review-committed-tool-result"),
 
         workflow_origin: None,
+        output_ref: None,
     });
 
     let committed = pane.render_terminal_update(80, 12);
@@ -784,6 +793,7 @@ fn native_scrollback_keeps_shell_and_progressive_history_exactly_once() {
             arguments: serde_json::json!({ "command": "overflow-live-command" }),
 
             workflow_origin: None,
+            output_ref: None,
         });
     let live_body = (0..30)
         .map(|index| format!("overflow-live-sentinel-{index:02}"))
@@ -797,6 +807,7 @@ fn native_scrollback_keeps_shell_and_progressive_history_exactly_once() {
             partial_result: ToolResult::ok(live_body),
 
             workflow_origin: None,
+            output_ref: None,
         });
     tui.transcript_mut()
         .push_status("deferred-alpha-overflow-sentinel");
@@ -819,6 +830,7 @@ fn native_scrollback_keeps_shell_and_progressive_history_exactly_once() {
             result: ToolResult::ok("overflow-live-finished"),
 
             workflow_origin: None,
+            output_ref: None,
         });
     let released = tui.render_terminal_frame(usize::from(width), usize::from(height));
     assert!(!released.review_surface);
@@ -919,6 +931,7 @@ fn review_acknowledgement_does_not_advance_normal_history_ledger() {
         arguments: serde_json::json!({ "path": "README.md" }),
 
         workflow_origin: None,
+        output_ref: None,
     });
     transcript.apply_agent_event(AgentEvent::ToolExecutionFinished {
         turn: 1,
@@ -927,6 +940,7 @@ fn review_acknowledgement_does_not_advance_normal_history_ledger() {
         result: ToolResult::ok("contents"),
 
         workflow_origin: None,
+        output_ref: None,
     });
     let mut tui = NeoTui::new(chrome, transcript);
     let normal = tui.render_terminal_frame(80, 12);
@@ -1253,6 +1267,7 @@ fn delegate_workflow_approval_live_content_stays_on_normal_screen_without_captur
             phase: AgentToolActivityPhase::Done,
             output: None,
             files: Vec::new(),
+            output_ref: None,
         },
     };
     let agent = AgentSnapshot {
@@ -1515,6 +1530,7 @@ fn workflow_group_progress_preserves_bottom_region_and_native_history() {
             name: "Read".to_owned(),
             arguments: serde_json::json!({"path": "workflow-source-sentinel.rs"}),
             workflow_origin: Some(read_origin.clone()),
+            output_ref: None,
         });
     tui.transcript_mut()
         .apply_agent_event(AgentEvent::ToolExecutionUpdate {
@@ -1523,6 +1539,7 @@ fn workflow_group_progress_preserves_bottom_region_and_native_history() {
             name: "Read".to_owned(),
             partial_result: ToolResult::ok("workflow-tool-progress-sentinel"),
             workflow_origin: Some(read_origin.clone()),
+            output_ref: None,
         });
     tui.transcript_mut()
         .apply_agent_event(AgentEvent::ToolExecutionFinished {
@@ -1531,6 +1548,7 @@ fn workflow_group_progress_preserves_bottom_region_and_native_history() {
             name: "Read".to_owned(),
             result: ToolResult::ok("workflow-tool-final-sentinel"),
             workflow_origin: Some(read_origin),
+            output_ref: None,
         });
 
     let delegate_origin = scrollback_workflow_origin("delegate-call");
@@ -1541,6 +1559,7 @@ fn workflow_group_progress_preserves_bottom_region_and_native_history() {
             name: "Delegate".to_owned(),
             arguments: serde_json::json!({"task": "delegate-sentinel"}),
             workflow_origin: Some(delegate_origin.clone()),
+            output_ref: None,
         });
     let delegate = scrollback_agent_snapshot("delegate-sentinel");
     tui.transcript_mut()
@@ -1558,6 +1577,7 @@ fn workflow_group_progress_preserves_bottom_region_and_native_history() {
             name: "DelegateSwarm".to_owned(),
             arguments: serde_json::json!({"tasks": ["swarm-child-sentinel"]}),
             workflow_origin: Some(swarm_origin.clone()),
+            output_ref: None,
         });
     let swarm = scrollback_swarm_snapshot(
         "swarm-sentinel",
@@ -1853,6 +1873,7 @@ fn restored_terminal_workflow_history_is_bounded_before_final_assistant_message(
                 "command": format!("cargo test restored-terminal-tool-{index}")
             }),
             workflow_origin: Some(origin.clone()),
+            output_ref: None,
         });
         pane.apply_agent_event(AgentEvent::ToolExecutionFinished {
             turn: 1,
@@ -1860,6 +1881,7 @@ fn restored_terminal_workflow_history_is_bounded_before_final_assistant_message(
             name: "Bash".to_owned(),
             result: ToolResult::ok(format!("restored-terminal-tool-{index}-done")),
             workflow_origin: Some(origin),
+            output_ref: None,
         });
     }
 
@@ -1872,6 +1894,7 @@ fn restored_terminal_workflow_history_is_bounded_before_final_assistant_message(
             name: "Delegate".to_owned(),
             arguments: serde_json::json!({"task": format!("restored-delegate-{index}")}),
             workflow_origin: Some(origin.clone()),
+            output_ref: None,
         });
         let agent = scrollback_agent_snapshot(&format!("restored-delegate-{index}"));
         pane.apply_agent_event(AgentEvent::DelegateStarted {

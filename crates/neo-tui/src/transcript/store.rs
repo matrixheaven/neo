@@ -322,6 +322,7 @@ impl TranscriptStore {
                 phase,
                 output,
                 files,
+                output_ref,
             } = &activity.kind
             else {
                 continue;
@@ -336,6 +337,7 @@ impl TranscriptStore {
                 phase: *phase,
                 output: output.clone(),
                 files: files.clone(),
+                output_ref: output_ref.clone(),
             };
             if !fact.is_terminal() {
                 continue;

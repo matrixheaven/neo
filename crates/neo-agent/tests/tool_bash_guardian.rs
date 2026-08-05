@@ -318,7 +318,7 @@ async fn background_output_is_persisted_by_guardian_in_agent_task_log() {
     let session = tempfile::tempdir().expect("session");
     let ctx = guarded_context(&workspace, ShellLimits::default())
         .with_agent_session_context(session.path(), "agent-test");
-    let started = execute_model_bash_for_runtime(
+    let (started, output_ref) = execute_model_bash_for_runtime(
         &ctx,
         serde_json::json!({
             "command": "printf persisted-output",
@@ -335,6 +335,22 @@ async fn background_output_is_persisted_by_guardian_in_agent_task_log() {
         .expect("task id")
         .to_owned();
 
+    // Backgrounded model Bash keeps its typed artifact reference on the
+    // immediate Finished event, keyed by the same task id the model saw.
+    let reference = output_ref.expect("backgrounded bash must carry a captured reference");
+    assert_eq!(reference.agent_id, "agent-test");
+    assert_eq!(reference.task_id, task_id);
+    let log = session
+        .path()
+        .join("agents")
+        .join("agent-test")
+        .join("tasks")
+        .join(format!("{task_id}.log"));
+    assert!(
+        log.exists(),
+        "the guardian must open the artifact before the start result returns"
+    );
+
     for _ in 0..100 {
         if ctx
             .background_tasks
@@ -346,23 +362,23 @@ async fn background_output_is_persisted_by_guardian_in_agent_task_log() {
         }
         tokio::time::sleep(Duration::from_millis(20)).await;
     }
-    let log = session
-        .path()
-        .join("agents")
-        .join("agent-test")
-        .join("tasks")
-        .join(format!("{task_id}.log"));
     assert_eq!(
-        std::fs::read_to_string(log).expect("read guardian task log"),
+        std::fs::read_to_string(&log).expect("read guardian task log"),
         "persisted-output"
     );
+    // Once the process exits, the artifact is complete with final counts.
+    let finished = neo_agent_core::session::ToolOutputStore::new(session.path().to_path_buf())
+        .metadata("agent-test", &task_id)
+        .expect("final artifact metadata");
+    assert!(finished.complete, "{finished:?}");
+    assert_eq!(finished.byte_len, "persisted-output".len() as u64);
 }
 
 #[tokio::test]
 async fn background_bash_clamps_unsupported_timeout() {
     let workspace = tempfile::tempdir().expect("workspace");
     let ctx = guarded_context(&workspace, ShellLimits::default());
-    let started = execute_model_bash_for_runtime(
+    let (started, _output_ref) = execute_model_bash_for_runtime(
         &ctx,
         serde_json::json!({
             "command": "printf completed",
@@ -596,7 +612,7 @@ async fn complete_agent_output_survives_preview_queue_pressure() {
     let session = tempfile::tempdir().expect("session");
     let ctx = guarded_context(&workspace, ShellLimits::default())
         .with_agent_session_context(session.path(), "agent-test");
-    let result = execute_model_bash_for_runtime(
+    let (result, _output_ref) = execute_model_bash_for_runtime(
         &ctx,
         serde_json::json!({
             "command": format!("yes preview-flood | head -c {FLOOD_BYTES}; printf '{TAIL_MARKER}'"),
@@ -690,7 +706,7 @@ async fn agent_bash_capture_append_failure_stops_process_with_diagnostic() {
     let session = tempfile::tempdir().expect("session");
     let ctx = guarded_context(&workspace, ShellLimits::default())
         .with_agent_session_context(session.path(), "agent-test");
-    let started = execute_model_bash_for_runtime(
+    let (started, _output_ref) = execute_model_bash_for_runtime(
         &ctx,
         serde_json::json!({
             "command": "sleep 1; printf 'flood\\n'; sleep 30",
@@ -769,7 +785,7 @@ async fn agent_bash_capture_preserves_output_emitted_before_cancellation() {
     let session = tempfile::tempdir().expect("session");
     let ctx = guarded_context(&workspace, ShellLimits::default())
         .with_agent_session_context(session.path(), "agent-test");
-    let started = execute_model_bash_for_runtime(
+    let (started, _output_ref) = execute_model_bash_for_runtime(
         &ctx,
         serde_json::json!({
             "command": "printf 'BEFORE_CANCEL_MARKER_9f2a'; sleep 30",

@@ -3222,6 +3222,7 @@ mod tests {
                 phase: AgentToolActivityPhase::Ongoing,
                 output: None,
                 files: Vec::new(),
+                output_ref: None,
             }),
             outcome: None,
         }

@@ -186,6 +186,7 @@ impl InteractiveController {
                         observed: None,
                     }),
                     capture_error: None,
+                    output_ref: None,
                 }
             }
             Err(error) => neo_agent_core::tools::ShellExecutionResult {
@@ -200,6 +201,7 @@ impl InteractiveController {
                 foreground_task_id: None,
                 resource_limit: None,
                 capture_error: None,
+                output_ref: None,
             },
         };
         self.finish_shell_command(shell.id, shell.command, result)
@@ -254,6 +256,7 @@ impl InteractiveController {
             truncated: result.truncated,
             origin: ShellCommandOrigin::UserShellMode,
             outcome: result.outcome.clone(),
+            output_ref: None,
         });
         let message = AgentMessage::shell_command(
             command,
@@ -415,6 +418,7 @@ impl InteractiveController {
                 foreground_task_id,
                 resource_limit: None,
                 capture_error: None,
+                output_ref: None,
             };
             self.finish_shell_command(shell.id, shell.command, result)
                 .await?;
@@ -462,6 +466,7 @@ impl InteractiveController {
                 foreground_task_id: shell.foreground_task_id,
                 resource_limit: None,
                 capture_error: None,
+                output_ref: None,
             };
             self.finish_shell_command(shell.id, shell.command, result)
                 .await?;

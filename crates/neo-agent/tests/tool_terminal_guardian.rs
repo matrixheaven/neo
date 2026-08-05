@@ -701,7 +701,7 @@ async fn bash_and_terminal_share_the_active_command_limit() {
         )
         .await
         .expect("terminal stop");
-    let result = queued
+    let (result, _output_ref) = queued
         .await
         .expect("join queued bash")
         .expect("queued bash after terminal release");
@@ -782,7 +782,7 @@ async fn terminal_session_holds_background_permit_until_process_exit() {
         tokio::time::sleep(Duration::from_millis(50)).await;
     }
 
-    let result = tokio::time::timeout(Duration::from_secs(10), queued)
+    let (result, _output_ref) = tokio::time::timeout(Duration::from_secs(10), queued)
         .await
         .expect("bash should start after terminal process exit")
         .expect("join queued bash")

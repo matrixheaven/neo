@@ -48,6 +48,7 @@ fn user_shell_finish_updates_existing_shell_run() {
         truncated: false,
         origin: ShellCommandOrigin::UserShellMode,
         outcome: ShellCommandOutcome::Completed,
+        output_ref: None,
     });
     let rendered = rendered(&mut pane);
     assert!(rendered.contains("me"));

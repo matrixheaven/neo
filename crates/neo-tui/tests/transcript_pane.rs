@@ -239,6 +239,7 @@ fn live_budget_truncation_keeps_recent_whole_blocks() {
             arguments: serde_json::json!({"path": path}),
 
             workflow_origin: None,
+            output_ref: None,
         });
     }
     pane.apply_agent_event(neo_agent_core::AgentEvent::ToolExecutionUpdate {
@@ -250,6 +251,7 @@ fn live_budget_truncation_keeps_recent_whole_blocks() {
         ),
 
         workflow_origin: None,
+        output_ref: None,
     });
 
     let update = pane.render_terminal_update(80, 8);
@@ -301,6 +303,7 @@ fn transcript_pane_renders_transcript_entries_in_one_ordered_frame() {
         arguments: serde_json::json!({ "command": "cargo test" }),
 
         workflow_origin: None,
+        output_ref: None,
     });
     transcript_pane.push_transcript(TranscriptEntry::assistant_message("streaming"));
 
@@ -339,6 +342,7 @@ fn transcript_pane_exposes_frame_ansi_lines_for_inspection() {
         arguments: serde_json::json!({ "command": "cargo test" }),
 
         workflow_origin: None,
+        output_ref: None,
     });
     let _ = transcript_pane.render_frame(80, 12);
 
@@ -505,6 +509,7 @@ fn transcript_pane_renders_inline_bash_approval_prompt() {
         arguments: serde_json::json!({ "command": "echo hello" }),
 
         workflow_origin: None,
+        output_ref: None,
     });
     transcript_pane.apply_agent_event(neo_agent_core::AgentEvent::ApprovalRequested {
         request: shell_request(
@@ -873,6 +878,7 @@ fn transcript_pane_places_approval_after_matching_tool_and_renders_resolution_li
         arguments: serde_json::json!({ "command": "printf 1" }),
 
         workflow_origin: None,
+        output_ref: None,
     });
     transcript_pane.apply_agent_event(neo_agent_core::AgentEvent::ToolExecutionStarted {
         turn: 1,
@@ -881,6 +887,7 @@ fn transcript_pane_places_approval_after_matching_tool_and_renders_resolution_li
         arguments: serde_json::json!({ "command": "printf 2" }),
 
         workflow_origin: None,
+        output_ref: None,
     });
     transcript_pane.apply_agent_event(neo_agent_core::AgentEvent::ApprovalRequested {
         request: shell_request("tool-1", "printf 1", None, shell_options()),
@@ -983,6 +990,7 @@ fn long_shell_result_lines_never_exceed_terminal_width() {
         }),
 
         workflow_origin: None,
+        output_ref: None,
     });
     transcript_pane.apply_agent_event(neo_agent_core::AgentEvent::ToolExecutionFinished {
         turn: 1,
@@ -991,6 +999,7 @@ fn long_shell_result_lines_never_exceed_terminal_width() {
         result: neo_agent_core::ToolResult::ok(long_memory_row),
 
         workflow_origin: None,
+        output_ref: None,
     });
 
     let width = 80_u16;
@@ -1026,6 +1035,7 @@ fn long_live_tool_output_lines_never_exceed_terminal_width() {
         }),
 
         workflow_origin: None,
+        output_ref: None,
     });
     transcript_pane.apply_agent_event(neo_agent_core::AgentEvent::ToolExecutionUpdate {
         turn: 1,
@@ -1034,6 +1044,7 @@ fn long_live_tool_output_lines_never_exceed_terminal_width() {
         partial_result: neo_agent_core::ToolResult::ok(long_memory_row),
 
         workflow_origin: None,
+        output_ref: None,
     });
 
     let width = 80_u16;
@@ -1223,6 +1234,7 @@ fn text_after_tool_starts_a_new_assistant_entry_after_the_tool() {
         arguments: serde_json::json!({ "command": "pwd" }),
 
         workflow_origin: None,
+        output_ref: None,
     });
     transcript_pane.apply_agent_event(neo_agent_core::AgentEvent::ToolExecutionFinished {
         turn: 1,
@@ -1231,6 +1243,7 @@ fn text_after_tool_starts_a_new_assistant_entry_after_the_tool() {
         result: neo_agent_core::ToolResult::ok("Cargo.toml"),
 
         workflow_origin: None,
+        output_ref: None,
     });
     transcript_pane.apply_agent_event(neo_agent_core::AgentEvent::TextDelta {
         turn: 1,
@@ -1272,6 +1285,7 @@ fn transcript_blocks_have_exactly_one_blank_row_between_neighbors() {
         arguments: serde_json::json!({ "command": "pwd" }),
 
         workflow_origin: None,
+        output_ref: None,
     });
     transcript_pane.apply_agent_event(neo_agent_core::AgentEvent::ToolExecutionFinished {
         turn: 1,
@@ -1280,6 +1294,7 @@ fn transcript_blocks_have_exactly_one_blank_row_between_neighbors() {
         result: neo_agent_core::ToolResult::ok("Cargo.toml"),
 
         workflow_origin: None,
+        output_ref: None,
     });
     transcript_pane.push_transcript(TranscriptEntry::thinking_complete("thinking two"));
     transcript_pane.push_transcript(TranscriptEntry::assistant_message("Final answer"));
@@ -1375,6 +1390,7 @@ fn transcript_pane_keeps_finished_tool_cards_in_the_same_frame_slot() {
         arguments: serde_json::json!({ "path": "README.md" }),
 
         workflow_origin: None,
+        output_ref: None,
     });
     let running = plain_frame(&mut transcript_pane, 80, 12);
     assert!(running.iter().any(|l| l.contains("Using Read (README.md)")));
@@ -1386,6 +1402,7 @@ fn transcript_pane_keeps_finished_tool_cards_in_the_same_frame_slot() {
         result: neo_agent_core::ToolResult::ok("line one\nline two"),
 
         workflow_origin: None,
+        output_ref: None,
     });
     let finished = plain_frame(&mut transcript_pane, 80, 12);
 
@@ -1440,6 +1457,7 @@ fn transcript_pane_frame_keeps_tool_card_and_streaming_assistant() {
         arguments: serde_json::json!({ "command": "cargo test" }),
 
         workflow_origin: None,
+        output_ref: None,
     });
     transcript_pane.push_transcript(TranscriptEntry::assistant_message("streaming"));
     let frame = plain_frame(&mut transcript_pane, 80, 6);
@@ -1474,6 +1492,7 @@ fn transcript_pane_updates_one_tool_run_entry_in_place() {
         arguments: serde_json::json!({ "path": "README.md" }),
 
         workflow_origin: None,
+        output_ref: None,
     });
     transcript_pane.apply_agent_event(neo_agent_core::AgentEvent::ToolExecutionFinished {
         turn: 1,
@@ -1482,6 +1501,7 @@ fn transcript_pane_updates_one_tool_run_entry_in_place() {
         result: neo_agent_core::ToolResult::ok("line one\nline two"),
 
         workflow_origin: None,
+        output_ref: None,
     });
 
     let tool_runs = transcript_pane
@@ -1512,6 +1532,7 @@ fn transcript_pane_keeps_running_tool_run_live() {
         arguments: serde_json::json!({ "command": "cargo test" }),
 
         workflow_origin: None,
+        output_ref: None,
     });
 
     let state = transcript_pane
@@ -1560,6 +1581,7 @@ fn transcript_pane_marks_declared_tool_call_as_queued_until_execution_starts() {
         arguments: serde_json::json!({ "command": "cargo test" }),
 
         workflow_origin: None,
+        output_ref: None,
     });
 
     let running = plain_frame(&mut transcript_pane, 80, 12);
@@ -1674,6 +1696,7 @@ fn transcript_does_not_render_duplicate_bash_queued_and_used_for_same_id() {
         truncated: false,
         origin: neo_agent_core::ShellCommandOrigin::ModelBashTool,
         outcome: neo_agent_core::ShellCommandOutcome::Completed,
+        output_ref: None,
     });
 
     let frame = plain_frame(&mut transcript_pane, 80, 16);
@@ -1715,6 +1738,7 @@ fn transcript_pane_records_tool_execution_updates_on_existing_run() {
         partial_result: neo_agent_core::ToolResult::ok("building crate"),
 
         workflow_origin: None,
+        output_ref: None,
     });
 
     let component = transcript_pane
@@ -1803,6 +1827,7 @@ fn skill_tool_call_renders_as_skill_activation_card_not_tool_card() {
         arguments: serde_json::json!({ "skill": "brainstorming" }),
 
         workflow_origin: None,
+        output_ref: None,
     });
     pane.apply_agent_event(neo_agent_core::AgentEvent::ToolExecutionFinished {
         turn: 1,
@@ -1811,6 +1836,7 @@ fn skill_tool_call_renders_as_skill_activation_card_not_tool_card() {
         result: neo_agent_core::ToolResult::ok("expanded skill body"),
 
         workflow_origin: None,
+        output_ref: None,
     });
     pane.apply_agent_event(neo_agent_core::AgentEvent::SkillInvocation {
         names: vec!["brainstorming".to_owned()],
@@ -1893,6 +1919,7 @@ fn failed_skill_tool_renders_semantic_failure_card() {
         result: neo_agent_core::ToolResult::error("skill `missing` is not available"),
 
         workflow_origin: None,
+        output_ref: None,
     });
     pane.apply_agent_event(neo_agent_core::AgentEvent::SkillInvocation {
         names: vec!["missing".to_owned()],
@@ -2618,6 +2645,7 @@ fn retry_reset_preserves_earlier_turn_live_entry() {
         arguments: serde_json::json!({ "path": "README.md" }),
 
         workflow_origin: None,
+        output_ref: None,
     });
     let older_id = pane.transcript().entry_ids()[0];
     pane.apply_agent_event(neo_agent_core::AgentEvent::MessageStarted {
@@ -2730,6 +2758,7 @@ fn replayed_instruction_epoch_has_identical_order_and_no_duplicate_card() {
                 result: neo_agent_core::ToolResult::ok("deferred by instruction epoch"),
 
                 workflow_origin: None,
+                output_ref: None,
             });
         }
         pane.apply_agent_event(neo_agent_core::AgentEvent::InstructionEpoch {
@@ -2744,6 +2773,7 @@ fn replayed_instruction_epoch_has_identical_order_and_no_duplicate_card() {
                 arguments: serde_json::json!({}),
 
                 workflow_origin: None,
+                output_ref: None,
             });
             pane.apply_agent_event(neo_agent_core::AgentEvent::ToolExecutionFinished {
                 turn: 1,
@@ -2752,6 +2782,7 @@ fn replayed_instruction_epoch_has_identical_order_and_no_duplicate_card() {
                 result: neo_agent_core::ToolResult::ok("done"),
 
                 workflow_origin: None,
+                output_ref: None,
             });
         }
     };
@@ -2863,6 +2894,7 @@ fn finalized_instruction_card_does_not_drift_after_later_updates() {
         arguments: serde_json::json!({ "path": "README.md" }),
 
         workflow_origin: None,
+        output_ref: None,
     });
     pane.apply_agent_event(neo_agent_core::AgentEvent::ToolExecutionFinished {
         turn: 1,
@@ -2871,6 +2903,7 @@ fn finalized_instruction_card_does_not_drift_after_later_updates() {
         result: neo_agent_core::ToolResult::ok("done"),
 
         workflow_origin: None,
+        output_ref: None,
     });
     pane.apply_agent_event(neo_agent_core::AgentEvent::TurnFinished {
         turn: 1,
@@ -2915,6 +2948,7 @@ fn list_delegates_renders_structured_rows_without_opaque_cursor() {
         arguments: serde_json::json!({}),
 
         workflow_origin: None,
+        output_ref: None,
     });
     pane.apply_agent_event(neo_agent_core::AgentEvent::ToolExecutionFinished {
         turn: 1,
@@ -2954,6 +2988,7 @@ fn list_delegates_renders_structured_rows_without_opaque_cursor() {
         })),
 
         workflow_origin: None,
+        output_ref: None,
     });
 
     let update = pane.render_terminal_update(80, 24);
@@ -3034,6 +3069,7 @@ fn sleep_renders_total_remaining_and_reason_without_duplicate_result() {
         }),
 
         workflow_origin: None,
+        output_ref: None,
     });
 
     let running = pane.render_terminal_update(80, 16);
@@ -3063,6 +3099,7 @@ fn sleep_renders_total_remaining_and_reason_without_duplicate_result() {
         result: neo_agent_core::ToolResult::ok("Waited 30 seconds: backoff before retry"),
 
         workflow_origin: None,
+        output_ref: None,
     });
     let finished = pane.render_terminal_update(80, 16);
     let finished_text = finished

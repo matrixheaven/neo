@@ -35,6 +35,7 @@ fn tool_activity(
             phase,
             output: None,
             files: Vec::new(),
+            output_ref: None,
         },
     }
 }
@@ -133,6 +134,7 @@ fn finish_test_tool(pane: &mut TranscriptPane) {
         arguments: serde_json::json!({ "path": "README.md" }),
 
         workflow_origin: None,
+        output_ref: None,
     });
     pane.apply_agent_event(neo_agent_core::AgentEvent::ToolExecutionFinished {
         turn: 1,
@@ -141,6 +143,7 @@ fn finish_test_tool(pane: &mut TranscriptPane) {
         result: neo_agent_core::ToolResult::ok("done"),
 
         workflow_origin: None,
+        output_ref: None,
     });
 }
 
@@ -307,6 +310,7 @@ fn terminal_tool_ignores_late_running_update() {
         arguments: serde_json::json!({ "path": "README.md" }),
 
         workflow_origin: None,
+        output_ref: None,
     });
 
     assert_eq!(

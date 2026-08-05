@@ -604,7 +604,8 @@ async fn bash_lifecycle_events_use_invocation_id() {
     let config = AgentConfig::for_model(harness.model())
         .with_workspace_root(dir.path())
         .expect("workspace root")
-        .with_permission_mode(PermissionMode::Yolo);
+        .with_permission_mode(PermissionMode::Yolo)
+        .with_session_directory(dir.path().join("session"));
     let handle = handle(
         config,
         &harness,
@@ -631,10 +632,40 @@ async fn bash_lifecycle_events_use_invocation_id() {
         event,
         AgentEvent::ShellCommandStarted { id, .. } if id == "inv_bash_lifecycle"
     )));
-    assert!(events.iter().any(|event| matches!(
-        event,
-        AgentEvent::ToolExecutionFinished { id, .. } if id == "inv_bash_lifecycle"
-    )));
+    let finished = events
+        .iter()
+        .find_map(|event| match event {
+            AgentEvent::ToolExecutionFinished { id, output_ref, .. }
+                if id == "inv_bash_lifecycle" =>
+            {
+                Some(output_ref)
+            }
+            _ => None,
+        })
+        .expect("finished event");
+    // Workflow direct tools run under the main agent reference: the finished
+    // event carries the typed artifact, complete with final metadata.
+    let reference = finished
+        .as_ref()
+        .expect("workflow direct bash must carry a captured output reference");
+    assert_eq!(reference.agent_id, neo_agent_core::session::MAIN_AGENT_ID);
+    assert!(reference.complete, "{reference:?}");
+    assert!(reference.byte_len > 0, "{reference:?}");
+    assert!(reference.line_count > 0, "{reference:?}");
+    // The artifact exists on disk with the recorded length.
+    let log = dir
+        .path()
+        .join("session")
+        .join("agents")
+        .join(&reference.agent_id)
+        .join("tasks")
+        .join(format!("{}.log", reference.task_id));
+    assert_eq!(
+        std::fs::metadata(&log).expect("artifact log").len(),
+        reference.byte_len,
+        "{}",
+        log.display()
+    );
 }
 
 #[tokio::test]

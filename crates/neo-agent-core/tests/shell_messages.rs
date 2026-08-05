@@ -80,6 +80,7 @@ fn shell_events_include_origin_and_outcome() {
         truncated: false,
         origin: ShellCommandOrigin::UserShellMode,
         outcome: ShellCommandOutcome::Completed,
+        output_ref: None,
     };
     let finished_json = serde_json::to_string(&finished).expect("serialize");
     assert!(finished_json.contains("Completed"));

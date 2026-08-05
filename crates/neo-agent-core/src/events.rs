@@ -7,6 +7,7 @@ use crate::multi_agent::{
     AgentLifecycleState, AgentProgressSnapshot, AgentSnapshot, SwarmAggregate, SwarmChildProgress,
     SwarmSnapshot,
 };
+use crate::session::ToolOutputRef;
 use crate::{
     AgentMessage, AgentToolCall, ApprovalRequest, ApprovalResolution, ShellCommandOutcome,
     ToolResult,
@@ -187,6 +188,11 @@ pub enum AgentEvent {
         arguments: serde_json::Value,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         workflow_origin: Option<crate::workflow::WorkflowExecutionOrigin>,
+        /// Typed complete-display-output artifact for this execution, when the
+        /// runtime captured one. Presentation metadata only: never enters
+        /// `ToolResult`, canonical messages, or provider requests.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        output_ref: Option<ToolOutputRef>,
     },
     ToolExecutionQueued {
         turn: u32,
@@ -209,6 +215,11 @@ pub enum AgentEvent {
         result: ToolResult,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         workflow_origin: Option<crate::workflow::WorkflowExecutionOrigin>,
+        /// Typed complete-display-output artifact for this execution, when the
+        /// runtime captured one. Presentation metadata only: never enters
+        /// `ToolResult`, canonical messages, or provider requests.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        output_ref: Option<ToolOutputRef>,
     },
     ToolExecutionUpdate {
         turn: u32,
@@ -217,6 +228,11 @@ pub enum AgentEvent {
         partial_result: ToolResult,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         workflow_origin: Option<crate::workflow::WorkflowExecutionOrigin>,
+        /// Typed complete-display-output artifact for this execution, when the
+        /// runtime captured one. Presentation metadata only: never enters
+        /// `ToolResult`, canonical messages, or provider requests.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        output_ref: Option<ToolOutputRef>,
     },
     SkillInvocation {
         names: Vec<String>,
@@ -285,6 +301,11 @@ pub enum AgentEvent {
         truncated: bool,
         origin: ShellCommandOrigin,
         outcome: ShellCommandOutcome,
+        /// Typed complete-display-output artifact for this command, when the
+        /// runtime captured one. Presentation metadata only: never enters
+        /// `ToolResult`, canonical messages, or provider requests.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        output_ref: Option<ToolOutputRef>,
     },
     TerminalSessionStarted {
         turn: u32,
@@ -294,6 +315,11 @@ pub enum AgentEvent {
         cwd: PathBuf,
         cols: u16,
         rows: u16,
+        /// Typed complete-display-output artifact for this session, when the
+        /// runtime captured one. One terminal process keeps one reference
+        /// across start/read/write/resize/stop tool calls.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        output_ref: Option<ToolOutputRef>,
     },
     TerminalSessionOutput {
         turn: u32,
@@ -301,6 +327,11 @@ pub enum AgentEvent {
         handle: String,
         output: String,
         truncated: bool,
+        /// Typed complete-display-output artifact for this session, when the
+        /// runtime captured one. One terminal process keeps one reference
+        /// across start/read/write/resize/stop tool calls.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        output_ref: Option<ToolOutputRef>,
     },
     TerminalSessionFinished {
         turn: u32,
@@ -308,6 +339,11 @@ pub enum AgentEvent {
         handle: String,
         status: String,
         exit_code: Option<i32>,
+        /// Typed complete-display-output artifact for this session, when the
+        /// runtime captured one. One terminal process keeps one reference
+        /// across start/read/write/resize/stop tool calls.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        output_ref: Option<ToolOutputRef>,
     },
     TokenUsage {
         turn: u32,

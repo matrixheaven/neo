@@ -53,6 +53,7 @@ fn running_delegate() -> AgentSnapshot {
                     phase: AgentToolActivityPhase::Done,
                     output: None,
                     files: Vec::new(),
+                    output_ref: None,
                 },
             },
             AgentActivityEntry {
@@ -63,6 +64,7 @@ fn running_delegate() -> AgentSnapshot {
                     phase: AgentToolActivityPhase::Failed,
                     output: None,
                     files: Vec::new(),
+                    output_ref: None,
                 },
             },
             AgentActivityEntry {
@@ -138,6 +140,7 @@ fn option_b_running_delegate() -> AgentSnapshot {
                 phase: AgentToolActivityPhase::Done,
                 output: None,
                 files: Vec::new(),
+                output_ref: None,
             },
         },
         AgentActivityEntry {
@@ -153,6 +156,7 @@ fn option_b_running_delegate() -> AgentSnapshot {
                     tail: true,
                 }),
                 files: Vec::new(),
+                output_ref: None,
             },
         },
         AgentActivityEntry {
@@ -415,6 +419,7 @@ fn compact_delegate_progress_replays_as_delegate_card() {
             phase: AgentToolActivityPhase::Done,
             output: None,
             files: Vec::new(),
+            output_ref: None,
         },
     });
     pane.apply_agent_event(AgentEvent::DelegateProgressUpdated {
@@ -789,6 +794,7 @@ fn option_b_expanded_swarm_preserves_full_child_transcripts() {
             phase: AgentToolActivityPhase::Done,
             output: None,
             files: Vec::new(),
+            output_ref: None,
         },
     }];
     iris.outcome = Some(AgentTerminalOutcome {
@@ -1044,6 +1050,7 @@ fn delegate_card_marks_unfinished_tool_as_using_with_neutral_marker() {
                 phase: AgentToolActivityPhase::Done,
                 output: None,
                 files: Vec::new(),
+                output_ref: None,
             },
         },
         AgentActivityEntry {
@@ -1056,6 +1063,7 @@ fn delegate_card_marks_unfinished_tool_as_using_with_neutral_marker() {
                 phase: AgentToolActivityPhase::Ongoing,
                 output: None,
                 files: Vec::new(),
+                output_ref: None,
             },
         },
     ];
@@ -1244,6 +1252,7 @@ fn delegate_card_trims_activity_to_recent_kimi_style_window() {
                 phase: AgentToolActivityPhase::Done,
                 output: None,
                 files: Vec::new(),
+                output_ref: None,
             },
         })
         .collect();
@@ -1449,6 +1458,7 @@ fn option_b_delegate_transcript_absorbs_matching_tool_header() {
         arguments: serde_json::json!({"task": "answer 5+5"}),
 
         workflow_origin: None,
+        output_ref: None,
     });
     pane.apply_agent_event(AgentEvent::DelegateStarted {
         turn: 11,
@@ -1485,6 +1495,7 @@ fn option_b_delegate_transcript_absorbs_late_tool_header_after_snapshot() {
         arguments: serde_json::json!({"task": "answer 5+5"}),
 
         workflow_origin: None,
+        output_ref: None,
     });
 
     let _ = pane.render_frame(140, 30);
@@ -1509,6 +1520,7 @@ fn option_b_delegate_absorption_suppresses_matching_tool_result_details() {
         arguments: serde_json::json!({"task": "answer 5+5"}),
 
         workflow_origin: None,
+        output_ref: None,
     });
     pane.apply_agent_event(AgentEvent::DelegateStarted {
         turn: 20,
@@ -1527,6 +1539,7 @@ fn option_b_delegate_absorption_suppresses_matching_tool_result_details() {
         ),
 
         workflow_origin: None,
+        output_ref: None,
     });
 
     let _ = pane.render_frame(140, 30);
@@ -1553,6 +1566,7 @@ fn option_b_delegate_absorption_restores_failed_tool_result() {
         arguments: serde_json::json!({"task": "answer 5+5"}),
 
         workflow_origin: None,
+        output_ref: None,
     });
     pane.apply_agent_event(AgentEvent::DelegateStarted {
         turn: 14,
@@ -1566,6 +1580,7 @@ fn option_b_delegate_absorption_restores_failed_tool_result() {
         result: neo_agent_core::ToolResult::error("delegate failed before snapshot settled"),
 
         workflow_origin: None,
+        output_ref: None,
     });
 
     let _ = pane.render_frame(140, 30);
@@ -1593,6 +1608,7 @@ fn option_b_delegate_absorption_distinguishes_completed_agent_from_failed_schema
         name: "Delegate".to_owned(),
         arguments: serde_json::json!({"task": "answer 5+5"}),
         workflow_origin: None,
+        output_ref: None,
     });
     pane.apply_agent_event(AgentEvent::DelegateStarted {
         turn: 18,
@@ -1617,6 +1633,7 @@ fn option_b_delegate_absorption_distinguishes_completed_agent_from_failed_schema
                 "schema_error": "required property `echoed` is missing"
             })),
         workflow_origin: None,
+        output_ref: None,
     });
 
     pane.set_tool_output_expanded(true);
@@ -1653,6 +1670,7 @@ fn option_b_delegate_absorption_restores_mismatched_tool_result_details() {
         arguments: serde_json::json!({"task": "answer 5+5"}),
 
         workflow_origin: None,
+        output_ref: None,
     });
     pane.apply_agent_event(AgentEvent::DelegateStarted {
         turn: 15,
@@ -1671,6 +1689,7 @@ fn option_b_delegate_absorption_restores_mismatched_tool_result_details() {
         ),
 
         workflow_origin: None,
+        output_ref: None,
     });
 
     let _ = pane.render_frame(140, 30);
@@ -1696,6 +1715,7 @@ fn option_b_delegate_absorption_keeps_completed_mismatched_tool_when_snapshot_ar
         arguments: serde_json::json!({"task": "answer 5+5"}),
 
         workflow_origin: None,
+        output_ref: None,
     });
     pane.apply_agent_event(AgentEvent::ToolExecutionFinished {
         turn: 17,
@@ -1709,6 +1729,7 @@ fn option_b_delegate_absorption_keeps_completed_mismatched_tool_when_snapshot_ar
         ),
 
         workflow_origin: None,
+        output_ref: None,
     });
     pane.apply_agent_event(AgentEvent::DelegateStarted {
         turn: 17,
@@ -1745,6 +1766,7 @@ fn option_b_delegate_group_keeps_unmatched_running_tool_header() {
         arguments: serde_json::json!({"task": "6*7"}),
 
         workflow_origin: None,
+        output_ref: None,
     });
     pane.apply_agent_event(AgentEvent::ToolExecutionStarted {
         turn: 22,
@@ -1753,6 +1775,7 @@ fn option_b_delegate_group_keeps_unmatched_running_tool_header() {
         arguments: serde_json::json!({"task": "7*8"}),
 
         workflow_origin: None,
+        output_ref: None,
     });
     pane.apply_agent_event(AgentEvent::DelegateStarted {
         turn: 22,
@@ -1788,6 +1811,7 @@ fn option_b_delegate_group_suppresses_matching_finished_tool_and_keeps_failed_on
         arguments: serde_json::json!({"task": "6*7"}),
 
         workflow_origin: None,
+        output_ref: None,
     });
     pane.apply_agent_event(AgentEvent::ToolExecutionStarted {
         turn: 23,
@@ -1796,6 +1820,7 @@ fn option_b_delegate_group_suppresses_matching_finished_tool_and_keeps_failed_on
         arguments: serde_json::json!({"task": "7*8"}),
 
         workflow_origin: None,
+        output_ref: None,
     });
     pane.apply_agent_event(AgentEvent::DelegateStarted {
         turn: 23,
@@ -1814,6 +1839,7 @@ fn option_b_delegate_group_suppresses_matching_finished_tool_and_keeps_failed_on
         ),
 
         workflow_origin: None,
+        output_ref: None,
     });
     pane.apply_agent_event(AgentEvent::ToolExecutionFinished {
         turn: 23,
@@ -1822,6 +1848,7 @@ fn option_b_delegate_group_suppresses_matching_finished_tool_and_keeps_failed_on
         result: neo_agent_core::ToolResult::error("second delegate failed before starting"),
 
         workflow_origin: None,
+        output_ref: None,
     });
 
     let _ = pane.render_frame(160, 40);
@@ -1868,6 +1895,7 @@ fn option_b_delegate_group_absorbs_matching_tool_headers() {
         arguments: serde_json::json!({"task": "6*7"}),
 
         workflow_origin: None,
+        output_ref: None,
     });
     pane.apply_agent_event(AgentEvent::ToolExecutionStarted {
         turn: 12,
@@ -1876,6 +1904,7 @@ fn option_b_delegate_group_absorbs_matching_tool_headers() {
         arguments: serde_json::json!({"task": "7*8"}),
 
         workflow_origin: None,
+        output_ref: None,
     });
     pane.apply_agent_event(AgentEvent::DelegateStarted {
         turn: 12,
@@ -1921,6 +1950,7 @@ fn option_b_swarm_transcript_absorbs_matching_tool_header() {
         }),
 
         workflow_origin: None,
+        output_ref: None,
     });
     pane.apply_agent_event(AgentEvent::DelegateSwarmStarted {
         turn: 13,
@@ -1961,6 +1991,7 @@ fn option_b_swarm_absorption_suppresses_matching_tool_result_details() {
         }),
 
         workflow_origin: None,
+        output_ref: None,
     });
     pane.apply_agent_event(AgentEvent::DelegateSwarmStarted {
         turn: 21,
@@ -1979,6 +2010,7 @@ fn option_b_swarm_absorption_suppresses_matching_tool_result_details() {
         ),
 
         workflow_origin: None,
+        output_ref: None,
     });
 
     let _ = pane.render_frame(160, 30);
@@ -2013,6 +2045,7 @@ fn option_b_swarm_absorption_restores_failed_tool_result() {
         }),
 
         workflow_origin: None,
+        output_ref: None,
     });
     pane.apply_agent_event(AgentEvent::DelegateSwarmStarted {
         turn: 18,
@@ -2026,6 +2059,7 @@ fn option_b_swarm_absorption_restores_failed_tool_result() {
         result: neo_agent_core::ToolResult::error("swarm failed before returning ids"),
 
         workflow_origin: None,
+        output_ref: None,
     });
 
     let _ = pane.render_frame(160, 30);
@@ -2059,6 +2093,7 @@ fn option_b_swarm_absorption_keeps_completed_mismatched_tool_when_snapshot_arriv
         }),
 
         workflow_origin: None,
+        output_ref: None,
     });
     pane.apply_agent_event(AgentEvent::ToolExecutionFinished {
         turn: 19,
@@ -2072,6 +2107,7 @@ fn option_b_swarm_absorption_keeps_completed_mismatched_tool_when_snapshot_arriv
         ),
 
         workflow_origin: None,
+        output_ref: None,
     });
     pane.apply_agent_event(AgentEvent::DelegateSwarmStarted {
         turn: 19,
@@ -2519,6 +2555,7 @@ fn swarm_card_freezes_stale_running_child_progress_and_marks_waiting() {
             phase: AgentToolActivityPhase::Ongoing,
             output: None,
             files: Vec::new(),
+            output_ref: None,
         },
     }];
     let children = vec![SwarmChildSnapshot {
@@ -2581,6 +2618,7 @@ fn delegate_and_swarm_render_same_bounded_shell_summary() {
             },
             output: None,
             files: Vec::new(),
+            output_ref: None,
         },
     }];
 
@@ -2688,6 +2726,7 @@ fn delegate_and_swarm_render_same_bounded_shell_summary() {
             phase: AgentToolActivityPhase::Ongoing,
             output: None,
             files: Vec::new(),
+            output_ref: None,
         },
     }];
     let width = 160;
@@ -3002,6 +3041,7 @@ fn swarm_card_child_row_prefers_latest_activity_over_full_prompt() {
                 phase: AgentToolActivityPhase::Done,
                 output: None,
                 files: Vec::new(),
+                output_ref: None,
             },
         });
 
@@ -3044,6 +3084,7 @@ fn delegate_card_renders_ongoing_tool_from_explicit_phase_with_output_preview() 
                 tail: true,
             }),
             files: Vec::new(),
+            output_ref: None,
         },
     }];
 
@@ -3131,6 +3172,7 @@ fn swarm_progress_preserves_started_time_for_live_elapsed_ticks() {
             phase: AgentToolActivityPhase::Ongoing,
             output: None,
             files: Vec::new(),
+            output_ref: None,
         },
     });
 
@@ -3218,6 +3260,7 @@ fn same_turn_root_delegates_render_as_one_live_group() {
             phase: AgentToolActivityPhase::Done,
             output: None,
             files: Vec::new(),
+            output_ref: None,
         },
     }];
     second.tool_count = 1;
@@ -3312,6 +3355,7 @@ fn swarm_progress_starts_at_zero_then_moves_after_running_activity() {
             phase: AgentToolActivityPhase::Done,
             output: None,
             files: Vec::new(),
+            output_ref: None,
         },
     });
     card.update(running);
@@ -3340,6 +3384,7 @@ fn expanded_swarm_child_uses_delegate_activity_rules() {
                     tail: false,
                 }),
                 files: Vec::new(),
+                output_ref: None,
             },
         },
         AgentActivityEntry {
@@ -3546,6 +3591,7 @@ fn delegate_card_layout_is_unchanged_by_batch_write_summary() {
                 phase: AgentToolActivityPhase::Done,
                 output: None,
                 files: Vec::new(),
+                output_ref: None,
             },
         },
         AgentActivityEntry {
@@ -3556,6 +3602,7 @@ fn delegate_card_layout_is_unchanged_by_batch_write_summary() {
                 phase: AgentToolActivityPhase::Done,
                 output: None,
                 files: Vec::new(),
+                output_ref: None,
             },
         },
     ];
@@ -3598,6 +3645,7 @@ fn delegate_card_layout_is_unchanged_by_batch_write_summary() {
             phase: AgentToolActivityPhase::Ongoing,
             output: None,
             files: Vec::new(),
+            output_ref: None,
         },
     }];
 
@@ -3672,6 +3720,7 @@ fn delegate_family_renders_edit_write_file_rows() {
                 phase: AgentToolActivityPhase::Done,
                 output: None,
                 files: edit_files,
+                output_ref: None,
             },
         },
         AgentActivityEntry {
@@ -3682,6 +3731,7 @@ fn delegate_family_renders_edit_write_file_rows() {
                 phase: AgentToolActivityPhase::Failed,
                 output: None,
                 files: write_files,
+                output_ref: None,
             },
         },
     ];
@@ -3746,6 +3796,7 @@ fn delegate_family_renders_edit_write_file_rows() {
                 removed: Some(98),
                 message: None,
             }],
+            output_ref: None,
         },
     }];
     let narrow_rows =
@@ -3808,6 +3859,7 @@ fn delegate_family_tool_activity_uses_theme_and_collapsed_file_hint() {
             phase,
             output: None,
             files,
+            output_ref: None,
         },
     };
 

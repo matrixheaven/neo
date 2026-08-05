@@ -22,6 +22,7 @@ use std::{
     path::{Path, PathBuf},
 };
 
+use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
 use super::atomic_file::{replace_existing_file_atomic_with_status, write_file_atomic_create_new};
@@ -33,7 +34,7 @@ const INDEX_HEADER: &str = "neo-tool-output-index 1";
 const INDEX_READ_BUFFER_SIZE: usize = 64 * 1024;
 
 /// Snapshot of one task's complete output artifact.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default, JsonSchema)]
 #[serde(default)]
 pub struct ToolOutputRef {
     pub agent_id: String,

@@ -147,7 +147,7 @@ async fn bash_timeout_secs_clamps_to_supported_range() {
         .with_access(ToolAccess::all());
 
     for (timeout_secs, effective_secs) in [(299, 300), (3_601, 3_600)] {
-        let result = execute_model_bash_for_runtime(
+        let (result, _output_ref) = execute_model_bash_for_runtime(
             &context,
             json!({"command": "printf ready", "timeout_secs": timeout_secs}),
         )
@@ -164,7 +164,7 @@ async fn bash_timeout_secs_clamps_to_supported_range() {
     }
 
     for timeout_secs in [300, 3_600] {
-        let result = execute_model_bash_for_runtime(
+        let (result, _output_ref) = execute_model_bash_for_runtime(
             &context,
             json!({"command": "printf ready", "timeout_secs": timeout_secs}),
         )

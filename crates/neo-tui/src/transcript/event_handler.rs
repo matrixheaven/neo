@@ -1,5 +1,6 @@
 use std::borrow::Borrow;
 
+use neo_agent_core::session::ToolOutputRef;
 use neo_agent_core::workflow::WorkflowExecutionOrigin;
 use neo_agent_core::{
     AgentEvent, AgentToolCall, ShellCommandOrigin, ShellCommandOutcome, ToolResult,
@@ -425,12 +426,14 @@ impl TranscriptPane {
                 name,
                 arguments,
                 workflow_origin,
+                output_ref,
             } => {
                 self.start_tool_execution(
                     *turn,
                     id,
                     name.clone(),
                     arguments,
+                    output_ref.clone(),
                     workflow_origin.as_ref(),
                 );
                 true
@@ -471,6 +474,7 @@ impl TranscriptPane {
                 name,
                 partial_result,
                 workflow_origin,
+                output_ref,
             } => {
                 if self.transcript.has_shell_run(id) {
                     self.update_shell_run(id, partial_result.clone());
@@ -480,6 +484,7 @@ impl TranscriptPane {
                         id,
                         name.clone(),
                         partial_result.clone(),
+                        output_ref.clone(),
                         workflow_origin.as_ref(),
                     );
                 }
@@ -491,12 +496,14 @@ impl TranscriptPane {
                 name,
                 result,
                 workflow_origin,
+                output_ref,
             } => {
                 self.finish_tool_execution(
                     *turn,
                     id.clone(),
                     name.clone(),
                     result.clone(),
+                    output_ref.clone(),
                     workflow_origin.as_ref(),
                 );
                 true
@@ -811,6 +818,7 @@ impl TranscriptPane {
         id: &str,
         name: String,
         arguments: &serde_json::Value,
+        output_ref: Option<ToolOutputRef>,
         workflow_origin: Option<&WorkflowExecutionOrigin>,
     ) {
         let arguments = self
@@ -839,11 +847,27 @@ impl TranscriptPane {
             {
                 self.streaming_tool_args.remove(id);
             }
+            self.attach_tool_output_ref(id, output_ref);
             return;
         }
         self.remember_tool_call(turn, id, &name);
         self.upsert_tool(id, name, Some(arguments), ToolStatusKind::Running);
+        self.attach_tool_output_ref(id, output_ref);
         self.mark_dirty();
+    }
+
+    /// Attach the typed complete-display-output reference to the tool entry
+    /// (a `ToolRun` card or a Workflow direct tool).
+    fn attach_tool_output_ref(&mut self, id: &str, output_ref: Option<ToolOutputRef>) {
+        if output_ref.is_none() {
+            return;
+        }
+        if self
+            .transcript
+            .mutate_tool(id, |tool| tool.attach_output_ref(output_ref))
+        {
+            self.mark_dirty();
+        }
     }
 
     fn queue_tool_execution(
@@ -895,6 +919,7 @@ impl TranscriptPane {
         id: &str,
         name: String,
         partial_result: ToolResult,
+        output_ref: Option<ToolOutputRef>,
         workflow_origin: Option<&WorkflowExecutionOrigin>,
     ) {
         if let Some(workflow_origin) = workflow_origin {
@@ -917,6 +942,7 @@ impl TranscriptPane {
             self.remember_tool_call(turn, id, &name);
             self.upsert_tool(id, name.clone(), None, ToolStatusKind::Running);
         }
+        self.attach_tool_output_ref(id, output_ref);
         let is_structured_mutation = matches!(name.as_str(), "Edit" | "Write");
         let details = partial_result.details.clone();
         let content = partial_result.content;
@@ -952,6 +978,7 @@ impl TranscriptPane {
         id: String,
         name: String,
         result: ToolResult,
+        output_ref: Option<ToolOutputRef>,
         workflow_origin: Option<&WorkflowExecutionOrigin>,
     ) {
         if is_skill_tool(&name) {
@@ -983,6 +1010,7 @@ impl TranscriptPane {
             self.upsert_tool(&id, name, None, ToolStatusKind::Running);
         }
         self.streaming_tool_args.remove(&id);
+        self.attach_tool_output_ref(&id, output_ref);
         let is_error = result.is_error;
         let details_for_check = result.details.clone();
         let details = result.details;
@@ -1078,6 +1106,7 @@ impl TranscriptPane {
             stderr,
             truncated,
             outcome,
+            output_ref,
             ..
         } = event
         else {
@@ -1086,6 +1115,7 @@ impl TranscriptPane {
         if !self.transcript.has_tool(id) {
             return;
         }
+        self.attach_tool_output_ref(id, output_ref.clone());
         let detail =
             shell_finished_detail(*exit_code, *signal, stdout, stderr, *truncated, outcome);
         let changed = self.transcript.mutate_tool(id, |tool| {

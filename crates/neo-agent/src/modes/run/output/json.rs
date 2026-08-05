@@ -203,6 +203,7 @@ impl StableJsonState {
                 name,
                 arguments,
                 workflow_origin: _,
+                output_ref: _,
             } => Some(json!({
                 "type": "tool_execution_start",
                 "turn": turn,
@@ -216,6 +217,7 @@ impl StableJsonState {
                 name,
                 partial_result,
                 workflow_origin: _,
+                output_ref: _,
             } => Some(json!({
                 "type": "tool_execution_update",
                 "turn": turn,
@@ -229,6 +231,7 @@ impl StableJsonState {
                 name,
                 result,
                 workflow_origin: _,
+                output_ref: _,
             } => {
                 let result_message = json!({
                     "role": "tool",

@@ -686,6 +686,7 @@ fn refresh_git_status_now_updates_after_write_tool_finished() {
         name: "Write".to_owned(),
         result: ToolResult::ok("wrote file"),
         workflow_origin: None,
+        output_ref: None,
     });
 
     assert_eq!(controller.chrome().git_status_label(), Some("main [+2 -1]"));
@@ -712,6 +713,7 @@ fn refresh_git_status_now_updates_after_edit_tool_finished() {
         name: "Edit".to_owned(),
         result: ToolResult::ok("edited file"),
         workflow_origin: None,
+        output_ref: None,
     });
 
     assert_eq!(controller.chrome().git_status_label(), Some("main [+3 -2]"));
@@ -753,6 +755,7 @@ fn refresh_git_status_now_updates_after_shell_and_terminal_finished() {
         truncated: false,
         origin: neo_agent_core::ShellCommandOrigin::ModelBashTool,
         outcome: neo_agent_core::ShellCommandOutcome::Completed,
+        output_ref: None,
     });
     assert_eq!(controller.chrome().git_status_label(), Some("main [↑1]"));
 
@@ -761,6 +764,7 @@ fn refresh_git_status_now_updates_after_shell_and_terminal_finished() {
         id: "terminal-1".to_owned(),
         handle: "terminal".to_owned(),
         status: "exited".to_owned(),
+        output_ref: None,
         exit_code: Some(0),
     });
     assert_eq!(controller.chrome().git_status_label(), Some("main"));
@@ -966,6 +970,7 @@ fn transcript_pane_exposes_live_rows_for_neo_tui_draw() {
         name: "Bash".to_owned(),
         arguments: serde_json::json!({ "command": "cargo test" }),
         workflow_origin: None,
+        output_ref: None,
     });
 
     let lines = compose_tui_frame(&app, &mut transcript, 80, 12).expect("non-zero terminal size");
@@ -1188,6 +1193,7 @@ fn task_stop_for_question_closes_pending_question_overlay() {
             "status": "stopped"
         })),
         workflow_origin: None,
+        output_ref: None,
     });
 
     assert!(!controller.chrome().question_dialog_is_focused());
@@ -1217,6 +1223,7 @@ fn neo_tui_draw_composes_body_then_chrome_in_one_frame() {
         name: "Bash".to_owned(),
         arguments: serde_json::json!({ "command": "cargo test" }),
         workflow_origin: None,
+        output_ref: None,
     });
 
     let lines = compose_tui_frame(&app, &mut transcript, 80, 20)
@@ -1304,6 +1311,7 @@ async fn controller_snapshot_uses_transcript_tool_card_rendering() {
                     name: "Read".to_owned(),
                     arguments: serde_json::json!({ "path": "README.md" }),
                     workflow_origin: None,
+                    output_ref: None,
                 },
                 AgentEvent::ToolExecutionFinished {
                     turn: 1,
@@ -1311,6 +1319,7 @@ async fn controller_snapshot_uses_transcript_tool_card_rendering() {
                     name: "Read".to_owned(),
                     result: ToolResult::ok("line one\nline two"),
                     workflow_origin: None,
+                    output_ref: None,
                 },
             ])
         },
@@ -2365,6 +2374,7 @@ async fn ctrl_o_renders_before_queued_tool_finish() {
                 name: "Write".to_owned(),
                 result: ToolResult::ok("write complete"),
                 workflow_origin: None,
+                output_ref: None,
             });
             let sender = finish_queued_tx.lock().expect("finish sender lock").take();
             if let Some(sender) = sender {
@@ -2401,6 +2411,7 @@ async fn ctrl_o_renders_before_queued_tool_finish() {
                 "content": content,
             }),
             workflow_origin: None,
+            output_ref: None,
         });
     controller.start_turn_with_prompt_origin(Vec::new(), MessageOrigin::User);
     finish_queued_rx.await.expect("finish event queued");
@@ -3211,6 +3222,7 @@ async fn event_loop_ctrl_c_clears_stale_working_state_before_exit_confirmation()
             name: "AskUserQuestion".to_owned(),
             arguments: serde_json::json!({ "questions": [] }),
             workflow_origin: None,
+            output_ref: None,
         });
     assert!(controller.chrome().working_label().is_some());
 
@@ -6219,6 +6231,7 @@ async fn tall_transcript_keeps_prompt_input_on_normal_screen() {
             name: "Read".to_owned(),
             arguments: serde_json::json!({ "path": "README.md" }),
             workflow_origin: None,
+            output_ref: None,
         });
     controller
         .transcript_mut()
@@ -6228,6 +6241,7 @@ async fn tall_transcript_keeps_prompt_input_on_normal_screen() {
             name: "Read".to_owned(),
             result: ToolResult::ok("committed expandable content"),
             workflow_origin: None,
+            output_ref: None,
         });
     let committed = controller.tui.render_terminal_frame(80, 24);
     controller.tui.acknowledge_history(&committed);
@@ -6243,6 +6257,7 @@ async fn tall_transcript_keeps_prompt_input_on_normal_screen() {
             name: "Bash".to_owned(),
             arguments: serde_json::json!({ "command": "overflow-controller-command" }),
             workflow_origin: None,
+            output_ref: None,
         });
     let body = (0..40)
         .map(|index| format!("overflow-controller-sentinel-{index:02}"))
@@ -6256,6 +6271,7 @@ async fn tall_transcript_keeps_prompt_input_on_normal_screen() {
             name: "Bash".to_owned(),
             partial_result: ToolResult::ok(body),
             workflow_origin: None,
+            output_ref: None,
         });
 
     let frame = controller.tui.render_terminal_frame(40, 8);
@@ -6319,6 +6335,7 @@ async fn ctrl_o_enters_and_leaves_transcript_browser() {
             name: "Read".to_owned(),
             arguments: serde_json::json!({ "path": "README.md" }),
             workflow_origin: None,
+            output_ref: None,
         });
     controller
         .transcript_mut()
@@ -6328,6 +6345,7 @@ async fn ctrl_o_enters_and_leaves_transcript_browser() {
             name: "Read".to_owned(),
             result: ToolResult::ok("expanded file content"),
             workflow_origin: None,
+            output_ref: None,
         });
     let frame = controller.tui.render_terminal_frame(80, 24);
     controller.tui.acknowledge_history(&frame);
@@ -6527,6 +6545,7 @@ async fn transcript_browser_interrupt_cancels_active_turn() {
             name: "Read".to_owned(),
             arguments: serde_json::json!({ "path": "README.md" }),
             workflow_origin: None,
+            output_ref: None,
         });
     controller
         .transcript_mut()
@@ -6536,6 +6555,7 @@ async fn transcript_browser_interrupt_cancels_active_turn() {
             name: "Read".to_owned(),
             result: ToolResult::ok("expanded file content"),
             workflow_origin: None,
+            output_ref: None,
         });
     let frame = controller.tui.render_terminal_frame(80, 24);
     controller.tui.acknowledge_history(&frame);
@@ -8632,6 +8652,7 @@ fn replay_session_into_transcript_does_not_carry_tool_lifecycle_into_next_assist
             name: "Read".to_owned(),
             arguments: serde_json::json!({"path": "ordered.txt"}),
             workflow_origin: None,
+            output_ref: None,
         },
         AgentEvent::ToolExecutionFinished {
             turn: 1,
@@ -8639,6 +8660,7 @@ fn replay_session_into_transcript_does_not_carry_tool_lifecycle_into_next_assist
             name: "Read".to_owned(),
             result: neo_agent_core::ToolResult::ok("ordered-result"),
             workflow_origin: None,
+            output_ref: None,
         },
         AgentEvent::MessageAppended {
             message: AgentMessage::tool_result(
@@ -8793,6 +8815,7 @@ fn replay_exit_plan_mode_uses_only_persisted_snapshot_details() {
                 name: "ExitPlanMode".to_owned(),
                 arguments: serde_json::json!({"plan_summary": "Ready"}),
                 workflow_origin: None,
+                output_ref: None,
             },
             AgentEvent::ToolExecutionFinished {
                 turn: 1,
@@ -8805,6 +8828,7 @@ fn replay_exit_plan_mode_uses_only_persisted_snapshot_details() {
                     }),
                 ),
                 workflow_origin: None,
+                output_ref: None,
             },
             AgentEvent::MessageAppended {
                 message: AgentMessage::tool_result(
@@ -9340,6 +9364,7 @@ fn interleaved_replay_execution_events() -> Vec<AgentEvent> {
             name: "Read".to_owned(),
             arguments: serde_json::json!({ "path": "first-order.txt" }),
             workflow_origin: None,
+            output_ref: None,
         },
         AgentEvent::ToolExecutionFinished {
             turn: 2,
@@ -9347,6 +9372,7 @@ fn interleaved_replay_execution_events() -> Vec<AgentEvent> {
             name: "Read".to_owned(),
             result: neo_agent_core::ToolResult::ok("first result"),
             workflow_origin: None,
+            output_ref: None,
         },
         AgentEvent::ToolExecutionStarted {
             turn: 2,
@@ -9354,6 +9380,7 @@ fn interleaved_replay_execution_events() -> Vec<AgentEvent> {
             name: "Delegate".to_owned(),
             arguments: serde_json::json!({ "task": "failed delegate marker" }),
             workflow_origin: None,
+            output_ref: None,
         },
         AgentEvent::ToolExecutionFinished {
             turn: 2,
@@ -9361,6 +9388,7 @@ fn interleaved_replay_execution_events() -> Vec<AgentEvent> {
             name: "Delegate".to_owned(),
             result: neo_agent_core::ToolResult::error("failed delegate marker"),
             workflow_origin: None,
+            output_ref: None,
         },
         AgentEvent::ToolExecutionStarted {
             turn: 2,
@@ -9368,6 +9396,7 @@ fn interleaved_replay_execution_events() -> Vec<AgentEvent> {
             name: "Bash".to_owned(),
             arguments: serde_json::json!({ "command": "later-order-command" }),
             workflow_origin: None,
+            output_ref: None,
         },
         AgentEvent::ToolExecutionFinished {
             turn: 2,
@@ -9375,6 +9404,7 @@ fn interleaved_replay_execution_events() -> Vec<AgentEvent> {
             name: "Bash".to_owned(),
             result: neo_agent_core::ToolResult::ok("later result"),
             workflow_origin: None,
+            output_ref: None,
         },
     ]
 }
@@ -11813,6 +11843,7 @@ fn idle_workflow_events_do_not_set_the_foreground_working_footer() {
                     name: "Bash".to_owned(),
                     arguments: serde_json::json!({"command": "cargo --version"}),
                     workflow_origin: None,
+                    output_ref: None,
                 },
             }),
         ))
@@ -13218,6 +13249,7 @@ fn terminal_exit_commits_interrupted_live_entries_before_leave() {
         name: "Write".to_owned(),
         arguments: serde_json::json!({"path": "notes.txt", "content": "draft"}),
         workflow_origin: None,
+        output_ref: None,
     });
     controller.tui.transcript_mut().start_assistant_message();
     controller
@@ -16487,6 +16519,7 @@ fn completed_shell_result(
         foreground_task_id: None,
         resource_limit: None,
         capture_error: None,
+        output_ref: None,
     }
 }
 

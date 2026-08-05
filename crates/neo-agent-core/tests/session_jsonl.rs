@@ -380,6 +380,7 @@ fn compact_delegate_progress_events_deserialize_and_do_not_replay_messages() {
                 removed: None,
                 message: None,
             }],
+            output_ref: None,
         }),
         outcome: None,
     };
@@ -1594,6 +1595,7 @@ async fn queue_metadata_never_enters_tool_result_or_replayed_model_messages() {
             name: "Bash".to_owned(),
             arguments: json!({"command": "printf ready"}),
             workflow_origin: None,
+            output_ref: None,
         },
         AgentEvent::ToolExecutionFinished {
             turn: 1,
@@ -1606,6 +1608,7 @@ async fn queue_metadata_never_enters_tool_result_or_replayed_model_messages() {
                 "stderr": "",
             })),
             workflow_origin: None,
+            output_ref: None,
         },
         AgentEvent::MessageAppended {
             message: AgentMessage::assistant(
@@ -1723,6 +1726,7 @@ fn queued_shell_agent_snapshot(
                 },
                 output: None,
                 files: Vec::new(),
+                output_ref: None,
             },
         }],
         prior_messages: Vec::new(),
@@ -1779,4 +1783,155 @@ fn assert_phase_queue_stripped(phase: &AgentToolActivityPhase) {
         | AgentToolActivityPhase::Done
         | AgentToolActivityPhase::Failed => {}
     }
+}
+
+#[tokio::test]
+async fn tool_output_reference_is_optional_and_round_trips() {
+    use neo_agent_core::ShellCommandOrigin;
+    use neo_agent_core::ShellCommandOutcome;
+    use neo_agent_core::ToolResult;
+    use neo_agent_core::session::ToolOutputRef;
+
+    let dir = tempfile::tempdir().expect("tempdir");
+    let path = dir.path().join("session.jsonl");
+    let mut writer = JsonlSessionWriter::create(&path)
+        .await
+        .expect("create session");
+    let complete = ToolOutputRef {
+        agent_id: "main".to_owned(),
+        task_id: "bash-1".to_owned(),
+        byte_len: 4096,
+        line_count: 12,
+        complete: true,
+    };
+    let incomplete = ToolOutputRef {
+        agent_id: "child-a".to_owned(),
+        task_id: "terminal-abc".to_owned(),
+        byte_len: 1024,
+        line_count: 3,
+        complete: false,
+    };
+    let events = vec![
+        AgentEvent::ToolExecutionStarted {
+            turn: 1,
+            id: "call-bash".to_owned(),
+            name: "Bash".to_owned(),
+            arguments: json!({"command": "printf round-trip"}),
+            workflow_origin: None,
+            output_ref: Some(complete.clone()),
+        },
+        AgentEvent::ToolExecutionUpdate {
+            turn: 1,
+            id: "call-bash".to_owned(),
+            name: "Bash".to_owned(),
+            partial_result: ToolResult::ok("progress"),
+            workflow_origin: None,
+            output_ref: Some(incomplete.clone()),
+        },
+        AgentEvent::ToolExecutionFinished {
+            turn: 1,
+            id: "call-bash".to_owned(),
+            name: "Bash".to_owned(),
+            result: ToolResult::ok("done"),
+            workflow_origin: None,
+            output_ref: Some(complete.clone()),
+        },
+        AgentEvent::ShellCommandFinished {
+            turn: 1,
+            id: "call-bash".to_owned(),
+            exit_code: Some(0),
+            signal: None,
+            stdout: "done".to_owned(),
+            stderr: String::new(),
+            truncated: false,
+            origin: ShellCommandOrigin::ModelBashTool,
+            outcome: ShellCommandOutcome::Completed,
+            output_ref: Some(complete.clone()),
+        },
+        AgentEvent::TerminalSessionStarted {
+            turn: 1,
+            id: "call-term".to_owned(),
+            handle: "abc".to_owned(),
+            command: "sleep 1".to_owned(),
+            cwd: std::path::PathBuf::from("/workspace"),
+            cols: 80,
+            rows: 24,
+            output_ref: Some(incomplete.clone()),
+        },
+        AgentEvent::TerminalSessionOutput {
+            turn: 1,
+            id: "call-term".to_owned(),
+            handle: "abc".to_owned(),
+            output: "partial".to_owned(),
+            truncated: false,
+            output_ref: Some(incomplete.clone()),
+        },
+        AgentEvent::TerminalSessionFinished {
+            turn: 1,
+            id: "call-term".to_owned(),
+            handle: "abc".to_owned(),
+            status: "completed".to_owned(),
+            exit_code: Some(0),
+            output_ref: Some(complete),
+        },
+        // A legacy-shaped finished event must deserialize with `None`.
+        AgentEvent::ToolExecutionFinished {
+            turn: 1,
+            id: "legacy".to_owned(),
+            name: "Bash".to_owned(),
+            result: ToolResult::ok("old"),
+            workflow_origin: None,
+            output_ref: None,
+        },
+    ];
+    for event in &events {
+        writer.append(event).await.expect("append event");
+    }
+    writer.flush().await.expect("flush");
+
+    let replayed = JsonlSessionReader::read_all(&path)
+        .await
+        .expect("read events");
+    assert_eq!(replayed, events);
+
+    // Old records without the field stay readable and deserialize to `None`.
+    let legacy = json!({
+        "ToolExecutionFinished": {
+            "turn": 2,
+            "id": "legacy-raw",
+            "name": "Bash",
+            "result": {"content": "old", "is_error": false, "terminate": false},
+            "workflow_origin": null,
+        }
+    });
+    let deserialized: AgentEvent = serde_json::from_value(legacy).expect("legacy record");
+    assert!(matches!(
+        deserialized,
+        AgentEvent::ToolExecutionFinished {
+            output_ref: None,
+            ..
+        }
+    ));
+
+    // The reference is presentation metadata: it must never serialize inside
+    // the model-visible `ToolResult` payload of a finished event.
+    let finished = events
+        .iter()
+        .find(|event| matches!(event, AgentEvent::ToolExecutionFinished { id, .. } if id == "call-bash"))
+        .expect("finished event");
+    let serialized = serde_json::to_value(finished).expect("serialize finished");
+    assert_eq!(
+        serialized["ToolExecutionFinished"]["result"]["content"],
+        "done"
+    );
+    assert!(
+        serialized["ToolExecutionFinished"]["result"]
+            .get("output_ref")
+            .is_none()
+    );
+    assert!(
+        serialized["ToolExecutionFinished"]["result"]
+            .get("byte_len")
+            .is_none()
+    );
 }

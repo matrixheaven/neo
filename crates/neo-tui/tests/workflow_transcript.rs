@@ -154,6 +154,16 @@ fn tool_result(content: &str, is_error: bool) -> ToolResult {
     }
 }
 
+fn replayed_reference() -> neo_agent_core::session::ToolOutputRef {
+    neo_agent_core::session::ToolOutputRef {
+        agent_id: "main".to_owned(),
+        task_id: "bash-replay-artifact".to_owned(),
+        byte_len: 8192,
+        line_count: 24,
+        complete: true,
+    }
+}
+
 fn terminal_text(lines: &[String]) -> String {
     lines
         .iter()
@@ -175,6 +185,7 @@ fn workflow_tool_started(
         name: name.to_owned(),
         arguments,
         workflow_origin: Some(tool_origin.clone()),
+        output_ref: None,
     });
     tool_origin
 }
@@ -296,6 +307,7 @@ fn workflow_main_card_bounds_direct_tools_and_long_content() {
         name: "Edit".to_owned(),
         result: tool_result("FULL_TOOL_OUTPUT must stay out of the normal card", true),
         workflow_origin: Some(failed_origin),
+        output_ref: None,
     });
     for index in 0..6 {
         let id = format!("completed-read-{index}");
@@ -313,6 +325,7 @@ fn workflow_main_card_bounds_direct_tools_and_long_content() {
             name: "Read".to_owned(),
             result: tool_result("FULL_TOOL_OUTPUT must stay out of the normal card", false),
             workflow_origin: Some(read_origin),
+            output_ref: None,
         });
     }
 
@@ -356,6 +369,7 @@ fn workflow_child_summaries_use_two_sibling_cards_and_one_row_per_agent() {
             phase: AgentToolActivityPhase::Ongoing,
             output: None,
             files: Vec::new(),
+            output_ref: None,
         },
     });
     workflow_delegate_started(&mut pane, "delegate-euclid-call", euclid);
@@ -383,6 +397,7 @@ fn workflow_child_summaries_use_two_sibling_cards_and_one_row_per_agent() {
             phase: AgentToolActivityPhase::Ongoing,
             output: None,
             files: Vec::new(),
+            output_ref: None,
         },
     });
     let mut beta = agent_snapshot("swarm-beta");
@@ -580,6 +595,7 @@ fn workflow_origin_routes_tools_and_children_into_one_entry() {
         name: "Read".to_owned(),
         arguments: serde_json::json!({"path": "README.md"}),
         workflow_origin: Some(read_origin.clone()),
+        output_ref: None,
     });
     pane.apply_agent_event(AgentEvent::ToolExecutionUpdate {
         turn: 1,
@@ -587,6 +603,7 @@ fn workflow_origin_routes_tools_and_children_into_one_entry() {
         name: "Read".to_owned(),
         partial_result: tool_result("partial", false),
         workflow_origin: Some(read_origin.clone()),
+        output_ref: None,
     });
     pane.apply_agent_event(AgentEvent::ToolExecutionFinished {
         turn: 1,
@@ -594,6 +611,7 @@ fn workflow_origin_routes_tools_and_children_into_one_entry() {
         name: "Read".to_owned(),
         result: tool_result("done", false),
         workflow_origin: Some(read_origin.clone()),
+        output_ref: None,
     });
 
     let bash_origin = origin("wf-test", "bash-call");
@@ -603,6 +621,7 @@ fn workflow_origin_routes_tools_and_children_into_one_entry() {
         name: "Bash".to_owned(),
         arguments: serde_json::json!({"command": "printf ok"}),
         workflow_origin: Some(bash_origin),
+        output_ref: None,
     });
     pane.apply_agent_event(AgentEvent::ShellCommandStarted {
         turn: 1,
@@ -621,6 +640,7 @@ fn workflow_origin_routes_tools_and_children_into_one_entry() {
         truncated: false,
         origin: ShellCommandOrigin::ModelBashTool,
         outcome: ShellCommandOutcome::Completed,
+        output_ref: None,
     });
 
     let delegate_origin = origin("wf-test", "delegate-call");
@@ -630,6 +650,7 @@ fn workflow_origin_routes_tools_and_children_into_one_entry() {
         name: "Delegate".to_owned(),
         arguments: serde_json::json!({"task": "verify"}),
         workflow_origin: Some(delegate_origin.clone()),
+        output_ref: None,
     });
     let delegate = agent_snapshot("delegate");
     pane.apply_agent_event(AgentEvent::DelegateStarted {
@@ -648,6 +669,7 @@ fn workflow_origin_routes_tools_and_children_into_one_entry() {
         name: "Delegate".to_owned(),
         result: tool_result("delegated", false),
         workflow_origin: Some(delegate_origin),
+        output_ref: None,
     });
 
     let swarm_origin = origin("wf-test", "swarm-call");
@@ -657,6 +679,7 @@ fn workflow_origin_routes_tools_and_children_into_one_entry() {
         name: "DelegateSwarm".to_owned(),
         arguments: serde_json::json!({"tasks": ["verify"]}),
         workflow_origin: Some(swarm_origin.clone()),
+        output_ref: None,
     });
     let swarm_agent = agent_snapshot("swarm-child");
     let swarm = swarm_snapshot("swarm", swarm_agent.clone());
@@ -684,6 +707,7 @@ fn workflow_origin_routes_tools_and_children_into_one_entry() {
         name: "DelegateSwarm".to_owned(),
         result: tool_result("swarmed", false),
         workflow_origin: Some(swarm_origin),
+        output_ref: None,
     });
 
     let failed_origin = origin("wf-test", "failed-delegate");
@@ -693,6 +717,7 @@ fn workflow_origin_routes_tools_and_children_into_one_entry() {
         name: "Delegate".to_owned(),
         arguments: serde_json::json!({"task": "never started"}),
         workflow_origin: Some(failed_origin.clone()),
+        output_ref: None,
     });
     pane.apply_agent_event(AgentEvent::ToolExecutionFinished {
         turn: 1,
@@ -700,6 +725,7 @@ fn workflow_origin_routes_tools_and_children_into_one_entry() {
         name: "Delegate".to_owned(),
         result: tool_result("failed before child start", true),
         workflow_origin: Some(failed_origin),
+        output_ref: None,
     });
 
     let workflow = pane
@@ -749,6 +775,7 @@ fn workflow_origin_routes_tools_and_children_into_one_entry() {
         name: "Read".to_owned(),
         arguments: serde_json::json!({"path": "other"}),
         workflow_origin: Some(origin("other-run", "other-invocation")),
+        output_ref: None,
     });
     let workflow = pane
         .transcript()
@@ -770,6 +797,7 @@ fn workflow_origin_routes_tools_and_children_into_one_entry() {
         name: "Read".to_owned(),
         arguments: serde_json::json!({"path": "ordinary"}),
         workflow_origin: None,
+        output_ref: None,
     });
     assert!(pane.transcript().entries().iter().any(
         |entry| matches!(entry, TranscriptEntry::ToolRun { component } if component.id() == "ordinary-call")
@@ -803,6 +831,7 @@ fn successful_workflow_launch_replaces_the_generic_tool_card() {
         name: "Workflow".to_owned(),
         arguments: serde_json::json!({"action": "run_saved", "name": "review"}),
         workflow_origin: None,
+        output_ref: None,
     });
     pane.apply_agent_event(AgentEvent::WorkflowStarted {
         turn: 1,
@@ -828,6 +857,7 @@ fn successful_workflow_launch_replaces_the_generic_tool_card() {
             terminate: false,
         },
         workflow_origin: None,
+        output_ref: None,
     });
 
     assert!(pane.transcript().is_tool_run_suppressed("workflow-launch"));
@@ -853,6 +883,7 @@ fn successful_workflow_launch_replaces_the_generic_tool_card() {
         name: "Workflow".to_owned(),
         arguments: serde_json::json!({"action": "run_saved", "name": "missing"}),
         workflow_origin: None,
+        output_ref: None,
     });
     failed.apply_agent_event(AgentEvent::ToolExecutionFinished {
         turn: 1,
@@ -869,6 +900,7 @@ fn successful_workflow_launch_replaces_the_generic_tool_card() {
             terminate: false,
         },
         workflow_origin: None,
+        output_ref: None,
     });
     assert!(
         !failed
@@ -896,6 +928,7 @@ async fn jsonl_replay_preserves_workflow_question_tool_and_child_grouping() {
             name: "Bash".to_owned(),
             arguments: serde_json::json!({"command": "printf replay"}),
             workflow_origin: Some(bash_origin.clone()),
+            output_ref: Some(replayed_reference()),
         },
         AgentEvent::ToolExecutionFinished {
             turn: 1,
@@ -903,6 +936,7 @@ async fn jsonl_replay_preserves_workflow_question_tool_and_child_grouping() {
             name: "Bash".to_owned(),
             result: tool_result("replayed", false),
             workflow_origin: Some(bash_origin),
+            output_ref: Some(replayed_reference()),
         },
         AgentEvent::ToolExecutionStarted {
             turn: 1,
@@ -910,6 +944,7 @@ async fn jsonl_replay_preserves_workflow_question_tool_and_child_grouping() {
             name: "Delegate".to_owned(),
             arguments: serde_json::json!({"task": "delegate replay"}),
             workflow_origin: Some(delegate_origin.clone()),
+            output_ref: None,
         },
         AgentEvent::DelegateStarted {
             turn: 1,
@@ -922,6 +957,7 @@ async fn jsonl_replay_preserves_workflow_question_tool_and_child_grouping() {
             name: "DelegateSwarm".to_owned(),
             arguments: serde_json::json!({"tasks": ["swarm replay"]}),
             workflow_origin: Some(swarm_origin.clone()),
+            output_ref: None,
         },
         AgentEvent::DelegateSwarmStarted {
             turn: 1,
@@ -1004,6 +1040,11 @@ async fn jsonl_replay_preserves_workflow_question_tool_and_child_grouping() {
     assert_eq!(workflow.direct_tools().len(), 1);
     assert_eq!(workflow.direct_tools()[0].id(), "bash-replay-call");
     assert_eq!(
+        workflow.direct_tools()[0].output_ref(),
+        Some(&replayed_reference()),
+        "the typed reference must rehydrate onto the Workflow direct tool from JSONL"
+    );
+    assert_eq!(
         workflow.delegates()[0].display_name.as_str(),
         "delegate-replay"
     );
@@ -1033,6 +1074,7 @@ fn workflow_origin_conflict_is_one_terminal_error_and_blocks_id_only_updates() {
         name: "Bash".to_owned(),
         arguments: serde_json::json!({"command": "printf original"}),
         workflow_origin: Some(original_origin.clone()),
+        output_ref: None,
     });
     let conflicting_origin = origin("wf-test", "conflicting-invocation");
     pane.apply_agent_event(AgentEvent::ToolExecutionStarted {
@@ -1041,6 +1083,7 @@ fn workflow_origin_conflict_is_one_terminal_error_and_blocks_id_only_updates() {
         name: "Bash".to_owned(),
         arguments: serde_json::json!({"command": "printf conflicting"}),
         workflow_origin: Some(conflicting_origin.clone()),
+        output_ref: None,
     });
 
     let workflow_index = pane
@@ -1075,6 +1118,7 @@ fn workflow_origin_conflict_is_one_terminal_error_and_blocks_id_only_updates() {
         name: "Bash".to_owned(),
         arguments: serde_json::json!({"command": "printf conflicting"}),
         workflow_origin: Some(conflicting_origin),
+        output_ref: None,
     });
     pane.apply_agent_event(AgentEvent::ToolExecutionQueueUpdated {
         turn: 1,
@@ -1099,6 +1143,7 @@ fn workflow_origin_conflict_is_one_terminal_error_and_blocks_id_only_updates() {
         truncated: false,
         origin: ShellCommandOrigin::ModelBashTool,
         outcome: ShellCommandOutcome::Completed,
+        output_ref: None,
     });
 
     assert_eq!(
@@ -1128,6 +1173,7 @@ fn orphan_model_shell_events_do_not_create_top_level_tools() {
         name: "Bash".to_owned(),
         arguments: serde_json::json!({"command": "printf orphan"}),
         workflow_origin: Some(origin("missing-workflow", "orphan-shell")),
+        output_ref: None,
     });
     pane.apply_agent_event(AgentEvent::ShellCommandStarted {
         turn: 1,
@@ -1146,6 +1192,7 @@ fn orphan_model_shell_events_do_not_create_top_level_tools() {
         truncated: false,
         origin: ShellCommandOrigin::ModelBashTool,
         outcome: ShellCommandOutcome::Completed,
+        output_ref: None,
     });
 
     assert_eq!(pane.transcript().entries().len(), 1);
@@ -1173,6 +1220,7 @@ fn finalized_workflow_tool_rejects_late_updates() {
         name: "Read".to_owned(),
         arguments: serde_json::json!({"path": "result"}),
         workflow_origin: Some(tool_origin.clone()),
+        output_ref: None,
     });
     pane.apply_agent_event(AgentEvent::ToolExecutionFinished {
         turn: 1,
@@ -1180,6 +1228,7 @@ fn finalized_workflow_tool_rejects_late_updates() {
         name: "Read".to_owned(),
         result: tool_result("final", false),
         workflow_origin: Some(tool_origin.clone()),
+        output_ref: None,
     });
     let workflow_index = pane
         .transcript()
@@ -1195,6 +1244,7 @@ fn finalized_workflow_tool_rejects_late_updates() {
         name: "Read".to_owned(),
         arguments: serde_json::json!({"path": "late-start"}),
         workflow_origin: Some(tool_origin.clone()),
+        output_ref: None,
     });
     assert_finalized_workflow_tool(&pane, workflow_index, revision);
 
@@ -1204,6 +1254,7 @@ fn finalized_workflow_tool_rejects_late_updates() {
         name: "Read".to_owned(),
         partial_result: tool_result("late", false),
         workflow_origin: Some(tool_origin.clone()),
+        output_ref: None,
     });
     assert_finalized_workflow_tool(&pane, workflow_index, revision);
 

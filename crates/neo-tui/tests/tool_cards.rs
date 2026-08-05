@@ -1337,6 +1337,7 @@ fn transcript_pane_expansion_reaches_rendered_bash_tool_body() {
         result: neo_agent_core::ToolResult::ok("1\n2\n3\n4\n5\n6\n7\n8"),
 
         workflow_origin: None,
+        output_ref: None,
     });
 
     let collapsed = runtime
@@ -1418,6 +1419,7 @@ fn bash_shell_failure_summary_survives_empty_tool_result_finish() {
         truncated: false,
         origin: ShellCommandOrigin::ModelBashTool,
         outcome: ShellCommandOutcome::Completed,
+        output_ref: None,
     });
     runtime.apply_agent_event(AgentEvent::ToolExecutionFinished {
         turn: 1,
@@ -1435,6 +1437,7 @@ fn bash_shell_failure_summary_survives_empty_tool_result_finish() {
         })),
 
         workflow_origin: None,
+        output_ref: None,
     });
 
     let frame = runtime
@@ -1484,6 +1487,7 @@ fn tool_card_lines_do_not_exceed_terminal_width_after_gutter() {
         result: neo_agent_core::ToolResult::ok("x".repeat(200)),
 
         workflow_origin: None,
+        output_ref: None,
     });
     runtime.apply_agent_event(AgentEvent::ToolExecutionStarted {
         turn: 1,
@@ -1492,6 +1496,7 @@ fn tool_card_lines_do_not_exceed_terminal_width_after_gutter() {
         arguments: json!({"command": "y".repeat(200)}),
 
         workflow_origin: None,
+        output_ref: None,
     });
     runtime.apply_agent_event(AgentEvent::ToolExecutionFinished {
         turn: 1,
@@ -1500,6 +1505,7 @@ fn tool_card_lines_do_not_exceed_terminal_width_after_gutter() {
         result: neo_agent_core::ToolResult::ok(""),
 
         workflow_origin: None,
+        output_ref: None,
     });
 
     let frame = runtime
@@ -1641,6 +1647,7 @@ fn grouped_read_lines_do_not_exceed_terminal_width_after_gutter() {
             result: neo_agent_core::ToolResult::ok("ok"),
 
             workflow_origin: None,
+            output_ref: None,
         });
     }
 
@@ -2330,6 +2337,7 @@ fn queued_shell_card_keeps_relative_position_across_later_entries() {
         arguments: json!({"command": "cargo test"}),
 
         workflow_origin: None,
+        output_ref: None,
     });
     let rendered = rendered(&mut pane);
     let tool = rendered.find("$ cargo test").expect("tool row");

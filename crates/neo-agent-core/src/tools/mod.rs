@@ -170,6 +170,10 @@ pub use bash::{
 };
 pub(crate) mod workflow;
 
+/// Terminal capture artifact key derivation, shared between the terminal tool
+/// and the runtime's terminal event emission.
+pub(crate) use terminal::terminal_task_id;
+
 pub use delegate_controls::{
     InterruptDelegateTool, ListDelegatesTool, MessageDelegateTool, WaitDelegateTool,
 };

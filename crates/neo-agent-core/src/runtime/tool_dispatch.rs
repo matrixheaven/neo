@@ -12,6 +12,7 @@ use super::error::AgentRuntimeError;
 use super::events::{
     EventEmitter, EventSink, emit_shell_finished, emit_terminal_events,
     make_shell_admission_callback, make_tool_event_callback, make_tool_update_callback,
+    terminal_output_ref, terminal_output_ref_for_result,
 };
 use super::instruction_context::InstructionContextBridge;
 use super::permission::{
@@ -569,6 +570,7 @@ fn emit_synthesized_finished(
             name: tool_call.name.to_string(),
             result: result.clone(),
             workflow_origin: None,
+            output_ref: None,
         });
     }
 }
@@ -1186,6 +1188,7 @@ fn finalize_authorized_batch(
                 name: tool_call.name.to_string(),
                 result: result.clone(),
                 workflow_origin: None,
+                output_ref: None,
             });
         }
     }
@@ -1439,6 +1442,7 @@ fn emit_tool_execution_finished(
     tool_call: &AgentToolCall,
     arguments: Option<&serde_json::Value>,
     result: &ToolResult,
+    output_ref: Option<crate::session::ToolOutputRef>,
     emitter: &mut EventEmitter,
 ) {
     if tool_call.name.as_ref() == "Skill" {
@@ -1476,6 +1480,7 @@ fn emit_tool_execution_finished(
         name: tool_call.name.to_string(),
         result: result.clone(),
         workflow_origin: None,
+        output_ref,
     });
 }
 
@@ -1537,7 +1542,7 @@ async fn execute_one_authorized_tool(
         let AuthorizedToolCallOutcome::Terminal { result, .. } = &entry.outcome else {
             unreachable!("unparsed calls always carry a terminal result");
         };
-        emit_tool_execution_finished(turn, tool_call, None, result, emitter);
+        emit_tool_execution_finished(turn, tool_call, None, result, None, emitter);
         return Ok((tool_call.clone(), result.clone(), false));
     };
     let AuthorizedToolCallOutcome::Run { access } = &entry.outcome else {
@@ -1555,6 +1560,7 @@ async fn execute_one_authorized_tool(
             Some(&prepared_call.arguments),
             &result,
             tool_context,
+            None,
             emitter,
         );
         return Ok((tool_call.clone(), result, false));
@@ -1588,9 +1594,14 @@ async fn execute_one_authorized_tool(
             name: tool_call.name.to_string(),
             arguments: arguments.as_ref().clone(),
             workflow_origin: None,
+            output_ref: started_output_ref(
+                tool_context,
+                tool_call.name.as_ref(),
+                arguments.as_ref(),
+            ),
         });
     }
-    let result = execute_prepared_tool(
+    let (result, output_ref) = execute_prepared_tool(
         &prepared_call.execution,
         skills,
         registry,
@@ -1609,6 +1620,7 @@ async fn execute_one_authorized_tool(
         Some(arguments.as_ref()),
         &result,
         tool_context,
+        output_ref,
         emitter,
     );
     Ok((tool_call.clone(), result, true))
@@ -1621,7 +1633,7 @@ async fn execute_prepared_tool(
     (tool_call, arguments): (&AgentToolCall, &serde_json::Value),
     (context, cancel_token): (&ToolContext, &CancellationToken),
     (sink, turn, emitter): (EventSink, u32, &mut EventEmitter),
-) -> ToolResult {
+) -> (ToolResult, Option<crate::session::ToolOutputRef>) {
     match execution {
         PreparedExecution::Edit(_) | PreparedExecution::Write(_) => {
             // Emit the verified planned projection before the first commit,
@@ -1635,6 +1647,7 @@ async fn execute_prepared_tool(
                         name: tool_call.name.to_string(),
                         partial_result: $prepared.prepared_update(),
                         workflow_origin: None,
+                        output_ref: None,
                     });
                     let progress_sink = sink;
                     let progress_id = tool_call.id.to_string();
@@ -1646,14 +1659,15 @@ async fn execute_prepared_tool(
                             name: progress_name.clone(),
                             partial_result: update,
                             workflow_origin: None,
+                            output_ref: None,
                         });
                     };
                     $prepared.commit(context, cancel_token, &mut on_progress)
                 }};
             }
             match execution {
-                PreparedExecution::Edit(edit) => commit_prepared_mutation!(edit),
-                PreparedExecution::Write(write) => commit_prepared_mutation!(write),
+                PreparedExecution::Edit(edit) => (commit_prepared_mutation!(edit), None),
+                PreparedExecution::Write(write) => (commit_prepared_mutation!(write), None),
                 PreparedExecution::Direct | PreparedExecution::Workflow(_) => {
                     unreachable!("guarded by outer match")
                 }
@@ -1670,9 +1684,10 @@ async fn execute_prepared_tool(
             )
             .await
         }
-        PreparedExecution::Workflow(action) => {
-            crate::tools::workflow::execute_prepared(action, context).await
-        }
+        PreparedExecution::Workflow(action) => (
+            crate::tools::workflow::execute_prepared(action, context).await,
+            None,
+        ),
     }
 }
 
@@ -1763,6 +1778,7 @@ async fn execute_authorized_sequential(
                 Some(&prepared_call.arguments),
                 &result,
                 tool_context,
+                None,
                 emitter,
             );
             results.push((entry.tool_call.clone(), result.clone()));
@@ -1799,11 +1815,35 @@ fn emit_authorized_call_result(
     arguments: Option<&serde_json::Value>,
     result: &ToolResult,
     tool_context: &ToolContext,
+    output_ref: Option<crate::session::ToolOutputRef>,
     emitter: &mut EventEmitter,
 ) {
-    emit_shell_finished(turn, tool_call, result, emitter);
+    emit_shell_finished(turn, tool_call, result, output_ref.clone(), emitter);
     emit_terminal_events(turn, arguments, tool_call, result, tool_context, emitter);
-    emit_tool_execution_finished(turn, tool_call, arguments, result, emitter);
+    let finished_ref = if tool_call.name.as_ref() == "Terminal" {
+        terminal_output_ref_for_result(tool_context, result)
+    } else {
+        output_ref
+    };
+    emit_tool_execution_finished(turn, tool_call, arguments, result, finished_ref, emitter);
+}
+
+/// Typed output reference available when a tool execution starts: Terminal
+/// calls whose session handle is already in the arguments (read/write/resize/
+/// stop) resolve the session artifact by identity. Bash starts have no task
+/// id yet at this point, so they stay `None` until the finished event.
+fn started_output_ref(
+    tool_context: &ToolContext,
+    name: &str,
+    arguments: &serde_json::Value,
+) -> Option<crate::session::ToolOutputRef> {
+    if name != "Terminal" {
+        return None;
+    }
+    let handle = arguments
+        .get("handle")
+        .and_then(serde_json::Value::as_str)?;
+    terminal_output_ref(tool_context, handle)
 }
 
 async fn execute_authorized_parallel(
@@ -1851,6 +1891,11 @@ async fn execute_authorized_parallel(
                 name: tool_call.name.to_string(),
                 arguments: arguments.as_ref().clone(),
                 workflow_origin: None,
+                output_ref: started_output_ref(
+                    &tool_context,
+                    tool_call.name.as_ref(),
+                    arguments.as_ref(),
+                ),
             });
         }
         running.push(async move {
@@ -1874,7 +1919,7 @@ async fn execute_authorized_parallel(
                         workspace_root,
                     ));
             }
-            let mut result = run_tool_with_cancel(
+            let (result, output_ref) = run_tool_with_cancel(
                 skills,
                 registry.as_ref(),
                 tool_call,
@@ -1883,21 +1928,22 @@ async fn execute_authorized_parallel(
                 &cancel_token,
             )
             .await;
+            let mut result = result;
             if !cancel_token.is_cancelled() {
                 result = after_tool_result(&config, tool_call, result, &cancel_token).await;
             }
-            Ok::<_, AgentRuntimeError>((index, (*tool_call).clone(), result))
+            Ok::<_, AgentRuntimeError>((index, (*tool_call).clone(), result, output_ref))
         });
     }
 
     while let Some(outcome) = running.next().await {
-        let (index, tool_call, result) = outcome?;
+        let (index, tool_call, result, output_ref) = outcome?;
         executed_any = true;
         let arguments = match authorized[index].prepared.as_ref() {
             Some(p) => p.arguments.clone(),
             None => serde_json::Value::Null,
         };
-        emit_shell_finished(turn, &tool_call, &result, emitter);
+        emit_shell_finished(turn, &tool_call, &result, output_ref.clone(), emitter);
         emit_terminal_events(
             turn,
             Some(&arguments),
@@ -1906,7 +1952,19 @@ async fn execute_authorized_parallel(
             tool_context,
             emitter,
         );
-        emit_tool_execution_finished(turn, &tool_call, Some(&arguments), &result, emitter);
+        let finished_ref = if tool_call.name.as_ref() == "Terminal" {
+            terminal_output_ref_for_result(tool_context, &result)
+        } else {
+            output_ref
+        };
+        emit_tool_execution_finished(
+            turn,
+            &tool_call,
+            Some(&arguments),
+            &result,
+            finished_ref,
+            emitter,
+        );
         completed.push((index, tool_call, result));
     }
 
@@ -1933,7 +1991,7 @@ async fn parallel_terminal_result(
         let AuthorizedToolCallOutcome::Terminal { result, .. } = &entry.outcome else {
             unreachable!("unparsed calls always carry a terminal result");
         };
-        emit_tool_execution_finished(turn, tool_call, None, result, emitter);
+        emit_tool_execution_finished(turn, tool_call, None, result, None, emitter);
         return Some((tool_call.clone(), result.clone()));
     };
     let AuthorizedToolCallOutcome::Terminal { result, .. } = &entry.outcome else {
@@ -1949,6 +2007,7 @@ async fn parallel_terminal_result(
         Some(&prepared_call.arguments),
         &result,
         tool_context,
+        None,
         emitter,
     );
     Some((tool_call.clone(), result))
@@ -1998,34 +2057,40 @@ async fn run_tool_with_cancel(
     arguments: &serde_json::Value,
     tool_context: &ToolContext,
     cancel_token: &CancellationToken,
-) -> ToolResult {
+) -> (ToolResult, Option<crate::session::ToolOutputRef>) {
     if tool_call.name.as_ref() == "Skill" {
-        return execute_invoke_skill(skills, arguments);
+        return (execute_invoke_skill(skills, arguments), None);
     }
     if tool_call.name.as_ref() == "Bash" {
         return run_model_bash_with_cancel(arguments, tool_context, cancel_token).await;
     }
     if matches!(tool_call.name.as_ref(), "Delegate" | "DelegateSwarm") {
-        return registry
-            .run(&tool_call.name, tool_context, arguments.clone())
-            .await
-            .unwrap_or_else(|err| ToolResult::error(err.to_string()));
+        return (
+            registry
+                .run(&tool_call.name, tool_context, arguments.clone())
+                .await
+                .unwrap_or_else(|err| ToolResult::error(err.to_string())),
+            None,
+        );
     }
     // Start may need async cleanup after registering a handle the model has not received yet.
     if tool_call.name.as_ref() == "Terminal"
         && arguments.get("mode").and_then(serde_json::Value::as_str) == Some("start")
     {
-        return registry
-            .run(&tool_call.name, tool_context, arguments.clone())
-            .await
-            .unwrap_or_else(|err| ToolResult::error(err.to_string()));
+        return (
+            registry
+                .run(&tool_call.name, tool_context, arguments.clone())
+                .await
+                .unwrap_or_else(|err| ToolResult::error(err.to_string())),
+            None,
+        );
     }
     tokio::select! {
         biased;
         result = registry.run(&tool_call.name, tool_context, arguments.clone()) => {
-            result.unwrap_or_else(|err| ToolResult::error(err.to_string()))
+            (result.unwrap_or_else(|err| ToolResult::error(err.to_string())), None)
         }
-        () = cancel_token.cancelled() => cancelled_tool_result(),
+        () = cancel_token.cancelled() => (cancelled_tool_result(), None),
     }
 }
 
@@ -2040,13 +2105,13 @@ async fn run_model_bash_with_cancel(
     arguments: &serde_json::Value,
     tool_context: &ToolContext,
     cancel_token: &CancellationToken,
-) -> ToolResult {
+) -> (ToolResult, Option<crate::session::ToolOutputRef>) {
     tokio::select! {
         biased;
         result = execute_model_bash_for_runtime(tool_context, arguments.clone()) => {
-            result.unwrap_or_else(|error| model_bash_error_result(tool_context, &error))
+            result.unwrap_or_else(|error| (model_bash_error_result(tool_context, &error), None))
         }
-        () = cancel_token.cancelled() => cancelled_tool_result(),
+        () = cancel_token.cancelled() => (cancelled_tool_result(), None),
     }
 }
 
@@ -2325,6 +2390,7 @@ mod tests {
             name: "Bash".into(),
             arguments: serde_json::json!({"command": "true"}),
             workflow_origin: None,
+            output_ref: None,
         };
         let stamped = stamp_workflow_origin(tool, Some(&origin));
         assert!(matches!(
@@ -2784,7 +2850,7 @@ mod tests {
             .await
             .expect("Terminal cleanup should settle after cancellation");
 
-        assert!(result.is_error);
+        assert!(result.0.is_error);
         assert!(
             settled.load(Ordering::SeqCst),
             "runtime returned before Terminal cleanup settled"

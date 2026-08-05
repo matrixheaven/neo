@@ -1644,21 +1644,29 @@ fn apply_live_tool_event(snapshot: &mut AgentSnapshot, event: &AgentEvent) -> bo
             id,
             name,
             arguments,
+            output_ref,
             ..
         } => {
             upsert_tool_activity(
                 &mut snapshot.activity,
                 id,
                 name,
-                summarize_tool_arguments(name, arguments),
-                AgentToolActivityPhase::Ongoing,
-                None,
-                tool_files_from_arguments(name, arguments),
+                ToolActivityProjection::new(
+                    summarize_tool_arguments(name, arguments),
+                    AgentToolActivityPhase::Ongoing,
+                    None,
+                    tool_files_from_arguments(name, arguments),
+                    output_ref.clone(),
+                ),
             );
             true
         }
         AgentEvent::ToolExecutionFinished {
-            id, name, result, ..
+            id,
+            name,
+            result,
+            output_ref,
+            ..
         } => {
             snapshot.tool_count = snapshot.tool_count.saturating_add(1);
             let phase = if result.is_error {
@@ -1680,10 +1688,13 @@ fn apply_live_tool_event(snapshot: &mut AgentSnapshot, event: &AgentEvent) -> bo
                 &mut snapshot.activity,
                 id,
                 name,
-                summary,
-                phase,
-                tool_output_preview(name, result, false),
-                files,
+                ToolActivityProjection::new(
+                    summary,
+                    phase,
+                    tool_output_preview(name, result, false),
+                    files,
+                    output_ref.clone(),
+                ),
             );
             true
         }
@@ -1691,6 +1702,7 @@ fn apply_live_tool_event(snapshot: &mut AgentSnapshot, event: &AgentEvent) -> bo
             id,
             name,
             partial_result,
+            output_ref,
             ..
         } => {
             let summary = partial_result
@@ -1707,10 +1719,13 @@ fn apply_live_tool_event(snapshot: &mut AgentSnapshot, event: &AgentEvent) -> bo
                 &mut snapshot.activity,
                 id,
                 name,
-                summary,
-                AgentToolActivityPhase::Ongoing,
-                tool_output_preview(name, partial_result, true),
-                files,
+                ToolActivityProjection::new(
+                    summary,
+                    AgentToolActivityPhase::Ongoing,
+                    tool_output_preview(name, partial_result, true),
+                    files,
+                    output_ref.clone(),
+                ),
             );
             true
         }
@@ -2876,6 +2891,7 @@ fn apply_tool_activity_event(
             id,
             name,
             arguments,
+            output_ref,
             ..
         } => {
             tool_args.insert(id.clone(), arguments.clone());
@@ -2883,15 +2899,22 @@ fn apply_tool_activity_event(
                 activity,
                 id,
                 name,
-                summarize_tool_arguments(name, arguments),
-                AgentToolActivityPhase::Ongoing,
-                None,
-                tool_files_from_arguments(name, arguments),
+                ToolActivityProjection::new(
+                    summarize_tool_arguments(name, arguments),
+                    AgentToolActivityPhase::Ongoing,
+                    None,
+                    tool_files_from_arguments(name, arguments),
+                    output_ref.clone(),
+                ),
             );
             true
         }
         AgentEvent::ToolExecutionFinished {
-            id, name, result, ..
+            id,
+            name,
+            result,
+            output_ref,
+            ..
         } => {
             let phase = if result.is_error {
                 AgentToolActivityPhase::Failed
@@ -2916,10 +2939,13 @@ fn apply_tool_activity_event(
                 activity,
                 id,
                 name,
-                summary,
-                phase,
-                tool_output_preview(name, result, false),
-                files,
+                ToolActivityProjection::new(
+                    summary,
+                    phase,
+                    tool_output_preview(name, result, false),
+                    files,
+                    output_ref.clone(),
+                ),
             );
             true
         }
@@ -2927,6 +2953,7 @@ fn apply_tool_activity_event(
             id,
             name,
             partial_result,
+            output_ref,
             ..
         } => {
             let summary = tool_summary_from_event(
@@ -2947,10 +2974,13 @@ fn apply_tool_activity_event(
                 activity,
                 id,
                 name,
-                summary,
-                AgentToolActivityPhase::Ongoing,
-                tool_output_preview(name, partial_result, true),
-                files,
+                ToolActivityProjection::new(
+                    summary,
+                    AgentToolActivityPhase::Ongoing,
+                    tool_output_preview(name, partial_result, true),
+                    files,
+                    output_ref.clone(),
+                ),
             );
             true
         }
@@ -3123,15 +3153,46 @@ fn latest_text_activity(activity: &[AgentActivityEntry], thinking: bool) -> Opti
         .map(ToOwned::to_owned)
 }
 
-fn upsert_tool_activity(
-    activity: &mut Vec<AgentActivityEntry>,
-    id: &str,
-    name: &str,
+/// One typed projection of a live child tool event onto the activity row.
+struct ToolActivityProjection {
     summary: Option<String>,
     phase: AgentToolActivityPhase,
     output: Option<AgentToolOutputPreview>,
     files: Vec<AgentToolFileChange>,
+    output_ref: Option<crate::session::ToolOutputRef>,
+}
+
+impl ToolActivityProjection {
+    fn new(
+        summary: Option<String>,
+        phase: AgentToolActivityPhase,
+        output: Option<AgentToolOutputPreview>,
+        files: Vec<AgentToolFileChange>,
+        output_ref: Option<crate::session::ToolOutputRef>,
+    ) -> Self {
+        Self {
+            summary,
+            phase,
+            output,
+            files,
+            output_ref,
+        }
+    }
+}
+
+fn upsert_tool_activity(
+    activity: &mut Vec<AgentActivityEntry>,
+    id: &str,
+    name: &str,
+    projection: ToolActivityProjection,
 ) {
+    let ToolActivityProjection {
+        summary,
+        phase,
+        output,
+        files,
+        output_ref,
+    } = projection;
     for entry in activity.iter_mut().rev() {
         let AgentActivityKind::Tool {
             id: entry_id,
@@ -3140,6 +3201,7 @@ fn upsert_tool_activity(
             phase: entry_phase,
             output: entry_output,
             files: entry_files,
+            output_ref: entry_output_ref,
         } = &mut entry.kind
         else {
             continue;
@@ -3156,6 +3218,12 @@ fn upsert_tool_activity(
             if !files.is_empty() {
                 *entry_files = files;
             }
+            // A later event with a typed reference wins; `None` (e.g. an
+            // early streaming update before the artifact was allocated) never
+            // clears a reference the entry already carries.
+            if output_ref.is_some() {
+                *entry_output_ref = output_ref;
+            }
             return;
         }
     }
@@ -3167,6 +3235,7 @@ fn upsert_tool_activity(
             phase,
             output,
             files,
+            output_ref,
         },
     });
 }
@@ -3228,6 +3297,7 @@ fn upsert_queued_tool_activity(
             },
             output: None,
             files,
+            output_ref: None,
         },
     });
     true
@@ -3997,6 +4067,7 @@ mod tests {
             name: "Edit".to_owned(),
             arguments: serde_json::json!({"path":"a.rs","old":"a","new":"A"}),
             workflow_origin: None,
+            output_ref: None,
         };
         assert!(apply_tool_activity_event(
             &mut activity,
@@ -4016,6 +4087,7 @@ mod tests {
                 "removed": 4
             })),
             workflow_origin: None,
+            output_ref: None,
         };
         assert!(apply_tool_activity_event(
             &mut activity,
@@ -4045,6 +4117,7 @@ mod tests {
                 "removed": 1
             })),
             workflow_origin: None,
+            output_ref: None,
         };
         runtime
             .apply_child_event(&child.id, started_at, &progress)
@@ -4075,6 +4148,7 @@ mod tests {
                 ]
             })),
             workflow_origin: None,
+            output_ref: None,
         };
         runtime
             .apply_child_event(&child.id, started_at, &finished)
@@ -4113,6 +4187,7 @@ mod tests {
                 "removed": 1
             })),
             workflow_origin: None,
+            output_ref: None,
         };
         assert!(apply_tool_activity_event(
             &mut activity,
@@ -4142,6 +4217,7 @@ mod tests {
                 "path": "src/a.rs", "content": "fn main() {}"
             }),
             workflow_origin: None,
+            output_ref: None,
         };
         assert!(apply_tool_activity_event(
             &mut activity,
@@ -4167,6 +4243,7 @@ mod tests {
                 "removed": 0
             })),
             workflow_origin: None,
+            output_ref: None,
         };
         assert!(apply_tool_activity_event(
             &mut activity,
@@ -4199,6 +4276,7 @@ mod tests {
                 ]
             })),
             workflow_origin: None,
+            output_ref: None,
         };
         assert!(apply_tool_activity_event(
             &mut activity,
@@ -4226,6 +4304,7 @@ mod tests {
                 "path": "src/first.rs", "content": large_content
             }),
             workflow_origin: None,
+            output_ref: None,
         };
         runtime
             .apply_child_event(&child.id, started_at, &started)
@@ -4260,6 +4339,7 @@ mod tests {
                 ]
             })),
             workflow_origin: None,
+            output_ref: None,
         };
         runtime
             .apply_child_event(&child.id, started_at, &finished)
@@ -4295,6 +4375,7 @@ mod tests {
                 "removed": 5
             })),
             workflow_origin: None,
+            output_ref: None,
         };
         assert!(apply_tool_activity_event(
             &mut activity,
@@ -4463,6 +4544,7 @@ mod tests {
                 name: "Read".to_owned(),
                 arguments: serde_json::json!({"path": format!("file-{index}")}),
                 workflow_origin: None,
+                output_ref: None,
             });
         }
         record(AgentEvent::ThinkingDelta {

@@ -1588,6 +1588,7 @@ mod tests {
             arguments: serde_json::json!({ "path": "one.rs" }),
 
             workflow_origin: None,
+            output_ref: None,
         });
         pane.apply_agent_event(neo_agent_core::AgentEvent::ToolExecutionFinished {
             turn: 1,
@@ -1596,6 +1597,7 @@ mod tests {
             result: neo_agent_core::ToolResult::ok("one"),
 
             workflow_origin: None,
+            output_ref: None,
         });
         pane.apply_agent_event(neo_agent_core::AgentEvent::ToolExecutionStarted {
             turn: 1,
@@ -1604,6 +1606,7 @@ mod tests {
             arguments: serde_json::json!({ "path": "two.rs" }),
 
             workflow_origin: None,
+            output_ref: None,
         });
 
         let running = pane.render_terminal_update(80, 12);
@@ -1617,6 +1620,7 @@ mod tests {
             result: neo_agent_core::ToolResult::ok("two"),
 
             workflow_origin: None,
+            output_ref: None,
         });
         let finished = pane.render_terminal_update(80, 12);
 
