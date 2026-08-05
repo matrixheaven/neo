@@ -881,8 +881,7 @@ fn control_key_code_for_input(input: &InputEvent) -> Option<KeyCode> {
         InputEvent::Key(_)
         | InputEvent::Action(_)
         | InputEvent::Paste(_)
-        | InputEvent::ScrollUp(_)
-        | InputEvent::ScrollDown(_)
+        | InputEvent::Mouse(_)
         | InputEvent::Resize { .. }
         | InputEvent::Interrupt
         | InputEvent::Insert(_)

@@ -1,10 +1,11 @@
-use crate::input::{InputEvent, KeybindingAction};
+use crate::input::{InputEvent, KeybindingAction, MouseEvent, MouseKind};
 use crate::primitive::InputResult;
 use crate::primitive::Style;
 use crate::primitive::paint;
 use crate::primitive::theme::TuiTheme;
 use crate::primitive::{truncate_width, visible_width, wrap_text};
 use crate::shell::{SelectItem, SelectListState};
+use crate::transcript::WHEEL_SCROLL_ROWS;
 use unicode_segmentation::UnicodeSegmentation;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -110,14 +111,20 @@ impl WorkflowPickerState {
                 self.list.move_down();
                 InputResult::Handled
             }
-            InputEvent::ScrollUp(rows) => {
-                for _ in 0..(*rows).max(1) {
+            InputEvent::Mouse(MouseEvent {
+                kind: MouseKind::ScrollUp,
+                ..
+            }) => {
+                for _ in 0..WHEEL_SCROLL_ROWS {
                     self.list.move_up();
                 }
                 InputResult::Handled
             }
-            InputEvent::ScrollDown(rows) => {
-                for _ in 0..(*rows).max(1) {
+            InputEvent::Mouse(MouseEvent {
+                kind: MouseKind::ScrollDown,
+                ..
+            }) => {
+                for _ in 0..WHEEL_SCROLL_ROWS {
                     self.list.move_down();
                 }
                 InputResult::Handled
@@ -371,6 +378,7 @@ fn box_line(content: &str, width: usize, content_style: Style, border_style: Sty
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crossterm::event::{KeyModifiers, MouseButton};
 
     fn item(name: &str, display_name: &str, description: &str) -> WorkflowPickerItem {
         WorkflowPickerItem {
@@ -486,7 +494,13 @@ mod tests {
             theme: TuiTheme::default(),
         });
 
-        picker.handle_input(&InputEvent::ScrollDown(3));
+        picker.handle_input(&InputEvent::Mouse(MouseEvent {
+            kind: MouseKind::ScrollDown,
+            button: MouseButton::Left,
+            column: 1,
+            row: 1,
+            modifiers: KeyModifiers::NONE,
+        }));
         let rendered = picker.render_lines(40).join("\n");
         assert!(rendered.contains("Fourth"), "{rendered}");
         assert!(rendered.lines().count() <= 16);

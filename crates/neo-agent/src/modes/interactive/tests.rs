@@ -8,6 +8,7 @@ use std::{
 };
 
 use clap::Parser as _;
+use crossterm::event::{KeyModifiers, MouseButton};
 use neo_agent_core::{
     AgentConfig, AgentContext, AgentEvent, AgentMessage, AgentRuntime, ApprovalAction,
     ApprovalCancelReason, ApprovalOption, ApprovalPresentation, ApprovalRequest,
@@ -24,7 +25,10 @@ use neo_tui::{
     input::{InputEvent, KeyId, KeybindingAction},
     screen_output::FullscreenTerminal,
     shell::{ChromeMode, CommandPaletteState, CommandSpec, Overlay, OverlayKind},
-    transcript::{ApprovalDisplayState, QuestionPromptState, TranscriptEntry, TranscriptPane},
+    transcript::{
+        ApprovalDisplayState, MouseEvent, MouseKind, QuestionPromptState, TranscriptEntry,
+        TranscriptPane,
+    },
 };
 use tokio::sync::oneshot;
 use tracing_subscriber::prelude::*;
@@ -6122,17 +6126,27 @@ async fn event_loop_dispatches_mouse_wheel_to_transcript_view() {
     let initial = controller.tui.render_terminal_frame(80, 6).lines;
 
     controller
-        .handle_input_event(InputEvent::ScrollUp(3))
+        .handle_input_event(wheel_event(MouseKind::ScrollUp))
         .await
         .expect("wheel up scrolls the document toward older rows");
     let wheel_up = controller.tui.render_terminal_frame(80, 6).lines;
     assert_ne!(wheel_up, initial);
 
     controller
-        .handle_input_event(InputEvent::ScrollDown(3))
+        .handle_input_event(wheel_event(MouseKind::ScrollDown))
         .await
         .expect("wheel down returns the document to newest rows");
     assert_eq!(controller.tui.render_terminal_frame(80, 6).lines, initial);
+}
+
+fn wheel_event(kind: MouseKind) -> InputEvent {
+    InputEvent::Mouse(MouseEvent {
+        kind,
+        button: MouseButton::Left,
+        column: 10,
+        row: 3,
+        modifiers: KeyModifiers::NONE,
+    })
 }
 
 #[tokio::test]
@@ -6148,7 +6162,7 @@ async fn event_loop_submit_restores_transcript_follow_tail() {
     let _ = controller.transcript_mut().render_visible_slice(80, 6);
 
     controller
-        .handle_input_event(InputEvent::ScrollUp(5))
+        .handle_input_event(wheel_event(MouseKind::ScrollUp))
         .await
         .expect("wheel up scrolls transcript");
     assert!(transcript_view_locked(&controller));
@@ -7463,7 +7477,7 @@ async fn approval_mouse_wheel_scrolls_transcript_without_moving_selection() {
     let selected = controller.chrome().approval_selected_action().cloned();
 
     controller
-        .handle_input_event(InputEvent::ScrollUp(3))
+        .handle_input_event(wheel_event(MouseKind::ScrollUp))
         .await
         .expect("wheel scrolls transcript while approval stays focused");
 
@@ -17156,7 +17170,7 @@ async fn task_browser_mouse_wheel_moves_selection_without_prompt_history() {
     let second_task_id = browser.snapshot().items()[1].id.clone();
     assert_eq!(browser.selected_task_id(), Some(first_task_id.as_str()));
     controller
-        .handle_input_event(InputEvent::ScrollDown(3))
+        .handle_input_event(wheel_event(MouseKind::ScrollDown))
         .await
         .expect("wheel moves selection");
     assert_eq!(

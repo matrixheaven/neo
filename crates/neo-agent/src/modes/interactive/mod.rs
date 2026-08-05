@@ -38,7 +38,7 @@ use neo_tui::{
         ContextWindow, MainAgentTokenUsage, NeoChromeState, OverlayKind, PickerItem,
         PromptCompletionPrefix, PromptEdit, SessionPickerItem, SessionPickerScope, StreamUpdate,
     },
-    transcript::{TranscriptPane, frame_content_width},
+    transcript::{MouseEvent, MouseKind, TranscriptPane, WHEEL_SCROLL_ROWS, frame_content_width},
 };
 
 #[cfg(test)]
@@ -2989,3 +2989,6 @@ async fn fork_session_transcript(
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+mod selection_tests;

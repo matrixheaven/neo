@@ -3,7 +3,7 @@
 use std::collections::BTreeMap;
 
 use crate::dialogs::choice_picker::{dialog_rgb, dialog_sgr_bg, dialog_sgr_fg};
-use crate::input::{InputEvent, KeybindingAction};
+use crate::input::{InputEvent, KeybindingAction, MouseKind};
 use crate::primitive::Color;
 use crate::primitive::InputResult;
 use crate::primitive::theme::TuiTheme;
@@ -476,14 +476,14 @@ impl ModelSelectorState {
             }
             InputEvent::Backspace => self.backspace(),
             InputEvent::Insert(ch) => self.insert(*ch),
-            InputEvent::ScrollUp(1)
-            | InputEvent::MoveLeft
-            | InputEvent::ScrollDown(1)
-            | InputEvent::MoveRight => {
-                self.move_reasoning(matches!(
-                    input,
-                    InputEvent::ScrollDown(1) | InputEvent::MoveRight
-                ));
+            InputEvent::Mouse(event)
+                if matches!(event.kind, MouseKind::ScrollUp | MouseKind::ScrollDown) =>
+            {
+                self.move_reasoning(event.kind == MouseKind::ScrollDown);
+                InputResult::Handled
+            }
+            InputEvent::MoveLeft | InputEvent::MoveRight => {
+                self.move_reasoning(matches!(input, InputEvent::MoveRight));
                 InputResult::Handled
             }
             InputEvent::Paste(text) => self.paste(text),

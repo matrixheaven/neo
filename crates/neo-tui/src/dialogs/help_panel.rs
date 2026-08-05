@@ -2,12 +2,12 @@
 
 use std::cmp::Ordering;
 
-use crate::input::InputEvent;
-use crate::input::KeybindingAction;
+use crate::input::{InputEvent, KeybindingAction, MouseEvent, MouseKind};
 use crate::primitive::Color;
 use crate::primitive::InputResult;
 use crate::primitive::theme::TuiTheme;
 use crate::primitive::visible_width;
+use crate::transcript::WHEEL_SCROLL_ROWS;
 
 use super::choice_picker::dialog_rgb;
 
@@ -103,16 +103,22 @@ impl HelpPanelState {
                 self.scroll_up(1);
                 InputResult::Handled
             }
-            InputEvent::ScrollUp(rows) => {
-                self.scroll_up(*rows);
+            InputEvent::Mouse(MouseEvent {
+                kind: MouseKind::ScrollUp,
+                ..
+            }) => {
+                self.scroll_up(WHEEL_SCROLL_ROWS);
                 InputResult::Handled
             }
             InputEvent::Action(KeybindingAction::SelectDown) => {
                 self.scroll_down(1);
                 InputResult::Handled
             }
-            InputEvent::ScrollDown(rows) => {
-                self.scroll_down(*rows);
+            InputEvent::Mouse(MouseEvent {
+                kind: MouseKind::ScrollDown,
+                ..
+            }) => {
+                self.scroll_down(WHEEL_SCROLL_ROWS);
                 InputResult::Handled
             }
             InputEvent::Action(KeybindingAction::SelectPageUp) | InputEvent::MoveLeft => {
@@ -293,6 +299,7 @@ fn truncate_styled_to_width(text: &str, max_width: usize) -> String {
 mod tests {
     use super::*;
     use crate::input::KeybindingAction;
+    use crossterm::event::{KeyModifiers, MouseButton};
 
     fn theme() -> TuiTheme {
         TuiTheme::default()
@@ -449,15 +456,27 @@ mod tests {
         assert!(!scrolled.contains("/cmd00"));
 
         assert_eq!(
-            state.handle_input(&InputEvent::ScrollUp(4)),
+            state.handle_input(&InputEvent::Mouse(MouseEvent {
+                kind: MouseKind::ScrollUp,
+                button: MouseButton::Left,
+                column: 1,
+                row: 1,
+                modifiers: KeyModifiers::NONE,
+            })),
             InputResult::Handled
         );
-        assert_eq!(state.scroll_offset(), 6);
+        assert_eq!(state.scroll_offset(), 7);
         assert_eq!(
-            state.handle_input(&InputEvent::ScrollDown(3)),
+            state.handle_input(&InputEvent::Mouse(MouseEvent {
+                kind: MouseKind::ScrollDown,
+                button: MouseButton::Left,
+                column: 1,
+                row: 1,
+                modifiers: KeyModifiers::NONE,
+            })),
             InputResult::Handled
         );
-        assert_eq!(state.scroll_offset(), 9);
+        assert_eq!(state.scroll_offset(), 10);
 
         assert_eq!(
             state.handle_input(&InputEvent::Action(KeybindingAction::SelectPageDown)),

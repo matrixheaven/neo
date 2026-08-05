@@ -5,6 +5,7 @@ pub mod raw_input;
 use std::collections::VecDeque;
 use std::time::{Duration, Instant};
 
+pub use crate::transcript::{DocumentPoint, MouseEvent, MouseKind};
 pub use key_id::{KeyId, KeyIdError};
 pub use keybinding::{
     KeybindingAction, KeybindingConflict, KeybindingDefinition, KeybindingsManager,
@@ -28,11 +29,19 @@ pub enum InputEvent {
     MoveEnd,
     Submit,
     NewLine,
-    ScrollUp(usize),
-    ScrollDown(usize),
+    Mouse(MouseEvent),
     Resize { columns: u16, rows: u16 },
     Cancel,
     Interrupt,
+}
+
+impl InputEvent {
+    /// Whether the event is a wheel scroll (up or down). Wheel navigation
+    /// keeps its transcript-wide behavior even while dialogs are focused.
+    #[must_use]
+    pub fn is_wheel(&self) -> bool {
+        matches!(self, InputEvent::Mouse(event) if event.is_wheel())
+    }
 }
 
 #[derive(Debug, Clone, Default)]
@@ -134,12 +143,8 @@ impl InputParser {
             return Vec::new();
         }
 
-        if let Some(button) = raw_input::parse_sgr_mouse_button(seq) {
-            return match button & !(4 | 8 | 16) {
-                64 => vec![InputEvent::ScrollUp(3)],
-                65 => vec![InputEvent::ScrollDown(3)],
-                _ => Vec::new(),
-            };
+        if let Some(mouse) = raw_input::parse_sgr_mouse(seq) {
+            return vec![InputEvent::Mouse(mouse)];
         }
 
         // Try printable key first (for text insertion)
@@ -497,36 +502,190 @@ mod tests {
     }
 
     #[test]
-    fn sgr_mouse_wheel_maps_to_transcript_scroll_events() {
-        let mut parser = InputParser::new();
+    fn sgr_mouse_parses_coordinates_buttons_modifiers_motion_and_release() {
+        use crate::transcript::{MouseEvent, MouseKind};
+        use crossterm::event::{KeyModifiers, MouseButton};
+
+        let mouse = |kind, button, column, row, modifiers| {
+            InputEvent::Mouse(MouseEvent {
+                kind,
+                button,
+                column,
+                row,
+                modifiers,
+            })
+        };
+
+        // Press: left button, one-based SGR coordinates become zero-based.
         assert_eq!(
-            parser.feed_bytes(b"\x1b[<64;20;10M"),
-            vec![InputEvent::ScrollUp(3)]
+            parser().feed_bytes(b"\x1b[<0;20;10M"),
+            vec![mouse(
+                MouseKind::Press,
+                MouseButton::Left,
+                19,
+                9,
+                KeyModifiers::NONE
+            )]
+        );
+        // Right button.
+        assert_eq!(
+            parser().feed_bytes(b"\x1b[<2;1;1M"),
+            vec![mouse(
+                MouseKind::Press,
+                MouseButton::Right,
+                0,
+                0,
+                KeyModifiers::NONE
+            )]
+        );
+        // Middle button.
+        assert_eq!(
+            parser().feed_bytes(b"\x1b[<1;5;3M"),
+            vec![mouse(
+                MouseKind::Press,
+                MouseButton::Middle,
+                4,
+                2,
+                KeyModifiers::NONE
+            )]
+        );
+        // Modifier bits: 4 shift, 8 alt, 16 control, and combinations.
+        assert_eq!(
+            parser().feed_bytes(b"\x1b[<4;20;10M"),
+            vec![mouse(
+                MouseKind::Press,
+                MouseButton::Left,
+                19,
+                9,
+                KeyModifiers::SHIFT
+            )]
         );
         assert_eq!(
-            parser.feed_bytes(b"\x1b[<65;20;10M"),
-            vec![InputEvent::ScrollDown(3)]
+            parser().feed_bytes(b"\x1b[<8;20;10M"),
+            vec![mouse(
+                MouseKind::Press,
+                MouseButton::Left,
+                19,
+                9,
+                KeyModifiers::ALT
+            )]
         );
         assert_eq!(
-            parser.feed_bytes(b"\x1b[<68;20;10M"),
-            vec![InputEvent::ScrollUp(3)]
+            parser().feed_bytes(b"\x1b[<16;20;10M"),
+            vec![mouse(
+                MouseKind::Press,
+                MouseButton::Left,
+                19,
+                9,
+                KeyModifiers::CONTROL
+            )]
         );
         assert_eq!(
-            parser.feed_bytes(b"\x1b[<73;20;10M"),
-            vec![InputEvent::ScrollDown(3)]
+            parser().feed_bytes(b"\x1b[<28;20;10M"),
+            vec![mouse(
+                MouseKind::Press,
+                MouseButton::Left,
+                19,
+                9,
+                KeyModifiers::SHIFT | KeyModifiers::ALT | KeyModifiers::CONTROL
+            )]
+        );
+        // Motion bit (32) marks a drag with the button held.
+        assert_eq!(
+            parser().feed_bytes(b"\x1b[<32;20;10M"),
+            vec![mouse(
+                MouseKind::Drag,
+                MouseButton::Left,
+                19,
+                9,
+                KeyModifiers::NONE
+            )]
+        );
+        // Drag with shift.
+        assert_eq!(
+            parser().feed_bytes(b"\x1b[<36;20;10M"),
+            vec![mouse(
+                MouseKind::Drag,
+                MouseButton::Left,
+                19,
+                9,
+                KeyModifiers::SHIFT
+            )]
+        );
+        // Release: lowercase `m` suffix with button bits 3.
+        assert_eq!(
+            parser().feed_bytes(b"\x1b[<3;20;10m"),
+            vec![mouse(
+                MouseKind::Release,
+                MouseButton::Left,
+                19,
+                9,
+                KeyModifiers::NONE
+            )]
+        );
+        // Release with shift modifier.
+        assert_eq!(
+            parser().feed_bytes(b"\x1b[<7;20;10m"),
+            vec![mouse(
+                MouseKind::Release,
+                MouseButton::Left,
+                19,
+                9,
+                KeyModifiers::SHIFT
+            )]
+        );
+        // Wheel: 64 up, 65 down; 68/73 are wheel with shift/control.
+        assert_eq!(
+            parser().feed_bytes(b"\x1b[<64;20;10M"),
+            vec![mouse(
+                MouseKind::ScrollUp,
+                MouseButton::Left,
+                19,
+                9,
+                KeyModifiers::NONE
+            )]
         );
         assert_eq!(
-            parser.feed_bytes(b"\x1b[<81;20;10M"),
-            vec![InputEvent::ScrollDown(3)]
+            parser().feed_bytes(b"\x1b[<65;20;10M"),
+            vec![mouse(
+                MouseKind::ScrollDown,
+                MouseButton::Left,
+                19,
+                9,
+                KeyModifiers::NONE
+            )]
         );
         assert_eq!(
-            parser.feed_bytes(b"\x1b[<64;20;10m"),
-            Vec::<InputEvent>::new()
+            parser().feed_bytes(b"\x1b[<68;20;10M"),
+            vec![mouse(
+                MouseKind::ScrollUp,
+                MouseButton::Left,
+                19,
+                9,
+                KeyModifiers::SHIFT
+            )]
         );
         assert_eq!(
-            parser.feed_bytes(b"\x1b[<0;20;10M"),
-            Vec::<InputEvent>::new()
+            parser().feed_bytes(b"\x1b[<81;20;10M"),
+            vec![mouse(
+                MouseKind::ScrollDown,
+                MouseButton::Left,
+                19,
+                9,
+                KeyModifiers::CONTROL
+            )]
         );
+        // The wheel's own release event does not re-scroll.
+        assert_eq!(parser().feed_bytes(b"\x1b[<64;20;10m"), Vec::new());
+        // Horizontal wheel (66/67) is not consumed as a scroll.
+        assert_eq!(parser().feed_bytes(b"\x1b[<66;20;10M"), Vec::new());
+        // Malformed sequences are ignored.
+        assert_eq!(parser().feed_bytes(b"\x1b[<0;20M"), Vec::new());
+        assert_eq!(parser().feed_bytes(b"\x1b[<0;20;10x"), Vec::new());
+    }
+
+    fn parser() -> InputParser {
+        InputParser::new()
     }
 
     #[test]

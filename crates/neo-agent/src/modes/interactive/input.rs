@@ -50,8 +50,7 @@ impl InteractiveController {
                 self.follow_transcript_tail();
                 self.submit_current_prompt().await?;
             }
-            InputEvent::ScrollUp(rows) => self.scroll_transcript_up(rows),
-            InputEvent::ScrollDown(rows) => self.scroll_transcript_down(rows),
+            InputEvent::Mouse(mouse) => self.handle_mouse_event(mouse),
             InputEvent::Cancel => return self.handle_cancel_input().await,
             InputEvent::Interrupt => return self.handle_interrupt_input().await,
             InputEvent::Resize { .. }
@@ -69,6 +68,25 @@ impl InteractiveController {
         Ok(false)
     }
 
+    /// Route one typed mouse event. Wheel events scroll the transcript
+    /// (transcript-wide navigation, matching the historical wheel behavior);
+    /// other buttons and Shift-modified drags are not interpreted by Neo —
+    /// Shift selection stays with the terminal emulator.
+    fn handle_mouse_event(&mut self, mouse: MouseEvent) {
+        if mouse.is_wheel() {
+            if mouse.is_wheel_up() {
+                self.scroll_transcript_up(WHEEL_SCROLL_ROWS);
+            } else {
+                self.scroll_transcript_down(WHEEL_SCROLL_ROWS);
+            }
+            return;
+        }
+        if mouse.is_shift_modified() {
+            return;
+        }
+        self.tui.handle_mouse_event(mouse);
+    }
+
     fn follow_transcript_tail(&mut self) {
         self.transcript_mut().scroll_transcript_down(usize::MAX);
     }
@@ -81,7 +99,7 @@ impl InteractiveController {
             return Ok(false);
         }
         // The wheel owns transcript navigation even while approval input is focused.
-        if matches!(event, InputEvent::ScrollUp(_) | InputEvent::ScrollDown(_)) {
+        if event.is_wheel() {
             return Ok(false);
         }
         // Interrupt rejects every visible approval (and any pending runtime
@@ -133,7 +151,7 @@ impl InteractiveController {
             return Ok(false);
         }
         // The wheel owns transcript navigation while a blocking dialog is focused.
-        if matches!(event, InputEvent::ScrollUp(_) | InputEvent::ScrollDown(_)) {
+        if event.is_wheel() {
             return Ok(false);
         }
         if matches!(event, InputEvent::Interrupt) {
@@ -256,10 +274,16 @@ impl InteractiveController {
                     }
                     InputEvent::Action(KeybindingAction::SelectUp)
                     | InputEvent::Action(KeybindingAction::EditorCursorUp)
-                    | InputEvent::ScrollUp(_) => Some(TaskBrowserAction::SelectPreviousAnswerField),
+                    | InputEvent::Mouse(MouseEvent {
+                        kind: MouseKind::ScrollUp,
+                        ..
+                    }) => Some(TaskBrowserAction::SelectPreviousAnswerField),
                     InputEvent::Action(KeybindingAction::SelectDown)
                     | InputEvent::Action(KeybindingAction::EditorCursorDown)
-                    | InputEvent::ScrollDown(_)
+                    | InputEvent::Mouse(MouseEvent {
+                        kind: MouseKind::ScrollDown,
+                        ..
+                    })
                     | InputEvent::Action(KeybindingAction::InputTab)
                     | InputEvent::Insert('\t') => Some(TaskBrowserAction::SelectNextAnswerField),
                     InputEvent::MoveLeft
@@ -474,8 +498,14 @@ impl InteractiveController {
             InputEvent::Action(KeybindingAction::SelectPageDown) => {
                 Some(TaskBrowserAction::SelectPageDown)
             }
-            InputEvent::ScrollUp(_) => Some(TaskBrowserAction::SelectUp),
-            InputEvent::ScrollDown(_) => Some(TaskBrowserAction::SelectDown),
+            InputEvent::Mouse(MouseEvent {
+                kind: MouseKind::ScrollUp,
+                ..
+            }) => Some(TaskBrowserAction::SelectUp),
+            InputEvent::Mouse(MouseEvent {
+                kind: MouseKind::ScrollDown,
+                ..
+            }) => Some(TaskBrowserAction::SelectDown),
             InputEvent::Action(KeybindingAction::SelectConfirm) | InputEvent::Submit => {
                 self.tui.chrome().task_browser_state().map(|state| {
                     if state.stop_confirmation_task_id().is_some() {

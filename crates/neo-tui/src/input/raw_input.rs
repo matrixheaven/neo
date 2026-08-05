@@ -11,7 +11,10 @@
 use std::sync::OnceLock;
 use std::sync::atomic::{AtomicBool, Ordering};
 
+use crossterm::event::{KeyModifiers, MouseButton};
 use regex::Regex;
+
+use crate::transcript::{MouseEvent, MouseKind};
 
 // ===========================================================================
 // Constants
@@ -190,15 +193,70 @@ fn is_sgr_mouse_payload(payload: &str) -> bool {
             .all(|p| !p.is_empty() && p.chars().all(|c| c.is_ascii_digit()))
 }
 
-pub(super) fn parse_sgr_mouse_button(data: &str) -> Option<u16> {
-    let payload = data.strip_prefix("\x1b[")?;
-    if !payload.starts_with('<') || !payload.ends_with('M') || !is_sgr_mouse_payload(payload) {
+pub(super) fn parse_sgr_mouse(sequence: &str) -> Option<MouseEvent> {
+    let payload = sequence.strip_prefix("\x1b[")?;
+    if !payload.starts_with('<') || !is_sgr_mouse_payload(payload) {
         return None;
     }
-    payload[1..]
-        .split(';')
-        .next()
-        .and_then(|button| button.parse().ok())
+    let body = &payload[1..];
+    let release_suffix = body.ends_with('m');
+    let body = body.strip_suffix(['M', 'm'])?;
+    let mut parts = body.split(';');
+    let code: u16 = parts.next()?.parse().ok()?;
+    let column: u16 = parts.next()?.parse().ok()?;
+    let row: u16 = parts.next()?.parse().ok()?;
+
+    let kind = if code & 64 != 0 {
+        // Wheel: 64 up, 65 down; 66/67 are horizontal and unused. The wheel's
+        // own release event (lowercase `m` suffix) must not re-scroll.
+        if release_suffix {
+            return None;
+        }
+        match code & 3 {
+            0 => MouseKind::ScrollUp,
+            1 => MouseKind::ScrollDown,
+            _ => return None,
+        }
+    } else if release_suffix || code & 3 == 3 {
+        MouseKind::Release
+    } else if code & 32 != 0 {
+        MouseKind::Drag
+    } else {
+        MouseKind::Press
+    };
+
+    // Button bits: 0 left, 1 middle, 2 right; 3 marks release with no button.
+    // Wheel events encode the direction in the low bits, not a button.
+    let button = if code & 64 != 0 {
+        MouseButton::Left
+    } else {
+        match code & 3 {
+            1 => MouseButton::Middle,
+            2 => MouseButton::Right,
+            _ => MouseButton::Left,
+        }
+    };
+
+    // Modifier bits: 2 shift, 3 meta/alt, 4 control.
+    let mut modifiers = KeyModifiers::NONE;
+    if code & 4 != 0 {
+        modifiers |= KeyModifiers::SHIFT;
+    }
+    if code & 8 != 0 {
+        modifiers |= KeyModifiers::ALT;
+    }
+    if code & 16 != 0 {
+        modifiers |= KeyModifiers::CONTROL;
+    }
+
+    Some(MouseEvent {
+        kind,
+        button,
+        // SGR coordinates are one-based; convert to zero-based exactly once.
+        column: column.saturating_sub(1),
+        row: row.saturating_sub(1),
+        modifiers,
+    })
 }
 
 /// Parse a complete one-based CPR (`ESC [ <row> ; <column> R`) into zero-based

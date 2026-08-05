@@ -2,7 +2,7 @@
 
 use std::fmt::Write as _;
 
-use crate::input::{InputEvent, KeybindingAction};
+use crate::input::{InputEvent, KeybindingAction, MouseEvent, MouseKind};
 use crate::primitive::Color;
 use crate::primitive::InputResult;
 use crate::primitive::theme::TuiTheme;
@@ -192,7 +192,11 @@ impl ChoicePickerState {
             return InputResult::Ignored;
         }
         match input {
-            InputEvent::Action(KeybindingAction::SelectUp) | InputEvent::ScrollUp(1) => {
+            InputEvent::Action(KeybindingAction::SelectUp)
+            | InputEvent::Mouse(MouseEvent {
+                kind: MouseKind::ScrollUp,
+                ..
+            }) => {
                 if !self.items.is_empty() && self.selected == 0 {
                     self.selected = self.items.len() - 1;
                 } else {
@@ -201,7 +205,11 @@ impl ChoicePickerState {
                 self.ensure_selected_visible();
                 InputResult::Handled
             }
-            InputEvent::Action(KeybindingAction::SelectDown) | InputEvent::ScrollDown(1) => {
+            InputEvent::Action(KeybindingAction::SelectDown)
+            | InputEvent::Mouse(MouseEvent {
+                kind: MouseKind::ScrollDown,
+                ..
+            }) => {
                 if !self.items.is_empty() {
                     self.selected = (self.selected + 1) % self.items.len();
                 }

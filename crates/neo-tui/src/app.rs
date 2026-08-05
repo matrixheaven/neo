@@ -1,6 +1,7 @@
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
+use crate::input::MouseEvent;
 use crate::screen_output::{CursorPos, TerminalFrame};
 use crate::shell::{NeoChromeState, OverlayKind};
 use crate::transcript::chrome_render::extract_cursor;
@@ -142,7 +143,8 @@ impl NeoTui {
 
         let next_animation_deadline = (self.chrome.working_label().is_some()
             || self.transcript.has_visible_animation()
-            || self.transcript.has_live_entries())
+            || self.transcript.has_live_entries()
+            || self.transcript.selection_requests_animation())
         .then(|| now.checked_add(ANIMATION_INTERVAL).unwrap_or(now));
 
         TerminalFrame::with_animation_deadline(lines, cursor, next_animation_deadline)
@@ -151,6 +153,26 @@ impl NeoTui {
     pub fn advance_animation_at(&mut self, _now: Instant) {
         self.chrome.advance_activity_frame();
         self.transcript.advance_animation_at_ms(current_time_ms());
+    }
+
+    /// Map a screen-space mouse event into transcript-body coordinates and
+    /// route it to the document selection. In the fullscreen layout the
+    /// transcript body occupies the top of the screen (the chrome is appended
+    /// below it), so the body row equals the screen row and the body column
+    /// is the screen column minus the gutter. Wheel events and Shift-modified
+    /// drags are not consumed here; the runtime routes wheels and the
+    /// terminal emulator owns Shift selection.
+    pub fn handle_mouse_event(&mut self, event: MouseEvent) {
+        if !event.is_selection_event() || event.is_shift_modified() {
+            return;
+        }
+        if self.chrome.focused_overlay_blocks_prompt() {
+            // Blocking overlays own the full screen; they keep input priority.
+            return;
+        }
+        let body_col = usize::from(event.column).saturating_sub(CHROME_GUTTER);
+        self.transcript
+            .handle_mouse_event(event, usize::from(event.row), body_col);
     }
 
     pub fn render(&mut self, width: usize, height: usize) -> Vec<String> {

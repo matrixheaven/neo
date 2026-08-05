@@ -826,23 +826,3 @@ fn prompt_copy_uses_internal_buffer_without_mutating_editor_state() {
     assert_eq!(app.prompt().text, "copy me");
     assert_eq!(app.prompt().cursor, 7);
 }
-
-#[test]
-fn transcript_selection_copies_item_range_with_roles() {
-    let mut transcript = TranscriptStore::new();
-    transcript.push(TranscriptEntry::user_message("first prompt"));
-    transcript.push(TranscriptEntry::assistant_message("first answer"));
-    transcript.push_tool_run("tool-1", "shell.run", Some("exit 0".to_owned()));
-    assert!(transcript.mutate_tool("tool-1", |tool| {
-        tool.set_result(Some("exit 0".to_owned()), None, false, Some(0))
-    }));
-    transcript.push(TranscriptEntry::status("done"));
-
-    transcript.select_visible_entry();
-    transcript.extend_selection_up(2);
-
-    assert_eq!(
-        transcript.copy_selection().as_deref(),
-        Some("Assistant\nfirst answer\n\nTool\n+ shell.run (exit 0)\n\nStatus\ndone")
-    );
-}

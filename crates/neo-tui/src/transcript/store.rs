@@ -35,58 +35,6 @@ pub(crate) enum WorkflowActivityRouteError {
     ConflictingOrigin { tool_id: String },
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct TranscriptSelection {
-    start: usize,
-    end: usize,
-}
-
-impl TranscriptSelection {
-    #[must_use]
-    pub const fn new(index: usize) -> Self {
-        Self {
-            start: index,
-            end: index,
-        }
-    }
-
-    fn extend_up(&mut self, len: usize, count: usize) {
-        let max_index = len.saturating_sub(1);
-        self.start = self.start.saturating_sub(count).min(max_index);
-        self.end = self.end.min(max_index);
-    }
-
-    fn extend_down(&mut self, len: usize, count: usize) {
-        let max_index = len.saturating_sub(1);
-        self.start = self.start.min(max_index);
-        self.end = self.end.saturating_add(count).min(max_index);
-    }
-
-    #[must_use]
-    fn range(&self, len: usize) -> Option<std::ops::Range<usize>> {
-        if len == 0 {
-            return None;
-        }
-        let max_index = len - 1;
-        let start = self.start.min(max_index).min(self.end.min(max_index));
-        let end = self.start.min(max_index).max(self.end.min(max_index)) + 1;
-        Some(start..end)
-    }
-}
-
-/// Cached render output for a single transcript entry. The cache is valid
-/// only while `width` matches the current terminal content width.
-#[derive(Debug, Clone)]
-struct CachedRender {
-    width: usize,
-    lines: Vec<Line>,
-    ansi_lines: Vec<String>,
-}
-
-/// Stable identity for an entry in a [`TranscriptStore`].
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub struct TranscriptEntryId(u64);
-
 #[derive(Debug, Clone, Default)]
 pub struct TranscriptStore {
     entries: Vec<TranscriptEntry>,
@@ -107,12 +55,31 @@ pub struct TranscriptStore {
     /// Per-entry render cache, parallel to `entries`. `None` means the entry
     /// needs re-rendering (new, mutated, or width changed).
     render_cache: Vec<Option<CachedRender>>,
-    /// Legacy entry-index selection. The document owns visibility; this
-    /// index-based selection remains until document-coordinate selection
-    /// replaces it.
-    selection: Option<TranscriptSelection>,
     progressive_facts: Vec<ProgressiveFact>,
     next_progressive_sequence: u64,
+}
+
+/// Cached render output for a single transcript entry. The cache is valid
+/// only while `width` matches the current terminal content width.
+#[derive(Debug, Clone)]
+struct CachedRender {
+    width: usize,
+    lines: Vec<Line>,
+    ansi_lines: Vec<String>,
+}
+
+/// Stable identity for an entry in a [`TranscriptStore`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct TranscriptEntryId(u64);
+
+impl TranscriptEntryId {
+    /// Deterministic identity for tests that need to build document
+    /// coordinates without a live store.
+    #[cfg(test)]
+    #[must_use]
+    pub const fn new_for_test(inner: u64) -> Self {
+        Self(inner)
+    }
 }
 
 impl TranscriptStore {
@@ -1457,61 +1424,6 @@ impl TranscriptStore {
             *start -= 1;
         }
         Some(entry)
-    }
-
-    pub fn select_visible_entry(&mut self) {
-        // The document owns view visibility; entry-index selection is legacy
-        // behavior that document-coordinate selection replaces. Without view
-        // state the store selects the tail entry, which matches the default
-        // tail-following view.
-        self.selection = self
-            .entries
-            .len()
-            .checked_sub(1)
-            .map(TranscriptSelection::new);
-    }
-
-    pub fn clear_selection(&mut self) {
-        self.selection = None;
-    }
-
-    pub fn extend_selection_up(&mut self, count: usize) {
-        if self.selection.is_none() {
-            self.select_visible_entry();
-        }
-        if let Some(selection) = &mut self.selection {
-            selection.extend_up(self.entries.len(), count);
-        }
-    }
-
-    pub fn extend_selection_down(&mut self, count: usize) {
-        if self.selection.is_none() {
-            self.select_visible_entry();
-        }
-        if let Some(selection) = &mut self.selection {
-            selection.extend_down(self.entries.len(), count);
-        }
-    }
-
-    #[must_use]
-    pub fn has_selection(&self) -> bool {
-        self.selection.is_some()
-    }
-
-    #[must_use]
-    pub fn copy_selection(&self) -> Option<String> {
-        let range = self.selection?.range(self.entries.len())?;
-        let mut copied = String::new();
-        for (offset, entry) in self.entries[range].iter().enumerate() {
-            if offset > 0 {
-                copied.push_str("\n\n");
-            }
-            let (label, content) = entry.copy_parts();
-            copied.push_str(label);
-            copied.push('\n');
-            copied.push_str(&content);
-        }
-        Some(copied)
     }
 
     #[must_use]

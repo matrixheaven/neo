@@ -1,12 +1,13 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
+use std::time::Instant;
 
 use neo_agent_core::instructions::InstructionEpochData;
 use neo_agent_core::{AgentEvent, AgentMessage, Content, ImageRef, skills::SkillStore};
 
 use crate::dialogs::question_dialog::{QuestionDisplayData, QuestionStateMachine};
 use crate::primitive::theme::TuiTheme;
-use crate::primitive::{Finalization, next_sequence};
+use crate::primitive::{Finalization, next_sequence, strip_ansi};
 use crate::shell::{StreamUpdate, ToolStatusKind};
 use crate::terminal_image::{
     ImageRenderPolicy, ImageSource, InlineImage, TerminalImageCapabilities,
@@ -18,6 +19,17 @@ use crate::transcript::{
 };
 
 use super::entry::RetryStatusData;
+use super::selection::{
+    AutoScroll, DocumentPoint, DocumentSelection, MouseEvent, MouseKind, cell_to_grapheme_index,
+    grapheme_index_to_cell, slice_text_by_cells, word_span_in_text,
+};
+
+/// Clamp a body coordinate into the u16 mouse coordinate space. Body rows and
+/// columns come from terminal geometry and are already u16-bounded in
+/// practice; the clamp keeps the threshold arithmetic total.
+fn clamp_u16(value: usize) -> u16 {
+    u16::try_from(value).unwrap_or(u16::MAX)
+}
 
 fn compaction_is_complete(phase: Option<neo_agent_core::CompactionPhase>, percent: u8) -> bool {
     phase == Some(neo_agent_core::CompactionPhase::Applying) && percent >= 100
@@ -183,6 +195,15 @@ pub struct TranscriptPane {
     image_render_policy: ImageRenderPolicy,
     image_capabilities: TerminalImageCapabilities,
     pub(super) skill_store: Option<SkillStore>,
+    /// Document-coordinate text selection: endpoints, drag lifecycle, word
+    /// selection, auto-scroll intent, and materialized plain text.
+    selection: DocumentSelection,
+    /// Body height (rows) of the last rendered visible slice, used to map
+    /// mouse rows into document rows and to detect viewport-edge drags.
+    body_height: usize,
+    /// Pointer column of the most recent drag event, carried into frame-
+    /// driven auto-scroll so the active endpoint keeps the pointer's column.
+    last_drag_col: usize,
 }
 
 impl TranscriptPane {
@@ -213,6 +234,9 @@ impl TranscriptPane {
             image_render_policy: ImageRenderPolicy::default(),
             image_capabilities: TerminalImageCapabilities::default(),
             skill_store: None,
+            selection: DocumentSelection::new(),
+            body_height: 0,
+            last_drag_col: 0,
         }
     }
 
@@ -606,29 +630,373 @@ impl TranscriptPane {
     }
 
     pub fn select_visible_transcript_entry(&mut self) {
-        self.transcript.select_visible_entry();
+        self.ensure_layout_current();
+        let range = self.document.visible_row_range(self.body_height);
+        if let Some(point) = self.document.point_at(range.start, 0) {
+            self.selection.start_keyboard_selection(point);
+        }
     }
 
     pub fn clear_transcript_selection(&mut self) {
-        self.transcript.clear_selection();
+        self.selection.clear();
     }
 
     pub fn extend_transcript_selection_up(&mut self, rows: usize) {
-        self.transcript.extend_selection_up(rows);
+        self.ensure_layout_current();
+        if !self.selection.has_anchor() {
+            self.select_visible_transcript_entry();
+        }
+        let Some(active) = self.selection.active() else {
+            return;
+        };
+        let Some(active_row) = self.document.row_of(active) else {
+            return;
+        };
+        if let Some(point) = self
+            .document
+            .point_at(active_row.saturating_sub(rows), active.display_cell)
+        {
+            self.selection.extend_to(point);
+        }
     }
 
     pub fn extend_transcript_selection_down(&mut self, rows: usize) {
-        self.transcript.extend_selection_down(rows);
+        self.ensure_layout_current();
+        if !self.selection.has_anchor() {
+            self.select_visible_transcript_entry();
+        }
+        let Some(active) = self.selection.active() else {
+            return;
+        };
+        let Some(active_row) = self.document.row_of(active) else {
+            return;
+        };
+        let target = active_row
+            .saturating_add(rows)
+            .min(self.document.total_rows().saturating_sub(1));
+        if let Some(point) = self.document.point_at(target, active.display_cell) {
+            self.selection.extend_to(point);
+        }
     }
 
     #[must_use]
     pub fn has_transcript_selection(&self) -> bool {
-        self.transcript.has_selection()
+        self.selection.is_active()
     }
 
+    /// The materialized plain text of the current selection, frozen at the
+    /// document revision where it was captured. Materializes on demand when
+    /// the selection came from the keyboard instead of a mouse release.
+    pub fn copy_selected_transcript_text(&mut self) -> Option<String> {
+        if self.selection.materialized().is_none()
+            && let Some(text) = self.materialize_selection()
+        {
+            self.selection.set_materialized(text);
+        }
+        self.selection.materialized().map(str::to_owned)
+    }
+
+    // ======================================================================
+    // Mouse-driven document selection
+    // ======================================================================
+
+    /// Feed one typed mouse event with transcript-body coordinates. Wheel
+    /// events are handled by the runtime (transcript-wide navigation) and are
+    /// ignored here. Shift-modified drags are never consumed so terminal
+    /// emulators keep native selection.
+    pub fn handle_mouse_event(&mut self, event: MouseEvent, body_row: usize, body_col: usize) {
+        if event.is_shift_modified() || event.is_wheel() {
+            return;
+        }
+        match event.kind {
+            MouseKind::Press if event.button == crossterm::event::MouseButton::Left => {
+                self.mouse_press(body_row, body_col);
+            }
+            MouseKind::Drag if event.button == crossterm::event::MouseButton::Left => {
+                self.mouse_drag(body_row, body_col);
+            }
+            MouseKind::Release => self.mouse_release(),
+            _ => {}
+        }
+    }
+
+    /// Whether the frame loop must keep rendering while a drag auto-scrolls.
     #[must_use]
-    pub fn copy_selected_transcript_text(&self) -> Option<String> {
-        self.transcript.copy_selection()
+    pub(crate) fn selection_requests_animation(&self) -> bool {
+        self.selection.requests_animation()
+    }
+
+    fn mouse_press(&mut self, body_row: usize, body_col: usize) {
+        self.ensure_layout_current();
+        let Some(point) = self.point_at_body(body_row, body_col) else {
+            return;
+        };
+        let double_click = self.selection.press(
+            point,
+            clamp_u16(body_row),
+            clamp_u16(body_col),
+            Instant::now(),
+        );
+        if double_click && let Some((start, end)) = self.word_span(point) {
+            self.selection.set_word_selection(start, end);
+            self.selection.invalidate_materialized();
+        }
+    }
+
+    fn mouse_drag(&mut self, body_row: usize, body_col: usize) {
+        if !self.selection.has_anchor() {
+            return;
+        }
+        self.ensure_layout_current();
+        self.last_drag_col = body_col;
+        let row = clamp_u16(body_row);
+        let col = clamp_u16(body_col);
+        let point = self.point_at_body(body_row, body_col);
+        let update = self.selection.drag(point, row, col);
+        if update.started {
+            // Lock the view so tail-following cannot shift the pointer-to-
+            // document mapping mid-drag.
+            let range = self.document.visible_row_range(self.body_height);
+            if self.document.is_following_tail() {
+                self.document.lock_at_row(range.start);
+                self.mark_dirty();
+            }
+        }
+        let auto_scroll = if body_row >= self.body_height {
+            Some(AutoScroll::Down)
+        } else if body_row == 0 {
+            Some(AutoScroll::Up)
+        } else {
+            None
+        };
+        self.selection.set_auto_scroll(auto_scroll);
+        if auto_scroll.is_some() {
+            self.mark_dirty();
+        }
+    }
+
+    fn mouse_release(&mut self) {
+        if self.selection.release()
+            && let Some(text) = self.materialize_selection()
+        {
+            self.selection.set_materialized(text);
+        }
+    }
+
+    /// Advance the document one row per frame while a drag crosses the
+    /// viewport edge, extending the active endpoint into the revealed row.
+    /// Called from [`Self::render_visible_slice`], so auto-scroll rides the
+    /// existing frame cadence and stops on mouse release (which clears the
+    /// auto-scroll intent and the animation deadline request).
+    fn apply_drag_autoscroll(&mut self, body_height: usize) {
+        let Some(direction) = self.selection.auto_scroll() else {
+            return;
+        };
+        if !self.selection.is_dragging() {
+            return;
+        }
+        match direction {
+            AutoScroll::Up => self.document.scroll_up(1),
+            AutoScroll::Down => self.document.scroll_down(1),
+        }
+        let range = self.document.visible_row_range(body_height);
+        let edge_row = match direction {
+            AutoScroll::Up => range.start,
+            AutoScroll::Down => range.end.saturating_sub(1),
+        };
+        if let Some(point) = self.document.point_at(edge_row, self.last_drag_col) {
+            self.selection.extend_to(point);
+        }
+        self.mark_dirty();
+    }
+
+    /// Resolve a body position to a document point through the current
+    /// visible slice. `None` outside the body or over a non-text region.
+    fn point_at_body(&mut self, body_row: usize, body_col: usize) -> Option<DocumentPoint> {
+        if body_row >= self.body_height {
+            return None;
+        }
+        let range = self.document.visible_row_range(self.body_height);
+        self.document
+            .point_at(range.start.saturating_add(body_row), body_col)
+    }
+
+    /// The word under `point`, as a document endpoint span. Uses the entry's
+    /// rendered row text so the word matches what is on screen. Image rows
+    /// have no selectable word.
+    fn word_span(&mut self, point: DocumentPoint) -> Option<(DocumentPoint, DocumentPoint)> {
+        let content_width = super::chrome_render::frame_content_width(self.width);
+        let index = self
+            .transcript
+            .entry_ids()
+            .iter()
+            .position(|id| *id == point.entry_id)?;
+        let block = self.entry_block_lines(index, content_width);
+        let raw = block.get(point.row_in_entry)?;
+        if ansi_line_is_image(raw) {
+            return None;
+        }
+        let text = strip_ansi(raw);
+        let grapheme_index = cell_to_grapheme_index(&text, point.display_cell);
+        let (start, end) = word_span_in_text(&text, grapheme_index);
+        let start_cell = grapheme_index_to_cell(&text, start);
+        let end_cell = grapheme_index_to_cell(&text, end);
+        let mut start_point = point;
+        let mut end_point = point;
+        start_point.display_cell = start_cell;
+        end_point.display_cell = end_cell.saturating_sub(1);
+        Some((start_point, end_point))
+    }
+
+    /// Materialize the plain text between the selection endpoints against
+    /// the current document revision, clamping vanished endpoints.
+    fn materialize_selection(&mut self) -> Option<String> {
+        self.ensure_layout_current();
+        let (anchor, active) = (self.selection.anchor()?, self.selection.active()?);
+        let anchor = self.clamp_point(anchor)?;
+        let active = self.clamp_point(active)?;
+        let start_row = self.document.row_of(anchor)?;
+        let end_row = self.document.row_of(active)?;
+        let (min_row, max_row) = (start_row.min(end_row), start_row.max(end_row));
+        // Endpoint cells are symmetric: the min-end row is cut on the right
+        // at the active cell when the drag ends there (upward drag), and the
+        // max-end row is cut on the left at the anchor cell when the drag
+        // leaves it there (upward drag). Downward drags cut the anchor row
+        // on the left and the active row on the right. A single-row
+        // selection spans the cells between both endpoints.
+        let (min_start_cell, min_end_cell, max_start_cell, max_end_cell) = if start_row == end_row {
+            let start = anchor.display_cell.min(active.display_cell);
+            let end = anchor
+                .display_cell
+                .max(active.display_cell)
+                .saturating_add(1);
+            (start, end, start, end)
+        } else if start_row < end_row {
+            (
+                anchor.display_cell,
+                usize::MAX,
+                0,
+                active.display_cell.saturating_add(1),
+            )
+        } else {
+            (
+                0,
+                active.display_cell.saturating_add(1),
+                anchor.display_cell,
+                usize::MAX,
+            )
+        };
+        let content_width = super::chrome_render::frame_content_width(self.width);
+        let mut text = String::new();
+        let mut index = self.document.entry_at_row(min_row)?;
+        let mut row = min_row;
+        let mut first_line = true;
+        while row <= max_row {
+            let Some(layout) = self.document.entry_layout(index).copied() else {
+                break;
+            };
+            let block_len = self.document.block_height(index).unwrap_or(0);
+            let block_start = layout.start_row + layout.height.saturating_sub(block_len);
+            let span_end = (layout.start_row + layout.height).min(max_row + 1);
+            if span_end <= row {
+                index += 1;
+                continue;
+            }
+            let block = if block_len > 0 {
+                self.entry_block_lines(index, content_width)
+            } else {
+                Vec::new()
+            };
+            let mut virtual_row = row;
+            while virtual_row < span_end {
+                if !first_line {
+                    text.push('\n');
+                }
+                first_line = false;
+                // Separator rows (between cards) copy as blank lines; only
+                // rows inside the rendered block carry text.
+                if virtual_row >= block_start {
+                    let row_in_block = virtual_row - block_start;
+                    if row_in_block < block_len
+                        && let Some(line) = block.get(row_in_block)
+                    {
+                        let plain = strip_ansi(line);
+                        let start_cell = if virtual_row == min_row {
+                            min_start_cell
+                        } else if virtual_row == max_row {
+                            max_start_cell
+                        } else {
+                            0
+                        };
+                        let end_cell = if virtual_row == max_row {
+                            max_end_cell
+                        } else if virtual_row == min_row {
+                            min_end_cell
+                        } else {
+                            usize::MAX
+                        };
+                        text.push_str(&slice_text_by_cells(&plain, start_cell, end_cell));
+                    }
+                }
+                virtual_row += 1;
+            }
+            row = span_end;
+            index += 1;
+            if index >= self.document.layouts().len() {
+                break;
+            }
+        }
+        Some(text)
+    }
+
+    /// Clamp an endpoint against the current document: a vanished row clamps
+    /// to the last surviving row of the same entry, then to the nearest
+    /// preceding surviving entry, then to the first surviving entry.
+    fn clamp_point(&self, point: DocumentPoint) -> Option<DocumentPoint> {
+        let layouts = self.document.layouts();
+        let surviving = |offset: usize| {
+            self.document
+                .block_height(offset)
+                .filter(|height| *height > 0)
+                .map(|height| DocumentPoint {
+                    entry_id: layouts[offset].entry_id,
+                    row_in_entry: height - 1,
+                    display_cell: point.display_cell,
+                })
+        };
+        if let Some(position) = layouts.iter().position(|l| l.entry_id == point.entry_id) {
+            if let Some(height) = self.document.block_height(position).filter(|h| *h > 0) {
+                return Some(DocumentPoint {
+                    entry_id: point.entry_id,
+                    row_in_entry: point.row_in_entry.min(height - 1),
+                    display_cell: point.display_cell,
+                });
+            }
+            for offset in (0..position).rev() {
+                if let Some(point) = surviving(offset) {
+                    return Some(point);
+                }
+            }
+        } else {
+            for offset in (0..layouts.len()).rev() {
+                if let Some(point) = surviving(offset) {
+                    return Some(point);
+                }
+            }
+        }
+        for offset in 0..layouts.len() {
+            if let Some(point) = surviving(offset) {
+                return Some(point);
+            }
+        }
+        None
+    }
+
+    /// Reconcile the document layout with the store and feed fresh heights,
+    /// so row resolution reflects the current document at event time.
+    fn ensure_layout_current(&mut self) {
+        let content_width = super::chrome_render::frame_content_width(self.width);
+        self.refresh_layout(content_width);
     }
 
     pub fn start_assistant_message(&mut self) {
@@ -783,6 +1151,7 @@ impl TranscriptPane {
         self.dirty = false;
         self.width = width;
         self.height = height;
+        self.body_height = height;
 
         let lines = self.render_body_lines(width);
         self.last_frame.clone_from(&lines);
@@ -1506,10 +1875,16 @@ impl TranscriptPane {
     /// rows, resolving the document's anchor/follow state against the new
     /// document bottom. The frame composition itself is owned by the
     /// fullscreen lifecycle; this is the document-powered resolution.
+    ///
+    /// While a drag crosses the viewport edge, each frame-driven call also
+    /// advances the document one row (the existing frame cadence) and extends
+    /// the active endpoint into the revealed row.
     #[must_use]
     pub fn render_visible_slice(&mut self, width: usize, height: usize) -> Vec<String> {
+        self.body_height = height;
         let content_width = super::chrome_render::frame_content_width(width);
         self.refresh_layout(content_width);
+        self.apply_drag_autoscroll(height);
         let range = self.document.visible_row_range(height);
         self.compose_rows(range.start, range.end, content_width)
     }

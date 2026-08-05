@@ -134,21 +134,28 @@ impl RawStdinEvents {
     }
 
     fn enqueue_pending(&mut self, event: InputEvent) {
-        if is_scroll_event(&event) {
-            let scroll_count = self
+        if is_motion_event(&event) {
+            // Coalesce consecutive drag/wheel motion: a newer motion event
+            // supersedes the motion events queued directly behind it, so a
+            // drag flood never accumulates. Press and release events are
+            // never dropped and never replaced.
+            while self.pending.back().is_some_and(is_motion_event) {
+                self.pending.pop_back();
+            }
+            let motion_count = self
                 .pending
                 .iter()
-                .filter(|pending| is_scroll_event(pending))
+                .filter(|pending| is_motion_event(pending))
                 .count();
-            if scroll_count >= MAX_PENDING_SCROLL_EVENTS
-                && let Some(index) = self.pending.iter().position(is_scroll_event)
+            if motion_count >= MAX_PENDING_SCROLL_EVENTS
+                && let Some(index) = self.pending.iter().position(is_motion_event)
             {
                 self.pending.remove(index);
             }
         } else {
-            // Wheel input is transient. A fresh keyboard event should never
-            // wait behind stale wheel events captured by a blocking overlay.
-            self.pending.retain(|pending| !is_scroll_event(pending));
+            // Motion input is transient. A fresh event should never wait
+            // behind stale drag/wheel events captured by a blocking overlay.
+            self.pending.retain(|pending| !is_motion_event(pending));
         }
         self.pending.push_back(event);
     }
@@ -298,8 +305,10 @@ impl TerminalEvents for RawStdinEvents {
     }
 }
 
-fn is_scroll_event(event: &InputEvent) -> bool {
-    matches!(event, InputEvent::ScrollUp(_) | InputEvent::ScrollDown(_))
+/// Transient pointer motion (drag or wheel) that a stale queue may drop;
+/// press and release events are never classified as motion.
+fn is_motion_event(event: &InputEvent) -> bool {
+    matches!(event, InputEvent::Mouse(mouse) if mouse.is_motion())
 }
 
 fn read_stdin_chunks(reader: &mut impl Read, mut on_chunk: impl FnMut(&[u8]) -> bool) {
@@ -485,6 +494,8 @@ impl NeoTerminal {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crossterm::event::{KeyModifiers, MouseButton};
+    use neo_tui::transcript::MouseKind;
     use std::io::{Error, ErrorKind, Read, Result as IoResult};
 
     struct InterruptedThenBytes {
@@ -576,7 +587,7 @@ mod tests {
             stdin_disconnected: false,
         };
         for _ in 0..(MAX_PENDING_SCROLL_EVENTS * 4) {
-            events.enqueue_pending(InputEvent::ScrollDown(3));
+            events.enqueue_pending(wheel_down());
         }
         tx.send(b"x".to_vec()).expect("stdin chunk is queued");
 
@@ -587,6 +598,67 @@ mod tests {
             Some(InputEvent::Insert('x'))
         );
         assert!(events.pending.is_empty());
+    }
+
+    #[test]
+    fn drag_motion_coalesces_but_press_and_release_are_never_dropped() {
+        let (tx, rx) = std::sync::mpsc::channel::<Vec<u8>>();
+        let geometry = GeometryObservation::new(80, 24, 0, 0);
+        let mut events = RawStdinEvents {
+            parser: InputParser::with_keybindings(KeybindingsManager::default()),
+            pending: VecDeque::new(),
+            rx,
+            last_size: Some((80, 24)),
+            geometry,
+            stdin_disconnected: false,
+        };
+        events.enqueue_pending(mouse_event(MouseKind::Press, 5, 3));
+        for column in 6..20 {
+            events.enqueue_pending(mouse_event(MouseKind::Drag, column, 3));
+        }
+        // Consecutive drags collapse to the latest one.
+        assert_eq!(
+            events
+                .poll_input_event(Duration::from_millis(0))
+                .expect("poll input"),
+            Some(mouse_event(MouseKind::Press, 5, 3))
+        );
+        assert_eq!(
+            events
+                .poll_input_event(Duration::from_millis(0))
+                .expect("poll input"),
+            Some(mouse_event(MouseKind::Drag, 19, 3))
+        );
+        // A release overtakes any stale drags and is itself never dropped.
+        events.enqueue_pending(mouse_event(MouseKind::Drag, 20, 3));
+        events.enqueue_pending(mouse_event(MouseKind::Release, 20, 3));
+        assert_eq!(
+            events
+                .poll_input_event(Duration::from_millis(0))
+                .expect("poll input"),
+            Some(mouse_event(MouseKind::Release, 20, 3))
+        );
+        assert!(events.pending.is_empty());
+    }
+
+    fn wheel_down() -> InputEvent {
+        InputEvent::Mouse(neo_tui::transcript::MouseEvent {
+            kind: MouseKind::ScrollDown,
+            button: MouseButton::Left,
+            column: 10,
+            row: 10,
+            modifiers: KeyModifiers::NONE,
+        })
+    }
+
+    fn mouse_event(kind: MouseKind, column: u16, row: u16) -> InputEvent {
+        InputEvent::Mouse(neo_tui::transcript::MouseEvent {
+            kind,
+            button: MouseButton::Left,
+            column,
+            row,
+            modifiers: KeyModifiers::NONE,
+        })
     }
 
     #[test]

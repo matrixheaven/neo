@@ -9,6 +9,7 @@
 
 use std::collections::{BTreeSet, HashMap};
 
+use super::selection::DocumentPoint;
 use super::store::TranscriptEntryId;
 
 /// A logical scroll anchor: entry identity plus the position inside that
@@ -428,6 +429,60 @@ impl DocumentLayout {
         self.layouts
             .iter()
             .position(|l| l.start_row <= row && row < l.start_row + l.height)
+    }
+
+    /// The rendered block height (text rows, excluding the separator row) of
+    /// the entry at `index`, if any.
+    #[must_use]
+    pub fn block_height(&self, index: usize) -> Option<usize> {
+        self.block_rows.get(index).copied()
+    }
+
+    /// Map a virtual document row and display cell to a [`DocumentPoint`].
+    ///
+    /// A separator row (the blank row between cards) clamps into the entry's
+    /// first text row; `display_cell` is the raw cell and is clamped to the
+    /// row's real width only when text is materialized.
+    #[must_use]
+    pub fn point_at(&self, row: usize, cell: usize) -> Option<DocumentPoint> {
+        if row >= self.total_rows {
+            return None;
+        }
+        let index = self.entry_at_row(row)?;
+        let layout = &self.layouts[index];
+        let block = self.block_rows[index];
+        let block_start = layout.start_row + layout.height.saturating_sub(block);
+        let row_in_entry = row.saturating_sub(block_start).min(block.saturating_sub(1));
+        Some(DocumentPoint {
+            entry_id: layout.entry_id,
+            row_in_entry,
+            display_cell: cell,
+        })
+    }
+
+    /// The virtual row of a [`DocumentPoint`], clamping the row inside the
+    /// same entry when the entry shrank. `None` when the entry vanished or
+    /// renders no rows.
+    #[must_use]
+    pub fn row_of(&self, point: DocumentPoint) -> Option<usize> {
+        let index = self
+            .layouts
+            .iter()
+            .position(|l| l.entry_id == point.entry_id)?;
+        let layout = self.layouts[index];
+        let block = self.block_rows[index];
+        if block == 0 {
+            return None;
+        }
+        let block_start = layout.start_row + layout.height.saturating_sub(block);
+        Some(block_start + point.row_in_entry.min(block - 1))
+    }
+
+    /// Lock the view at `row`, exactly like a wheel scroll would. Used when a
+    /// selection drag begins so tail-following cannot shift the mapping
+    /// between the pointer and the document mid-drag.
+    pub fn lock_at_row(&mut self, row: usize) {
+        self.set_anchor_at_row(row);
     }
 
     /// Rebuild the layout for a new content width. All entries invalidate on
