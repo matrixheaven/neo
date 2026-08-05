@@ -128,6 +128,11 @@ pub struct DocumentSelection {
     anchor: Option<DocumentPoint>,
     active: Option<DocumentPoint>,
     /// Inclusive entry identities selected by keyboard actions.
+    ///
+    /// A keyboard entry selection is preserved by mouse presses and plain
+    /// clicks — single clicks on entries keep their action ownership — and is
+    /// replaced only when the gesture is confirmed as a drag (movement past
+    /// the threshold) or becomes a double-click word selection.
     keyboard_entries: Option<(TranscriptEntryId, TranscriptEntryId)>,
     /// Threshold crossed: the gesture is a drag, not a click.
     dragging: bool,
@@ -215,6 +220,11 @@ impl DocumentSelection {
     /// Start (or restart) a selection at `point`. Returns `true` when this
     /// press forms a double-click with the previous press, in which case the
     /// caller should replace the endpoints with the word under the point.
+    ///
+    /// A press starts a tentative mouse gesture and never destroys an active
+    /// keyboard entry selection: clicks keep it, and only a confirmed drag
+    /// ([`Self::drag`] crossing the movement threshold) or a double-click
+    /// word selection replaces it.
     pub fn press(&mut self, point: DocumentPoint, row: u16, col: u16, now: Instant) -> bool {
         let double_click = self
             .last_press_at
@@ -228,7 +238,6 @@ impl DocumentSelection {
             });
         self.anchor = Some(point);
         self.active = Some(point);
-        self.keyboard_entries = None;
         self.dragging = false;
         self.word_selected = false;
         self.auto_scroll = None;
@@ -251,6 +260,9 @@ impl DocumentSelection {
                 || col.abs_diff(self.press_col) > MOVEMENT_THRESHOLD)
         {
             self.dragging = true;
+            // The gesture is confirmed as a drag: it supersedes any active
+            // keyboard entry selection, which clicks never destroy.
+            self.keyboard_entries = None;
         }
         if self.dragging
             && let Some(point) = point
@@ -265,13 +277,14 @@ impl DocumentSelection {
 
     /// End the gesture. Returns `true` when a real selection exists (a drag
     /// or a double-click word selection) and should be materialized; a plain
-    /// click clears the selection so single clicks stay inert.
+    /// click clears a mouse selection so single clicks stay inert, while an
+    /// active keyboard entry selection survives the click untouched.
     pub fn release(&mut self) -> bool {
         let keep = self.dragging || self.word_selected;
         self.dragging = false;
         self.word_selected = false;
         self.auto_scroll = None;
-        if !keep {
+        if !keep && self.keyboard_entries.is_none() {
             self.anchor = None;
             self.active = None;
             self.materialized = None;
@@ -489,6 +502,51 @@ mod tests {
         assert!(update.started);
         assert!(update.dragging);
         assert!(selection.release());
+    }
+
+    #[test]
+    fn mouse_press_and_click_keep_keyboard_selection_but_confirmed_drag_replaces() {
+        let mut selection = DocumentSelection::new();
+        let point = DocumentPoint {
+            entry_id: TranscriptEntryId::new_for_test(1),
+            row_in_entry: 0,
+            display_cell: 0,
+        };
+        let now = Instant::now();
+        selection.set_keyboard_entry_selection(point, point);
+        assert!(selection.keyboard_entries().is_some());
+
+        // A press starts a tentative mouse gesture; the keyboard selection
+        // survives it and a plain click release.
+        assert!(!selection.press(point, 2, 3, now));
+        assert!(selection.keyboard_entries().is_some());
+        assert!(!selection.release());
+        assert!(selection.keyboard_entries().is_some());
+        assert!(selection.is_active());
+
+        // Sub-threshold movement still counts as a click. The press sits 6
+        // cells from the previous press point so it is not a double-click,
+        // and the wiggle stays inside the movement threshold.
+        let point_b = DocumentPoint {
+            entry_id: TranscriptEntryId::new_for_test(1),
+            row_in_entry: 0,
+            display_cell: 6,
+        };
+        assert!(!selection.press(point_b, 2, 6, now + Duration::from_millis(50)));
+        let update = selection.drag(Some(point_b), 2, 7);
+        assert!(!update.dragging);
+        assert!(selection.keyboard_entries().is_some());
+        assert!(!selection.release());
+        assert!(selection.keyboard_entries().is_some());
+
+        // Crossing the movement threshold confirms the drag and replaces the
+        // keyboard selection with the mouse gesture.
+        assert!(!selection.press(point, 2, 3, now + Duration::from_millis(100)));
+        let update = selection.drag(Some(point), 5, 5);
+        assert!(update.started);
+        assert!(selection.keyboard_entries().is_none());
+        assert!(selection.release());
+        assert!(selection.keyboard_entries().is_none());
     }
 
     #[test]

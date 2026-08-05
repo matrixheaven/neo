@@ -204,6 +204,11 @@ pub struct TranscriptPane {
     /// Pointer column of the most recent drag event, carried into frame-
     /// driven auto-scroll so the active endpoint keeps the pointer's column.
     last_drag_col: usize,
+    /// Entry index range visible in the last resolved document layout.
+    /// `None` until the first layout resolution: animation scheduling then
+    /// falls back to scanning every entry, so frames are never scheduled
+    /// before the viewport exists.
+    visible_entries: Option<std::ops::Range<usize>>,
 }
 
 impl TranscriptPane {
@@ -237,6 +242,7 @@ impl TranscriptPane {
             selection: DocumentSelection::new(),
             body_height: 0,
             last_drag_col: 0,
+            visible_entries: None,
         }
     }
 
@@ -1207,12 +1213,15 @@ impl TranscriptPane {
         if !has_visible_animation {
             return;
         }
-        let has_frame_animation = self.transcript.entries().iter().any(|entry| {
+        let visible_entries = self.visible_entry_slice();
+        let has_frame_animation = visible_entries.iter().any(|entry| {
             !matches!(entry, TranscriptEntry::Compaction { .. }) && entry.has_visible_animation()
         });
         self.activity_frame = self.activity_frame.wrapping_add(1);
         let compaction_changed = self.advance_compaction_display(now_ms);
-        let live_entry_changed = self.transcript.tick_live_entries(now_ms);
+        let live_entry_changed = self
+            .transcript
+            .tick_live_entries_in(now_ms, self.visible_entries.clone());
         if compaction_changed || live_entry_changed || has_frame_animation {
             self.mark_dirty();
         }
@@ -1220,15 +1229,51 @@ impl TranscriptPane {
 
     #[must_use]
     pub(crate) fn has_live_entries(&self) -> bool {
-        self.transcript.has_live_entries()
+        match &self.visible_entries {
+            Some(range) => self.transcript.has_live_entries_in(range.clone()),
+            None => self.transcript.has_live_entries(),
+        }
     }
 
     #[must_use]
     pub(crate) fn has_visible_animation(&self) -> bool {
-        self.transcript
-            .entries()
+        self.visible_entry_slice()
             .iter()
             .any(TranscriptEntry::has_visible_animation)
+    }
+
+    /// The entries currently on screen, or every entry when the document has
+    /// not been laid out yet. Animation scheduling is driven exclusively by
+    /// this slice: off-screen entries neither request deadlines nor tick.
+    fn visible_entry_slice(&self) -> &[TranscriptEntry] {
+        let entries = self.transcript.entries();
+        match &self.visible_entries {
+            Some(range) => entries.get(range.clone()).unwrap_or(entries),
+            None => entries,
+        }
+    }
+
+    /// The entry indices whose laid-out rows intersect `[start_row, end_row)`.
+    fn visible_entry_indices(
+        &self,
+        start_row: usize,
+        end_row: usize,
+    ) -> Option<std::ops::Range<usize>> {
+        let layouts = self.document.layouts();
+        if start_row >= end_row || layouts.is_empty() {
+            return None;
+        }
+        let start = layouts
+            .iter()
+            .position(|layout| layout.start_row + layout.height > start_row)?;
+        let mut end = start;
+        for layout in &layouts[start..] {
+            if layout.start_row >= end_row {
+                break;
+            }
+            end += 1;
+        }
+        Some(start..end)
     }
 
     /// Render a single flat frame of all non-chrome content lines as ANSI
@@ -1963,6 +2008,7 @@ impl TranscriptPane {
     fn render_transcript_ansi_rows(&mut self, width: usize) -> Vec<String> {
         self.refresh_layout(width);
         let total = self.document.total_rows();
+        self.visible_entries = self.visible_entry_indices(0, total);
         self.compose_rows(0, total, width)
     }
 
@@ -1981,6 +2027,7 @@ impl TranscriptPane {
         self.refresh_layout(content_width);
         self.apply_drag_autoscroll(height);
         let range = self.document.visible_row_range(height);
+        self.visible_entries = self.visible_entry_indices(range.start, range.end);
         self.compose_rows(range.start, range.end, content_width)
     }
 

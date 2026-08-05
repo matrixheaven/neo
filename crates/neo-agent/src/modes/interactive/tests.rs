@@ -951,12 +951,51 @@ fn render_tui_snapshot(tui: &neo_tui::NeoTui) -> String {
 }
 
 #[test]
-fn exit_message_prints_resume_command_when_session_exists() {
-    assert_eq!(exit_message(None), "Bye\n");
+fn exit_projection_prints_final_answer_status_and_resume_command() {
+    let session_id = Some("session_550e8400-e29b-41d4-a716-446655440000");
+    assert_eq!(compose_exit_projection(None, None, None, None), "Bye\n");
     assert_eq!(
-        exit_message(Some("session_550e8400-e29b-41d4-a716-446655440000")),
-        "Bye\nneo resume session_550e8400-e29b-41d4-a716-446655440000\n"
+        compose_exit_projection(session_id, None, None, None),
+        "Bye\n\nResume: neo resume session_550e8400-e29b-41d4-a716-446655440000\n"
     );
+    let projection = compose_exit_projection(
+        session_id,
+        Some("done with the task"),
+        Some("Tasks: 2 done, 1 in progress, 0 pending"),
+        Some("Workflow Demo: running"),
+    );
+    assert!(projection.contains("done with the task"), "{projection}");
+    assert!(projection.contains("Tasks: 2 done"), "{projection}");
+    assert!(
+        projection.contains("Workflow Demo: running"),
+        "{projection}"
+    );
+    assert!(
+        projection.contains("neo resume session_550e8400-e29b-41d4-a716-446655440000"),
+        "{projection}"
+    );
+}
+
+#[test]
+fn exit_projection_bounds_long_answers_and_strips_ansi() {
+    let long = format!("{} tail", "x".repeat(10_000));
+    let projection = compose_exit_projection(None, Some(&format!("\x1b[31m{long}")), None, None);
+    assert!(projection.len() <= EXIT_PROJECTION_MAX_BYTES + 1);
+    assert!(!projection.contains('\x1b'));
+    assert!(projection.contains("… (answer truncated)"));
+    // The 10k-char answer is cut at the bound, so the trailing words are gone.
+    assert!(!projection.contains("tail"));
+}
+
+#[test]
+fn exit_recovery_line_carries_session_id_and_stays_bounded() {
+    assert_eq!(exit_recovery_line(None), "Session interrupted.\n");
+    let line = exit_recovery_line(Some("session_550e8400-e29b-41d4-a716-446655440000"));
+    assert!(
+        line.contains("neo resume session_550e8400-e29b-41d4-a716-446655440000"),
+        "{line}"
+    );
+    assert!(line.len() < 200, "{line}");
 }
 
 #[test]

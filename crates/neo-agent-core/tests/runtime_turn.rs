@@ -13,9 +13,9 @@ use neo_agent_core::{
     skills::{SkillStore, SkillStoreHandle},
 };
 use neo_ai::{
-    AiError, AiStreamEvent, ApiKind, ChatRequest, MessagePhase, ModelCapabilities, ModelClient,
-    ModelSpec, ProviderId, ReasoningCapability, ReasoningEffort, ReasoningSelection, ThinkingKind,
-    ToolSpec,
+    AiError, AiStreamEvent, ApiKind, ChatMessage, ChatRequest, ContentPart, MessagePhase,
+    ModelCapabilities, ModelClient, ModelSpec, ProviderId, ReasoningCapability, ReasoningEffort,
+    ReasoningSelection, ThinkingKind, ToolSpec,
 };
 use serde_json::json;
 use std::{
@@ -259,6 +259,105 @@ async fn runtime_streams_one_turn_text_and_updates_context() {
     assert_eq!(
         context.messages()[1],
         AgentMessage::assistant([Content::text("hello")], Vec::new(), StopReason::EndTurn)
+    );
+}
+
+#[tokio::test]
+async fn unchanged_session_keeps_cache_prefix_and_new_context_appends() {
+    let harness = FakeHarness::from_turns([
+        vec![
+            AiStreamEvent::MessageStart {
+                phase: MessagePhase::Unknown,
+                id: "msg_1".to_owned(),
+            },
+            AiStreamEvent::TextDelta {
+                text: "first reply".to_owned(),
+            },
+            AiStreamEvent::MessageEnd {
+                phase: MessagePhase::Unknown,
+                stop_reason: neo_ai::StopReason::EndTurn,
+                usage: None,
+            },
+        ],
+        vec![
+            AiStreamEvent::MessageStart {
+                phase: MessagePhase::Unknown,
+                id: "msg_2".to_owned(),
+            },
+            AiStreamEvent::TextDelta {
+                text: "second reply".to_owned(),
+            },
+            AiStreamEvent::MessageEnd {
+                phase: MessagePhase::Unknown,
+                stop_reason: neo_ai::StopReason::EndTurn,
+                usage: None,
+            },
+        ],
+    ]);
+    let config = AgentConfig::for_model(harness.model());
+    let mut context = AgentContext::new();
+
+    collect_turn_events(
+        &harness,
+        config.clone(),
+        &mut context,
+        AgentMessage::user_text("first prompt"),
+    )
+    .await;
+    collect_turn_events(
+        &harness,
+        config.clone(),
+        &mut context,
+        AgentMessage::user_text("second prompt"),
+    )
+    .await;
+
+    let requests = harness.requests();
+    assert_eq!(requests.len(), 2, "one request per turn");
+    let first = &requests[0];
+    let second = &requests[1];
+
+    // Context integrity invariant: the unchanged session keeps a byte-identical
+    // cache prefix — every message of the first request reappears in the second
+    // request as the same leading bytes, serialized exactly as the provider
+    // sees them.
+    let first_messages = first
+        .messages
+        .iter()
+        .map(|message| serde_json::to_vec(message).expect("serialize message"))
+        .collect::<Vec<_>>();
+    let second_messages = second
+        .messages
+        .iter()
+        .map(|message| serde_json::to_vec(message).expect("serialize message"))
+        .collect::<Vec<_>>();
+    assert!(
+        second_messages.len() >= first_messages.len()
+            && second_messages[..first_messages.len()] == first_messages[..],
+        "cache prefix changed\nfirst: {}\nsecond: {}",
+        String::from_utf8_lossy(&serde_json::to_vec(&first.messages).expect("serialize")),
+        String::from_utf8_lossy(&serde_json::to_vec(&second.messages).expect("serialize"))
+    );
+
+    // New canonical messages append after the prefix in event order: the
+    // assistant reply to the first prompt, then the second user prompt.
+    assert_eq!(second.messages.len(), first.messages.len() + 2);
+    let appended = &second.messages[first.messages.len()..];
+    assert_eq!(
+        appended,
+        [
+            ChatMessage::Assistant {
+                content: vec![ContentPart::Text {
+                    text: "first reply".to_owned(),
+                }],
+                tool_calls: Vec::new(),
+            },
+            ChatMessage::User {
+                content: vec![ContentPart::Text {
+                    text: "second prompt".to_owned(),
+                }],
+            },
+        ]
     );
 }
 

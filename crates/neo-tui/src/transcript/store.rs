@@ -1505,17 +1505,29 @@ impl TranscriptStore {
         self.invalidate_render_cache();
     }
 
-    pub fn tick_live_entries(&mut self, now_ms: u64) -> bool {
-        // Fast path: if no live-capable entries exist, skip the full scan.
-        // This avoids an O(n) iteration over all entries every 50ms tick
-        // when there are no delegates, MCP connections, or streaming blocks.
-        if !self.has_live_entries() {
+    /// Tick live-capable entries inside `range` (or every entry when `None`).
+    ///
+    /// Presentation ticks are visible-only: off-screen entries pause their
+    /// elapsed presentation until they scroll back into the viewport.
+    pub(crate) fn tick_live_entries_in(
+        &mut self,
+        now_ms: u64,
+        range: Option<std::ops::Range<usize>>,
+    ) -> bool {
+        let entry_range = range.unwrap_or(0..self.entries.len());
+        if entry_range.start > entry_range.end || entry_range.end > self.entries.len() {
+            return false;
+        }
+        // Fast path: if no live-capable entries exist in the visible slice,
+        // skip the scan. This avoids an O(n) iteration over all entries every
+        // 50ms tick when there are no delegates, MCP connections, or
+        // streaming blocks on screen.
+        if !self.entries[entry_range.clone()].iter().any(is_live_entry) {
             return false;
         }
         let mut changed = false;
-        for index in 0..self.entries.len() {
-            let entry_changed = self.entries[index].on_render_tick(now_ms);
-            if entry_changed {
+        for index in entry_range {
+            if self.entries[index].on_render_tick(now_ms) {
                 self.touch_entry(index);
                 changed = true;
             }
@@ -1523,23 +1535,20 @@ impl TranscriptStore {
         changed
     }
 
+    pub fn tick_live_entries(&mut self, now_ms: u64) -> bool {
+        self.tick_live_entries_in(now_ms, None)
+    }
+
     #[must_use]
     pub fn has_live_entries(&self) -> bool {
-        self.entries.iter().any(|entry| {
-            matches!(
-                entry,
-                TranscriptEntry::Delegate { .. }
-                    | TranscriptEntry::DelegateGroup { .. }
-                    | TranscriptEntry::DelegateSwarm { .. }
-                    | TranscriptEntry::McpStartupStatus { .. }
-            ) || matches!(
-                entry,
-                TranscriptEntry::Workflow { component } if component.has_ticking_elapsed()
-            ) || matches!(
-                entry,
-                TranscriptEntry::RetryStatus { data } if data.phase != RetryPhase::Exhausted
-            )
-        })
+        self.entries.iter().any(is_live_entry)
+    }
+
+    #[must_use]
+    pub(crate) fn has_live_entries_in(&self, range: std::ops::Range<usize>) -> bool {
+        self.entries
+            .get(range)
+            .is_some_and(|entries| entries.iter().any(is_live_entry))
     }
 
     /// Remove the entry at `index`, shifting later entries down. Returns the
@@ -1850,6 +1859,24 @@ fn adjusted_index_after_remove(active: Option<usize>, removed: usize) -> Option<
     active.and_then(|index| {
         (index != removed).then_some(if index > removed { index - 1 } else { index })
     })
+}
+
+/// Whether an entry presents time-based activity (elapsed headers, spinners,
+/// or progress) that needs periodic ticks while on screen.
+fn is_live_entry(entry: &TranscriptEntry) -> bool {
+    matches!(
+        entry,
+        TranscriptEntry::Delegate { .. }
+            | TranscriptEntry::DelegateGroup { .. }
+            | TranscriptEntry::DelegateSwarm { .. }
+            | TranscriptEntry::McpStartupStatus { .. }
+    ) || matches!(
+        entry,
+        TranscriptEntry::Workflow { component } if component.has_ticking_elapsed()
+    ) || matches!(
+        entry,
+        TranscriptEntry::RetryStatus { data } if data.phase != RetryPhase::Exhausted
+    )
 }
 
 /// Replay-stable dedup identity for one instruction epoch card:

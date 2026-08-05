@@ -326,11 +326,21 @@ pub async fn execute_tty_with_startup(
         let _ = terminal.borrow_mut().draw_tui(tui, false)?;
         Ok(())
     });
+    // Build the exit projection from canonical final state BEFORE restoring
+    // the terminal; `main` prints it after `leave` returns.
+    let projection = controller.exit_projection();
     let leave_result = terminal.borrow_mut().leave();
-    lifecycle_result?;
-    final_render_result?;
-    leave_result?;
-    Ok(Some(exit_message(controller.active_session_id())))
+    if lifecycle_result.is_err() || final_render_result.is_err() || leave_result.is_err() {
+        // Abnormal termination: restoration was already attempted above.
+        // Emit a bounded recovery line with the session id instead of a
+        // projection, and keep the underlying failure in the log.
+        tracing::error!(
+            "terminal exit completed with errors: lifecycle={lifecycle_result:?} \
+             render={final_render_result:?} leave={leave_result:?}"
+        );
+        return Ok(Some(exit_recovery_line(controller.active_session_id())));
+    }
+    Ok(Some(projection))
 }
 
 async fn run_tty_lifecycle_with_event_factory<E>(
@@ -380,12 +390,68 @@ fn render_due_frame(
     Ok(())
 }
 
-fn exit_message(session_id: Option<&str>) -> String {
+/// Bounded static exit projection printed by `main` after the terminal has
+/// been restored. Derived from canonical final state only — the final
+/// assistant answer, the terminal task/Workflow status, and the session
+/// reopen command — and never written back into session history.
+const EXIT_ANSWER_MAX_CHARS: usize = 600;
+const EXIT_PROJECTION_MAX_BYTES: usize = 4_096;
+
+fn compose_exit_projection(
+    session_id: Option<&str>,
+    final_answer: Option<&str>,
+    task_status: Option<&str>,
+    workflow_status: Option<&str>,
+) -> String {
     let mut message = String::from("Bye\n");
+    if let Some(answer) = final_answer {
+        let answer = bound_exit_answer(answer);
+        if !answer.is_empty() {
+            let _ = writeln!(message, "\n{answer}");
+        }
+    }
+    if let Some(status) = task_status {
+        let _ = writeln!(message, "\n{status}");
+    }
+    if let Some(status) = workflow_status {
+        let _ = writeln!(message, "{status}");
+    }
     if let Some(session_id) = session_id {
-        let _ = writeln!(message, "neo resume {session_id}");
+        let _ = writeln!(message, "\nResume: neo resume {session_id}");
+    }
+    if message.len() > EXIT_PROJECTION_MAX_BYTES {
+        let boundary = message.floor_char_boundary(EXIT_PROJECTION_MAX_BYTES);
+        message.truncate(boundary);
+        message.push('\n');
     }
     message
+}
+
+/// Bound one assistant answer to the static projection size, stripping any
+/// terminal control sequences from the display text.
+fn bound_exit_answer(answer: &str) -> String {
+    let answer = neo_tui::primitive::strip_ansi(answer).trim().to_owned();
+    if answer.chars().count() <= EXIT_ANSWER_MAX_CHARS {
+        answer
+    } else {
+        let mut bounded = answer
+            .chars()
+            .take(EXIT_ANSWER_MAX_CHARS)
+            .collect::<String>();
+        bounded.push('\n');
+        bounded.push_str("… (answer truncated)");
+        bounded
+    }
+}
+
+/// Bounded recovery line emitted when termination was abnormal and a safe
+/// exit projection cannot be built. Terminal restoration is always attempted
+/// first; this line is printed after it.
+fn exit_recovery_line(session_id: Option<&str>) -> String {
+    match session_id {
+        Some(session_id) => format!("Session interrupted.\nResume: neo resume {session_id}\n"),
+        None => "Session interrupted.\n".to_owned(),
+    }
 }
 
 pub(crate) struct InteractiveController {
@@ -1363,6 +1429,75 @@ impl InteractiveController {
     ) -> Result<()> {
         self.finalize_terminal_exit();
         render(&mut self.tui)
+    }
+
+    /// Build the bounded static exit projection from canonical final state.
+    /// Pure: reads no files, never appends to session history, never fails.
+    fn exit_projection(&self) -> String {
+        compose_exit_projection(
+            self.active_session_id(),
+            self.last_assistant_answer().as_deref(),
+            self.terminal_task_status().as_deref(),
+            self.terminal_workflow_status().as_deref(),
+        )
+    }
+
+    /// The text of the final assistant answer in transcript order, if any.
+    fn last_assistant_answer(&self) -> Option<String> {
+        self.tui
+            .transcript()
+            .transcript()
+            .entries()
+            .iter()
+            .rev()
+            .find_map(|entry| match entry {
+                neo_tui::transcript::TranscriptEntry::AssistantMessage { content } => {
+                    (!content.trim().is_empty()).then(|| content.clone())
+                }
+                _ => None,
+            })
+    }
+
+    /// Terminal task status derived from the canonical todo state, if any.
+    fn terminal_task_status(&self) -> Option<String> {
+        let items = self.tui.chrome().todo_items();
+        if items.is_empty() {
+            return None;
+        }
+        let mut done = 0;
+        let mut in_progress = 0;
+        let mut pending = 0;
+        for item in items {
+            match item.status {
+                neo_tui::widgets::todo_panel::TodoDisplayStatus::Done => done += 1,
+                neo_tui::widgets::todo_panel::TodoDisplayStatus::InProgress => in_progress += 1,
+                neo_tui::widgets::todo_panel::TodoDisplayStatus::Pending => pending += 1,
+            }
+        }
+        Some(format!(
+            "Tasks: {done} done, {in_progress} in progress, {pending} pending"
+        ))
+    }
+
+    /// Terminal Workflow status from the final workflow snapshot, if any.
+    fn terminal_workflow_status(&self) -> Option<String> {
+        self.tui
+            .transcript()
+            .transcript()
+            .entries()
+            .iter()
+            .rev()
+            .find_map(|entry| match entry {
+                neo_tui::transcript::TranscriptEntry::Workflow { component } => {
+                    let snapshot = component.snapshot();
+                    Some(format!(
+                        "Workflow {}: {}",
+                        snapshot.title,
+                        snapshot.state.as_str()
+                    ))
+                }
+                _ => None,
+            })
     }
 
     async fn connect_mcp_at_startup(&mut self) -> Result<()> {
@@ -3000,3 +3135,6 @@ mod tests;
 
 #[cfg(test)]
 mod selection_tests;
+
+#[cfg(test)]
+mod fullscreen_tests;

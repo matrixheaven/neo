@@ -1,6 +1,8 @@
 //! Document-coordinate selection integration tests: cross-entry drag with
-//! frame-driven auto-scroll materializes the exact document text, and
-//! double-click selects one Unicode word.
+//! frame-driven auto-scroll materializes the exact document text,
+//! double-click selects one Unicode word, keyboard entry selection falls
+//! back to the tail before the first render, and mouse gestures interact
+//! with keyboard selection by the click/drag threshold.
 
 use crossterm::event::{KeyModifiers, MouseButton};
 use neo_tui::transcript::{MouseEvent, MouseKind, TranscriptPane};
@@ -21,6 +23,72 @@ fn mouse(kind: MouseKind, column: u16, row: u16) -> MouseEvent {
         row,
         modifiers: KeyModifiers::NONE,
     }
+}
+
+#[test]
+fn keyboard_selection_without_render_falls_back_to_tail() {
+    // No frame was ever rendered, so `body_height` is still zero. Keyboard
+    // entry selection must fall back to the pane height and select the tail
+    // entry — never anchor at the top of the document (the welcome banner).
+    let mut pane = TranscriptPane::new(80, 20);
+    pane.push_welcome_banner("neo", "test-session", "gpt-4.1", "/work", "9.9.9", None);
+    pane.push_user_message("selected user prompt");
+    pane.push_assistant_message("selected assistant reply");
+
+    pane.select_visible_transcript_entry();
+    assert_eq!(
+        pane.copy_selected_transcript_text().as_deref(),
+        Some("Assistant\nselected assistant reply"),
+        "unrendered keyboard selection must pick the tail entry, not the banner"
+    );
+
+    // Extending upward from the tail covers the preceding entry too.
+    pane.extend_transcript_selection_up(1);
+    assert_eq!(
+        pane.copy_selected_transcript_text().as_deref(),
+        Some("You\nselected user prompt\n\nAssistant\nselected assistant reply")
+    );
+}
+
+#[test]
+fn mouse_click_preserves_keyboard_selection_but_confirmed_drag_replaces() {
+    let mut pane = pane_with_status_rows(8);
+    pane.render_visible_slice(80, 6);
+    // Keyboard-select the tail entry.
+    pane.select_visible_transcript_entry();
+    let keyboard_text = pane
+        .copy_selected_transcript_text()
+        .expect("keyboard selection materializes");
+    assert_eq!(keyboard_text, "Status\nrow-7");
+
+    // A plain click does NOT destroy the keyboard selection: single clicks
+    // stay inert and the copy still returns the keyboard entries. The click
+    // sits 6 cells from the next press so the double-click window cannot
+    // misclassify it.
+    pane.handle_mouse_event(mouse(MouseKind::Press, 9, 5), 5, 8);
+    pane.handle_mouse_event(mouse(MouseKind::Release, 9, 5), 5, 8);
+    assert_eq!(
+        pane.copy_selected_transcript_text().as_deref(),
+        Some(keyboard_text.as_str()),
+        "a click must keep the keyboard selection"
+    );
+
+    // A confirmed drag (movement past the threshold) replaces the keyboard
+    // selection with the mouse gesture.
+    pane.handle_mouse_event(mouse(MouseKind::Press, 3, 5), 5, 2);
+    pane.handle_mouse_event(mouse(MouseKind::Drag, 4, 1), 1, 3);
+    pane.handle_mouse_event(mouse(MouseKind::Release, 4, 1), 1, 3);
+    assert_eq!(
+        pane.copy_selected_transcript_text().as_deref(),
+        Some("row-\n\nrow-6\n\nw-7"),
+        "a confirmed drag must supersede the keyboard selection"
+    );
+
+    // The replaced selection is a mouse selection again: a plain click now
+    // clears it (again kept 6 cells from the previous press).
+    pane.handle_mouse_event(mouse(MouseKind::Press, 9, 5), 5, 8);
+    pane.handle_mouse_event(mouse(MouseKind::Release, 9, 5), 5, 8);
+    assert!(pane.copy_selected_transcript_text().is_none());
 }
 
 #[test]
