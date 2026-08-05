@@ -81,6 +81,26 @@ fn normalize_tool_schema_removes_provider_hostile_metadata() {
 }
 
 #[test]
+fn normalize_tool_schema_requires_an_object_root() {
+    let missing_type = json!({
+        "oneOf": [
+            { "type": "object", "properties": { "action": { "const": "preview" } } },
+            { "type": "object", "properties": { "action": { "const": "save" } } }
+        ]
+    });
+    let null_type = json!({ "type": null, "properties": {} });
+
+    assert_eq!(
+        neo_ai::tool_schema::normalize_tool_schema(&missing_type)["type"],
+        "object"
+    );
+    assert_eq!(
+        neo_ai::tool_schema::normalize_tool_schema(&null_type)["type"],
+        "object"
+    );
+}
+
+#[test]
 fn collect_tool_arguments_prefers_final_tool_call_end_arguments() {
     let events = vec![
         AiStreamEvent::ToolCallArgsDelta {

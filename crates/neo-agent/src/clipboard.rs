@@ -20,48 +20,6 @@ pub enum ClipboardError {
     ReadFailed(String),
 }
 
-/// Read plain text from the system clipboard. Used as a fallback when Ctrl+V
-/// is pressed but no image is available.
-pub fn read_text_clipboard() -> Option<String> {
-    #[cfg(target_os = "macos")]
-    {
-        std::process::Command::new("pbpaste")
-            .output()
-            .ok()
-            .filter(|o| o.status.success())
-            .and_then(|o| String::from_utf8(o.stdout).ok())
-            .filter(|s| !s.is_empty())
-    }
-    #[cfg(target_os = "linux")]
-    {
-        for (cmd, args) in [
-            ("wl-paste", &["--no-newline"][..]),
-            ("xclip", &["-selection", "clipboard", "-o"][..]),
-        ] {
-            if let Ok(out) = std::process::Command::new(cmd).args(args).output()
-                && out.status.success()
-                && let Ok(text) = String::from_utf8(out.stdout)
-                && !text.is_empty()
-            {
-                return Some(text);
-            }
-        }
-        None
-    }
-    #[cfg(target_os = "windows")]
-    {
-        let script =
-            "Add-Type -AssemblyName System.Windows.Forms; [Windows.Forms.Clipboard]::GetText()";
-        std::process::Command::new("powershell.exe")
-            .args(["-NoProfile", "-Command", script])
-            .output()
-            .ok()
-            .filter(|o| o.status.success())
-            .and_then(|o| String::from_utf8(o.stdout).ok())
-            .filter(|s| !s.is_empty())
-    }
-}
-
 /// Read an image from the system clipboard, if one is available.
 pub fn read_clipboard_image() -> Result<ClipboardImage, ClipboardError> {
     #[cfg(target_os = "macos")]
@@ -382,33 +340,31 @@ mod windows {
     use std::process::Command;
 
     pub fn read_clipboard_image() -> Result<ClipboardImage, ClipboardError> {
-        let tmp = tempfile::Builder::new()
-            .suffix(".png")
-            .tempfile_in(std::env::temp_dir())
-            .map_err(|e| ClipboardError::ReadFailed(e.to_string()))?;
-        let tmp_path = tmp.into_temp_path();
-        let tmp_path_str = tmp_path.to_str().ok_or_else(|| {
-            ClipboardError::ReadFailed("clipboard temporary path is not valid UTF-8".into())
-        })?;
-
-        let script = format!(
-            "Add-Type -AssemblyName System.Windows.Forms; $img = [Windows.Forms.Clipboard]::GetImage(); if ($img -eq $null) {{ exit 1 }}; $img.Save({tmp_path_str:?}, [System.Drawing.Imaging.ImageFormat]::Png);"
-        );
+        let script = "$ErrorActionPreference = 'Stop'; Add-Type -AssemblyName System.Windows.Forms; \
+            $img = [Windows.Forms.Clipboard]::GetImage(); if ($null -eq $img) { exit 2 }; \
+            $stream = [IO.MemoryStream]::new(); try { \
+            $img.Save($stream, [Drawing.Imaging.ImageFormat]::Png); $bytes = $stream.ToArray(); \
+            [Console]::OpenStandardOutput().Write($bytes, 0, $bytes.Length) \
+            } finally { $stream.Dispose(); $img.Dispose() }";
         let out = Command::new("powershell.exe")
-            .args(["-NoProfile", "-Command", &script])
+            .args(["-NoProfile", "-STA", "-Command", script])
             .output()
             .map_err(|e| ClipboardError::ReadFailed(e.to_string()))?;
-        if !out.status.success() {
+        if out.status.code() == Some(2) {
             return Err(ClipboardError::NoImage);
         }
-        let bytes =
-            std::fs::read(&tmp_path).map_err(|e| ClipboardError::ReadFailed(e.to_string()))?;
-        let mime = detect_image_mime(&bytes).unwrap_or("image/png");
+        if !out.status.success() {
+            return Err(ClipboardError::ReadFailed(
+                String::from_utf8_lossy(&out.stderr).trim().to_owned(),
+            ));
+        }
+        let mime = detect_image_mime(&out.stdout).ok_or_else(|| {
+            ClipboardError::ReadFailed("PowerShell returned invalid image data".into())
+        })?;
         Ok(ClipboardImage {
-            bytes,
+            bytes: out.stdout,
             mime_type: mime.to_owned(),
         })
-        // `tmp_path` drops here and deletes the temporary file.
     }
 }
 

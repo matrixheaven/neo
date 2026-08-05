@@ -372,8 +372,7 @@ impl InteractiveController {
     #[allow(clippy::unused_async)] // sync API kept for symmetry with submit_shell_command; no awaits inside.
     pub(super) async fn handle_paste_image(&mut self) -> Result<()> {
         if !self.model_supports_images() {
-            // Model doesn't support images — fall through to text paste.
-            self.fallback_text_paste();
+            self.push_status("Active model does not support images");
             return Ok(());
         }
 
@@ -384,9 +383,7 @@ impl InteractiveController {
         let image = match crate::clipboard::read_clipboard_image() {
             Ok(img) => img,
             Err(crate::clipboard::ClipboardError::NoImage) => {
-                // No image in clipboard — fall through to text paste (like
-                // kimi-code: Ctrl+V pastes text when no image is available).
-                self.fallback_text_paste();
+                self.push_status("No image found in clipboard");
                 return Ok(());
             }
             Err(err) => {
@@ -414,15 +411,6 @@ impl InteractiveController {
         let placeholder = format!("[image #{id} ({width}x{height})]");
         self.apply_prompt_edit(PromptEdit::Insert(&placeholder));
         Ok(())
-    }
-
-    pub(super) fn fallback_text_paste(&mut self) {
-        let text = crate::clipboard::read_text_clipboard();
-        if let Some(text) = text
-            && !text.is_empty()
-        {
-            self.handle_paste_text(&text);
-        }
     }
 
     pub(super) fn model_supports_images(&self) -> bool {

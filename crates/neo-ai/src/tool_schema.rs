@@ -16,6 +16,17 @@ pub(crate) fn root_schema_for<T: JsonSchema>() -> serde_json::Value {
 pub fn normalize_tool_schema(schema: &Value) -> Value {
     let mut normalized = resolve_schema_refs(schema, schema, &mut Vec::new());
     normalize_schema_node(&mut normalized);
+    match &mut normalized {
+        Value::Object(object) => {
+            object.insert("type".to_owned(), Value::String("object".to_owned()));
+        }
+        _ => {
+            normalized = Value::Object(Map::from_iter([(
+                "type".to_owned(),
+                Value::String("object".to_owned()),
+            )]));
+        }
+    }
     normalized
 }
 
