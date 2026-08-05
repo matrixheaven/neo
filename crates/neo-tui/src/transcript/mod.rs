@@ -43,9 +43,7 @@ pub use chrome_render::{
 };
 pub use delegate_card::DelegateCardComponent;
 pub use delegate_group::DelegateGroupComponent;
-pub use document::{
-    DocumentLayout, DocumentViewport, EntryLayout, TranscriptAnchor, TranscriptViewport,
-};
+pub use document::{DocumentLayout, DocumentViewport, EntryLayout, TranscriptAnchor};
 pub use entry::{
     ApprovalDisplayState, ApprovalPromptData, BannerData, McpStartupPhase, McpStartupStatusData,
     QuestionPromptData, QuestionPromptState, StatusSeverity, ThinkingPart, ThinkingPhase,
