@@ -486,7 +486,9 @@ impl Tool for ThemeDraftTool {
     }
 
     fn input_schema(&self) -> serde_json::Value {
-        neo_ai::tool_schema::schema_for::<ThemeDraftInput>()
+        let mut schema = neo_ai::tool_schema::schema_for::<ThemeDraftInput>();
+        schema["type"] = serde_json::Value::String("object".to_owned());
+        schema
     }
 
     fn execute<'a>(&'a self, ctx: &'a ToolContext, input: serde_json::Value) -> ToolFuture<'a> {
@@ -911,6 +913,14 @@ mod tests {
             "name": name,
             "colors": {"brand": "#58a6ff", "text_primary": "#E6EDF3"},
         })
+    }
+
+    #[test]
+    fn input_schema_declares_object_root_for_providers() {
+        let schema = tool_in(&TempDir::new().expect("tempdir")).input_schema();
+
+        assert_eq!(schema["type"], "object");
+        assert_eq!(schema["oneOf"].as_array().map(Vec::len), Some(2));
     }
 
     async fn run_preview(
