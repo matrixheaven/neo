@@ -214,8 +214,11 @@ pub(super) fn child_tool_status_spans(status: ChildToolStatus<'_>) -> Vec<Span> 
     } else if let Some(summary) =
         bounded_status_summary(verb, name, summary, phase, now_ms, max_width)
     {
+        let result_summary = matches!(name, "Edit" | "Write");
+        let prefix = if result_summary { " · " } else { " (" };
+        let suffix = if result_summary { "" } else { ")" };
         spans.push(Span::styled(
-            format!(" ({summary})"),
+            format!("{prefix}{summary}{suffix}"),
             Style::default().fg(theme.text_muted),
         ));
     }
@@ -973,12 +976,53 @@ fn tail_non_empty_lines(text: &str, limit: usize) -> Vec<String> {
 
 #[cfg(test)]
 mod tests {
-    use super::format_token_count;
+    use neo_agent_core::multi_agent::AgentToolActivityPhase;
+
+    use super::{ChildToolStatus, child_tool_status_spans, format_token_count};
 
     #[test]
     fn format_token_count_uses_millions_for_large_agent_usage() {
         assert_eq!(format_token_count(999_999), "1000.0k");
         assert_eq!(format_token_count(1_000_000), "1.0M");
         assert_eq!(format_token_count(27_922_100), "27.9M");
+    }
+
+    #[test]
+    fn edit_and_write_summaries_use_result_separators() {
+        let theme = super::TuiTheme::default();
+        for (name, summary) in [
+            ("Edit", "1 files · 1 replacements · +0 -4"),
+            ("Write", "1 files · 1 created · +4 -0"),
+        ] {
+            let spans = child_tool_status_spans(ChildToolStatus {
+                name,
+                summary: Some(summary),
+                phase: AgentToolActivityPhase::Done,
+                inline_files: None,
+                verb_override: None,
+                now_ms: 0,
+                max_width: 200,
+                theme: &theme,
+            });
+            let rendered = spans.iter().map(|span| span.text()).collect::<String>();
+            assert!(
+                rendered.contains(&format!("Used {name} · {summary}")),
+                "{rendered}"
+            );
+            assert!(!rendered.contains(" ("), "{rendered}");
+        }
+
+        let spans = child_tool_status_spans(ChildToolStatus {
+            name: "Read",
+            summary: Some("README.md"),
+            phase: AgentToolActivityPhase::Done,
+            inline_files: None,
+            verb_override: None,
+            now_ms: 0,
+            max_width: 200,
+            theme: &theme,
+        });
+        let rendered = spans.iter().map(|span| span.text()).collect::<String>();
+        assert!(rendered.contains("Used Read (README.md)"), "{rendered}");
     }
 }
