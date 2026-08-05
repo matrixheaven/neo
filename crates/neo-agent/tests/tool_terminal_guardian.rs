@@ -1452,3 +1452,94 @@ async fn wait_for_process_exit(pid: u32) -> bool {
     }
     false
 }
+
+#[tokio::test]
+async fn terminal_capture_survives_ring_overflow() {
+    let _guard = serial_guard().await;
+    let workspace = tempfile::tempdir().expect("workspace");
+    let session = tempfile::tempdir().expect("session");
+    let context = guarded_context(&workspace, ShellLimits::default())
+        .with_agent_session_context(session.path(), "agent-test");
+    let registry = ToolRegistry::with_builtin_tools();
+    #[cfg(windows)]
+    let command = windows_powershell_command(
+        "Start-Sleep -Milliseconds 200; [Console]::Out.Write(('f' * 550000)); [Console]::Out.Write('TERMINAL_CAPTURE_TAIL_7f3a'); [Console]::Out.Flush(); Start-Sleep -Seconds 300",
+    );
+    #[cfg(not(windows))]
+    let command =
+        "sleep 0.2; yes terminal-ring-flood | head -c 524288; printf 'TERMINAL_CAPTURE_TAIL_7f3a'; sleep 300"
+            .to_owned();
+    let details = start_terminal_command(&registry, &context, command, 80, 24, 500)
+        .await
+        .expect("start flooding terminal");
+    let handle = details["handle"].as_str().expect("handle").to_owned();
+    let task_id = format!("terminal-{handle}");
+
+    // The model-visible snapshot is bounded by the 64 KiB ring no matter how
+    // much floods in.
+    let visible = details["output"].as_str().unwrap_or_default();
+    assert!(
+        visible.len() <= 65_536,
+        "model-visible terminal output must stay bounded, got {} bytes",
+        visible.len()
+    );
+
+    // The complete capture holds the whole flood including the tail sentinel
+    // beyond the ring capacity. The capture is appended before the ring and
+    // fsync-backed, so the flood arrives here at the capture's own pace.
+    let capture_path = session
+        .path()
+        .join("agents")
+        .join("agent-test")
+        .join("tasks")
+        .join(format!("{task_id}.log"));
+    let mut complete = None;
+    for _ in 0..3_000 {
+        if let Ok(text) = std::fs::read_to_string(&capture_path)
+            && text.contains("TERMINAL_CAPTURE_TAIL_7f3a")
+        {
+            complete = Some(text);
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    let complete = complete.expect("capture must contain the tail sentinel");
+    assert!(
+        complete.len() >= 524_288 + "TERMINAL_CAPTURE_TAIL_7f3a".len(),
+        "capture must hold the full flood, got {} bytes",
+        complete.len()
+    );
+
+    // Once the capture saw the tail, the ring counter has seen the whole
+    // flood too: the overflow is proven by the ring's unbounded total.
+    let read = registry
+        .run(
+            "Terminal",
+            &context,
+            json!({
+                "mode": "read",
+                "handle": handle,
+                "yield_time_ms": 0
+            }),
+        )
+        .await
+        .expect("read after flood");
+    assert!(
+        read.details
+            .as_ref()
+            .and_then(|details| details["total_output_bytes"].as_u64())
+            .unwrap_or(0)
+            >= 524_288,
+        "ring total must show the full flood: {:?}",
+        read.details
+    );
+
+    registry
+        .run(
+            "Terminal",
+            &context,
+            json!({ "mode": "stop", "handle": handle }),
+        )
+        .await
+        .expect("stop flooding terminal");
+}

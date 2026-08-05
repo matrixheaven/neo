@@ -148,7 +148,8 @@ pub use process_supervisor::ProcessSupervisor;
 pub use shell_guard::{
     GuardLimits, ResourceLimitCause, ResourceLimitDetail, ShellAdmissionCallback,
     ShellAdmissionClass, ShellAdmissionEvent, ShellAdmissionRequest, ShellLimits, ShellLimitsError,
-    ShellRuntime, format_resource_limit, run_process_guard, scavenge_completed_runtime_instances,
+    ShellRuntime, ToolOutputCapture, format_resource_limit, run_process_guard,
+    scavenge_completed_runtime_instances,
 };
 
 // Re-export AskUser tool types for external use (TUI / CLI layer).

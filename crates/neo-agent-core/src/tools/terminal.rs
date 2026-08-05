@@ -9,7 +9,7 @@ use uuid::Uuid;
 use super::shell_guard::{
     GuardStatusKind, GuardedCommandResult, GuardianClient, ShellAdmissionClass,
     ShellAdmissionEvent, ShellAdmissionRequest, TerminalClientSession, TerminalClientState,
-    TerminalStart,
+    TerminalStart, output_capture_for,
 };
 use super::{
     ShellRuntime, Tool, ToolContext, ToolError, ToolFuture, ToolResult, format_exit_code,
@@ -286,6 +286,7 @@ async fn start_terminal(
         rows,
         timeout,
         permit,
+        output_capture: output_capture_for(ctx),
     })
     .await?;
     let guardian_pid = client.guardian_pid;

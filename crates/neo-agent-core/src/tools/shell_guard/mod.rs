@@ -24,11 +24,22 @@ pub(crate) use client::{
 };
 pub use guardian::run_process_guard;
 pub(crate) use output::TaggedOutput;
+pub use protocol::ToolOutputCapture;
 pub use scheduler::{
     ShellAdmissionCallback, ShellAdmissionClass, ShellAdmissionEvent, ShellAdmissionRequest,
 };
 pub(crate) use scheduler::{ShellCommandPermit, ShellScheduler};
 pub(crate) use status::{GuardStatus, GuardStatusKind};
+
+/// Complete-output capture target for an agent-owned tool execution, or
+/// `None` when the context has no agent session (internal shell uses stay
+/// explicitly uncaptured).
+pub(crate) fn output_capture_for(ctx: &super::ToolContext) -> Option<ToolOutputCapture> {
+    Some(ToolOutputCapture {
+        session_dir: ctx.session_directory.clone()?,
+        agent_id: ctx.agent_id.clone()?,
+    })
+}
 
 /// Removes prior Neo runtime instances only after every running task has a
 /// valid create-once final status.
@@ -448,6 +459,7 @@ mod tests {
                     resource_limit: None,
                     omitted_output_bytes: 0,
                     omitted_log_bytes: 0,
+                    capture_error: None,
                 },
                 cleanup_errors: Vec::new(),
             })

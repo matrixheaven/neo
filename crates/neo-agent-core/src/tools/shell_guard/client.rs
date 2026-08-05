@@ -22,8 +22,8 @@ use super::{
     output::{StreamKind, TaggedHeadTailBuffer, TaggedOutput},
     protocol::{
         GuardRequest, GuardResponse, GuardResponsePart, GuardTaskKind, MAX_FRAME_BODY,
-        MAX_TERMINAL_WRITE, ProtocolError, StartRequest, decode_fragmented_response, read_response,
-        write_request,
+        MAX_TERMINAL_WRITE, ProtocolError, StartRequest, ToolOutputCapture,
+        decode_fragmented_response, read_response, write_request,
     },
     status::{GuardExit, GuardStatusKind, RunningStatus},
 };
@@ -50,6 +50,7 @@ pub(crate) struct BashStart<'a> {
     pub max_output_bytes: usize,
     pub stream_update: Option<ToolUpdateCallback>,
     pub permit: ShellCommandPermit,
+    pub output_capture: Option<ToolOutputCapture>,
 }
 
 pub(crate) struct TerminalStart<'a> {
@@ -62,6 +63,7 @@ pub(crate) struct TerminalStart<'a> {
     pub rows: u16,
     pub timeout: Option<Duration>,
     pub permit: ShellCommandPermit,
+    pub output_capture: Option<ToolOutputCapture>,
 }
 
 #[derive(Debug, Clone)]
@@ -144,6 +146,7 @@ impl GuardianClient {
             max_output_bytes,
             stream_update,
             permit,
+            output_capture,
         } = input;
         let stream_limit = max_output_bytes.min(runtime.limits().max_output_bytes);
         Self::start(
@@ -160,6 +163,7 @@ impl GuardianClient {
                 rows: None,
                 stream_limit,
                 permit,
+                output_capture,
             },
             stream_update,
         )
@@ -177,6 +181,7 @@ impl GuardianClient {
             rows,
             timeout,
             permit,
+            output_capture,
         } = input;
         let max_output_bytes = runtime.limits().max_output_bytes;
         Self::start(
@@ -193,6 +198,7 @@ impl GuardianClient {
                 rows: Some(rows),
                 stream_limit: max_output_bytes,
                 permit,
+                output_capture,
             },
             None,
         )
@@ -388,6 +394,7 @@ struct GuardianStartArgs<'a> {
     rows: Option<u16>,
     stream_limit: usize,
     permit: ShellCommandPermit,
+    output_capture: Option<ToolOutputCapture>,
 }
 
 async fn spawn_guardian_and_handshake(
@@ -445,6 +452,7 @@ async fn spawn_guardian_and_handshake(
                     status_dir: args.status_dir.to_path_buf(),
                     cols: args.cols,
                     rows: args.rows,
+                    output_capture: args.output_capture,
                 },
             },
         )
@@ -761,6 +769,7 @@ fn failed_result() -> GuardedCommandResult {
             resource_limit: None,
             omitted_output_bytes: 0,
             omitted_log_bytes: 0,
+            capture_error: None,
         },
         output: TaggedOutput {
             stdout: Vec::new(),
@@ -949,6 +958,7 @@ mod tests {
                     resource_limit: None,
                     omitted_output_bytes: 0,
                     omitted_log_bytes: 0,
+                    capture_error: None,
                 },
                 stdout: vec![b'o'; super::super::protocol::MAX_FRAME_BODY + 17],
                 stderr: vec![b'e'; super::super::protocol::MAX_FRAME_BODY + 17],

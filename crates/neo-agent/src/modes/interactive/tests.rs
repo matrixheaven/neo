@@ -16486,6 +16486,7 @@ fn completed_shell_result(
         outcome: neo_agent_core::ShellCommandOutcome::Completed,
         foreground_task_id: None,
         resource_limit: None,
+        capture_error: None,
     }
 }
 

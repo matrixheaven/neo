@@ -71,6 +71,10 @@ pub(crate) struct GuardExit {
     pub(crate) resource_limit: Option<ResourceLimitDetail>,
     pub(crate) omitted_output_bytes: u64,
     pub(crate) omitted_log_bytes: u64,
+    /// Complete-output capture failure, if any. The process was stopped and
+    /// partial side effects are possible.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) capture_error: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -183,6 +187,7 @@ impl Drop for FinalStatusGuard {
                     resource_limit: None,
                     omitted_output_bytes: 0,
                     omitted_log_bytes: 0,
+                    capture_error: None,
                 },
                 cleanup_errors: vec!["guardian exited before writing final status".to_owned()],
             },
@@ -213,6 +218,7 @@ impl GuardStatus {
                 resource_limit: None,
                 omitted_output_bytes: 0,
                 omitted_log_bytes: 0,
+                capture_error: None,
             },
             cleanup_errors: Vec::new(),
         }

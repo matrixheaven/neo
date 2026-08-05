@@ -20,7 +20,10 @@ use super::{
         ProcessSampler, ResourceTick, check_resource_tick, process_start_id, try_send_response,
     },
     process_tree::TerminalProcessTree,
-    protocol::{GuardRequest, GuardResponse, StartRequest, request_stream, write_response},
+    protocol::{
+        GuardRequest, GuardResponse, StartRequest, ToolOutputCapture, request_stream,
+        write_response,
+    },
     status::{
         FinalStatusGuard, GuardExit, GuardStatus, GuardStatusKind, RunningStatus,
         require_durable_running_write,
@@ -90,6 +93,11 @@ fn start_terminal_guard(
     start: &StartRequest,
 ) -> io::Result<TerminalGuardState> {
     std::fs::create_dir_all(&start.status_dir)?;
+    if let Some(capture) = &start.output_capture {
+        // Open the complete-output artifact before the PTY process launches;
+        // an open failure prevents launch.
+        capture.open(&start.task_id)?;
+    }
     let started_at_ms = unix_time_ms();
     let final_status_path = start
         .status_dir
@@ -112,7 +120,16 @@ fn start_terminal_guard(
     });
     let cols = start.cols.unwrap_or(80).max(1);
     let rows = start.rows.unwrap_or(24).max(1);
-    let mut terminal = GuardedTerminal::spawn(start, cols, rows, response_tx.clone())?;
+    let capture_error = Arc::new(StdMutex::new(None));
+    let mut terminal = GuardedTerminal::spawn(
+        start,
+        cols,
+        rows,
+        response_tx.clone(),
+        start.output_capture.clone(),
+        start.task_id.clone(),
+        Arc::clone(&capture_error),
+    )?;
     let command_pid = terminal.process_id();
     let sampler = ProcessSampler::new(command_pid);
     let command_start_id = process_start_id(command_pid);
@@ -195,6 +212,11 @@ where
                 break (GuardStatusKind::TimedOut, None, None, None)
             }
             _ = poll.tick() => {
+                if terminal.capture_failed() {
+                    // Complete-output capture failed: stop the process now and
+                    // report the failure with possible partial side effects.
+                    break (GuardStatusKind::Failed, None, None, None);
+                }
                 if let Some(code) = terminal.try_wait()? {
                     break (status_kind_for_exit_code(code), Some(code), None, None);
                 }
@@ -379,6 +401,12 @@ async fn finalize_terminal(
     }
     let exit_code = result.exit_code.or(cleanup_exit);
     let output = state.terminal.full_output(start.limits.max_output_bytes);
+    let capture_error = state.terminal.take_capture_error();
+    if let Some(capture) = &start.output_capture
+        && let Err(error) = capture.finish(&start.task_id)
+    {
+        cleanup_errors.push(format!("finish output capture: {error}"));
+    }
     let exit = GuardExit {
         status: result.status,
         exit_code,
@@ -386,6 +414,7 @@ async fn finalize_terminal(
         resource_limit: result.resource_limit,
         omitted_output_bytes: output.omitted,
         omitted_log_bytes: 0,
+        capture_error,
     };
     let final_write = state
         .final_status_guard
@@ -428,6 +457,7 @@ struct GuardedTerminal {
     write_responses: std::sync::mpsc::Receiver<GuardResponse>,
     reader_done: std::sync::mpsc::Receiver<()>,
     reader_thread: Option<std::thread::JoinHandle<()>>,
+    capture_error: Arc<StdMutex<Option<String>>>,
     #[cfg(windows)]
     _launch_barrier: WindowsLaunchBarrier,
 }
@@ -438,6 +468,9 @@ impl GuardedTerminal {
         cols: u16,
         rows: u16,
         _response_tx: mpsc::Sender<GuardResponse>,
+        capture: Option<ToolOutputCapture>,
+        task_id: String,
+        capture_error: Arc<StdMutex<Option<String>>>,
     ) -> io::Result<Self> {
         let pair = native_pty_system()
             .openpty(pty_size(cols, rows))
@@ -509,7 +542,13 @@ impl GuardedTerminal {
             start.limits.max_output_bytes,
         )));
         let reader_output = Arc::clone(&output);
-        let (reader_thread, reader_done) = Self::spawn_terminal_reader(reader, reader_output);
+        let (reader_thread, reader_done) = Self::spawn_terminal_reader(
+            reader,
+            reader_output,
+            capture,
+            task_id,
+            Arc::clone(&capture_error),
+        );
         let (write_tx, write_responses) = Self::spawn_terminal_writer(writer);
         Ok(Self {
             process,
@@ -519,6 +558,7 @@ impl GuardedTerminal {
             write_responses,
             reader_done,
             reader_thread: Some(reader_thread),
+            capture_error,
             #[cfg(windows)]
             _launch_barrier: launch_barrier,
         })
@@ -527,13 +567,32 @@ impl GuardedTerminal {
     fn spawn_terminal_reader(
         mut reader: Box<dyn Read + Send>,
         output: Arc<StdMutex<TerminalOutputBuffer>>,
+        capture: Option<ToolOutputCapture>,
+        task_id: String,
+        capture_error: Arc<StdMutex<Option<String>>>,
     ) -> (std::thread::JoinHandle<()>, std::sync::mpsc::Receiver<()>) {
         let (reader_done_tx, reader_done) = std::sync::mpsc::sync_channel(0);
         let thread = std::thread::spawn(move || {
             let mut chunk = [0u8; 8 * 1024];
+            let mut capture_failed = false;
             while let Ok(read) = reader.read(&mut chunk) {
                 if read == 0 {
                     break;
+                }
+                // Complete-output capture precedes the bounded ring so ring
+                // overflow can never lose display bytes.
+                if !capture_failed
+                    && let Some(capture) = &capture
+                    && let Err(error) =
+                        capture.append(&task_id, &String::from_utf8_lossy(&chunk[..read]))
+                {
+                    capture_failed = true;
+                    let mut slot = capture_error
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner);
+                    if slot.is_none() {
+                        *slot = Some(error.to_string());
+                    }
                 }
                 output
                     .lock()
@@ -635,6 +694,20 @@ impl GuardedTerminal {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         output.read(output.start, max_bytes)
+    }
+
+    fn capture_failed(&self) -> bool {
+        self.capture_error
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .is_some()
+    }
+
+    fn take_capture_error(&mut self) -> Option<String> {
+        self.capture_error
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .take()
     }
 }
 

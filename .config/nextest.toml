@@ -28,11 +28,24 @@ slow-timeout = { period = "30s", terminate-after = 3 }
 filter = "test(child_pages_cover_thousand_and_ten_thousand_rows_with_stable_cursor)"
 slow-timeout = { period = "45s", terminate-after = 3 }
 
+# Captures 12 MiB of bash output; the complete-output store performs a
+# durable index write per 8 KiB chunk, so the flood legitimately takes
+# tens of seconds on fsync-bound disks.
+[[profile.default.overrides]]
+filter = "test(complete_agent_output_survives_preview_queue_pressure)"
+slow-timeout = { period = "45s", terminate-after = 3 }
+
 [profile.ci]
 inherits = "default"
 status-level = "all"
 final-status-level = "all"
 slow-timeout = { period = "30s", terminate-after = 2 }
+
+# Same 12 MiB capture test as in profile.default: the complete-output store
+# writes a durable index per 8 KiB chunk, so the flood takes tens of seconds.
+[[profile.ci.overrides]]
+filter = "test(complete_agent_output_survives_preview_queue_pressure)"
+slow-timeout = { period = "45s", terminate-after = 3 }
 
 [profile.slow]
 inherits = "default"

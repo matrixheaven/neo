@@ -8,6 +8,7 @@ use super::shell_env::{self, ShellEnv};
 use super::shell_guard::{
     BashStart, GuardStatusKind, GuardedCommandResult, GuardianClient, ShellAdmissionCallback,
     ShellAdmissionClass, ShellAdmissionEvent, ShellAdmissionRequest, ShellCommandPermit,
+    ToolOutputCapture, output_capture_for,
 };
 use super::{
     CommandOutput, ManagedBackgroundCommand, Tool, ToolContext, ToolError, ToolFuture, ToolResult,
@@ -129,6 +130,9 @@ pub struct ShellExecutionRequest {
     pub shell_runtime: super::ShellRuntime,
     pub admission: ShellAdmissionRequest,
     pub admission_callback: Option<ShellAdmissionCallback>,
+    /// Complete-output capture target for agent-owned executions; `None` for
+    /// internal shell uses (user shell mode, tests) that stay uncaptured.
+    pub tool_output_capture: Option<ToolOutputCapture>,
 }
 
 fn admission_owner(ctx: &ToolContext) -> String {
@@ -189,6 +193,9 @@ pub struct ShellExecutionResult {
     pub outcome: ShellCommandOutcome,
     pub foreground_task_id: Option<String>,
     pub resource_limit: Option<super::ResourceLimitDetail>,
+    /// Complete-output capture failure, if any. The process was stopped and
+    /// partial side effects are possible.
+    pub capture_error: Option<String>,
 }
 
 impl Tool for BashTool {
@@ -251,6 +258,15 @@ fn shell_command_result(result: &ShellExecutionResult) -> ToolResult {
             content.push('\n');
         }
         content.push_str(&failure_msg);
+    }
+    if let Some(message) = &result.capture_error {
+        if !content.ends_with('\n') && !content.is_empty() {
+            content.push('\n');
+        }
+        let capture_notice = format!(
+            "Output capture failed: {message}. The command may have partially executed; its complete output was not recorded."
+        );
+        content.push_str(&capture_notice);
     }
     if truncated {
         if !content.ends_with('\n') && !content.is_empty() {
@@ -405,6 +421,7 @@ async fn run_command_without_error_mapping(
         shell_runtime: ctx.shell_runtime.clone(),
         admission: model_admission(ctx, ShellAdmissionClass::AgentForeground),
         admission_callback: ctx.shell_admission_callback.clone(),
+        tool_output_capture: output_capture_for(ctx),
     };
     let permit = acquire_shell_permit(&request).await?;
     ctx.ensure_shell_allowed()?;
@@ -449,6 +466,7 @@ async fn execute_shell_command_with_permit(
         max_output_bytes,
         stream_update: request.stream_update,
         permit,
+        output_capture: request.tool_output_capture,
     })
     .await?;
     let result = tokio::select! {
@@ -489,6 +507,7 @@ async fn execute_manager_owned_shell_command(
         max_output_bytes,
         stream_update: request.stream_update.clone(),
         permit,
+        output_capture: request.tool_output_capture,
     })
     .await?;
     manager
@@ -583,6 +602,7 @@ fn shell_result_from_guarded(
     let mut shell_result =
         shell_result_from_output(output, outcome, foreground_task_id, max_output_bytes);
     shell_result.resource_limit = result.exit.resource_limit;
+    shell_result.capture_error = result.exit.capture_error;
     shell_result
 }
 
@@ -616,6 +636,7 @@ fn shell_result_from_output(
             outcome,
             foreground_task_id,
             resource_limit: output.resource_limit,
+            capture_error: None,
         },
         max_output_bytes,
     )
@@ -638,6 +659,7 @@ fn cap_shell_result_output(
         outcome: result.outcome,
         foreground_task_id: result.foreground_task_id,
         resource_limit: result.resource_limit,
+        capture_error: result.capture_error,
     }
 }
 
@@ -687,6 +709,7 @@ async fn start_background_command(
         max_output_bytes,
         stream_update: ctx.tool_update.clone(),
         permit,
+        output_capture: output_capture_for(ctx),
     })
     .await?;
 
@@ -717,6 +740,7 @@ mod tests {
             outcome: ShellCommandOutcome::TimedOut,
             foreground_task_id: None,
             resource_limit: None,
+            capture_error: None,
         };
 
         let tool_result = shell_command_result(&result);

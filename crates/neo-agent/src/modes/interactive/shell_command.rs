@@ -185,6 +185,7 @@ impl InteractiveController {
                         configured: None,
                         observed: None,
                     }),
+                    capture_error: None,
                 }
             }
             Err(error) => neo_agent_core::tools::ShellExecutionResult {
@@ -198,6 +199,7 @@ impl InteractiveController {
                 outcome: ShellCommandOutcome::Cancelled,
                 foreground_task_id: None,
                 resource_limit: None,
+                capture_error: None,
             },
         };
         self.finish_shell_command(shell.id, shell.command, result)
@@ -412,6 +414,7 @@ impl InteractiveController {
                 outcome: ShellCommandOutcome::Cancelled,
                 foreground_task_id,
                 resource_limit: None,
+                capture_error: None,
             };
             self.finish_shell_command(shell.id, shell.command, result)
                 .await?;
@@ -458,6 +461,7 @@ impl InteractiveController {
                 },
                 foreground_task_id: shell.foreground_task_id,
                 resource_limit: None,
+                capture_error: None,
             };
             self.finish_shell_command(shell.id, shell.command, result)
                 .await?;

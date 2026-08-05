@@ -64,6 +64,7 @@ async fn explicit_timeout_starts_after_guardian_start_and_kills_tree() {
         shell_runtime: ctx.shell_runtime.clone(),
         admission: user_admission(),
         admission_callback: None,
+        tool_output_capture: None,
     })
     .await
     .expect("run timed shell");
@@ -88,6 +89,7 @@ async fn bash_foreground_collects_output_through_guardian() {
         shell_runtime: ctx.shell_runtime.clone(),
         admission: user_admission(),
         admission_callback: None,
+        tool_output_capture: None,
     })
     .await
     .expect("run guarded shell");
@@ -116,6 +118,7 @@ async fn bash_foreground_cancellation_kills_descendant_process_group() {
         shell_runtime: ctx.shell_runtime.clone(),
         admission: user_admission(),
         admission_callback: None,
+        tool_output_capture: None,
     }));
     tokio::time::sleep(Duration::from_millis(100)).await;
     cancel.cancel();
@@ -144,6 +147,7 @@ async fn bash_foreground_cancellation_allows_term_cleanup_before_force_kill() {
         shell_runtime: ctx.shell_runtime.clone(),
         admission: user_admission(),
         admission_callback: None,
+        tool_output_capture: None,
     }));
     for _ in 0..500 {
         if workspace.path().join("ready.marker").exists() {
@@ -183,6 +187,7 @@ async fn user_shell_runner_registers_foreground_task_for_detach() {
         shell_runtime: runtime,
         admission: user_admission(),
         admission_callback: None,
+        tool_output_capture: None,
     }));
 
     let mut task_id = None;
@@ -242,6 +247,7 @@ async fn queued_bash_does_not_spawn_guardian_before_permit() {
         shell_runtime: runtime.clone(),
         admission: user_admission(),
         admission_callback: None,
+        tool_output_capture: None,
     }));
 
     let mut holders = 0;
@@ -277,6 +283,7 @@ async fn queued_bash_does_not_spawn_guardian_before_permit() {
             class: ShellAdmissionClass::User,
         },
         admission_callback: None,
+        tool_output_capture: None,
     }));
 
     // Give the second request time to reach the scheduler queue, then prove it
@@ -414,6 +421,7 @@ async fn queued_model_bash_revalidates_cwd_after_admission() {
         shell_runtime: ctx.shell_runtime.clone(),
         admission: user_admission(),
         admission_callback: None,
+        tool_output_capture: None,
     }));
     for _ in 0..500 {
         if count_running_markers(ctx.shell_runtime.runtime_root()) == 1 {
@@ -484,6 +492,7 @@ async fn explicit_timeout_excludes_time_spent_in_admission_queue() {
         shell_runtime: runtime.clone(),
         admission: user_admission(),
         admission_callback: None,
+        tool_output_capture: None,
     }));
 
     let mut holders = 0;
@@ -524,6 +533,7 @@ async fn explicit_timeout_excludes_time_spent_in_admission_queue() {
             class: ShellAdmissionClass::User,
         },
         admission_callback: None,
+        tool_output_capture: None,
     }));
 
     // Queue longer than the explicit one-second deadline so a leak would
@@ -575,5 +585,242 @@ async fn explicit_timeout_excludes_time_spent_in_admission_queue() {
     assert!(
         after_grant <= Duration::from_secs(4),
         "timeout should not include multi-second queue wait, got {after_grant:?}"
+    );
+}
+
+#[tokio::test]
+async fn complete_agent_output_survives_preview_queue_pressure() {
+    const FLOOD_BYTES: usize = 12_582_912; // 12 MiB: beyond the 64 KiB result cap AND the 10 MiB log cap
+    const TAIL_MARKER: &str = "CAPTURE_TAIL_MARKER_7f3a";
+    let workspace = tempfile::tempdir().expect("workspace");
+    let session = tempfile::tempdir().expect("session");
+    let ctx = guarded_context(&workspace, ShellLimits::default())
+        .with_agent_session_context(session.path(), "agent-test");
+    let result = execute_model_bash_for_runtime(
+        &ctx,
+        serde_json::json!({
+            "command": format!("yes preview-flood | head -c {FLOOD_BYTES}; printf '{TAIL_MARKER}'"),
+        }),
+    )
+    .await
+    .expect("flooding agent bash should complete");
+
+    // Model-visible output stays bounded at the 64 KiB result cap while the
+    // preview queue drops and the head-only result buffer omits.
+    assert!(
+        result.content.contains("[output truncated]"),
+        "flood must be truncated in the model-visible result"
+    );
+    assert!(
+        !result.content.contains(TAIL_MARKER),
+        "model-visible result must not contain the tail beyond the cap"
+    );
+
+    let tasks = session
+        .path()
+        .join("agents")
+        .join("agent-test")
+        .join("tasks");
+    let captures = std::fs::read_dir(&tasks)
+        .expect("agent tasks dir")
+        .flatten()
+        .map(|entry| entry.path())
+        .filter(|path| path.extension().is_some_and(|extension| extension == "log"))
+        .collect::<Vec<_>>();
+    assert_eq!(captures.len(), 1, "one capture file expected");
+    let log = std::fs::read_to_string(&captures[0]).expect("read capture log");
+    assert!(
+        log.contains(TAIL_MARKER),
+        "complete capture must contain the tail sentinel beyond old caps"
+    );
+    assert!(
+        log.len() >= FLOOD_BYTES + TAIL_MARKER.len(),
+        "capture must hold the full flood, got {} bytes",
+        log.len()
+    );
+}
+
+#[tokio::test]
+async fn agent_bash_capture_open_failure_prevents_launch() {
+    let workspace = tempfile::tempdir().expect("workspace");
+    let session = tempfile::tempdir().expect("session");
+    // An agent id with a path separator is rejected by the output store, so
+    // the guardian cannot open the capture and must refuse to launch.
+    let ctx = guarded_context(&workspace, ShellLimits::default())
+        .with_agent_session_context(session.path(), "agent/blocked");
+    let error = execute_model_bash_for_runtime(
+        &ctx,
+        serde_json::json!({
+            "command": "printf ran > ran.marker",
+        }),
+    )
+    .await
+    .expect_err("capture open failure must prevent launch");
+    assert!(
+        error.to_string().contains("guard"),
+        "unexpected error: {error}"
+    );
+    assert!(
+        !workspace.path().join("ran.marker").exists(),
+        "command must not run when the capture cannot be opened"
+    );
+    let tasks = session
+        .path()
+        .join("agents")
+        .join("agent")
+        .join("blocked")
+        .join("tasks");
+    let captures = std::fs::read_dir(&tasks)
+        .map(|entries| {
+            entries
+                .flatten()
+                .filter(|entry| entry.path().extension().is_some_and(|ext| ext == "log"))
+                .count()
+        })
+        .unwrap_or(0);
+    assert_eq!(
+        captures, 0,
+        "no capture artifact may exist after open failure"
+    );
+}
+
+#[tokio::test]
+async fn agent_bash_capture_append_failure_stops_process_with_diagnostic() {
+    let workspace = tempfile::tempdir().expect("workspace");
+    let session = tempfile::tempdir().expect("session");
+    let ctx = guarded_context(&workspace, ShellLimits::default())
+        .with_agent_session_context(session.path(), "agent-test");
+    let started = execute_model_bash_for_runtime(
+        &ctx,
+        serde_json::json!({
+            "command": "sleep 1; printf 'flood\\n'; sleep 30",
+            "run_in_background": true,
+            "description": "capture failure"
+        }),
+    )
+    .await
+    .expect("start background bash");
+    let task_id = started
+        .details
+        .as_ref()
+        .and_then(|details| details["task_id"].as_str())
+        .expect("task id")
+        .to_owned();
+    let tasks = session
+        .path()
+        .join("agents")
+        .join("agent-test")
+        .join("tasks");
+    let log_path = tasks.join(format!("{task_id}.log"));
+    for _ in 0..500 {
+        if log_path.exists() {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    assert!(log_path.exists(), "capture must open before launch");
+    // Squat on the capture path so the next append fails after the command
+    // already started (its side effects cannot be rolled back).
+    std::fs::remove_file(&log_path).expect("remove capture log");
+    std::fs::create_dir(&log_path).expect("block capture log");
+
+    let started_at = std::time::Instant::now();
+    let mut terminal = false;
+    for _ in 0..500 {
+        if let Ok(snapshot) = ctx.background_tasks.snapshot(&task_id).await
+            && !snapshot.status.is_active()
+        {
+            terminal = true;
+            break;
+        }
+        assert!(
+            started_at.elapsed() < Duration::from_secs(10),
+            "capture failure must stop the command instead of letting it run"
+        );
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    assert!(
+        terminal,
+        "task must reach a terminal state after capture failure"
+    );
+    assert!(
+        started_at.elapsed() < Duration::from_secs(10),
+        "capture failure must stop the process promptly, took {:?}",
+        started_at.elapsed()
+    );
+
+    let status: serde_json::Value = serde_json::from_slice(
+        &std::fs::read(tasks.join(format!("{task_id}.status.json"))).expect("read final status"),
+    )
+    .expect("parse final status");
+    assert_eq!(status["exit"]["status"], "failed");
+    let capture_error = status["exit"]["capture_error"]
+        .as_str()
+        .expect("capture_error in final status");
+    assert!(
+        capture_error.contains("not a regular file") || capture_error.contains("directory"),
+        "unexpected capture error: {capture_error}"
+    );
+}
+
+#[tokio::test]
+async fn agent_bash_capture_preserves_output_emitted_before_cancellation() {
+    let workspace = tempfile::tempdir().expect("workspace");
+    let session = tempfile::tempdir().expect("session");
+    let ctx = guarded_context(&workspace, ShellLimits::default())
+        .with_agent_session_context(session.path(), "agent-test");
+    let started = execute_model_bash_for_runtime(
+        &ctx,
+        serde_json::json!({
+            "command": "printf 'BEFORE_CANCEL_MARKER_9f2a'; sleep 30",
+            "run_in_background": true,
+            "description": "cancel capture"
+        }),
+    )
+    .await
+    .expect("start background bash");
+    let task_id = started
+        .details
+        .as_ref()
+        .and_then(|details| details["task_id"].as_str())
+        .expect("task id")
+        .to_owned();
+    let tasks = session
+        .path()
+        .join("agents")
+        .join("agent-test")
+        .join("tasks");
+    let log_path = tasks.join(format!("{task_id}.log"));
+
+    // Wait until the capture holds the output the command emitted before it
+    // can be cancelled, then stop it mid-flight.
+    let mut captured = false;
+    for _ in 0..500 {
+        if let Ok(text) = std::fs::read_to_string(&log_path)
+            && text.contains("BEFORE_CANCEL_MARKER_9f2a")
+        {
+            captured = true;
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    assert!(
+        captured,
+        "capture must contain output emitted before cancellation"
+    );
+    ctx.background_tasks
+        .stop(&task_id, "test cancel", 1_024)
+        .await
+        .expect("stop background bash");
+
+    let status: serde_json::Value = serde_json::from_slice(
+        &std::fs::read(tasks.join(format!("{task_id}.status.json"))).expect("read final status"),
+    )
+    .expect("parse final status");
+    assert_eq!(status["exit"]["status"], "cancelled");
+    let log = std::fs::read_to_string(&log_path).expect("read capture log");
+    assert!(
+        log.contains("BEFORE_CANCEL_MARKER_9f2a"),
+        "capture must keep output emitted before cancellation"
     );
 }

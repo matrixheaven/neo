@@ -1700,6 +1700,11 @@ impl BackgroundTaskManager {
         }
     }
 
+    /// In-memory hydration bound for a persisted task log. The complete-output
+    /// store log is unbounded, so resume never loads the whole file; reads
+    /// beyond the cap are reported as truncated.
+    const PERSISTED_LOG_HYDRATION_CAP: u64 = 10 * 1024 * 1024;
+
     async fn read_persisted_final(
         root: &Path,
         task_id: &str,
@@ -1718,9 +1723,7 @@ impl BackgroundTaskManager {
             status.schema_version,
             &status.task_id,
         )?;
-        let output = tokio::fs::read(root.join(format!("{task_id}.log")))
-            .await
-            .unwrap_or_default();
+        let (output, log_hydration_truncated) = Self::read_bounded_task_log(root, task_id).await;
         let task_status = background_status_from_kind(status.exit.status);
         Ok(Some(BackgroundTaskSnapshot {
             task_id: task_id.to_owned(),
@@ -1733,7 +1736,7 @@ impl BackgroundTaskManager {
                 signal: status.exit.signal,
                 stdout: String::from_utf8_lossy(&output).into_owned(),
                 stderr: String::new(),
-                stdout_truncated: status.exit.omitted_log_bytes > 0,
+                stdout_truncated: status.exit.omitted_log_bytes > 0 || log_hydration_truncated,
                 stderr_truncated: false,
                 resource_limit: status.exit.resource_limit,
             }),
@@ -1742,6 +1745,29 @@ impl BackgroundTaskManager {
             swarm: None,
             workflow: None,
         }))
+    }
+
+    /// Read a persisted task log into memory without ever hydrating the
+    /// complete file: at most [`Self::PERSISTED_LOG_HYDRATION_CAP`] bytes are
+    /// loaded and longer logs are reported as truncated.
+    async fn read_bounded_task_log(root: &Path, task_id: &str) -> (Vec<u8>, bool) {
+        use tokio::io::AsyncReadExt as _;
+        let log_path = root.join(format!("{task_id}.log"));
+        let Ok(mut file) = tokio::fs::File::open(&log_path).await else {
+            return (Vec::new(), false);
+        };
+        let over_cap = file
+            .metadata()
+            .await
+            .is_ok_and(|meta| meta.len() > Self::PERSISTED_LOG_HYDRATION_CAP);
+        let mut bytes = Vec::new();
+        let _ = if over_cap {
+            let mut bounded = file.take(Self::PERSISTED_LOG_HYDRATION_CAP);
+            bounded.read_to_end(&mut bytes).await
+        } else {
+            file.read_to_end(&mut bytes).await
+        };
+        (bytes, over_cap)
     }
 
     pub async fn is_detached(&self, task_id: &str) -> bool {

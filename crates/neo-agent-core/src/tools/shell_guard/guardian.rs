@@ -4,7 +4,7 @@ use std::{
     path::PathBuf,
     process::Stdio,
     sync::{
-        Arc,
+        Arc, Mutex as StdMutex,
         atomic::{AtomicBool, AtomicU64, Ordering},
     },
     time::{Duration, SystemTime, UNIX_EPOCH},
@@ -25,8 +25,8 @@ use super::{
     ResourceLimitCause, ResourceLimitDetail,
     output::{StreamKind, TaggedHeadTailBuffer, TaggedOutput},
     protocol::{
-        GuardRequest, GuardResponse, GuardTaskKind, ProtocolError, StartRequest, read_request,
-        request_stream, write_response,
+        GuardRequest, GuardResponse, GuardTaskKind, ProtocolError, StartRequest, ToolOutputCapture,
+        read_request, request_stream, write_response,
     },
     status::{
         FinalStatusGuard, GuardExit, GuardStatus, GuardStatusKind, RunningStatus,
@@ -82,11 +82,12 @@ struct SupervisionResult {
 
 struct OutputTasks {
     output: Arc<Mutex<TaggedHeadTailBuffer>>,
-    log_tx: mpsc::Sender<Vec<u8>>,
-    log_task: JoinHandle<io::Result<u64>>,
+    log_tx: Option<mpsc::Sender<Vec<u8>>>,
+    log_task: Option<JoinHandle<io::Result<u64>>>,
     stdout_task: Option<JoinHandle<io::Result<()>>>,
     stderr_task: Option<JoinHandle<io::Result<()>>>,
     dropped_log_bytes: Arc<AtomicU64>,
+    capture_error: Arc<StdMutex<Option<String>>>,
 }
 
 async fn run_process_guard_io<R, W>(mut control: R, response: W) -> io::Result<()>
@@ -118,6 +119,9 @@ where
     }
 
     std::fs::create_dir_all(&start.status_dir)?;
+    // Open the complete-output artifact before launch; an open failure
+    // prevents launch.
+    open_output_capture(&start)?;
     let started_at_ms = unix_time_ms();
     let mut final_status_guard = FinalStatusGuard::after_running_write(
         final_status_path(&start),
@@ -130,7 +134,6 @@ where
     let (mut process, mut sampler) =
         start_bash_process(&start, &response_tx, start_request_id, started_at_ms).await?;
     let output_tasks = spawn_output_tasks(&mut process, &start, &response_tx).await?;
-
     let result = run_supervision_loop(
         &mut process,
         &mut sampler,
@@ -138,6 +141,7 @@ where
         &mut writer,
         &response_tx,
         &start,
+        &output_tasks.capture_error,
     )
     .await?;
     if !result.response_open {
@@ -151,8 +155,10 @@ where
         result.response_error,
     )
     .await;
-    let (retained, omitted_log_bytes, mut errors) = await_output_and_log(output_tasks).await;
+    let (retained, omitted_log_bytes, mut errors, capture_error) =
+        await_output_and_log(output_tasks).await;
     cleanup_errors.append(&mut errors);
+    finish_output_capture(&start, &mut cleanup_errors);
 
     let exit = guard_exit(
         result.status_kind,
@@ -160,6 +166,7 @@ where
         &retained,
         result.resource_limit,
         omitted_log_bytes,
+        capture_error,
     );
     let final_status = build_final_status(&start, started_at_ms, exit.clone(), cleanup_errors);
     let final_write = final_status_guard
@@ -245,33 +252,47 @@ async fn spawn_output_tasks(
     let output = Arc::new(Mutex::new(TaggedHeadTailBuffer::new(
         start.limits.max_output_bytes,
     )));
-    let log_file = tokio::fs::File::create(log_path(start)).await?;
-    let (log_tx, log_rx) = mpsc::channel(LOG_QUEUE_CAPACITY);
+    let capture_error = Arc::new(StdMutex::new(None));
+    let capture = start.output_capture.clone();
+    // With a complete-output capture, the dropping/capped log writer is
+    // retired: it shares the capture's task log path and would truncate or
+    // corrupt the complete artifact. The capture is the completeness source.
+    let (log_tx, log_task) = if capture.is_some() {
+        (None, None)
+    } else {
+        let log_file = tokio::fs::File::create(log_path(start)).await?;
+        let (log_tx, log_rx) = mpsc::channel(LOG_QUEUE_CAPACITY);
+        let log_task = spawn_log_writer(log_file, log_rx, start.limits.max_background_log_bytes);
+        (Some(log_tx), Some(log_task))
+    };
     let dropped_log_bytes = Arc::new(AtomicU64::new(0));
     let log_truncated = Arc::new(AtomicBool::new(false));
-    let log_task = spawn_log_writer(log_file, log_rx, start.limits.max_background_log_bytes);
-    let stdout_task = process.child.stdout.take().map(|stdout| {
-        spawn_output_drain(
-            stdout,
-            StreamKind::Stdout,
-            Arc::clone(&output),
-            response_tx.clone(),
-            log_tx.clone(),
-            Arc::clone(&dropped_log_bytes),
-            Arc::clone(&log_truncated),
-        )
-    });
-    let stderr_task = process.child.stderr.take().map(|stderr| {
-        spawn_output_drain(
-            stderr,
-            StreamKind::Stderr,
-            Arc::clone(&output),
-            response_tx.clone(),
-            log_tx.clone(),
-            Arc::clone(&dropped_log_bytes),
-            Arc::clone(&log_truncated),
-        )
-    });
+    // The stdout and stderr drains share one capture; the store keeps one
+    // derived index per task, so appends are serialized (see
+    // `OutputDrainParams::capture_lock`) to honor one writer per reference.
+    let capture_lock = Arc::new(StdMutex::new(()));
+    let task_id = start.task_id.clone();
+    let drain_params = OutputDrainParams {
+        output: Arc::clone(&output),
+        response_tx: response_tx.clone(),
+        log_tx: log_tx.clone(),
+        dropped_log_bytes: Arc::clone(&dropped_log_bytes),
+        log_truncated: Arc::clone(&log_truncated),
+        capture: capture.clone(),
+        capture_error: Arc::clone(&capture_error),
+        capture_lock,
+        task_id,
+    };
+    let stdout_task = process
+        .child
+        .stdout
+        .take()
+        .map(|stdout| spawn_output_drain(stdout, StreamKind::Stdout, drain_params.clone()));
+    let stderr_task = process
+        .child
+        .stderr
+        .take()
+        .map(|stderr| spawn_output_drain(stderr, StreamKind::Stderr, drain_params));
     Ok(OutputTasks {
         output,
         log_tx,
@@ -279,6 +300,7 @@ async fn spawn_output_tasks(
         stdout_task,
         stderr_task,
         dropped_log_bytes,
+        capture_error,
     })
 }
 
@@ -289,6 +311,7 @@ async fn run_supervision_loop<R>(
     mut writer: &mut JoinHandle<io::Result<()>>,
     response_tx: &mpsc::Sender<GuardResponse>,
     start: &StartRequest,
+    capture_error: &Arc<StdMutex<Option<String>>>,
 ) -> io::Result<SupervisionResult>
 where
     R: AsyncRead + Unpin,
@@ -328,6 +351,11 @@ where
                 break (GuardStatusKind::TimedOut, None, None, None)
             }
             _ = poll.tick() => {
+                if capture_error_is_set(capture_error) {
+                    // Complete-output capture failed: stop the process now and
+                    // report the failure with possible partial side effects.
+                    break (GuardStatusKind::Failed, None, None, None);
+                }
                 if let Some(status) = process.child.try_wait()? {
                     break (status_kind_for_exit(status), Some(status), None, None);
                 }
@@ -449,7 +477,9 @@ async fn terminate_process(
     (exit_status, cleanup_errors)
 }
 
-async fn await_output_and_log(tasks: OutputTasks) -> (TaggedOutput, u64, Vec<String>) {
+async fn await_output_and_log(
+    tasks: OutputTasks,
+) -> (TaggedOutput, u64, Vec<String>, Option<String>) {
     let OutputTasks {
         output,
         log_tx,
@@ -457,6 +487,7 @@ async fn await_output_and_log(tasks: OutputTasks) -> (TaggedOutput, u64, Vec<Str
         stdout_task,
         stderr_task,
         dropped_log_bytes,
+        capture_error,
     } = tasks;
     let mut errors = Vec::new();
     tokio::join!(
@@ -464,23 +495,49 @@ async fn await_output_and_log(tasks: OutputTasks) -> (TaggedOutput, u64, Vec<Str
         drain_output_task(stderr_task)
     );
     drop(log_tx);
-    let omitted_log_bytes = match log_task.await {
-        Ok(Ok(omitted)) => omitted,
-        Ok(Err(error)) => {
-            errors.push(error.to_string());
-            0
-        }
-        Err(error) => {
-            errors.push(format!("join guardian log writer: {error}"));
-            0
-        }
+    let omitted_log_bytes = match log_task {
+        Some(log_task) => match log_task.await {
+            Ok(Ok(omitted)) => omitted,
+            Ok(Err(error)) => {
+                errors.push(error.to_string());
+                0
+            }
+            Err(error) => {
+                errors.push(format!("join guardian log writer: {error}"));
+                0
+            }
+        },
+        None => 0,
     }
     .saturating_add(dropped_log_bytes.load(Ordering::Relaxed));
     let retained = {
         let mut output = output.lock().await;
         std::mem::replace(&mut *output, TaggedHeadTailBuffer::new(0)).finish()
     };
-    (retained, omitted_log_bytes, errors)
+    let capture_error = capture_error
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .take();
+    (retained, omitted_log_bytes, errors, capture_error)
+}
+
+/// Open the complete-output artifact for a guarded execution before its
+/// process launches; an open failure prevents launch.
+fn open_output_capture(start: &StartRequest) -> io::Result<()> {
+    if let Some(capture) = &start.output_capture {
+        capture.open(&start.task_id)?;
+    }
+    Ok(())
+}
+
+/// Mark the capture artifact complete, recording finish failures as cleanup
+/// errors; the capture error itself already reached [`GuardExit`].
+fn finish_output_capture(start: &StartRequest, cleanup_errors: &mut Vec<String>) {
+    if let Some(capture) = &start.output_capture
+        && let Err(error) = capture.finish(&start.task_id)
+    {
+        cleanup_errors.push(format!("finish output capture: {error}"));
+    }
 }
 
 fn build_final_status(
@@ -719,31 +776,75 @@ fn signal_group(group: rustix::process::Pid, signal: rustix::process::Signal) ->
     }
 }
 
+/// Parameters shared by the stdout and stderr drains of one guarded execution.
+#[derive(Clone)]
+struct OutputDrainParams {
+    output: Arc<Mutex<TaggedHeadTailBuffer>>,
+    response_tx: mpsc::Sender<GuardResponse>,
+    log_tx: Option<mpsc::Sender<Vec<u8>>>,
+    dropped_log_bytes: Arc<AtomicU64>,
+    log_truncated: Arc<AtomicBool>,
+    capture: Option<ToolOutputCapture>,
+    capture_error: Arc<StdMutex<Option<String>>>,
+    /// Serializes capture appends across the two drains: the store keeps one
+    /// derived index per task, and concurrent appends could read the same
+    /// stale index, interleave log writes, and write a stale index back.
+    capture_lock: Arc<StdMutex<()>>,
+    task_id: String,
+}
+
 fn spawn_output_drain<R>(
     mut reader: R,
     stream: StreamKind,
-    output: Arc<Mutex<TaggedHeadTailBuffer>>,
-    response_tx: mpsc::Sender<GuardResponse>,
-    log_tx: mpsc::Sender<Vec<u8>>,
-    dropped_log_bytes: Arc<AtomicU64>,
-    log_truncated: Arc<AtomicBool>,
+    params: OutputDrainParams,
 ) -> JoinHandle<io::Result<()>>
 where
     R: AsyncRead + Unpin + Send + 'static,
 {
+    let OutputDrainParams {
+        output,
+        response_tx,
+        log_tx,
+        dropped_log_bytes,
+        log_truncated,
+        capture,
+        capture_error,
+        capture_lock,
+        task_id,
+    } = params;
     tokio::spawn(async move {
         let mut chunk = vec![0; OUTPUT_CHUNK_BYTES];
+        let mut capture_failed = false;
         loop {
             let read = reader.read(&mut chunk).await?;
             if read == 0 {
                 return Ok(());
             }
+            // Complete-output capture precedes every bounded preview/result
+            // sink so a dropped queue or capped buffer never loses bytes.
+            if !capture_failed && let Some(capture) = &capture {
+                let _serialized = capture_lock
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
+                if let Err(error) =
+                    capture.append(&task_id, &String::from_utf8_lossy(&chunk[..read]))
+                {
+                    capture_failed = true;
+                    let mut slot = capture_error
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner);
+                    if slot.is_none() {
+                        *slot = Some(error.to_string());
+                    }
+                }
+            }
             output.lock().await.push(stream, &chunk[..read]);
             if log_truncated.load(Ordering::Relaxed) {
                 dropped_log_bytes
                     .fetch_add(u64::try_from(read).unwrap_or(u64::MAX), Ordering::Relaxed);
-            } else if let Err(mpsc::error::TrySendError::Full(dropped)) =
-                log_tx.try_send(chunk[..read].to_vec())
+            } else if let Some(log_tx) = &log_tx
+                && let Err(mpsc::error::TrySendError::Full(dropped)) =
+                    log_tx.try_send(chunk[..read].to_vec())
             {
                 log_truncated.store(true, Ordering::Relaxed);
                 dropped_log_bytes.fetch_add(
@@ -759,6 +860,13 @@ where
             }
         }
     })
+}
+
+fn capture_error_is_set(capture_error: &Arc<StdMutex<Option<String>>>) -> bool {
+    capture_error
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .is_some()
 }
 
 fn spawn_log_writer(
@@ -805,6 +913,7 @@ fn guard_exit(
     output: &TaggedOutput,
     resource_limit: Option<ResourceLimitDetail>,
     omitted_log_bytes: u64,
+    capture_error: Option<String>,
 ) -> GuardExit {
     GuardExit {
         status,
@@ -820,6 +929,7 @@ fn guard_exit(
         resource_limit,
         omitted_output_bytes: output.omitted_bytes,
         omitted_log_bytes,
+        capture_error,
     }
 }
 
@@ -1208,6 +1318,7 @@ mod tests {
             status_dir: workspace.path().to_path_buf(),
             cols: None,
             rows: None,
+            output_capture: None,
         };
         let (mut request_writer, request_reader) = tokio::io::duplex(4096);
         super::super::protocol::write_request(

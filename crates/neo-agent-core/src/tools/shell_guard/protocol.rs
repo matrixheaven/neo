@@ -32,6 +32,40 @@ pub(crate) enum GuardTaskKind {
     Terminal,
 }
 
+/// Complete display-output capture target for one guarded execution.
+///
+/// Carries the session directory and agent identity of an agent-owned tool
+/// execution. The guardian opens the per-task artifact before launch and
+/// appends every decoded display chunk before any bounded preview or result
+/// update; append failures stop the process and are reported explicitly.
+/// Internal non-agent shell uses carry `None` and stay uncaptured.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ToolOutputCapture {
+    pub session_dir: PathBuf,
+    pub agent_id: String,
+}
+
+impl ToolOutputCapture {
+    /// Create the task artifact before the guarded process launches.
+    pub fn open(&self, task_id: &str) -> io::Result<()> {
+        self.store().open(&self.agent_id, task_id)
+    }
+
+    /// Append decoded display text to the task artifact.
+    pub fn append(&self, task_id: &str, text: &str) -> io::Result<()> {
+        self.store().append(&self.agent_id, task_id, text)
+    }
+
+    /// Mark the task artifact complete and record final counts.
+    pub fn finish(&self, task_id: &str) -> io::Result<crate::session::ToolOutputRef> {
+        self.store().finish(&self.agent_id, task_id)
+    }
+
+    fn store(&self) -> crate::session::ToolOutputStore {
+        crate::session::ToolOutputStore::new(self.session_dir.clone())
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub(crate) struct StartRequest {
     pub(crate) task_id: String,
@@ -41,6 +75,9 @@ pub(crate) struct StartRequest {
     pub(crate) status_dir: PathBuf,
     pub(crate) cols: Option<u16>,
     pub(crate) rows: Option<u16>,
+    /// Complete-output capture target; `None` for uncaptured shell uses.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) output_capture: Option<ToolOutputCapture>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -657,6 +694,7 @@ mod tests {
                     resource_limit: None,
                     omitted_output_bytes: 0,
                     omitted_log_bytes: 0,
+                    capture_error: None,
                 },
                 stdout: vec![b'o'; MAX_FRAME_BODY + 17],
                 stderr: vec![b'e'; MAX_FRAME_BODY + 17],
@@ -735,6 +773,7 @@ mod tests {
                 status_dir: PathBuf::from("status"),
                 cols: None,
                 rows: None,
+                output_capture: None,
             },
         };
         let bytes = encode_request_for_test(&request).expect("encode");

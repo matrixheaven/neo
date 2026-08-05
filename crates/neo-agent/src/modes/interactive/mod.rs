@@ -880,6 +880,7 @@ fn default_shell_driver() -> ShellDriver {
                         class: neo_agent_core::tools::ShellAdmissionClass::User,
                     },
                     admission_callback: Some(admission_callback),
+                    tool_output_capture: None,
                 },
             )
             .await
