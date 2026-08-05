@@ -6,9 +6,8 @@ use crate::primitive::theme::TuiTheme;
 use crate::primitive::{Component, Finalization, Line, Span, Style};
 use crate::transcript::{
     MAX_CHILD_TOOL_ROWS, can_detach, child_activity_view, display_elapsed,
-    format_cache_token_usage, format_elapsed, format_token_count, render_child_agent_summary,
-    render_child_body, render_child_final, render_child_thinking, render_child_tool_row,
-    role_badge_style, role_label,
+    format_cache_token_usage, format_elapsed, format_token_count, render_child_body,
+    render_child_final, render_child_thinking, render_child_tool_row, role_badge_style, role_label,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -94,103 +93,6 @@ impl DelegateGroupComponent {
             ));
         }
         lines
-    }
-
-    #[must_use]
-    pub(crate) fn render_live_with_theme(
-        &self,
-        width: usize,
-        theme: &TuiTheme,
-        max_tool_rows: usize,
-    ) -> Vec<Line> {
-        let mut lines = vec![self.header(width, theme)];
-        for (index, agent) in self.agents.iter().enumerate() {
-            let last = index + 1 == self.agents.len();
-            if agent.state.is_terminal() {
-                lines.push(self.render_agent_status(agent, last, width, theme));
-            } else {
-                lines.extend(self.render_agent(agent, last, width, theme, max_tool_rows));
-            }
-        }
-        if self.agents.iter().any(can_detach) {
-            lines.push(Line::styled(
-                "  Press Ctrl+B to run in background",
-                Style::default().fg(theme.text_muted),
-            ));
-        }
-        lines
-    }
-
-    #[must_use]
-    pub(crate) fn render_live_status_with_theme(
-        &self,
-        width: usize,
-        theme: &TuiTheme,
-    ) -> Vec<Line> {
-        let mut lines = vec![self.header(width, theme)];
-        for (index, agent) in self.agents.iter().enumerate() {
-            lines.push(self.render_agent_status(
-                agent,
-                index + 1 == self.agents.len(),
-                width,
-                theme,
-            ));
-        }
-        lines
-    }
-
-    #[must_use]
-    pub(crate) fn render_result_archive_with_theme(
-        &self,
-        width: usize,
-        theme: &TuiTheme,
-    ) -> Vec<Line> {
-        let muted = Style::default().fg(theme.text_muted);
-        let mut lines = vec![self.header(width, theme)];
-        lines.push(Line::styled("  Results", muted));
-
-        for agent in &self.agents {
-            lines.extend(
-                render_child_agent_summary(agent, width, theme)
-                    .into_iter()
-                    .map(|line| line.prepend_prefix("    ")),
-            );
-            let view = child_activity_view(agent, 1);
-            let indent = "       ↳ ";
-            for row in &view.tools {
-                lines.extend(render_child_tool_row(
-                    row,
-                    width,
-                    indent,
-                    theme,
-                    self.now_ms,
-                ));
-            }
-            if view.tools.is_empty()
-                && let Some(body) = view.body_text.as_deref()
-                && let Some(line) = render_child_body(body, width, indent, theme)
-            {
-                lines.push(line);
-            }
-        }
-
-        lines
-    }
-
-    #[must_use]
-    pub(crate) fn render_live_activity_tail(
-        &self,
-        width: usize,
-        theme: &TuiTheme,
-        max_tool_rows: usize,
-    ) -> Vec<Line> {
-        self.agents
-            .iter()
-            .filter(|agent| !agent.state.is_terminal())
-            .max_by_key(|agent| agent.updated_at_ms)
-            .map_or_else(Vec::new, |agent| {
-                self.render_agent_activity(agent, width, theme, max_tool_rows, "   ")
-            })
     }
 
     #[must_use]
@@ -316,50 +218,6 @@ impl DelegateGroupComponent {
                     format_stats(agent, self.now_ms)
                 ),
                 primary,
-            ),
-        ])
-        .truncate_to_width(width)
-    }
-
-    fn render_agent_status(
-        &self,
-        agent: &AgentSnapshot,
-        is_last: bool,
-        width: usize,
-        theme: &TuiTheme,
-    ) -> Line {
-        let branch = if is_last { "└─" } else { "├─" };
-        let (marker, label, marker_color) = match agent.state {
-            AgentLifecycleState::Completed => ("✓", "done", theme.status_ok),
-            AgentLifecycleState::Failed | AgentLifecycleState::TimedOut => {
-                ("✗", "failed", theme.status_error)
-            }
-            AgentLifecycleState::Cancelled | AgentLifecycleState::Interrupted => {
-                ("◌", "cancelled", theme.status_warn)
-            }
-            AgentLifecycleState::Queued => ("◌", "queued", theme.status_pending),
-            AgentLifecycleState::Running => ("●", "running", theme.brand),
-        };
-        let muted = Style::default().fg(theme.text_muted);
-        Line::from_spans(vec![
-            Span::styled(format!("  {branch} "), muted),
-            Span::styled(marker, Style::default().fg(marker_color)),
-            Span::styled(
-                format!(" {}", agent.display_name.as_str()),
-                Style::default().fg(marker_color),
-            ),
-            Span::raw("  "),
-            Span::styled(
-                format!("[{}]", role_label(agent.role)),
-                role_badge_style(agent.role, theme),
-            ),
-            Span::styled(
-                format!(
-                    "  {} · {label}{}",
-                    agent.display_title(),
-                    format_stats(agent, self.now_ms)
-                ),
-                Style::default().fg(theme.text_primary),
             ),
         ])
         .truncate_to_width(width)

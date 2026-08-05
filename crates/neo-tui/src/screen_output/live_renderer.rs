@@ -9,8 +9,8 @@ use super::types::CursorPos;
 
 /// Bounded live-frame diff renderer.
 ///
-/// Geometry ownership lives in [`super::InlineTerminal`]. This type only diffs
-/// row contents and emits absolute CUP sequences within a supplied origin.
+/// The fullscreen lifecycle owns the alternate screen; this type only diffs
+/// row contents and emits absolute CUP sequences at origin zero.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LiveRenderer {
     width: u16,
@@ -211,11 +211,6 @@ impl LiveRenderer {
         self.full_redraw_pending = false;
         deletes
     }
-
-    #[must_use]
-    pub(crate) fn previous_line_count(&self) -> usize {
-        self.previous_lines.len()
-    }
 }
 
 /// Emit CUP using one-based ANSI coordinates from zero-based geometry.
@@ -253,7 +248,7 @@ mod tests {
             deletes.contains("\x1b_Ga=d,d=I,i=77,q=2\x1b\\"),
             "missing delete for id 77: {deletes:?}"
         );
-        assert_eq!(renderer.previous_line_count(), 0);
+        assert!(renderer.previous_lines.is_empty());
         assert!(
             renderer.reset().is_empty(),
             "second reset must not re-emit deletes after ids were cleared"

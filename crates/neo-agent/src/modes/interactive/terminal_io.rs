@@ -9,7 +9,7 @@ use std::time::Instant;
 use anyhow::Result;
 use crossterm::terminal::size;
 use neo_tui::input::{InputEvent, InputParser, KeybindingsManager};
-use neo_tui::screen_output::InlineTerminal;
+use neo_tui::screen_output::FullscreenTerminal;
 
 /// Shared absolute geometry observation between the raw stdin owner and the
 /// interactive terminal. Cloneable; no process-global state.
@@ -327,7 +327,7 @@ pub(super) fn input_events(
 }
 
 pub(super) struct NeoTerminal {
-    tui: InlineTerminal,
+    tui: FullscreenTerminal,
     title: Option<String>,
     geometry: GeometryObservation,
 }
@@ -341,7 +341,7 @@ impl NeoTerminal {
         // Seed the initial observation before the background stdin reader starts.
         let (cols, rows, cursor_col, cursor_row) = observe_terminal_geometry()?;
         let geometry = GeometryObservation::new(cols, rows, cursor_col, cursor_row);
-        let tui = InlineTerminal::enter(cols, rows, capabilities, cursor_col, cursor_row)?;
+        let tui = FullscreenTerminal::enter(cols, rows, capabilities)?;
         Ok((
             Self {
                 tui,
@@ -382,7 +382,6 @@ impl NeoTerminal {
         let frame = tui.render_terminal_frame_at(usize::from(cols), usize::from(rows), now);
         let mut output = std::io::stdout().lock();
         self.tui.render_to(&mut output, &frame)?;
-        tui.acknowledge_history(&frame);
         Ok(frame.next_animation_deadline)
     }
 
@@ -612,9 +611,9 @@ mod tests {
         assert_eq!(snap.cursor_row, 7);
         assert_eq!(snap.generation, 1);
 
-        // A later observation must carry a higher generation; InlineTerminal
+        // A later observation must carry a higher generation; FullscreenTerminal
         // rejects stale ones.
-        let mut terminal = InlineTerminal::for_test_with_cursor(80, 24, 0, 0);
+        let mut terminal = FullscreenTerminal::for_test_with_cursor(80, 24, 0, 0);
         assert!(terminal.resize(100, 40, 3, 7, 1).is_ok());
         assert!(
             terminal.resize(120, 50, 0, 0, 1).is_err(),

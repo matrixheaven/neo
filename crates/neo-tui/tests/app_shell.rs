@@ -120,11 +120,9 @@ fn task_browser_overlay_replaces_existing_transcript_body() {
     transcript.push_status("old transcript line should be hidden");
     let mut tui = neo_tui::NeoTui::new(app, transcript);
     let frame = tui.render_terminal_frame(80, 20);
-    assert!(frame.review_surface);
-    assert!(frame.mouse_capture);
     assert!(frame.cursor.is_none());
     let rendered = frame
-        .live
+        .lines
         .into_iter()
         .map(|line| neo_tui::primitive::strip_ansi(&line))
         .collect::<Vec<_>>()
@@ -134,7 +132,7 @@ fn task_browser_overlay_replaces_existing_transcript_body() {
     assert!(!rendered.contains("old transcript line should be hidden"));
 
     tui.chrome_mut().close_focused_overlay();
-    assert!(!tui.render_terminal_frame(80, 20).mouse_capture);
+    assert!(tui.render_terminal_frame(80, 20).lines.len() <= 20);
 }
 
 #[test]
@@ -160,10 +158,9 @@ fn theme_manager_overlay_blocks_composer_and_escape_closes() {
     transcript.push_status("composer must be hidden");
     let mut tui = neo_tui::NeoTui::new(app, transcript);
     let frame = tui.render_terminal_frame(80, 20);
-    assert!(frame.review_surface);
     assert!(frame.cursor.is_none());
     let rendered = frame
-        .live
+        .lines
         .iter()
         .map(|line| neo_tui::primitive::strip_ansi(line))
         .collect::<Vec<_>>()
@@ -181,7 +178,7 @@ fn theme_manager_overlay_blocks_composer_and_escape_closes() {
     );
     assert!(tui.chrome().focused_overlay().is_none());
     assert!(tui.chrome_mut().take_theme_manager_action().is_none());
-    assert!(!tui.render_terminal_frame(80, 20).review_surface);
+    assert!(tui.render_terminal_frame(80, 20).lines.len() <= 20);
 }
 
 #[test]
@@ -1182,7 +1179,6 @@ fn app_shell_prompt_shows_scroll_indicators_when_clipped() {
 #[test]
 fn transcript_pane_frame_keeps_latest_live_row_visible() {
     let mut runtime = TranscriptPane::new(80, 12);
-    runtime.set_live_chrome_height(4);
     for index in 0..36 {
         runtime.start_assistant_message();
         runtime.append_assistant_delta(&format!("history line {index}"));

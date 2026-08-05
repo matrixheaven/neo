@@ -158,11 +158,6 @@ impl TranscriptStore {
         true
     }
 
-    #[must_use]
-    pub(crate) fn progressive_facts(&self) -> &[ProgressiveFact] {
-        &self.progressive_facts
-    }
-
     fn capture_delegate_snapshot_facts(
         &mut self,
         entry: TranscriptEntryId,
@@ -280,11 +275,6 @@ impl TranscriptStore {
         {
             self.live_model_attempt = None;
         }
-    }
-
-    #[must_use]
-    pub(crate) fn live_model_attempt_start(&self) -> Option<usize> {
-        self.live_model_attempt.map(|(_, start)| start)
     }
 
     #[must_use]

@@ -1,5 +1,4 @@
-use neo_tui::screen_output::{CursorPos, InlineTerminal, LiveRenderer, TerminalFrame};
-use neo_tui::transcript::TranscriptPane;
+use neo_tui::screen_output::{CursorPos, FullscreenTerminal, LiveRenderer, TerminalFrame};
 
 #[test]
 fn live_growth_at_terminal_bottom_preserves_unchanged_prefix() {
@@ -41,13 +40,12 @@ fn live_growth_at_terminal_bottom_preserves_unchanged_prefix() {
 }
 
 #[test]
-fn width_resize_redraws_at_absolute_observed_origin() {
-    let mut terminal = InlineTerminal::for_test(12, 4);
+fn width_resize_redraws_at_absolute_origin_zero() {
+    let mut terminal = FullscreenTerminal::for_test(12, 4);
     terminal
         .render_to(
             &mut Vec::new(),
             &TerminalFrame::new(
-                Vec::new(),
                 vec!["old-row-one".to_owned(), "old-row-two".to_owned()],
                 None,
             ),
@@ -55,28 +53,21 @@ fn width_resize_redraws_at_absolute_observed_origin() {
         .expect("initial live frame");
 
     terminal.resize_for_test(6, 4);
-    let mut pane = TranscriptPane::new(6, 4);
-    pane.push_status("done");
-    let update = pane.render_terminal_update(6, 4);
     let mut output = Vec::new();
     terminal
         .render_to(
             &mut output,
-            &TerminalFrame::new(
-                update.history,
-                vec!["new-a".to_owned(), "new-b".to_owned()],
-                None,
-            ),
+            &TerminalFrame::new(vec!["new-a".to_owned(), "new-b".to_owned()], None),
         )
         .expect("live frame after ambiguous width resize");
     let output = String::from_utf8(output).expect("ANSI output is UTF-8");
 
     assert!(
-        output.contains("\x1b[2;1H\x1b[2Knew-a"),
+        output.contains("\x1b[1;1H\x1b[2Knew-a"),
         "output: {output:?}"
     );
     assert!(
-        output.contains("\x1b[3;1H\x1b[2Knew-b"),
+        output.contains("\x1b[2;1H\x1b[2Knew-b"),
         "output: {output:?}"
     );
     assert!(
@@ -85,25 +76,22 @@ fn width_resize_redraws_at_absolute_observed_origin() {
     );
     assert!(
         !output.contains("\x1b[1A"),
-        "ambiguous geometry must not address the stale live anchor: {output:?}"
+        "ambiguous geometry must not address a stale anchor: {output:?}"
     );
 }
 
 #[test]
 fn height_resize_redraws_live_with_absolute_cup() {
     let live = vec!["same-a".to_owned(), "same-b".to_owned()];
-    let mut terminal = InlineTerminal::for_test(12, 4);
+    let mut terminal = FullscreenTerminal::for_test(12, 4);
     terminal
-        .render_to(
-            &mut Vec::new(),
-            &TerminalFrame::new(Vec::new(), live.clone(), None),
-        )
+        .render_to(&mut Vec::new(), &TerminalFrame::new(live.clone(), None))
         .expect("initial live frame");
 
     terminal.resize_for_test(12, 3);
     let mut output = Vec::new();
     terminal
-        .render_to(&mut output, &TerminalFrame::new(Vec::new(), live, None))
+        .render_to(&mut output, &TerminalFrame::new(live, None))
         .expect("unchanged live frame after height resize");
     let output = String::from_utf8(output).expect("ANSI output is UTF-8");
 

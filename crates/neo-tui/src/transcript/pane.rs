@@ -13,16 +13,11 @@ use crate::terminal_image::{
 };
 use crate::transcript::{
     DocumentLayout, McpStartupStatusData, QuestionPromptData, QuestionPromptState,
-    ShellRunComponent, ToolCallComponent, ToolCallState, TranscriptBrowserState, TranscriptEntry,
-    TranscriptEntryId, TranscriptStore,
+    ShellRunComponent, ToolCallComponent, ToolCallState, TranscriptEntry, TranscriptEntryId,
+    TranscriptStore,
 };
 
 use super::entry::RetryStatusData;
-use super::presentation::{
-    FinalizedBlock, TranscriptPresentation, TranscriptRenderOptions, TranscriptTerminalUpdate,
-};
-
-const DEFAULT_LIVE_CHROME_HEIGHT: usize = 4;
 
 fn compaction_is_complete(phase: Option<neo_agent_core::CompactionPhase>, percent: u8) -> bool {
     phase == Some(neo_agent_core::CompactionPhase::Applying) && percent >= 100
@@ -151,7 +146,6 @@ impl AbsorbedToolKind {
 pub struct TranscriptPane {
     width: usize,
     height: usize,
-    live_chrome_height: usize,
     pub(super) transcript: TranscriptStore,
     /// The incremental document: per-entry layout, logical anchor, and view
     /// state. The physical terminal only receives a bounded visible slice
@@ -188,7 +182,6 @@ pub struct TranscriptPane {
     theme: TuiTheme,
     image_render_policy: ImageRenderPolicy,
     image_capabilities: TerminalImageCapabilities,
-    presentation: TranscriptPresentation,
     pub(super) skill_store: Option<SkillStore>,
 }
 
@@ -198,7 +191,6 @@ impl TranscriptPane {
         Self {
             width,
             height,
-            live_chrome_height: DEFAULT_LIVE_CHROME_HEIGHT,
             transcript: TranscriptStore::new(),
             dirty: false,
             tool_output_expanded: false,
@@ -220,7 +212,6 @@ impl TranscriptPane {
             theme: TuiTheme::default(),
             image_render_policy: ImageRenderPolicy::default(),
             image_capabilities: TerminalImageCapabilities::default(),
-            presentation: TranscriptPresentation::default(),
             skill_store: None,
         }
     }
@@ -721,16 +712,6 @@ impl TranscriptPane {
         self.tool_output_expanded
     }
 
-    pub fn set_live_chrome_height(&mut self, height: usize) {
-        self.live_chrome_height = height;
-        self.mark_dirty();
-    }
-
-    #[must_use]
-    pub const fn live_chrome_height(&self) -> usize {
-        self.live_chrome_height
-    }
-
     pub fn mark_dirty(&mut self) {
         self.dirty = true;
     }
@@ -806,70 +787,6 @@ impl TranscriptPane {
         let lines = self.render_body_lines(width);
         self.last_frame.clone_from(&lines);
         Some(lines)
-    }
-
-    #[must_use]
-    pub fn render_terminal_update(
-        &mut self,
-        width: usize,
-        height: usize,
-    ) -> TranscriptTerminalUpdate {
-        self.width = width;
-        self.height = height;
-        self.dirty = false;
-
-        let content_width = super::chrome_render::frame_content_width(width);
-        self.presentation.render(
-            &mut self.transcript,
-            TranscriptRenderOptions::new(
-                content_width,
-                &self.theme,
-                self.activity_frame,
-                self.image_render_policy,
-                self.image_capabilities,
-                height.saturating_sub(self.live_chrome_height),
-            ),
-        )
-    }
-
-    #[must_use]
-    pub fn has_committed_expandable_entries(&self) -> bool {
-        self.transcript
-            .entries()
-            .iter()
-            .enumerate()
-            .any(|(index, entry)| {
-                entry.is_expandable()
-                    && self
-                        .transcript
-                        .entry_ids()
-                        .get(index)
-                        .is_some_and(|id| self.presentation.is_committed(*id))
-            })
-    }
-
-    #[must_use]
-    pub fn render_browser_rows(
-        &mut self,
-        state: &mut TranscriptBrowserState,
-        width: usize,
-        height: usize,
-    ) -> Vec<String> {
-        let mut snapshot = self.clone();
-        snapshot.width = width;
-        snapshot.height = height;
-        snapshot.set_tool_output_expanded(state.expanded());
-        let rows = snapshot.render_body_lines(width);
-        state.viewport.sync(rows.len(), height);
-        let range = state.viewport.visible_row_range(rows.len(), height);
-        rows[range].to_vec()
-    }
-
-    pub fn acknowledge_history(&mut self, blocks: &[FinalizedBlock]) {
-        // History acknowledgement commits presentation state only.
-        // Progressive facts stay attached to their entry and are never
-        // acknowledged away after physical output.
-        self.presentation.acknowledge(blocks);
     }
 
     /// The earliest unresolved blocking entry (approval or question) in
@@ -1597,6 +1514,15 @@ impl TranscriptPane {
         self.compose_rows(range.start, range.end, content_width)
     }
 
+    /// Compose the bounded physical slice for one terminal frame, consuming
+    /// the dirty flag so steady-state frames do not keep the runtime's frame
+    /// scheduler busy.
+    #[must_use]
+    pub fn render_terminal_slice(&mut self, width: usize, height: usize) -> Vec<String> {
+        self.dirty = false;
+        self.render_visible_slice(width, height)
+    }
+
     /// Read access to the incremental document layout and view state.
     #[must_use]
     pub const fn document(&self) -> &DocumentLayout {
@@ -1770,7 +1696,7 @@ impl TranscriptPane {
             }
             let mut ordered = group;
             let lines =
-                super::chrome_render::render_ordered_tools(&mut ordered, width, &self.theme).lines;
+                super::chrome_render::render_ordered_tools(&mut ordered, width, &self.theme);
             let first = lines.iter().position(|line| !line.is_blank());
             let last = lines.iter().rposition(|line| !line.is_blank());
             let (Some(first), Some(last)) = (first, last) else {

@@ -1,5 +1,4 @@
 mod approval_data;
-mod browser;
 mod child_activity;
 pub mod chrome_render;
 mod delegate_card;
@@ -14,12 +13,10 @@ mod live_output;
 pub mod pane;
 pub mod partial_json;
 pub mod plan_box;
-mod presentation;
 mod progressive;
 pub mod shell_run;
 mod shell_tool_presentation;
 pub mod store;
-mod streaming_prefix;
 mod swarm_card;
 pub mod tool_call;
 pub mod tool_group;
@@ -33,7 +30,6 @@ mod write_tool_presentation;
 
 use neo_agent_core::multi_agent::{AgentLifecycleState, AgentSnapshot};
 
-pub use browser::TranscriptBrowserState;
 pub(crate) use child_activity::{
     MAX_CHILD_TOOL_ROWS, can_detach, child_activity_view, compact_chars, display_elapsed,
     format_cache_token_usage, format_elapsed, format_token_count, one_line,
@@ -57,9 +53,6 @@ pub use entry::{
 pub use instruction_card::InstructionCardComponent;
 pub use pane::{BlockingEntryKind, TranscriptPane};
 pub use plan_box::PlanBoxComponent;
-pub use presentation::{
-    FinalizedBlock, FinalizedBlockProof, TranscriptBlockId, TranscriptTerminalUpdate,
-};
 pub use progressive::{ProgressiveFact, ProgressiveFactId};
 pub use shell_run::{ShellRunComponent, ShellRunState};
 pub use store::{TranscriptEntryId, TranscriptSelection, TranscriptStore};

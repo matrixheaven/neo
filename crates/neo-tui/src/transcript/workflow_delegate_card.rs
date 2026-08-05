@@ -46,7 +46,6 @@ impl AgentCounts {
 
 pub(super) struct WorkflowSummaryRender {
     pub(super) lines: Vec<Line>,
-    pub(super) has_visible_animation: bool,
 }
 
 #[must_use]
@@ -86,10 +85,7 @@ pub(super) fn render_workflow_delegate_card(
         theme,
     )];
     if max_rows == 1 {
-        return Some(WorkflowSummaryRender {
-            lines,
-            has_visible_animation: false,
-        });
+        return Some(WorkflowSummaryRender { lines });
     }
 
     let agent_refs = agents.iter().collect::<Vec<_>>();
@@ -103,19 +99,16 @@ pub(super) fn render_workflow_delegate_card(
     let indexes = selected_agent_indices(&agent_refs, visible_rows, pressured);
     let omitted = agents.len().saturating_sub(indexes.len());
     let visible_count = indexes.len();
-    let mut has_visible_animation = false;
     for (visible_index, agent_index) in indexes.into_iter().enumerate() {
         let is_last = visible_index + 1 == visible_count && omitted == 0;
-        let (line, animated) = render_agent_row(
+        lines.push(render_agent_row(
             agent_refs[agent_index],
             if is_last { "└─ " } else { "├─ " },
             "",
             width,
             now_ms,
             theme,
-        );
-        lines.push(line);
-        has_visible_animation |= animated;
+        ));
     }
     if omitted > 0 && lines.len() < max_rows {
         lines.push(
@@ -127,10 +120,7 @@ pub(super) fn render_workflow_delegate_card(
         );
     }
 
-    Some(WorkflowSummaryRender {
-        lines,
-        has_visible_animation,
-    })
+    Some(WorkflowSummaryRender { lines })
 }
 
 #[must_use]
@@ -217,7 +207,7 @@ pub(super) fn render_agent_row(
     width: usize,
     now_ms: Option<u64>,
     theme: &TuiTheme,
-) -> (Line, bool) {
+) -> Line {
     let (marker, marker_color) = agent_marker(agent.state, theme);
     let activity = agent_activity(agent);
     let mut spans = vec![
@@ -250,10 +240,6 @@ pub(super) fn render_agent_row(
     let elapsed = display_elapsed(agent, now_ms);
     let elapsed_suffix =
         (!elapsed.is_zero()).then(|| format!(" · {}", format_elapsed(elapsed.as_secs())));
-    let animated = agent.state == AgentLifecycleState::Running
-        && elapsed_suffix.as_ref().is_some_and(|suffix| {
-            line.visible_width() + Line::raw(suffix.as_str()).visible_width() <= width
-        });
     if let Some(suffix) = elapsed_suffix
         && line.visible_width() + Line::raw(suffix.as_str()).visible_width() <= width
     {
@@ -261,7 +247,7 @@ pub(super) fn render_agent_row(
         spans.push(Span::styled(suffix, Style::default().fg(theme.text_muted)));
         line = Line::from_spans(spans);
     }
-    (line.truncate_to_width(width), animated)
+    line.truncate_to_width(width)
 }
 
 fn summary_marker(

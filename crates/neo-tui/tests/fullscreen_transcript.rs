@@ -4,6 +4,7 @@
 
 use neo_agent_core::multi_agent::MultiAgentRuntime;
 use neo_tui::primitive::strip_ansi;
+use neo_tui::screen_output::{FullscreenTerminal, TerminalFrame};
 use neo_tui::transcript::{DelegateGroupComponent, TranscriptEntry, TranscriptPane};
 
 /// The non-blank content lines of a rendered slice, in order.
@@ -12,6 +13,88 @@ fn non_blank_lines(rows: &[String]) -> Vec<String> {
         .map(|row| strip_ansi(row))
         .filter(|row| !row.trim().is_empty())
         .collect()
+}
+
+#[test]
+fn fullscreen_lifecycle_enters_and_restores_once() {
+    let mut pane = TranscriptPane::new(80, 12);
+    for index in 0..8 {
+        pane.push_status(format!("row-{index}"));
+    }
+    let frame = TerminalFrame::new(pane.render_visible_slice(80, 12), None);
+    let mut terminal = FullscreenTerminal::for_test(80, 12);
+    let mut output = Vec::new();
+
+    // Every frame is one bounded slice written at the fullscreen origin with
+    // absolute CUP — never a native-history scroll into the alternate screen.
+    terminal
+        .render_to(&mut output, &frame)
+        .expect("render frame");
+    let frame_text = String::from_utf8_lossy(&output);
+    assert!(
+        !frame_text.contains("\r\n"),
+        "native history write detected: {frame_text:?}"
+    );
+    assert!(
+        !output.windows(4).any(|window| window == b"\x1b[2J")
+            && !output.windows(4).any(|window| window == b"\x1b[3J"),
+        "frame must not erase the surface: {frame_text:?}"
+    );
+    assert!(
+        frame_text.contains("row-7"),
+        "bounded slice content missing: {frame_text:?}"
+    );
+
+    // Suspend clears the live surface without erasing; resume repaints the
+    // fresh alternate screen fully; leave clears once and restores the
+    // cursor. Repeated frame content emits no bytes.
+    let mut suspend = Vec::new();
+    terminal
+        .suspend_prepare(&mut suspend)
+        .expect("prepare suspend");
+    let suspend_text = String::from_utf8_lossy(&suspend);
+    assert!(
+        !suspend_text.contains("\r\n"),
+        "suspend wrote native history: {suspend_text:?}"
+    );
+    assert!(
+        !suspend.windows(4).any(|window| window == b"\x1b[2J")
+            && !suspend.windows(4).any(|window| window == b"\x1b[3J"),
+        "suspend must not erase the normal screen: {suspend_text:?}"
+    );
+
+    terminal
+        .resume(80, 12, 0, 0, 1)
+        .expect("resume fullscreen modes");
+    let mut redraw = Vec::new();
+    terminal
+        .render_to(&mut redraw, &frame)
+        .expect("redraw after resume");
+    assert!(
+        !redraw.is_empty(),
+        "resumed surface must repaint from the fullscreen origin"
+    );
+
+    let mut unchanged = Vec::new();
+    terminal
+        .render_to(&mut unchanged, &frame)
+        .expect("unchanged frame");
+    assert!(
+        unchanged.is_empty(),
+        "repeated frame content must emit no bytes"
+    );
+
+    let mut leave = Vec::new();
+    terminal.leave(&mut leave).expect("leave fullscreen");
+    let leave_text = String::from_utf8_lossy(&leave);
+    assert!(
+        !leave_text.contains("\r\n"),
+        "leave wrote native history: {leave_text:?}"
+    );
+    assert!(
+        leave_text.contains("\x1b[?25h"),
+        "leave must restore the cursor: {leave_text:?}"
+    );
 }
 
 #[test]

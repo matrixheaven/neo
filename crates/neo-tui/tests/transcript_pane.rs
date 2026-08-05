@@ -11,8 +11,7 @@ use neo_tui::primitive::theme::TuiTheme;
 use neo_tui::primitive::{Color, Finalization, strip_ansi, visible_width};
 use neo_tui::shell::ToolStatusKind;
 use neo_tui::transcript::{
-    McpStartupPhase, McpStartupStatusData, StatusSeverity, TranscriptBrowserState, TranscriptEntry,
-    TranscriptPane,
+    McpStartupPhase, McpStartupStatusData, StatusSeverity, TranscriptEntry, TranscriptPane,
 };
 use std::path::PathBuf;
 
@@ -163,7 +162,7 @@ fn ansi_for_color(color: Color) -> String {
 }
 
 #[test]
-fn streaming_assistant_commits_stable_prefix_and_bounds_live_tail() {
+fn streaming_assistant_slice_shows_only_the_bounded_tail() {
     let mut pane = TranscriptPane::new(40, 8);
     pane.start_assistant_message();
     for index in 0..8 {
@@ -171,24 +170,20 @@ fn streaming_assistant_commits_stable_prefix_and_bounds_live_tail() {
     }
     pane.append_assistant_delta("mutable tail that is still streaming");
 
-    let update = pane.render_terminal_update(40, 8);
-    let history = update
-        .history
-        .iter()
-        .flat_map(|block| block.lines.iter())
-        .map(|line| strip_ansi(line))
-        .collect::<Vec<_>>()
-        .join("\n");
-    let live = update
-        .live
+    let slice = pane.render_visible_slice(40, 8);
+    let text = slice
         .iter()
         .map(|line| strip_ansi(line))
         .collect::<Vec<_>>()
         .join("\n");
 
-    assert!(history.contains("complete paragraph 0"));
-    assert!(!live.contains("complete paragraph 0"));
-    assert!(live.contains("mutable tail"));
+    assert!(
+        slice.len() <= 8,
+        "physical slice must stay bounded: {}",
+        slice.len()
+    );
+    assert!(!text.contains("complete paragraph 0"));
+    assert!(text.contains("mutable tail"), "slice:\n{text}");
 }
 
 #[test]
@@ -242,35 +237,29 @@ fn long_unstable_assistant_tail_stays_bounded_and_commits_once() {
     pane.start_assistant_message();
     pane.append_assistant_delta(&"unfinished ".repeat(80));
 
-    let update = pane.render_terminal_update(30, 8);
-    let live = update
-        .live
+    let slice = pane.render_visible_slice(30, 8);
+    let live = slice
         .iter()
         .map(|line| strip_ansi(line))
         .collect::<Vec<_>>()
         .join("\n");
 
-    assert!(update.history.is_empty());
     assert!(
-        update.live.len() <= 4,
-        "live tail must be bounded by live_budget: {}",
-        update.live.len()
+        slice.len() <= 8,
+        "slice must stay bounded by the terminal height: {}",
+        slice.len()
     );
-    assert!(live.contains("unfinished"), "live:\n{live}");
+    assert!(live.contains("unfinished"), "slice:\n{live}");
 
-    // Completion commits the canonical assistant entry once.
+    // Completion keeps the canonical assistant entry in the document.
     pane.finish_assistant_message();
-    let finished = pane.render_terminal_update(30, 8);
-    assert_eq!(finished.history.len(), 1, "one canonical commit");
-    assert!(
-        finished.history[0]
-            .lines
-            .iter()
-            .any(|line| strip_ansi(line).contains("unfinished"))
-    );
-    assert!(finished.live.is_empty());
-    pane.acknowledge_history(&finished.history);
-    assert!(pane.render_terminal_update(30, 8).history.is_empty());
+    let finished = pane
+        .render_visible_slice(30, 8)
+        .iter()
+        .map(|line| strip_ansi(line))
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(finished.contains("unfinished"), "slice:\n{finished}");
 }
 
 #[test]
@@ -299,25 +288,23 @@ fn live_budget_truncation_keeps_recent_whole_blocks() {
         output_ref: None,
     });
 
-    let update = pane.render_terminal_update(80, 8);
-    let live = update
-        .live
+    let slice = pane.render_visible_slice(80, 8);
+    let live = slice
         .iter()
         .map(|line| strip_ansi(line))
         .collect::<Vec<_>>()
         .join("\n");
 
     assert!(
-        update.live.len() <= 4,
-        "live must be bounded by live_budget: {}",
-        update.live.len()
+        slice.len() <= 8,
+        "slice must stay bounded by the terminal height: {}",
+        slice.len()
     );
-    // The adjacent tool cards render as one grouped live block; when that
-    // block exceeds the budget, its header and the newest rows survive
-    // instead of a mid-card row slice.
-    assert_eq!(live.matches("Using Read").count(), 1, "live:\n{live}");
-    assert!(live.contains("latest-output"), "live:\n{live}");
-    assert!(!live.contains("earlier rows omitted"), "live:\n{live}");
+    // The adjacent tool cards render as one grouped block; the newest rows
+    // survive instead of a mid-card row slice.
+    assert_eq!(live.matches("Using Read").count(), 1, "slice:\n{live}");
+    assert!(live.contains("latest-output"), "slice:\n{live}");
+    assert!(!live.contains("earlier rows omitted"), "slice:\n{live}");
 }
 
 #[test]
@@ -483,18 +470,15 @@ fn mcp_startup_status_updates_pending_spinner_to_red_failed_row() {
     let theme = TuiTheme::default().with_status_error(Color::Rgb(211, 37, 69));
     let mut transcript_pane = TranscriptPane::new(100, 12);
     transcript_pane.set_theme(theme);
-    transcript_pane.set_live_chrome_height(0);
     transcript_pane.upsert_mcp_startup_status(McpStartupStatusData {
         id: "linear".to_owned(),
         transport: "http".to_owned(),
         phase: McpStartupPhase::Connecting,
     });
 
-    let pending = transcript_pane.render_terminal_update(100, 12);
-    assert!(pending.history.is_empty());
+    let pending = transcript_pane.render_visible_slice(100, 12);
     assert!(
         pending
-            .live
             .iter()
             .map(|line| strip_ansi(line))
             .any(|line| line.contains("MCP server \"linear\" connecting"))
@@ -507,30 +491,22 @@ fn mcp_startup_status_updates_pending_spinner_to_red_failed_row() {
             message: "timeout connecting to server".to_owned(),
         },
     });
-    let failed = transcript_pane.render_terminal_update(100, 12);
-    let failed_ansi = failed
-        .history
+    let failed = transcript_pane.render_visible_slice(100, 12);
+    let failed_plain = failed
         .iter()
-        .flat_map(|block| block.lines.iter())
-        .cloned()
+        .map(|line| strip_ansi(line))
         .collect::<Vec<_>>()
         .join("\n");
-    let failed_plain = strip_ansi(&failed_ansi);
 
     assert!(
         failed_plain.contains("✗ MCP server \"linear\" failed · timeout connecting to server"),
         "{failed_plain}"
     );
     assert!(
-        failed_ansi.contains(&ansi_for_color(theme.status_error)),
-        "{failed_ansi}"
-    );
-    assert!(
         failed
-            .live
             .iter()
-            .map(|line| strip_ansi(line))
-            .all(|line| !line.contains("connecting"))
+            .any(|line| line.contains(&ansi_for_color(theme.status_error))),
+        "failed state must keep the error color"
     );
     assert_eq!(
         transcript_pane
@@ -620,25 +596,36 @@ fn transcript_pane_renders_only_earliest_pending_approval() {
     }
 
     // Every approval has its transcript position on arrival; the earliest
-    // unresolved one is the visible live focus and later ones stay deferred.
-    let update = transcript_pane.render_terminal_update(100, 24);
-    let live = update
-        .live
+    // unresolved one owns interactive input while all cards stay visible in
+    // the document in arrival order.
+    let slice = transcript_pane
+        .render_visible_slice(100, 40)
         .iter()
         .map(|line| plain(line))
         .collect::<Vec<_>>();
-    assert!(live.iter().any(|line| line.contains("$ printf 1")));
-    assert!(!live.iter().any(|line| line.contains("$ printf 2")));
-    assert!(!live.iter().any(|line| line.contains("$ printf 3")));
-    assert!(!live.iter().any(|line| line.contains("queued:")));
-    assert!(update.history.is_empty(), "later rows stay deferred");
+    let first = slice.iter().position(|line| line.contains("$ printf 1"));
+    let second = slice.iter().position(|line| line.contains("$ printf 2"));
+    let third = slice.iter().position(|line| line.contains("$ printf 3"));
+    assert!(first.is_some() && second.is_some() && third.is_some());
+    assert!(
+        first.unwrap() < second.unwrap() && second.unwrap() < third.unwrap(),
+        "approval cards keep arrival order in the document: {slice:?}"
+    );
+    assert_eq!(
+        transcript_pane.earliest_blocking_entry(),
+        Some(neo_tui::transcript::BlockingEntryKind::Approval(
+            "bash-1".to_owned()
+        ))
+    );
 
-    // Resolving the earliest approval releases the next one in canonical order.
+    // Resolving the earliest approval advances the blocking focus in order.
     transcript_pane.resolve_approval("bash-1", &approved_resolution());
-    let next = transcript_pane.render_terminal_update(100, 24);
-    let live = next.live.iter().map(|line| plain(line)).collect::<Vec<_>>();
-    assert!(live.iter().any(|line| line.contains("$ printf 2")));
-    assert!(!live.iter().any(|line| line.contains("$ printf 3")));
+    assert_eq!(
+        transcript_pane.earliest_blocking_entry(),
+        Some(neo_tui::transcript::BlockingEntryKind::Approval(
+            "bash-2".to_owned()
+        ))
+    );
 }
 
 #[test]
@@ -1494,7 +1481,6 @@ fn transcript_pane_accumulates_tool_argument_delta_fragments() {
 fn transcript_pane_frame_keeps_tool_card_and_streaming_assistant() {
     let mut transcript_pane = TranscriptPane::new(80, 6);
 
-    transcript_pane.set_live_chrome_height(4);
     transcript_pane.apply_agent_event(neo_agent_core::AgentEvent::ToolExecutionStarted {
         turn: 1,
         id: "tool-1".to_owned(),
@@ -2027,40 +2013,20 @@ fn skill_activation_toggle_expands_collapsed_body() {
 }
 
 #[test]
-fn browser_snapshot_expands_and_collapses_committed_tool_without_mutating_source() {
+fn tool_output_toggle_expands_and_collapses_in_primary_document() {
     let mut pane = TranscriptPane::new(80, 20);
-    let transcript = pane.transcript_mut();
-    transcript.push_tool_run("tool-1", "Read", Some("{\"path\":\"a\"}".to_owned()));
-    assert!(transcript.mutate_tool("tool-1", |tool| {
+    pane.transcript_mut()
+        .push_tool_run("tool-1", "Read", Some("{\"path\":\"a\"}".to_owned()));
+    assert!(pane.transcript_mut().mutate_tool("tool-1", |tool| {
         tool.set_result(Some("ok".to_owned()), None, false, None)
     }));
 
-    let committed = pane.render_terminal_update(80, 20);
-    assert!(!committed.history.is_empty());
-    assert!(!pane.has_committed_expandable_entries());
-    pane.acknowledge_history(&committed.history);
-    assert!(pane.has_committed_expandable_entries());
     assert!(!pane.tool_output_expanded());
-
-    pane.push_status("after-browser");
-    let mut browser = TranscriptBrowserState::new(true);
-
-    let expanded = strip_ansi(&pane.render_browser_rows(&mut browser, 80, 20).join("\n"));
-    assert!(
-        expanded.contains("Used Read (a)"),
-        "expanded must show tool header with key arg: {expanded}"
-    );
-    assert!(pane.has_committed_expandable_entries());
-    assert!(!pane.tool_output_expanded());
-
-    browser.toggle();
-    let collapsed = strip_ansi(&pane.render_browser_rows(&mut browser, 80, 20).join("\n"));
+    let collapsed = strip_ansi(&pane.render_visible_slice(80, 20).join("\n"));
     assert!(
         collapsed.contains("Used Read"),
         "collapsed still shows tool header: {collapsed}"
     );
-    // In collapsed browser mode a truncated result preview (up to 3 lines)
-    // is shown; single-line results are fully visible with no expand hint.
     assert!(
         collapsed.contains("1 lines"),
         "collapsed shows result line count chip: {collapsed}"
@@ -2069,39 +2035,24 @@ fn browser_snapshot_expands_and_collapses_committed_tool_without_mutating_source
         collapsed.contains("ok"),
         "collapsed shows result preview: {collapsed}"
     );
-    assert!(
-        !collapsed.contains("ctrl+o to expand"),
-        "single-line result needs no expand hint: {collapsed}"
-    );
-    assert!(pane.has_committed_expandable_entries());
-    assert!(!pane.tool_output_expanded());
 
-    let native = pane.render_terminal_update(80, 20);
-    let native_history = native
-        .history
-        .iter()
-        .flat_map(|block| block.lines.iter())
-        .cloned()
-        .collect::<Vec<_>>()
-        .join("\n");
-    assert!(native_history.contains("after-browser"));
-    assert!(!native_history.contains("{\"path\":\"a\"}"));
-}
-
-#[test]
-fn browser_rows_are_bounded_and_scrollable() {
-    let mut pane = TranscriptPane::new(80, 20);
-    for index in 0..40 {
-        pane.push_status(format!("row-{index}"));
-    }
-    let mut browser = TranscriptBrowserState::new(false);
-    assert_eq!(pane.render_browser_rows(&mut browser, 80, 5).len(), 5);
-    browser.scroll_up(usize::MAX);
+    // Ctrl+O routes to the primary document: no second surface, no browser
+    // state, just the pane's expansion toggle.
+    assert!(pane.toggle_tool_output_expanded());
+    assert!(pane.tool_output_expanded());
+    let expanded = strip_ansi(&pane.render_visible_slice(80, 20).join("\n"));
     assert!(
-        pane.render_browser_rows(&mut browser, 80, 5)
-            .join("\n")
-            .contains("row-0")
+        expanded.contains("Used Read"),
+        "expanded keeps the tool header: {expanded}"
     );
+    assert!(
+        expanded.contains("ok"),
+        "expanded shows the full result: {expanded}"
+    );
+
+    pane.push_status("after-toggle");
+    let slice = strip_ansi(&pane.render_visible_slice(80, 20).join("\n"));
+    assert!(slice.contains("after-toggle"), "slice:\n{slice}");
 }
 
 #[test]
@@ -2329,7 +2280,7 @@ fn retry_status_mutates_original_position() {
 }
 
 #[test]
-fn retry_attempt_stays_out_of_terminal_history_until_message_finishes() {
+fn retry_attempt_is_replaced_by_the_winning_attempt_in_the_document() {
     let mut pane = TranscriptPane::new(40, 8);
     pane.apply_agent_event(neo_agent_core::AgentEvent::MessageStarted {
         phase: neo_ai::MessagePhase::Unknown,
@@ -2355,22 +2306,13 @@ fn retry_attempt_stays_out_of_terminal_history_until_message_finishes() {
         text: "failed answer prefix\n\nfailed mutable tail".to_owned(),
     });
 
-    let provisional = pane.render_terminal_update(40, 8);
-    let provisional_live = provisional
-        .live
+    let provisional = pane
+        .render_visible_slice(40, 8)
         .iter()
         .map(|line| strip_ansi(line))
         .collect::<Vec<_>>()
         .join("\n");
-    let mut terminal_history = provisional
-        .history
-        .iter()
-        .flat_map(|block| block.lines.iter())
-        .map(|line| strip_ansi(line))
-        .collect::<Vec<_>>()
-        .join("\n");
-    assert!(provisional_live.contains("failed mutable tail"));
-    pane.acknowledge_history(&provisional.history);
+    assert!(provisional.contains("failed mutable tail"), "{provisional}");
 
     schedule_and_resume_retry(&mut pane, 1);
     pane.apply_agent_event(neo_agent_core::AgentEvent::MessageStarted {
@@ -2389,33 +2331,16 @@ fn retry_attempt_stays_out_of_terminal_history_until_message_finishes() {
         stop_reason: neo_agent_core::StopReason::EndTurn,
     });
 
-    let finished = pane.render_terminal_update(40, 8);
-    terminal_history.push('\n');
-    terminal_history.push_str(
-        &finished
-            .history
-            .iter()
-            .flat_map(|block| block.lines.iter())
-            .map(|line| strip_ansi(line))
-            .collect::<Vec<_>>()
-            .join("\n"),
-    );
-    pane.acknowledge_history(&finished.history);
-    assert!(pane.render_terminal_update(40, 8).history.is_empty());
+    let finished = pane
+        .render_visible_slice(40, 8)
+        .iter()
+        .map(|line| strip_ansi(line))
+        .collect::<Vec<_>>()
+        .join("\n");
 
-    assert!(
-        !terminal_history.contains("failed reasoning"),
-        "{terminal_history}"
-    );
-    assert!(
-        !terminal_history.contains("failed answer prefix"),
-        "{terminal_history}"
-    );
-    assert_eq!(
-        terminal_history.matches("winning answer").count(),
-        1,
-        "{terminal_history}"
-    );
+    assert!(!finished.contains("failed reasoning"), "{finished}");
+    assert!(!finished.contains("failed answer prefix"), "{finished}");
+    assert_eq!(finished.matches("winning answer").count(), 1, "{finished}");
 }
 
 #[test]
@@ -3036,11 +2961,9 @@ fn list_delegates_renders_structured_rows_without_opaque_cursor() {
         output_ref: None,
     });
 
-    let update = pane.render_terminal_update(80, 24);
-    let text = update
-        .live
+    let slice = pane.render_visible_slice(80, 24);
+    let text = slice
         .iter()
-        .chain(update.history.iter().flat_map(|block| block.lines.iter()))
         .map(|line| strip_ansi(line))
         .collect::<Vec<_>>()
         .join("\n");
@@ -3087,9 +3010,8 @@ fn sleep_renders_total_remaining_and_reason_without_duplicate_result() {
         json_fragment: r#"{"duration_seconds":30,"reason":"backoff before retry"}"#.to_owned(),
     });
 
-    let pending = pane.render_terminal_update(80, 16);
+    let pending = pane.render_visible_slice(80, 16);
     let pending_text = pending
-        .live
         .iter()
         .map(|line| strip_ansi(line))
         .collect::<Vec<_>>()
@@ -3102,7 +3024,6 @@ fn sleep_renders_total_remaining_and_reason_without_duplicate_result() {
         !pending_text.contains(" remaining"),
         "countdown must not start before Sleep execution: {pending_text}"
     );
-    assert!(!pending.has_visible_animation);
 
     pane.apply_agent_event(neo_agent_core::AgentEvent::ToolExecutionStarted {
         turn: 1,
@@ -3117,9 +3038,8 @@ fn sleep_renders_total_remaining_and_reason_without_duplicate_result() {
         output_ref: None,
     });
 
-    let running = pane.render_terminal_update(80, 16);
+    let running = pane.render_visible_slice(80, 16);
     let running_text = running
-        .live
         .iter()
         .map(|line| strip_ansi(line))
         .collect::<Vec<_>>()
@@ -3146,12 +3066,9 @@ fn sleep_renders_total_remaining_and_reason_without_duplicate_result() {
         workflow_origin: None,
         output_ref: None,
     });
-    let finished = pane.render_terminal_update(80, 16);
+    let finished = pane.render_visible_slice(80, 16);
     let finished_text = finished
-        .history
         .iter()
-        .flat_map(|block| block.lines.iter())
-        .chain(finished.live.iter())
         .map(|line| strip_ansi(line))
         .collect::<Vec<_>>()
         .join("\n");

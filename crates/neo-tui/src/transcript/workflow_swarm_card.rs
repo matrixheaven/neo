@@ -60,10 +60,7 @@ pub(super) fn render_workflow_swarm_card(
         theme,
     )];
     if max_rows == 1 {
-        return Some(WorkflowSummaryRender {
-            lines,
-            has_visible_animation: false,
-        });
+        return Some(WorkflowSummaryRender { lines });
     }
 
     children.sort_by(|left, right| {
@@ -86,21 +83,18 @@ pub(super) fn render_workflow_swarm_card(
     let indexes = selected_agent_indices(&agent_refs, visible_rows, pressured);
     let omitted = children.len().saturating_sub(indexes.len());
     let visible_count = indexes.len();
-    let mut has_visible_animation = false;
     for (visible_index, child_index) in indexes.into_iter().enumerate() {
         let row = &children[child_index];
         let is_last = visible_index + 1 == visible_count && omitted == 0;
         let identity_prefix = swarm_identity_prefix(swarms, row);
-        let (line, animated) = render_agent_row(
+        lines.push(render_agent_row(
             &row.child.agent,
             if is_last { "└─ " } else { "├─ " },
             &identity_prefix,
             width,
             now_ms,
             theme,
-        );
-        lines.push(line);
-        has_visible_animation |= animated;
+        ));
     }
     if omitted > 0 && lines.len() < max_rows {
         lines.push(
@@ -112,10 +106,7 @@ pub(super) fn render_workflow_swarm_card(
         );
     }
 
-    Some(WorkflowSummaryRender {
-        lines,
-        has_visible_animation,
-    })
+    Some(WorkflowSummaryRender { lines })
 }
 
 fn swarm_identity_prefix(swarms: &[SwarmSnapshot], row: &SwarmChildRow<'_>) -> String {

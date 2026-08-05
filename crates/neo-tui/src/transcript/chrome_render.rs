@@ -40,18 +40,12 @@ pub fn apply_gutter(lines: &mut [String]) {
 /// A run of length 1 still renders as a normal solo card. Any non-groupable
 /// Edit and Write runs keep their existing mutation-card presentation; their
 /// runtime calls and results remain independent.
-pub(super) struct OrderedToolRender {
-    pub lines: Vec<Line>,
-    pub animated_header_indices: Vec<usize>,
-}
-
 pub(super) fn render_ordered_tools(
     ordered: &mut [ToolCallComponent],
     width: usize,
     theme: &TuiTheme,
-) -> OrderedToolRender {
+) -> Vec<Line> {
     let mut rows = Vec::new();
-    let mut animated_header_indices = Vec::new();
     let mut i = 0;
     while i < ordered.len() {
         if !rows.is_empty() {
@@ -61,7 +55,6 @@ pub(super) fn render_ordered_tools(
         let tree_groupable = is_tree_groupable(&current_name);
         let mutation_groupable = is_mutation_groupable(&current_name);
         if !tree_groupable && !mutation_groupable {
-            record_tool_header(&ordered[i], rows.len(), &mut animated_header_indices);
             rows.extend(ordered[i].render_with_theme(width, theme));
             i += 1;
             continue;
@@ -76,12 +69,6 @@ pub(super) fn render_ordered_tools(
         }
         if j - i >= 2 {
             if mutation_groupable {
-                if ordered[i..j]
-                    .iter()
-                    .any(ToolCallComponent::has_visible_animation)
-                {
-                    animated_header_indices.push(rows.len());
-                }
                 let projected = aggregate_mutation_state(&ordered[i..j], &current_name);
                 let expanded = ordered[i..j].iter().all(ToolCallComponent::is_expanded);
                 let display = ordered[i..j]
@@ -107,7 +94,6 @@ pub(super) fn render_ordered_tools(
                     if index > 0 {
                         rows.push(Line::raw(""));
                     }
-                    record_tool_header(tool, rows.len(), &mut animated_header_indices);
                     rows.extend(tool.render_with_theme(width, theme));
                 }
             } else {
@@ -121,25 +107,11 @@ pub(super) fn render_ordered_tools(
                 rows.extend(render_tool_group(&group, width, theme, expanded));
             }
         } else {
-            record_tool_header(&ordered[i], rows.len(), &mut animated_header_indices);
             rows.extend(ordered[i].render_with_theme(width, theme));
         }
         i = j;
     }
-    OrderedToolRender {
-        lines: rows,
-        animated_header_indices,
-    }
-}
-
-fn record_tool_header(
-    tool: &ToolCallComponent,
-    row: usize,
-    animated_header_indices: &mut Vec<usize>,
-) {
-    if tool.has_visible_animation() {
-        animated_header_indices.push(row);
-    }
+    rows
 }
 
 /// Whether a tool name is eligible for consecutive-call grouping.

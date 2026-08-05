@@ -9,7 +9,6 @@ pub(crate) struct WorkflowGroupRender {
     main: Vec<Line>,
     delegates: Option<Vec<Line>>,
     swarms: Option<Vec<Line>>,
-    pub(crate) has_visible_animation: bool,
 }
 
 impl WorkflowGroupRender {
@@ -38,7 +37,6 @@ pub(crate) fn render_workflow_group(
             main: Vec::new(),
             delegates: None,
             swarms: None,
-            has_visible_animation: false,
         };
     }
 
@@ -50,17 +48,16 @@ pub(crate) fn render_workflow_group(
     let minimum_rows = 2 + usize::from(has_delegates) + usize::from(has_swarms);
     if available_rows < minimum_rows {
         let folded_counts = folded_child_counts(component);
-        let (main, has_visible_animation) = component.render_main_with_theme(
+        let main = component.render_main_with_theme(
             width,
             available_rows,
             folded_counts.as_deref(),
             theme,
         );
         return WorkflowGroupRender {
-            main,
+            main: main.0,
             delegates: None,
             swarms: None,
-            has_visible_animation,
         };
     }
 
@@ -104,7 +101,7 @@ pub(crate) fn render_workflow_group(
         }
     }
 
-    let (main, main_animation) = component.render_main_with_theme(width, budgets[0], None, theme);
+    let main = component.render_main_with_theme(width, budgets[0], None, theme);
     let delegates = render_workflow_delegate_card(
         component.delegates(),
         width,
@@ -119,18 +116,10 @@ pub(crate) fn render_workflow_group(
         component.now_ms(),
         theme,
     );
-    let has_visible_animation = main_animation
-        || delegates
-            .as_ref()
-            .is_some_and(|rendered| rendered.has_visible_animation)
-        || swarms
-            .as_ref()
-            .is_some_and(|rendered| rendered.has_visible_animation);
     WorkflowGroupRender {
-        main,
+        main: main.0,
         delegates: delegates.map(|rendered| rendered.lines),
         swarms: swarms.map(|rendered| rendered.lines),
-        has_visible_animation,
     }
 }
 

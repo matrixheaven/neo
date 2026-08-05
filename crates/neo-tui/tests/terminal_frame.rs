@@ -5,50 +5,46 @@ use neo_tui::NeoTui;
 use neo_tui::primitive::{strip_ansi, visible_width};
 use neo_tui::shell::{NeoChromeState, PromptEdit};
 use neo_tui::tasks_browser::TaskBrowserState;
-use neo_tui::transcript::{CHROME_GUTTER, TranscriptBrowserState, TranscriptEntry, TranscriptPane};
+use neo_tui::transcript::TranscriptEntry;
 
 #[test]
-fn terminal_frame_acknowledges_history_without_replaying_live_chrome() {
+fn interactive_frame_is_one_bounded_fullscreen_document() {
     let chrome = NeoChromeState::new("neo", "session", "model", PathBuf::from("."));
-    let mut transcript = TranscriptPane::new(80, 12);
+    let mut transcript = neo_tui::transcript::TranscriptPane::new(80, 12);
     transcript.push_status("committed status");
     transcript.start_assistant_message();
     transcript.append_assistant_delta("streaming tail");
     let mut tui = NeoTui::new(chrome, transcript);
 
-    let first = tui.render_terminal_frame(80, 12);
-    let history = first
-        .history
-        .iter()
-        .flat_map(|block| block.lines.iter())
-        .map(|line| strip_ansi(line))
-        .collect::<Vec<_>>()
-        .join("\n");
-    let live = first
-        .live
+    let frame = tui.render_terminal_frame(80, 12);
+    let text = frame
+        .lines
         .iter()
         .map(|line| strip_ansi(line))
         .collect::<Vec<_>>()
         .join("\n");
-    assert!(history.contains("committed status"));
-    assert!(live.contains("streaming tail"));
 
-    tui.acknowledge_history(&first);
-    let second = tui.render_terminal_frame(80, 12);
-    assert!(second.history.is_empty());
+    // One bounded frame: the visible document slice plus fitted chrome.
+    assert!(frame.lines.len() <= 12, "frame rows: {}", frame.lines.len());
+    assert!(text.contains("committed status"), "frame: {text}");
+    assert!(text.contains("streaming tail"), "frame: {text}");
     assert!(
-        second
-            .live
-            .iter()
-            .map(|line| strip_ansi(line))
-            .any(|line| line.contains("streaming tail"))
+        frame
+            .cursor
+            .is_none_or(|cursor| cursor.row < frame.lines.len() && cursor.row < 12),
+        "cursor must stay inside the bounded frame: {:?}",
+        frame.cursor
+    );
+    assert!(
+        frame.lines.iter().all(|line| visible_width(line) <= 80),
+        "every frame line must fit the terminal width"
     );
 }
 
 #[test]
 fn visible_footer_working_state_requests_an_animation_deadline() {
     let chrome = NeoChromeState::new("neo", "session", "model", PathBuf::from("."));
-    let transcript = TranscriptPane::new(80, 12);
+    let transcript = neo_tui::transcript::TranscriptPane::new(80, 12);
     let mut tui = NeoTui::new(chrome, transcript);
     tui.chrome_mut().set_shell_running(true);
 
@@ -60,23 +56,21 @@ fn visible_footer_working_state_requests_an_animation_deadline() {
 #[test]
 fn rendering_at_the_same_instant_does_not_advance_a_thinking_spinner() {
     let chrome = NeoChromeState::new("neo", "session", "model", PathBuf::from("."));
-    let mut transcript = TranscriptPane::new(80, 12);
-    transcript.push_transcript(neo_tui::transcript::TranscriptEntry::thinking_streaming(
-        "working it out",
-    ));
+    let mut transcript = neo_tui::transcript::TranscriptPane::new(80, 12);
+    transcript.push_transcript(TranscriptEntry::thinking_streaming("working it out"));
     let mut tui = NeoTui::new(chrome, transcript);
     let now = Instant::now();
 
-    let first = tui.render_terminal_frame_at(80, 12, now).live.join("\n");
-    let second = tui.render_terminal_frame_at(80, 12, now).live.join("\n");
+    let first = tui.render_terminal_frame_at(80, 12, now).lines.join("\n");
+    let second = tui.render_terminal_frame_at(80, 12, now).lines.join("\n");
 
     assert_eq!(first, second);
 }
 
 #[test]
-fn terminal_frame_is_bounded_when_chrome_exhausts_terminal_height() {
+fn frame_is_bounded_when_chrome_exhausts_terminal_height() {
     let chrome = NeoChromeState::new("neo", "session", "model", PathBuf::from("."));
-    let mut transcript = TranscriptPane::new(40, 4);
+    let mut transcript = neo_tui::transcript::TranscriptPane::new(40, 4);
     transcript.start_assistant_message();
     transcript.append_assistant_delta("live assistant output");
     let mut tui = NeoTui::new(chrome, transcript);
@@ -84,110 +78,20 @@ fn terminal_frame_is_bounded_when_chrome_exhausts_terminal_height() {
     for height in 1..=4 {
         let frame = tui.render_terminal_frame(40, height);
         assert!(
-            frame.live.len() <= height,
-            "height {height} produced {} live rows",
-            frame.live.len()
+            frame.lines.len() <= height,
+            "height {height} produced {} rows",
+            frame.lines.len()
         );
     }
 }
 
 #[test]
-fn transcript_browser_frame_is_bounded_and_marked_review_surface() {
+fn streaming_thinking_requests_an_animation_deadline() {
     let chrome = NeoChromeState::new("neo", "session", "model", PathBuf::from("."));
-    let mut transcript = TranscriptPane::new(80, 12);
-    for index in 0..32 {
-        transcript.push_status(format!("browser-status-{index}"));
-    }
-    let mut tui = NeoTui::new(chrome, transcript);
-
-    tui.chrome_mut().open_transcript_browser(false);
-    let frame = tui.render_terminal_frame_at(80, 12, Instant::now());
-
-    assert!(frame.review_surface);
-    assert!(frame.mouse_capture);
-    assert!(frame.history.is_empty());
-    assert!(frame.live.len() <= 12);
-}
-
-#[test]
-fn transcript_browser_expansion_reserves_chrome_rows() {
-    let mut chrome = NeoChromeState::new("neo", "session", "model", PathBuf::from("."));
-    chrome.prompt_mut().apply_edit(PromptEdit::Insert("draft"));
-    chrome.open_transcript_browser(true);
-    let mut transcript = TranscriptPane::new(80, 12);
-    transcript.push_transcript(TranscriptEntry::thinking_complete(
-        (1..=20)
-            .map(|index| format!("expanded-line-{index}"))
-            .collect::<Vec<_>>()
-            .join("\n"),
-    ));
-    let mut tui = NeoTui::new(chrome, transcript);
-
-    let frame = tui.render_terminal_frame_at(80, 12, Instant::now());
-    let text = frame
-        .live
-        .iter()
-        .map(|line| strip_ansi(line))
-        .collect::<Vec<_>>()
-        .join("\n");
-    let cursor = frame.cursor.expect("review keeps the prompt cursor");
-
-    assert!(frame.review_surface);
-    assert_eq!(frame.live.len(), 12);
-    assert!(text.contains("expanded-line-20"), "frame: {text}");
-    assert!(text.contains("draft"), "frame: {text}");
-    assert!(text.contains("[ask]"), "frame: {text}");
-    assert!(cursor.row < frame.live.len());
-    assert!(cursor.row < 12);
-}
-
-#[test]
-fn browser_render_does_not_consume_normal_pane_dirty_state() {
-    let mut transcript = TranscriptPane::new(80, 12);
-    transcript.push_status("pending normal render");
-    let mut browser = TranscriptBrowserState::new(false);
-
-    let _ = transcript.render_browser_rows(&mut browser, 80, 8);
-
-    assert!(transcript.is_dirty());
-}
-
-#[test]
-fn transcript_browser_uses_terminal_width_before_gutter() {
-    let chrome = NeoChromeState::new("neo", "session", "model", PathBuf::from("."));
-    let mut transcript = TranscriptPane::new(20, 8);
-    transcript.push_transcript(TranscriptEntry::assistant_message(
-        "0123456789012345678901234567890123456789",
-    ));
-
-    let mut tui = NeoTui::new(chrome, transcript);
-    tui.chrome_mut().open_transcript_browser(false);
-    let frame = tui.render_terminal_frame_at(20, 8, Instant::now());
-    let body_line = frame
-        .live
-        .iter()
-        .map(|line| strip_ansi(line))
-        .find(|line| line.contains("012345"))
-        .expect("review body line is visible");
-
-    assert!(frame.live.iter().all(|line| visible_width(line) <= 20));
-    assert!(
-        frame
-            .live
-            .iter()
-            .any(|line| visible_width(line) == 20 - CHROME_GUTTER)
-    );
-    assert!(body_line.starts_with(" ●"), "body line: {body_line:?}");
-}
-
-#[test]
-fn transcript_browser_frame_requests_deadline_for_streaming_thinking() {
-    let chrome = NeoChromeState::new("neo", "session", "model", PathBuf::from("."));
-    let mut transcript = TranscriptPane::new(80, 12);
+    let mut transcript = neo_tui::transcript::TranscriptPane::new(80, 12);
     transcript.push_transcript(TranscriptEntry::thinking_streaming("still thinking"));
     let mut tui = NeoTui::new(chrome, transcript);
 
-    tui.chrome_mut().open_transcript_browser(false);
     let frame = tui.render_terminal_frame_at(80, 12, Instant::now());
 
     assert!(frame.next_animation_deadline.is_some());
@@ -196,7 +100,7 @@ fn transcript_browser_frame_requests_deadline_for_streaming_thinking() {
 #[test]
 fn running_file_write_advances_transcript_animation_state() {
     let chrome = NeoChromeState::new("neo", "session", "model", PathBuf::from("."));
-    let mut transcript = TranscriptPane::new(80, 12);
+    let mut transcript = neo_tui::transcript::TranscriptPane::new(80, 12);
     transcript.apply_agent_event(neo_agent_core::AgentEvent::ToolCallStarted {
         turn: 1,
         id: "write-1".to_owned(),
@@ -230,7 +134,7 @@ fn running_file_write_advances_transcript_animation_state() {
 #[test]
 fn running_static_tool_does_not_request_an_animation_deadline() {
     let chrome = NeoChromeState::new("neo", "session", "model", PathBuf::from("."));
-    let mut transcript = TranscriptPane::new(80, 12);
+    let mut transcript = neo_tui::transcript::TranscriptPane::new(80, 12);
     transcript.apply_agent_event(neo_agent_core::AgentEvent::ToolExecutionStarted {
         turn: 1,
         id: "read-1".to_owned(),
@@ -250,7 +154,7 @@ fn running_static_tool_does_not_request_an_animation_deadline() {
 #[test]
 fn running_sleep_requests_animation_deadline() {
     let chrome = NeoChromeState::new("neo", "session", "model", PathBuf::from("."));
-    let mut transcript = TranscriptPane::new(80, 12);
+    let mut transcript = neo_tui::transcript::TranscriptPane::new(80, 12);
     transcript.apply_agent_event(neo_agent_core::AgentEvent::ToolExecutionStarted {
         turn: 1,
         id: "sleep-anim".to_owned(),
@@ -288,7 +192,7 @@ fn running_sleep_requests_animation_deadline() {
     );
 }
 
-fn push_overflowing_live_suffix(transcript: &mut TranscriptPane) {
+fn push_overflowing_live_suffix(transcript: &mut neo_tui::transcript::TranscriptPane) {
     transcript.apply_agent_event(neo_agent_core::AgentEvent::ToolExecutionStarted {
         turn: 1,
         id: "overflow-live-tool".to_owned(),
@@ -314,40 +218,33 @@ fn push_overflowing_live_suffix(transcript: &mut TranscriptPane) {
 }
 
 #[test]
-fn tall_live_projection_stays_on_normal_screen_without_mouse_capture() {
+fn tall_document_slice_stays_bounded_in_the_fullscreen_frame() {
     let chrome = NeoChromeState::new("neo", "session", "model", PathBuf::from("."));
-    let mut transcript = TranscriptPane::new(40, 8);
+    let mut transcript = neo_tui::transcript::TranscriptPane::new(40, 8);
     push_overflowing_live_suffix(&mut transcript);
     let mut tui = NeoTui::new(chrome, transcript);
 
-    // A tall live workload stays on the normal screen: no alternate-surface
-    // enter, no mouse capture, and the bounded live rows stay frame-safe.
+    // A tall live workload renders as one bounded document slice inside the
+    // already-active fullscreen surface: no second surface, no mouse flag,
+    // and the visible slice stays frame-safe.
     let frame = tui.render_terminal_frame_at(40, 8, Instant::now());
     let text = frame
-        .live
+        .lines
         .iter()
         .map(|line| strip_ansi(line))
         .collect::<Vec<_>>()
         .join("\n");
 
+    assert!(!frame.lines.is_empty());
     assert!(
-        !frame.review_surface,
-        "ordinary transcript stays on the normal screen"
-    );
-    assert!(
-        !frame.mouse_capture,
-        "the terminal owns the mouse on the normal screen"
-    );
-    assert!(!frame.history.is_empty() || !frame.live.is_empty());
-    assert!(
-        frame.live.len() <= 8,
-        "live must stay bounded by the terminal height: {}",
-        frame.live.len()
+        frame.lines.len() <= 8,
+        "slice must stay bounded by the terminal height: {}",
+        frame.lines.len()
     );
     assert!(
         frame
             .cursor
-            .is_some_and(|cursor| cursor.row < frame.live.len() && cursor.row < 8),
+            .is_none_or(|cursor| cursor.row < frame.lines.len() && cursor.row < 8),
         "cursor must stay inside the bounded frame: {:?}",
         frame.cursor
     );
@@ -356,37 +253,97 @@ fn tall_live_projection_stays_on_normal_screen_without_mouse_capture() {
         "chrome missing: {text}"
     );
     assert!(!text.contains("earlier rows omitted"), "frame: {text}");
+    // Tail follow shows the newest output rows of the tall card; the card
+    // header stays reachable by scrolling up the document.
     assert!(
-        text.contains("Using Bash") || text.contains("overflow-living"),
-        "the living card header stays visible: {text}"
+        text.contains("overflow-source-sentinel-39"),
+        "newest output row missing: {text}"
     );
+    tui.transcript_mut().scroll_transcript_up(usize::MAX);
+    let top = tui.render_terminal_frame_at(40, 8, Instant::now());
+    let top_text = top
+        .lines
+        .iter()
+        .map(|line| strip_ansi(line))
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(
+        top_text.contains("Using Bash") || top_text.contains("overflow-living"),
+        "the living card header is reachable by scrolling: {top_text}"
+    );
+    assert!(top.lines.len() <= 8);
 }
 
 #[test]
-fn blocking_overlay_reuses_manual_alternate_surface() {
+fn blocking_overlays_render_inside_the_active_fullscreen_frame() {
     let chrome = NeoChromeState::new("neo", "session", "model", PathBuf::from("."));
-    let mut transcript = TranscriptPane::new(40, 8);
-    transcript.push_status("manual-review-history");
+    let mut transcript = neo_tui::transcript::TranscriptPane::new(40, 8);
+    transcript.push_status("history status");
     let mut tui = NeoTui::new(chrome, transcript);
 
-    tui.chrome_mut().open_transcript_browser(false);
-    let manual = tui.render_terminal_frame_at(40, 8, Instant::now());
-    assert!(manual.review_surface);
-    assert!(manual.mouse_capture);
+    let plain = tui.render_terminal_frame_at(40, 8, Instant::now());
+    assert!(plain.lines.len() <= 8);
 
+    // Task Browser is an overlay inside the already-fullscreen session: the
+    // frame is still one bounded line set with no physical transition.
     tui.chrome_mut()
         .push_task_browser_overlay(TaskBrowserState::new());
     let overlay = tui.render_terminal_frame_at(40, 8, Instant::now());
-    assert!(overlay.review_surface);
-    assert!(overlay.history.is_empty());
+    assert!(overlay.lines.len() <= 8);
+    assert!(!overlay.lines.is_empty());
 
     tui.chrome_mut().close_focused_overlay();
     let restored = tui.render_terminal_frame_at(40, 8, Instant::now());
-    assert!(restored.review_surface);
-    assert!(restored.history.is_empty());
+    assert!(restored.lines.len() <= 8);
 
     tui.chrome_mut().open_help_panel(Vec::new());
     let dialog = tui.render_terminal_frame_at(40, 8, Instant::now());
-    assert!(dialog.review_surface);
-    assert!(dialog.history.is_empty());
+    assert!(dialog.lines.len() <= 8);
+    assert!(!dialog.lines.is_empty());
+}
+
+#[test]
+fn expansion_toggle_resizes_the_primary_document_slice() {
+    let mut chrome = NeoChromeState::new("neo", "session", "model", PathBuf::from("."));
+    chrome.prompt_mut().apply_edit(PromptEdit::Insert("draft"));
+    let mut transcript = neo_tui::transcript::TranscriptPane::new(80, 12);
+    transcript.push_transcript(TranscriptEntry::thinking_complete(
+        (1..=20)
+            .map(|index| format!("expanded-line-{index}"))
+            .collect::<Vec<_>>()
+            .join("\n"),
+    ));
+    let mut tui = NeoTui::new(chrome, transcript);
+
+    let collapsed = tui.render_terminal_frame_at(80, 12, Instant::now());
+    let collapsed_text = collapsed
+        .lines
+        .iter()
+        .map(|line| strip_ansi(line))
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(
+        !collapsed_text.contains("expanded-line-20"),
+        "collapsed frame: {collapsed_text}"
+    );
+
+    tui.transcript_mut().toggle_tool_output_expanded();
+    let expanded = tui.render_terminal_frame_at(80, 12, Instant::now());
+    let expanded_text = expanded
+        .lines
+        .iter()
+        .map(|line| strip_ansi(line))
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(
+        expanded_text.contains("expanded-line-20"),
+        "expanded frame: {expanded_text}"
+    );
+    assert!(expanded_text.contains("draft"), "frame: {expanded_text}");
+    assert!(expanded_text.contains("[ask]"), "frame: {expanded_text}");
+    assert_eq!(
+        expanded.lines.len(),
+        12,
+        "fullscreen frame fills the height"
+    );
 }

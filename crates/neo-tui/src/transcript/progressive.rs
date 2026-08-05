@@ -1,12 +1,10 @@
-//! Typed identities and pure projection helpers for completed child activity.
+//! Typed identities for completed child activity.
 
-use crate::primitive::theme::TuiTheme;
 use neo_agent_core::multi_agent::{
     AgentSnapshot, AgentToolActivityPhase, AgentToolFileChange, AgentToolOutputPreview,
 };
 use neo_agent_core::session::ToolOutputRef;
 
-use super::child_activity::{ChildToolRow, render_child_agent_summary, render_child_tool_row};
 use super::store::TranscriptEntryId;
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -29,17 +27,6 @@ pub enum ProgressiveFactId {
         agent_id: String,
         run_count: u32,
     },
-}
-
-impl ProgressiveFactId {
-    #[must_use]
-    pub(crate) const fn entry(&self) -> TranscriptEntryId {
-        match self {
-            Self::ChildTool { entry, .. }
-            | Self::ChildAgent { entry, .. }
-            | Self::SwarmItem { entry, .. } => *entry,
-        }
-    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -103,41 +90,4 @@ pub(crate) struct SwarmItemFact {
     pub agent_id: String,
     pub run_count: u32,
     pub snapshot: AgentSnapshot,
-}
-
-#[must_use]
-pub(crate) fn render_progressive_fact(
-    fact: &ProgressiveFact,
-    width: usize,
-    theme: &TuiTheme,
-) -> Vec<String> {
-    let mut lines = match &fact.payload {
-        ProgressiveFactPayload::ChildTool(tool) => {
-            let row = ChildToolRow {
-                name: &tool.name,
-                summary: tool.summary.as_deref(),
-                phase: tool.phase,
-                output: tool.output.as_ref(),
-                files: &tool.files,
-            };
-            render_child_tool_row(&row, width, "  ", theme, None)
-                .into_iter()
-                .map(|line| line.to_ansi())
-                .collect::<Vec<_>>()
-        }
-        ProgressiveFactPayload::ChildAgent(fact) => {
-            render_child_agent_summary(&fact.snapshot, width, theme)
-                .into_iter()
-                .map(|line| line.to_ansi())
-                .collect()
-        }
-        ProgressiveFactPayload::SwarmItem(fact) => {
-            render_child_agent_summary(&fact.snapshot, width, theme)
-                .into_iter()
-                .map(|line| line.to_ansi())
-                .collect()
-        }
-    };
-    super::pane::trim_ansi_transcript_block(&mut lines);
-    lines
 }

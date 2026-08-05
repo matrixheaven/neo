@@ -22,7 +22,7 @@ use neo_agent_core::{
 };
 use neo_tui::{
     input::{InputEvent, KeyId, KeybindingAction},
-    screen_output::InlineTerminal,
+    screen_output::FullscreenTerminal,
     shell::{ChromeMode, CommandPaletteState, CommandSpec, Overlay, OverlayKind},
     transcript::{ApprovalDisplayState, QuestionPromptState, TranscriptEntry, TranscriptPane},
 };
@@ -925,8 +925,8 @@ fn transcript_has_status(controller: &InteractiveController, expected: &str) -> 
     )
 }
 
-fn transcript_scrollback(controller: &InteractiveController) -> usize {
-    controller.transcript().transcript().viewport().scrollback()
+fn transcript_view_locked(controller: &InteractiveController) -> bool {
+    !controller.transcript().document().view().following_tail
 }
 
 /// Replay the active session's JSONL to recover `AgentMessage` values for
@@ -1565,7 +1565,7 @@ async fn thinking_boundaries_render_before_the_completed_turn_is_drained() {
     let first = controller
         .tui
         .render_terminal_frame(80, 24)
-        .live
+        .lines
         .into_iter()
         .map(|line| neo_tui::primitive::strip_ansi(&line))
         .collect::<Vec<_>>()
@@ -1586,7 +1586,7 @@ async fn thinking_boundaries_render_before_the_completed_turn_is_drained() {
     let second = controller
         .tui
         .render_terminal_frame(80, 24)
-        .live
+        .lines
         .into_iter()
         .map(|line| neo_tui::primitive::strip_ansi(&line))
         .collect::<Vec<_>>()
@@ -1607,7 +1607,7 @@ async fn thinking_boundaries_render_before_the_completed_turn_is_drained() {
     let third = controller
         .tui
         .render_terminal_frame(80, 24)
-        .live
+        .lines
         .into_iter()
         .map(|line| neo_tui::primitive::strip_ansi(&line))
         .collect::<Vec<_>>()
@@ -1708,7 +1708,7 @@ async fn thinking_boundaries_render_incrementally_through_terminal_loop() {
             move |tui, _| {
                 let frame = tui.render_terminal_frame(80, 24);
                 let text = frame
-                    .live
+                    .lines
                     .into_iter()
                     .map(|line| neo_tui::primitive::strip_ansi(&line))
                     .collect::<Vec<_>>()
@@ -2422,15 +2422,12 @@ async fn ctrl_o_renders_before_queued_tool_finish() {
             |tui, _| {
                 let frame = tui.render_terminal_frame_at(80, 24, Instant::now());
                 let text = frame
-                    .history
+                    .lines
                     .iter()
-                    .flat_map(|block| block.lines.iter())
-                    .chain(frame.live.iter())
                     .map(|line| neo_tui::primitive::strip_ansi(line))
                     .collect::<Vec<_>>()
                     .join("\n");
-                tui.acknowledge_history(&frame);
-                rendered.push((frame.review_surface, text));
+                rendered.push(text);
                 Ok(frame.next_animation_deadline)
             },
             || Ok(()),
@@ -2444,8 +2441,7 @@ async fn ctrl_o_renders_before_queued_tool_finish() {
         .await
         .expect("event loop exits");
 
-    let (review_surface, first_after_ctrl_o) = rendered.get(1).expect("frame after ctrl-o");
-    assert!(!*review_surface);
+    let first_after_ctrl_o = rendered.get(1).expect("frame after ctrl-o");
     assert!(first_after_ctrl_o.contains("Using Write"));
     assert!(first_after_ctrl_o.contains("1 files · unverified intent"));
     assert!(first_after_ctrl_o.contains("artifact.txt"));
@@ -6024,25 +6020,29 @@ async fn event_loop_dispatches_editor_scroll_actions_to_transcript_view() {
             .transcript_mut()
             .push_status(format!("line {index}"));
     }
-    controller.transcript_mut().sync_transcript_view(10, 2);
+    // Establish the viewport height through a bounded slice render.
+    let _ = controller.transcript_mut().render_visible_slice(80, 2);
 
     controller
         .handle_input_event(InputEvent::Action(KeybindingAction::EditorPageUp))
         .await
         .expect("page up scrolls transcript");
-    assert_eq!(transcript_scrollback(&controller), 8);
+    assert!(transcript_view_locked(&controller));
 
     controller
         .handle_input_event(InputEvent::Action(KeybindingAction::EditorCursorDown))
         .await
-        .expect("cursor down scrolls transcript toward bottom");
-    assert_eq!(transcript_scrollback(&controller), 8);
+        .expect("cursor down stays on the prompt");
+    assert!(
+        transcript_view_locked(&controller),
+        "cursor down must not scroll the view"
+    );
 
     controller
         .handle_input_event(InputEvent::Action(KeybindingAction::EditorPageDown))
         .await
         .expect("page down returns transcript to bottom");
-    assert_eq!(transcript_scrollback(&controller), 0);
+    assert!(!transcript_view_locked(&controller));
 }
 
 #[tokio::test]
@@ -6116,45 +6116,23 @@ async fn event_loop_dispatches_mouse_wheel_to_transcript_view() {
     for index in 0..30 {
         controller
             .transcript_mut()
-            .push_status(format!("browser-row-{index}"));
+            .push_status(format!("row-{index}"));
     }
-    controller.tui.chrome_mut().open_transcript_browser(false);
-    let initial = controller.tui.render_terminal_frame(80, 6).live;
+    // Establish the viewport height through a bounded slice render.
+    let initial = controller.tui.render_terminal_frame(80, 6).lines;
 
     controller
         .handle_input_event(InputEvent::ScrollUp(3))
         .await
-        .expect("wheel up scrolls browser toward older rows");
-    let wheel_up = controller.tui.render_terminal_frame(80, 6).live;
+        .expect("wheel up scrolls the document toward older rows");
+    let wheel_up = controller.tui.render_terminal_frame(80, 6).lines;
     assert_ne!(wheel_up, initial);
 
     controller
         .handle_input_event(InputEvent::ScrollDown(3))
         .await
-        .expect("wheel down returns browser to newest rows");
-    assert_eq!(controller.tui.render_terminal_frame(80, 6).live, initial);
-
-    controller
-        .handle_input_event(InputEvent::Key(KeyId::new("k").expect("valid key")))
-        .await
-        .expect("configured cursor-up scrolls browser toward older rows");
-    assert_ne!(controller.tui.render_terminal_frame(80, 6).live, initial);
-    controller
-        .handle_input_event(InputEvent::Key(KeyId::new("down").expect("valid key")))
-        .await
-        .expect("down returns browser to newest rows");
-    assert_eq!(controller.tui.render_terminal_frame(80, 6).live, initial);
-
-    controller
-        .handle_input_event(InputEvent::Key(KeyId::new("pageup").expect("valid key")))
-        .await
-        .expect("page up scrolls browser toward older rows");
-    assert_ne!(controller.tui.render_terminal_frame(80, 6).live, initial);
-    controller
-        .handle_input_event(InputEvent::Key(KeyId::new("pagedown").expect("valid key")))
-        .await
-        .expect("page down returns browser to newest rows");
-    assert_eq!(controller.tui.render_terminal_frame(80, 6).live, initial);
+        .expect("wheel down returns the document to newest rows");
+    assert_eq!(controller.tui.render_terminal_frame(80, 6).lines, initial);
 }
 
 #[tokio::test]
@@ -6166,20 +6144,15 @@ async fn event_loop_submit_restores_transcript_follow_tail() {
         test_workspace_root(),
         |_request| async move { Ok(Vec::<AgentEvent>::new()) },
     );
-    controller.transcript_mut().sync_transcript_view(30, 6);
+    // Establish the viewport height through a bounded slice render.
+    let _ = controller.transcript_mut().render_visible_slice(80, 6);
 
     controller
         .handle_input_event(InputEvent::ScrollUp(5))
         .await
         .expect("wheel up scrolls transcript");
-    assert!(transcript_scrollback(&controller) > 0);
-    assert!(
-        !controller
-            .transcript()
-            .transcript()
-            .viewport()
-            .is_following_tail()
-    );
+    assert!(transcript_view_locked(&controller));
+    assert!(!controller.transcript().document().view().following_tail);
 
     controller
         .handle_input_event(InputEvent::Insert('h'))
@@ -6194,14 +6167,8 @@ async fn event_loop_submit_restores_transcript_follow_tail() {
         .await
         .expect("submit restores tail before sending");
 
-    assert_eq!(transcript_scrollback(&controller), 0);
-    assert!(
-        controller
-            .transcript()
-            .transcript()
-            .viewport()
-            .is_following_tail()
-    );
+    assert!(!transcript_view_locked(&controller));
+    assert!(controller.transcript().document().view().following_tail);
 }
 
 #[tokio::test]
@@ -6222,33 +6189,8 @@ async fn tall_transcript_keeps_prompt_input_on_normal_screen() {
         },
     );
 
-    // Commit one expandable tool so Ctrl+O can open manual review later.
-    controller
-        .transcript_mut()
-        .apply_agent_event(AgentEvent::ToolExecutionStarted {
-            turn: 1,
-            id: "committed-read".to_owned(),
-            name: "Read".to_owned(),
-            arguments: serde_json::json!({ "path": "README.md" }),
-            workflow_origin: None,
-            output_ref: None,
-        });
-    controller
-        .transcript_mut()
-        .apply_agent_event(AgentEvent::ToolExecutionFinished {
-            turn: 1,
-            id: "committed-read".to_owned(),
-            name: "Read".to_owned(),
-            result: ToolResult::ok("committed expandable content"),
-            workflow_origin: None,
-            output_ref: None,
-        });
-    let committed = controller.tui.render_terminal_frame(80, 24);
-    controller.tui.acknowledge_history(&committed);
-    assert!(controller.transcript().has_committed_expandable_entries());
-
-    // A tall live workload (running Bash with a long body) never enters an
-    // application viewport: the frame stays on the normal screen.
+    // A tall live workload (running Bash with a long body) renders as one
+    // bounded document slice inside the active fullscreen surface.
     controller
         .transcript_mut()
         .apply_agent_event(AgentEvent::ToolExecutionStarted {
@@ -6276,12 +6218,19 @@ async fn tall_transcript_keeps_prompt_input_on_normal_screen() {
 
     let frame = controller.tui.render_terminal_frame(40, 8);
     assert!(
-        !frame.review_surface,
-        "tall live transcript stays on the normal screen"
+        frame.lines.len() <= 8,
+        "tall transcript stays bounded in the fullscreen frame"
     );
-    assert!(!frame.mouse_capture, "no automatic mouse capture");
+    assert!(
+        frame
+            .lines
+            .iter()
+            .map(|line| neo_tui::primitive::strip_ansi(line))
+            .any(|line| line.contains("overflow-controller-sentinel-39")),
+        "tail follow shows the newest output row"
+    );
 
-    // The prompt stays editable and submittable on the normal screen.
+    // The prompt stays editable and submittable on the same surface.
     controller
         .handle_input_event(InputEvent::Insert('h'))
         .await
@@ -6301,25 +6250,27 @@ async fn tall_transcript_keeps_prompt_input_on_normal_screen() {
         .expect("submitted turn completes");
     assert!(submitted.load(std::sync::atomic::Ordering::SeqCst));
 
-    // Explicit Ctrl+O review still enters the alternate surface on demand.
+    // Ctrl+O toggles tool output inside the primary document; it never opens
+    // a second surface.
     controller
         .handle_input_event(InputEvent::Key(KeyId::new("ctrl+o").expect("valid key")))
         .await
-        .expect("ctrl-o opens manual review");
-    assert!(controller.chrome().transcript_browser_state().is_some());
-    let manual = controller.tui.render_terminal_frame(40, 8);
-    assert!(manual.review_surface);
-    assert!(manual.mouse_capture);
-
+        .expect("ctrl-o toggles tool output");
+    assert!(controller.transcript().tool_output_expanded());
+    assert!(
+        controller.chrome().focused_overlay().is_none(),
+        "Ctrl+O must not open an overlay"
+    );
     controller
-        .handle_input_event(InputEvent::Cancel)
+        .handle_input_event(InputEvent::Key(KeyId::new("ctrl+o").expect("valid key")))
         .await
-        .expect("escape closes manual review");
-    assert!(controller.chrome().transcript_browser_state().is_none());
+        .expect("ctrl-o collapses tool output");
+    assert!(!controller.transcript().tool_output_expanded());
+    assert!(controller.chrome().focused_overlay().is_none());
 }
 
 #[tokio::test]
-async fn ctrl_o_enters_and_leaves_transcript_browser() {
+async fn ctrl_o_toggles_primary_document_without_review_surface() {
     let mut controller = InteractiveController::new_for_test(
         "neo",
         "test-session",
@@ -6327,6 +6278,10 @@ async fn ctrl_o_enters_and_leaves_transcript_browser() {
         test_workspace_root(),
         |_request| async move { Ok(Vec::<AgentEvent>::new()) },
     );
+    let body = (0..20)
+        .map(|index| format!("expanded-line-{index}"))
+        .collect::<Vec<_>>()
+        .join("\n");
     controller
         .transcript_mut()
         .apply_agent_event(AgentEvent::ToolExecutionStarted {
@@ -6343,251 +6298,58 @@ async fn ctrl_o_enters_and_leaves_transcript_browser() {
             turn: 1,
             id: "tool-1".to_owned(),
             name: "Read".to_owned(),
-            result: ToolResult::ok("expanded file content"),
+            result: ToolResult::ok(body),
             workflow_origin: None,
             output_ref: None,
         });
-    let frame = controller.tui.render_terminal_frame(80, 24);
-    controller.tui.acknowledge_history(&frame);
-    assert!(controller.transcript().has_committed_expandable_entries());
 
-    controller
-        .handle_input_event(InputEvent::Key(KeyId::new("ctrl+o").expect("valid key")))
-        .await
-        .expect("ctrl-o opens transcript browser");
-
-    let browser = controller
-        .chrome()
-        .transcript_browser_state()
-        .expect("transcript browser opens");
-    assert!(browser.expanded());
+    let collapsed = controller.tui.render_terminal_frame(80, 24);
+    let collapsed_text = collapsed
+        .lines
+        .iter()
+        .map(|line| neo_tui::primitive::strip_ansi(line))
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(
+        collapsed_text.contains("20 lines"),
+        "collapsed card shows the result chip: {collapsed_text}"
+    );
+    assert!(
+        !collapsed_text.contains("expanded-line-19"),
+        "collapsed card must not show the full result: {collapsed_text}"
+    );
     assert!(!controller.transcript().tool_output_expanded());
 
+    // Ctrl+O toggles the selected tool inside the primary document. It never
+    // opens an overlay or a second transcript surface.
     controller
         .handle_input_event(InputEvent::Key(KeyId::new("ctrl+o").expect("valid key")))
         .await
-        .expect("ctrl-o closes transcript browser");
-    assert!(controller.chrome().transcript_browser_state().is_none());
+        .expect("ctrl-o toggles tool output");
+    assert!(controller.transcript().tool_output_expanded());
+    assert!(
+        controller.chrome().focused_overlay().is_none(),
+        "Ctrl+O must not open a review overlay"
+    );
+    let expanded = controller.tui.render_terminal_frame(80, 24);
+    let expanded_text = expanded
+        .lines
+        .iter()
+        .map(|line| neo_tui::primitive::strip_ansi(line))
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(
+        expanded_text.contains("expanded-line-19"),
+        "expanded card shows the full result: {expanded_text}"
+    );
+
+    // A second Ctrl+O collapses back inside the primary document.
+    controller
+        .handle_input_event(InputEvent::Key(KeyId::new("ctrl+o").expect("valid key")))
+        .await
+        .expect("ctrl-o collapses tool output");
     assert!(!controller.transcript().tool_output_expanded());
-    assert!(!controller.tui.render_terminal_frame(80, 24).review_surface);
-}
-
-#[tokio::test]
-async fn transcript_browser_keeps_prompt_editable_and_closes_on_submit() {
-    let submitted = Arc::new(std::sync::atomic::AtomicBool::new(false));
-    let observed = Arc::clone(&submitted);
-    let mut controller = InteractiveController::new_for_test(
-        "neo",
-        "test-session",
-        "openai/gpt-4.1",
-        test_workspace_root(),
-        move |_request| {
-            let observed = Arc::clone(&observed);
-            async move {
-                observed.store(true, std::sync::atomic::Ordering::SeqCst);
-                Ok(Vec::<AgentEvent>::new())
-            }
-        },
-    );
-    controller.tui.chrome_mut().open_transcript_browser(false);
-
-    controller
-        .handle_input_event(InputEvent::Insert('a'))
-        .await
-        .expect("prompt input works during review");
-    assert_eq!(controller.chrome().prompt().text, "a");
-
-    controller
-        .handle_input_event(InputEvent::Action(KeybindingAction::InputSubmit))
-        .await
-        .expect("prompt submits during review");
-    controller
-        .wait_for_active_turn()
-        .await
-        .expect("submitted turn completes");
-
-    assert!(controller.chrome().transcript_browser_state().is_none());
-    assert!(submitted.load(std::sync::atomic::Ordering::SeqCst));
-}
-
-#[tokio::test]
-async fn transcript_browser_routes_default_and_custom_suspend_exit_keys() {
-    let mut default_controller = InteractiveController::new_for_test(
-        "neo",
-        "test-session",
-        "openai/gpt-4.1",
-        test_workspace_root(),
-        |_request| async move { Ok(Vec::<AgentEvent>::new()) },
-    );
-    default_controller
-        .tui
-        .chrome_mut()
-        .open_transcript_browser(false);
-
-    let suspend = default_controller
-        .handle_input_event(InputEvent::Key(KeyId::new("ctrl+z").expect("valid key")))
-        .await
-        .expect("default suspend key is handled");
-    let first_exit = default_controller
-        .handle_input_event(InputEvent::Key(KeyId::new("ctrl+d").expect("valid key")))
-        .await
-        .expect("default exit key requests confirmation");
-    let second_exit = default_controller
-        .handle_input_event(InputEvent::Key(KeyId::new("ctrl+d").expect("valid key")))
-        .await
-        .expect("default exit key confirms exit");
-
-    assert!(!suspend);
-    assert!(default_controller.take_suspend_requested());
-    assert!(!first_exit);
-    assert!(second_exit);
-
-    let mut custom_controller = InteractiveController::new_for_test(
-        "neo",
-        "test-session",
-        "openai/gpt-4.1",
-        test_workspace_root(),
-        |_request| async move { Ok(Vec::<AgentEvent>::new()) },
-    );
-    custom_controller.keybindings.set_user_bindings([
-        (
-            KeybindingAction::AppSuspend,
-            vec![KeyId::new("s").expect("valid key")],
-        ),
-        (
-            KeybindingAction::AppExit,
-            vec![KeyId::new("x").expect("valid key")],
-        ),
-    ]);
-    custom_controller
-        .tui
-        .chrome_mut()
-        .open_transcript_browser(false);
-
-    let suspend = custom_controller
-        .handle_input_event(InputEvent::Key(KeyId::new("s").expect("valid key")))
-        .await
-        .expect("custom suspend key is handled");
-    let first_exit = custom_controller
-        .handle_input_event(InputEvent::Key(KeyId::new("x").expect("valid key")))
-        .await
-        .expect("custom exit key requests confirmation");
-    let second_exit = custom_controller
-        .handle_input_event(InputEvent::Key(KeyId::new("x").expect("valid key")))
-        .await
-        .expect("custom exit key confirms exit");
-
-    assert!(!suspend);
-    assert!(custom_controller.take_suspend_requested());
-    assert!(!first_exit);
-    assert!(second_exit);
-}
-
-#[tokio::test]
-async fn transcript_browser_routes_direct_global_actions() {
-    let mut controller = InteractiveController::new_for_test(
-        "neo",
-        "test-session",
-        "openai/gpt-4.1",
-        test_workspace_root(),
-        |_request| async move { Ok(Vec::<AgentEvent>::new()) },
-    );
-    controller.tui.chrome_mut().open_transcript_browser(false);
-
-    let suspend = controller
-        .handle_input_event(InputEvent::Action(KeybindingAction::AppSuspend))
-        .await
-        .expect("direct suspend action is handled");
-    let first_exit = controller
-        .handle_input_event(InputEvent::Action(KeybindingAction::AppExit))
-        .await
-        .expect("direct exit action requests confirmation");
-    let second_exit = controller
-        .handle_input_event(InputEvent::Action(KeybindingAction::AppExit))
-        .await
-        .expect("direct exit action confirms exit");
-
-    assert!(controller.chrome().transcript_browser_state().is_some());
-    assert!(!suspend);
-    assert!(controller.take_suspend_requested());
-    assert!(!first_exit);
-    assert!(second_exit);
-}
-
-#[tokio::test]
-async fn transcript_browser_interrupt_cancels_active_turn() {
-    let captured_token = Arc::new(std::sync::Mutex::new(None));
-    let observed_token = Arc::clone(&captured_token);
-    let run_turn: TurnDriver = Arc::new(move |_request, channels| {
-        *observed_token.lock().expect("token lock") = Some(channels.cancel_token.clone());
-        Box::pin(async move {
-            channels.cancel_token.cancelled().await;
-            Ok(TurnOutcome::default())
-        })
-    });
-    let mut controller = InteractiveController::new(
-        "neo",
-        "test-session",
-        "openai/gpt-4.1",
-        test_workspace_root(),
-        PickerCatalogs::default(),
-        ControllerCallbacks {
-            run_turn,
-            load_session: Arc::new(|session_id| Box::pin(empty_session_loader(session_id))),
-            fork_session: Arc::new(|session_id| Box::pin(empty_session_forker(session_id))),
-        },
-    );
-    controller
-        .transcript_mut()
-        .apply_agent_event(AgentEvent::ToolExecutionStarted {
-            turn: 1,
-            id: "tool-1".to_owned(),
-            name: "Read".to_owned(),
-            arguments: serde_json::json!({ "path": "README.md" }),
-            workflow_origin: None,
-            output_ref: None,
-        });
-    controller
-        .transcript_mut()
-        .apply_agent_event(AgentEvent::ToolExecutionFinished {
-            turn: 1,
-            id: "tool-1".to_owned(),
-            name: "Read".to_owned(),
-            result: ToolResult::ok("expanded file content"),
-            workflow_origin: None,
-            output_ref: None,
-        });
-    let frame = controller.tui.render_terminal_frame(80, 24);
-    controller.tui.acknowledge_history(&frame);
-    controller
-        .handle_input_event(InputEvent::Key(KeyId::new("ctrl+o").expect("valid key")))
-        .await
-        .expect("ctrl-o opens transcript browser");
-    assert!(controller.chrome().transcript_browser_state().is_some());
-
-    controller.start_turn_with_prompt_origin(Vec::new(), MessageOrigin::User);
-    let token = captured_token
-        .lock()
-        .expect("token lock")
-        .clone()
-        .expect("turn token captured");
-    controller
-        .handle_input_event(InputEvent::Key(KeyId::new("ctrl+c").expect("valid key")))
-        .await
-        .expect("ctrl-c reaches global handler");
-
-    let cancelled = token.is_cancelled();
-    let active_turn_cleared = controller.active_turn.is_none();
-    let interrupted_status = transcript_has_status(&controller, "Interrupted");
-    if !cancelled {
-        controller
-            .cancel_active_turn()
-            .await
-            .expect("clean up swallowed interrupt");
-    }
-    assert!(cancelled, "browser must not swallow active-turn interrupt");
-    assert!(active_turn_cleared);
-    assert!(interrupted_status);
+    assert!(controller.chrome().focused_overlay().is_none());
 }
 
 #[tokio::test]
@@ -7689,7 +7451,8 @@ async fn approval_mouse_wheel_scrolls_transcript_without_moving_selection() {
             .transcript_mut()
             .push_status(format!("approval-scroll-row-{index}"));
     }
-    controller.transcript_mut().sync_transcript_view(30, 6);
+    // Establish the viewport height through a bounded slice render.
+    let _ = controller.transcript_mut().render_visible_slice(80, 6);
     let (pending, _response_rx) = make_pending_approval(ordinary_tool_request(
         "tool-1",
         "Write",
@@ -7704,7 +7467,7 @@ async fn approval_mouse_wheel_scrolls_transcript_without_moving_selection() {
         .await
         .expect("wheel scrolls transcript while approval stays focused");
 
-    assert!(transcript_scrollback(&controller) > 0);
+    assert!(transcript_view_locked(&controller));
     assert_eq!(
         controller.chrome().approval_selected_action(),
         selected.as_ref()
@@ -7874,13 +7637,18 @@ async fn approval_transcript_holds_every_request_and_focuses_earliest() {
     assert!(snapshot.contains("printf two"));
     assert!(!snapshot.contains("queued:"));
 
-    let update = controller
-        .tui
-        .transcript_mut()
-        .render_terminal_update(80, 24);
-    let live = update.live.join("\n");
-    assert!(live.contains("printf one"), "live:\n{live}");
-    assert!(!live.contains("printf two"), "live:\n{live}");
+    let slice = controller.tui.transcript_mut().render_visible_slice(80, 24);
+    let text = slice
+        .iter()
+        .map(|line| neo_tui::primitive::strip_ansi(line))
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(text.contains("printf one"), "slice:\n{text}");
+    assert!(text.contains("printf two"), "slice:\n{text}");
+    assert!(
+        text.find("printf one").unwrap() < text.find("printf two").unwrap(),
+        "approval cards keep arrival order:\n{text}"
+    );
     assert_eq!(
         controller.tui.transcript().earliest_blocking_entry(),
         Some(neo_tui::transcript::BlockingEntryKind::Approval(
@@ -13209,13 +12977,12 @@ async fn workflow_slash_is_rejected_while_busy_without_queueing_as_prose() {
 #[tokio::test]
 async fn slash_clear_does_not_request_terminal_scrollback_purge() {
     let (mut controller, _requests) = controller_with_session_for_new_tests();
-    let mut terminal = InlineTerminal::for_test(80, 24);
+    let mut terminal = FullscreenTerminal::for_test(80, 24);
 
     let before_clear = controller.tui.render_terminal_frame(80, 24);
     terminal
         .render_to(&mut Vec::new(), &before_clear)
         .expect("render initial terminal frame");
-    controller.tui.acknowledge_history(&before_clear);
 
     controller.type_text("/clear");
     controller
@@ -13256,12 +13023,11 @@ fn terminal_exit_commits_interrupted_live_entries_before_leave() {
         .tui
         .transcript_mut()
         .append_assistant_delta("unfinished assistant text");
-    let mut terminal = InlineTerminal::for_test(80, 24);
+    let mut terminal = FullscreenTerminal::for_test(80, 24);
     let initial = controller.tui.render_terminal_frame(80, 24);
     terminal
         .render_to(&mut Vec::new(), &initial)
         .expect("render initial live frame");
-    controller.tui.acknowledge_history(&initial);
 
     let mut final_frame = None;
     controller
@@ -13271,31 +13037,19 @@ fn terminal_exit_commits_interrupted_live_entries_before_leave() {
         })
         .expect("finalize and render terminal exit");
     let final_frame = final_frame.expect("final exit frame");
-    let history = final_frame
-        .history
-        .iter()
-        .flat_map(|block| block.lines.iter())
-        .map(|line| neo_tui::primitive::strip_ansi(line))
-        .collect::<Vec<_>>()
-        .join("\n");
-    let live = final_frame
-        .live
+    let text = final_frame
+        .lines
         .iter()
         .map(|line| neo_tui::primitive::strip_ansi(line))
         .collect::<Vec<_>>()
         .join("\n");
 
-    assert!(
-        history.contains("unfinished assistant text"),
-        "history:\n{history}\nlive:\n{live}"
-    );
-    assert!(history.contains("Write"), "history:\n{history}");
-    assert!(!live.contains("unfinished assistant text"));
+    assert!(text.contains("unfinished assistant text"), "frame:\n{text}");
+    assert!(text.contains("Write"), "frame:\n{text}");
     let mut output = Vec::new();
     terminal
         .render_to(&mut output, &final_frame)
         .expect("commit interrupted frame");
-    controller.tui.acknowledge_history(&final_frame);
     terminal.leave(&mut output).expect("leave terminal");
     let output = String::from_utf8(output).expect("terminal output is UTF-8");
     assert!(output.contains("unfinished assistant text"));
@@ -17292,6 +17046,82 @@ async fn task_browser_escape_closes_overlay_and_tab_toggles_filter() {
 }
 
 #[tokio::test]
+async fn task_browser_stays_inside_existing_fullscreen_surface() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let sessions_dir = temp.path().join(".neo/sessions");
+    let mut controller = InteractiveController::new_for_test(
+        "neo",
+        "test-session",
+        "openai/gpt-4.1",
+        temp.path().to_path_buf(),
+        |_request| async move { Ok(Vec::<AgentEvent>::new()) },
+    );
+    let config = test_config(temp.path(), sessions_dir);
+    config
+        .background_tasks
+        .start_question("question-1".to_owned(), "Pick one".to_owned())
+        .await;
+    controller.local_config = Some(config);
+
+    // The interactive session already owns the fullscreen surface: a normal
+    // frame is one bounded line set.
+    let plain = controller.tui.render_terminal_frame(80, 24);
+    assert!(plain.lines.len() <= 24, "plain frame must be bounded");
+
+    controller.type_text("/tasks");
+    controller
+        .handle_input_event(InputEvent::Submit)
+        .await
+        .expect("show tasks");
+    let browser = controller
+        .chrome()
+        .task_browser_state()
+        .expect("task browser opens");
+    assert_eq!(browser.snapshot().items().len(), 1);
+
+    // Task Browser renders as an overlay inside the already-fullscreen
+    // session: one bounded frame with no physical transition.
+    let overlay_frame = controller.tui.render_terminal_frame(80, 24);
+    assert!(
+        overlay_frame.lines.len() <= 24,
+        "overlay frame must stay bounded"
+    );
+    let overlay_text = overlay_frame
+        .lines
+        .iter()
+        .map(|line| neo_tui::primitive::strip_ansi(line))
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(
+        overlay_text.contains("TASK BROWSER"),
+        "overlay frame:\n{overlay_text}"
+    );
+
+    // The browser stays operable while the surface stays the same.
+    controller
+        .handle_input_event(InputEvent::Action(KeybindingAction::InputTab))
+        .await
+        .expect("toggle filter");
+    assert_eq!(
+        controller
+            .chrome()
+            .task_browser_state()
+            .expect("browser open")
+            .filter(),
+        neo_tui::tasks_browser::TaskBrowserFilter::Active
+    );
+
+    // Closing the overlay returns the primary document to the same frame.
+    controller
+        .handle_input_event(InputEvent::Cancel)
+        .await
+        .expect("close browser");
+    assert!(controller.chrome().task_browser_state().is_none());
+    let restored = controller.tui.render_terminal_frame(80, 24);
+    assert!(restored.lines.len() <= 24);
+}
+
+#[tokio::test]
 async fn task_browser_mouse_wheel_moves_selection_without_prompt_history() {
     let temp = tempfile::tempdir().expect("tempdir");
     let sessions_dir = temp.path().join(".neo/sessions");
@@ -19465,22 +19295,18 @@ async fn pending_approval_keeps_input_while_later_delegate_events_arrive() {
         response_rx.await.expect("approval response"),
         ApprovalResponse::Selected { .. }
     ));
-    // The later delegate card remains and the deferred history releases once.
+    // The later delegate card remains visible in the document after
+    // resolution.
     assert!(
         controller.render_snapshot().contains("later delegate work"),
         "delegate card must remain in the transcript"
     );
-    // The deferred delegate card becomes visible again after resolution.
-    let update = controller
-        .tui
-        .transcript_mut()
-        .render_terminal_update(80, 24);
+    let slice = controller.tui.transcript_mut().render_visible_slice(80, 24);
     assert!(
-        update
-            .live
+        slice
             .iter()
             .any(|line| neo_tui::primitive::strip_ansi(line).contains("later delegate work")),
-        "deferred delegate card must return to the live area after resolution"
+        "delegate card must remain in the document slice"
     );
 }
 

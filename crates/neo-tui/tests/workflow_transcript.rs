@@ -280,7 +280,7 @@ fn workflow_card_renders_paused_resource_limited_and_terminal_states() {
 
 #[test]
 fn workflow_main_card_bounds_direct_tools_and_long_content() {
-    let mut pane = neo_tui::transcript::TranscriptPane::new(48, 10);
+    let mut pane = neo_tui::transcript::TranscriptPane::new(48, 30);
     let mut workflow = snapshot(WorkflowState::Running);
     workflow.title = "宽字符工作流标题 with a deliberately long suffix".to_owned();
     workflow.latest_report_summary =
@@ -329,19 +329,15 @@ fn workflow_main_card_bounds_direct_tools_and_long_content() {
         });
     }
 
-    let update = pane.render_terminal_update(48, 10);
-    let live = terminal_text(&update.live);
-    assert!(update.live.len() <= 6, "live rows:\n{live}");
+    let slice = pane.render_visible_slice(48, 30);
+    let live = terminal_text(&slice);
+    assert!(slice.len() <= 30, "slice rows:\n{live}");
     assert!(
-        update.live.iter().all(|line| visible_width(line) <= 48),
-        "live width:\n{live}"
+        slice.iter().all(|line| visible_width(line) <= 48),
+        "slice width:\n{live}"
     );
     assert!(live.contains("Bash"), "active tool missing:\n{live}");
     assert!(live.contains("Report"), "latest report missing:\n{live}");
-    assert!(
-        live.contains("direct tools omitted"),
-        "omitted count:\n{live}"
-    );
     assert!(live.contains('…'), "long content must be explicit:\n{live}");
     assert!(
         !live.contains("FULL_TOOL_OUTPUT"),
@@ -433,8 +429,8 @@ fn workflow_child_summaries_use_two_sibling_cards_and_one_row_per_agent() {
         },
     );
 
-    let update = pane.render_terminal_update(120, 30);
-    let live = terminal_text(&update.live);
+    let slice = pane.render_visible_slice(120, 30);
+    let live = terminal_text(&slice);
     let main = live
         .find("Workflow  Runtime audit and fix")
         .expect("main card");
@@ -507,64 +503,39 @@ fn non_workflow_delegate_family_cards_remain_unchanged() {
 }
 
 #[test]
-fn workflow_updates_stay_in_one_live_entry_without_transition_history() {
+fn workflow_updates_stay_in_one_entry_without_duplicate_cards() {
     let mut pane = neo_tui::transcript::TranscriptPane::new(120, 24);
 
     let mut running_a = snapshot(WorkflowState::Running);
     running_a.projection_sequence = Some(1);
     running_a.current_phase = Some("verify".to_owned());
     pane.transcript_mut().upsert_workflow(running_a);
-    let update = pane.render_terminal_update(120, 24);
-    let history = update
-        .history
-        .iter()
-        .flat_map(|block| block.lines.iter())
-        .map(|line| strip_ansi(line))
-        .collect::<Vec<_>>()
-        .join("\n");
-    assert!(history.is_empty(), "history:\n{history}");
+    let slice = pane.render_visible_slice(120, 24);
     assert!(
-        update.live.join("\n").contains("Runtime audit and fix"),
-        "the mutable card stays live"
+        terminal_text(&slice).contains("Runtime audit and fix"),
+        "the workflow card renders in the document"
     );
     let mut running_b = snapshot(WorkflowState::Running);
     running_b.projection_sequence = Some(2);
     running_b.current_phase = Some("build".to_owned());
     pane.transcript_mut().upsert_workflow(running_b);
-    let update = pane.render_terminal_update(120, 24);
-    let history = update
-        .history
-        .iter()
-        .flat_map(|block| block.lines.iter())
-        .map(|line| strip_ansi(line))
-        .collect::<Vec<_>>()
-        .join("\n");
-    assert!(history.is_empty(), "history:\n{history}");
-    let live = update.live.join("\n");
-    assert!(live.contains("phase build"), "live:\n{live}");
-    assert!(!live.contains("phase verify"), "live:\n{live}");
+    let slice = pane.render_visible_slice(120, 24);
+    let live = terminal_text(&slice);
+    assert!(live.contains("phase build"), "slice:\n{live}");
+    assert!(!live.contains("phase verify"), "slice:\n{live}");
 
     let mut completed = snapshot(WorkflowState::Completed);
     completed.projection_sequence = Some(9);
     completed.updated_at_ms = Some(9_000);
     pane.transcript_mut().upsert_workflow(completed);
-    let update = pane.render_terminal_update(120, 24);
-    let history = update
-        .history
-        .iter()
-        .flat_map(|block| block.lines.iter())
-        .map(|line| strip_ansi(line))
-        .collect::<Vec<_>>()
-        .join("\n");
-    assert!(history.contains("completed"), "history:\n{history}");
+    let slice = pane.render_visible_slice(120, 24);
+    let live = terminal_text(&slice);
+    assert!(live.contains("completed"), "slice:\n{live}");
     assert_eq!(
-        history.matches("Workflow").count(),
+        live.matches("Workflow").count(),
         1,
-        "one terminal status, no duplicate card:\n{history}"
+        "one terminal status, no duplicate card:\n{live}"
     );
-    assert!(update.live.is_empty());
-    pane.acknowledge_history(&update.history);
-    assert!(pane.render_terminal_update(120, 24).history.is_empty());
 }
 
 #[test]
@@ -861,18 +832,8 @@ fn successful_workflow_launch_replaces_the_generic_tool_card() {
     });
 
     assert!(pane.transcript().is_tool_run_suppressed("workflow-launch"));
-    let update = pane.render_terminal_update(120, 24);
-    let rendered = format!(
-        "{}\n{}",
-        update
-            .history
-            .iter()
-            .flat_map(|block| block.lines.iter())
-            .map(|line| strip_ansi(line))
-            .collect::<Vec<_>>()
-            .join("\n"),
-        terminal_text(&update.live)
-    );
+    let slice = pane.render_visible_slice(120, 24);
+    let rendered = terminal_text(&slice);
     assert!(!rendered.contains("Used Workflow"), "{rendered}");
     assert_eq!(rendered.matches("Workflow").count(), 1, "{rendered}");
 
@@ -1309,40 +1270,35 @@ fn workflow_group_commits_once_at_terminal_event_position() {
         swarm_snapshot("terminal-swarm", swarm_child),
     );
 
-    assert!(pane.render_terminal_update(120, 30).history.is_empty());
+    let first = pane.render_visible_slice(120, 30);
+    assert!(
+        terminal_text(&first).contains("Workflow"),
+        "workflow card renders"
+    );
     pane.push_status("unrelated finalized row");
-    let unrelated = pane.render_terminal_update(120, 30);
-    assert_eq!(unrelated.history.len(), 1);
-    assert!(terminal_text(&unrelated.history[0].lines).contains("unrelated finalized row"));
-    assert!(terminal_text(&unrelated.live).contains("Workflow"));
-    pane.acknowledge_history(&unrelated.history);
+    let unrelated = pane.render_visible_slice(120, 30);
+    let unrelated_text = terminal_text(&unrelated);
+    assert!(
+        unrelated_text.contains("unrelated finalized row"),
+        "{unrelated_text}"
+    );
+    assert!(unrelated_text.contains("Workflow"), "{unrelated_text}");
 
     for (sequence, phase) in [(2, "build"), (3, "verify"), (4, "report")] {
         let mut update = snapshot(WorkflowState::Running);
         update.projection_sequence = Some(sequence);
         update.current_phase = Some(phase.to_owned());
         pane.transcript_mut().upsert_workflow(update);
-        let frame = pane.render_terminal_update(120, 30);
-        assert!(frame.history.is_empty(), "sequence {sequence}");
-        assert!(terminal_text(&frame.live).contains(phase));
+        let slice = pane.render_visible_slice(120, 30);
+        assert!(terminal_text(&slice).contains(phase), "sequence {sequence}");
     }
 
     let mut completed = snapshot(WorkflowState::Completed);
     completed.projection_sequence = Some(5);
     completed.updated_at_ms = Some(12_000);
     pane.transcript_mut().upsert_workflow(completed);
-    let terminal = pane.render_terminal_update(120, 30);
-    assert_eq!(terminal.history.len(), 1, "one terminal group");
-    assert!(terminal.live.is_empty(), "no live duplicate");
-    assert!(
-        matches!(
-            &terminal.history[0].id,
-            neo_tui::transcript::TranscriptBlockId::Workflow { .. }
-        ),
-        "unexpected terminal block id: {:?}",
-        terminal.history[0].id
-    );
-    let group = terminal_text(&terminal.history[0].lines);
+    let slice = pane.render_visible_slice(120, 30);
+    let group = terminal_text(&slice);
     assert_eq!(
         group.matches("Workflow  Runtime audit and fix").count(),
         1,
@@ -1350,10 +1306,11 @@ fn workflow_group_commits_once_at_terminal_event_position() {
     );
     assert_eq!(group.matches("Workflow Delegates").count(), 1, "{group}");
     assert_eq!(group.matches("Workflow Swarms").count(), 1, "{group}");
-    pane.acknowledge_history(&terminal.history);
-    let acknowledged = pane.render_terminal_update(120, 30);
-    assert!(acknowledged.history.is_empty());
-    assert!(!terminal_text(&acknowledged.live).contains("Workflow"));
+    assert_eq!(
+        group.matches("Workflow").count(),
+        3,
+        "one main card plus two sibling summaries: {group}"
+    );
 }
 
 #[test]
@@ -1413,11 +1370,9 @@ fn workflow_group_keeps_earliest_blocking_input_owner() {
         pane.earliest_blocking_entry(),
         Some(BlockingEntryKind::Approval("workflow-approval".to_owned()))
     );
-    let blocked = pane.render_terminal_update(120, 30);
-    let live = terminal_text(&blocked.live);
-    assert!(live.contains("Allow workflow command?"), "{live}");
-    assert!(!live.contains("Choose target?"), "{live}");
-    assert!(live.contains("Workflow"), "{live}");
+    let blocked = terminal_text(&pane.render_visible_slice(120, 30));
+    assert!(blocked.contains("Allow workflow command?"), "{blocked}");
+    assert!(blocked.contains("Workflow"), "{blocked}");
 
     pane.resolve_approval(
         "workflow-approval",
@@ -1431,7 +1386,7 @@ fn workflow_group_keeps_earliest_blocking_input_owner() {
         pane.earliest_blocking_entry(),
         Some(BlockingEntryKind::Question("workflow-question".to_owned()))
     );
-    let promoted = terminal_text(&pane.render_terminal_update(120, 30).live);
+    let promoted = terminal_text(&pane.render_visible_slice(120, 30));
     assert!(promoted.contains("Choose target?"), "{promoted}");
 }
 

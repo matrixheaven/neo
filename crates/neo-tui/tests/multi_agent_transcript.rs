@@ -367,9 +367,8 @@ fn later_same_turn_root_delegate_remains_visible_after_prior_group_commit() {
             workflow_origin: None,
         });
     }
-    let committed = pane.render_terminal_update(160, 30);
-    assert!(!committed.history.is_empty());
-    pane.acknowledge_history(&committed.history);
+    let committed = pane.render_visible_slice(160, 30);
+    assert!(!committed.is_empty());
 
     pane.apply_agent_event(AgentEvent::DelegateStarted {
         turn: 7,
@@ -382,15 +381,15 @@ fn later_same_turn_root_delegate_remains_visible_after_prior_group_commit() {
         ),
         workflow_origin: None,
     });
-    let update = pane.render_terminal_update(160, 30);
-    let live = update
-        .live
+    let slice = pane
+        .render_visible_slice(160, 30)
         .iter()
         .map(|line| strip_ansi(line))
         .collect::<Vec<_>>()
         .join("\n");
 
-    assert!(live.contains("Euler"), "live transcript:\n{live}");
+    assert!(slice.contains("Euler"), "slice:\n{slice}");
+    assert!(slice.contains("Nova"), "committed card remains: {slice}");
 }
 
 #[test]

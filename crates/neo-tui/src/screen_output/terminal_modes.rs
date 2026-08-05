@@ -11,11 +11,15 @@ use crossterm::{execute, queue};
 
 use crate::terminal_capabilities::TerminalCapabilities;
 
+/// Enter the single fullscreen surface: alternate screen, mouse reporting,
+/// bracketed paste, and (when supported) kitty keyboard enhancement.
 pub(super) fn write_enter_output(
     output: &mut dyn Write,
     capabilities: TerminalCapabilities,
 ) -> std::io::Result<()> {
     let mut output = output;
+    queue!(&mut output, EnterAlternateScreen)?;
+    queue!(&mut output, EnableMouseCapture)?;
     if capabilities.ansi.bracketed_paste {
         queue!(&mut output, EnableBracketedPaste)?;
     }
@@ -32,14 +36,27 @@ pub(super) fn write_enter_output(
     output.flush()
 }
 
+/// Leave the fullscreen surface: mouse reporting off, alternate screen
+/// restored, cursor shown, and all capability modes popped.
 pub(super) fn write_leave_output(
     output: &mut dyn Write,
     capabilities: TerminalCapabilities,
 ) -> std::io::Result<()> {
     let mut output = output;
     let mut result = output.write_all(b"\x1b[?25h");
+    if let Err(error) = execute!(&mut output, DisableMouseCapture)
+        && result.is_ok()
+    {
+        result = Err(error);
+    }
+    if let Err(error) = execute!(&mut output, LeaveAlternateScreen)
+        && result.is_ok()
+    {
+        result = Err(error);
+    }
     if capabilities.ansi.kitty_keyboard
         && let Err(error) = execute!(&mut output, PopKeyboardEnhancementFlags)
+        && result.is_ok()
     {
         result = Err(error);
     }
@@ -52,34 +69,10 @@ pub(super) fn write_leave_output(
     result
 }
 
-pub(super) fn write_enter_review_output(output: &mut dyn Write) -> std::io::Result<()> {
-    let mut output = output;
-    queue!(&mut output, EnterAlternateScreen)?;
-    output.flush()
-}
-
-pub(super) fn write_leave_review_output(output: &mut dyn Write) -> std::io::Result<()> {
-    let mut output = output;
-    queue!(&mut output, LeaveAlternateScreen)?;
-    output.flush()
-}
-
-pub(super) fn write_enable_mouse_capture(output: &mut dyn Write) -> std::io::Result<()> {
-    let mut output = output;
-    queue!(&mut output, EnableMouseCapture)
-}
-
-pub(super) fn write_disable_mouse_capture(output: &mut dyn Write) -> std::io::Result<()> {
-    let mut output = output;
-    queue!(&mut output, DisableMouseCapture)
-}
-
 #[derive(Debug)]
 pub(super) struct TerminalModeGuard {
     capabilities: TerminalCapabilities,
     active: bool,
-    review_active: bool,
-    mouse_capture_active: bool,
     #[cfg(windows)]
     windows_input_mode: windows_input_mode::WindowsInputModeGuard,
 }
@@ -100,8 +93,6 @@ impl TerminalModeGuard {
         Ok(Self {
             capabilities,
             active: true,
-            review_active: false,
-            mouse_capture_active: false,
             #[cfg(windows)]
             windows_input_mode,
         })
@@ -109,29 +100,9 @@ impl TerminalModeGuard {
 
     pub(super) fn leave(&mut self) {
         if !self.active {
-            if self.mouse_capture_active || self.review_active {
-                let mut output = stdout();
-                if self.mouse_capture_active {
-                    let _ = write_disable_mouse_capture(&mut output);
-                    self.mouse_capture_active = false;
-                }
-                if self.review_active {
-                    let _ = write_leave_review_output(&mut output);
-                    self.review_active = false;
-                }
-                let _ = output.flush();
-            }
             return;
         }
         let mut output = stdout();
-        if self.mouse_capture_active {
-            let _ = write_disable_mouse_capture(&mut output);
-            self.mouse_capture_active = false;
-        }
-        if self.review_active {
-            let _ = write_leave_review_output(&mut output);
-            self.review_active = false;
-        }
         let _ = write_leave_output(&mut output, self.capabilities);
         let _ = output.flush();
         #[cfg(windows)]
@@ -144,8 +115,6 @@ impl TerminalModeGuard {
         if self.active {
             return Ok(());
         }
-        self.review_active = false;
-        self.mouse_capture_active = false;
         let raw_mode = RawModeGuard::enter()?;
         #[cfg(windows)]
         {
@@ -161,57 +130,6 @@ impl TerminalModeGuard {
         raw_mode.disarm();
         self.active = true;
         Ok(())
-    }
-
-    pub(super) fn enter_review(&mut self, output: &mut dyn Write) -> std::io::Result<()> {
-        if !self.active || self.review_active {
-            return Ok(());
-        }
-        write_enter_review_output(output)
-    }
-
-    pub(super) fn leave_review(&mut self, output: &mut dyn Write) -> std::io::Result<()> {
-        if !self.review_active {
-            return Ok(());
-        }
-        write_leave_review_output(output)
-    }
-
-    pub(super) const fn set_review_active(&mut self, active: bool) {
-        self.review_active = active;
-    }
-
-    pub(super) const fn set_mouse_capture_active(&mut self, active: bool) {
-        self.mouse_capture_active = active;
-    }
-
-    #[cfg(test)]
-    pub(super) fn for_test() -> Self {
-        Self {
-            capabilities: TerminalCapabilities::default(),
-            active: true,
-            review_active: false,
-            mouse_capture_active: false,
-            #[cfg(windows)]
-            windows_input_mode: windows_input_mode::WindowsInputModeGuard::for_test(),
-        }
-    }
-
-    #[cfg(test)]
-    pub(super) const fn review_active_for_test(&self) -> bool {
-        self.review_active
-    }
-
-    #[cfg(test)]
-    pub(super) const fn active_for_test(&self) -> bool {
-        self.active
-    }
-
-    #[cfg(test)]
-    pub(super) const fn disarm_for_test(&mut self) {
-        self.active = false;
-        self.review_active = false;
-        self.mouse_capture_active = false;
     }
 }
 
@@ -447,13 +365,10 @@ mod windows_input_mode {
 mod tests {
     use crate::terminal_capabilities::{AnsiCapabilities, TerminalCapabilities};
 
-    use super::{
-        write_enter_output, write_enter_review_output, write_leave_output,
-        write_leave_review_output,
-    };
+    use super::{write_enter_output, write_leave_output};
 
     #[test]
-    fn normal_screen_modes_never_enable_mouse_capture_or_alternate_screen() {
+    fn fullscreen_enter_and_leave_are_single_sequences() {
         let capabilities = TerminalCapabilities {
             ansi: AnsiCapabilities {
                 bracketed_paste: true,
@@ -466,44 +381,24 @@ mod tests {
         write_enter_output(&mut enter, capabilities).expect("enter output");
         let mut leave = Vec::new();
         write_leave_output(&mut leave, capabilities).expect("leave output");
-        let output = format!(
-            "{}{}",
-            String::from_utf8_lossy(&enter),
-            String::from_utf8_lossy(&leave)
-        );
+        let enter = String::from_utf8_lossy(&enter);
+        let leave = String::from_utf8_lossy(&leave);
 
-        for forbidden in [
-            "\x1b[?1000h",
-            "\x1b[?1002h",
-            "\x1b[?1003h",
-            "\x1b[?1006h",
-            "\x1b[?1049h",
-        ] {
-            assert!(!output.contains(forbidden), "forbidden mode: {forbidden:?}");
-        }
-        assert!(String::from_utf8_lossy(&enter).contains("\x1b[?2004h"));
-        assert!(String::from_utf8_lossy(&leave).contains("\x1b[?2004l"));
-        assert!(String::from_utf8_lossy(&leave).contains("\x1b[?25h"));
-        assert!(!output.contains("\x1b[2J"));
-        assert!(!output.contains("\x1b[3J"));
-    }
+        // Exactly one alternate-screen enter and one mouse-capture enable.
+        assert_eq!(enter.matches("?1049h").count(), 1);
+        assert_eq!(enter.matches("?1000h").count(), 1);
+        assert_eq!(enter.matches("?2004h").count(), 1);
+        assert!(!enter.contains("?1049l"));
+        assert!(!enter.contains("?1000l"));
 
-    #[test]
-    fn review_modes_preserve_terminal_mouse_selection() {
-        let mut enter = Vec::new();
-        write_enter_review_output(&mut enter).expect("review enter output");
-        let mut leave = Vec::new();
-        write_leave_review_output(&mut leave).expect("review leave output");
-
-        let enter = String::from_utf8(enter).expect("review enter is UTF-8");
-        let leave = String::from_utf8(leave).expect("review leave is UTF-8");
-        assert!(enter.contains("?1049h"));
-        assert!(leave.contains("?1049l"));
-        assert!(!format!("{enter}{leave}").contains("\x1b[2J"));
-        assert!(!format!("{enter}{leave}").contains("\x1b[3J"));
-        for mouse_mode in ["?1000", "?1002", "?1003", "?1006"] {
-            assert!(!enter.contains(mouse_mode));
-            assert!(!leave.contains(mouse_mode));
-        }
+        // Exactly one leave sequence that restores every entered mode.
+        assert_eq!(leave.matches("?1049l").count(), 1);
+        assert_eq!(leave.matches("?1000l").count(), 1);
+        assert_eq!(leave.matches("?2004l").count(), 1);
+        assert!(leave.contains("\x1b[?25h"));
+        assert!(!leave.contains("?1049h"));
+        assert!(!leave.contains("?1000h"));
+        assert!(!enter.contains("\x1b[2J") && !leave.contains("\x1b[2J"));
+        assert!(!enter.contains("\x1b[3J") && !leave.contains("\x1b[3J"));
     }
 }

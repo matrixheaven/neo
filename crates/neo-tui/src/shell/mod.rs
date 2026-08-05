@@ -41,7 +41,6 @@ pub use theme_manager::{
 
 use crate::dialogs::{QuestionDisplayData, QuestionStateMachine};
 use crate::tasks_browser::TaskBrowserState;
-use crate::transcript::TranscriptBrowserState;
 
 /// Maximum number of visible content lines in the composer input box.
 pub(crate) const MAX_PROMPT_VISIBLE_LINES: usize = 8;
@@ -320,23 +319,6 @@ impl NeoChromeState {
         let id = self.focused_overlay?;
         let overlay = self.overlays.iter_mut().find(|overlay| overlay.id == id)?;
         let OverlayKind::TaskBrowser(state) = &mut overlay.kind else {
-            return None;
-        };
-        Some(state)
-    }
-
-    #[must_use]
-    pub fn transcript_browser_state(&self) -> Option<&TranscriptBrowserState> {
-        let OverlayKind::TranscriptBrowser(state) = &self.focused_overlay()?.kind else {
-            return None;
-        };
-        Some(state)
-    }
-
-    pub fn transcript_browser_state_mut(&mut self) -> Option<&mut TranscriptBrowserState> {
-        let id = self.focused_overlay?;
-        let overlay = self.overlays.iter_mut().find(|overlay| overlay.id == id)?;
-        let OverlayKind::TranscriptBrowser(state) = &mut overlay.kind else {
             return None;
         };
         Some(state)

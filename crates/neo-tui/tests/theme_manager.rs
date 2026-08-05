@@ -86,7 +86,7 @@ fn theme_manager_overlay_hides_transcript_and_composer() {
     let mut tui = neo_tui::NeoTui::new(chrome, transcript);
     let frame = tui.render_terminal_frame(120, 24);
     let rendered = frame
-        .live
+        .lines
         .iter()
         .map(|line| strip_ansi(line))
         .collect::<Vec<_>>()
@@ -94,7 +94,6 @@ fn theme_manager_overlay_hides_transcript_and_composer() {
     assert!(rendered.contains("THEME MANAGER"), "{rendered}");
     assert!(!rendered.contains("hidden transcript line"), "{rendered}");
     assert!(frame.cursor.is_none());
-    assert!(frame.review_surface);
 }
 
 #[test]

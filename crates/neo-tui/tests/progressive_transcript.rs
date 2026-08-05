@@ -138,9 +138,8 @@ fn strip_ansi(line: &str) -> String {
     plain
 }
 
-fn live_text(pane: &mut TranscriptPane, width: usize, height: usize) -> String {
-    pane.render_terminal_update(width, height)
-        .live
+fn slice_text(pane: &mut TranscriptPane, width: usize, height: usize) -> String {
+    pane.render_visible_slice(width, height)
         .iter()
         .map(|line| strip_ansi(line))
         .collect::<Vec<_>>()
@@ -213,54 +212,41 @@ fn finish_tool(pane: &mut TranscriptPane, id: &str, result: &str) {
     });
 }
 
-/// A live entry without a progressive projection (an ordinary running tool)
-/// must stay bounded by `live_budget` and commit its canonical final card
-/// exactly once at finalization — never an unbounded mutable suffix.
+/// An ordinary running tool renders inside the bounded document slice and its
+/// canonical final card persists after finalization — never an unbounded
+/// mutable suffix.
 #[test]
 fn unsupported_live_entry_stays_bounded_and_commits_once() {
     let mut pane = TranscriptPane::new(60, 8);
     start_tool(&mut pane, "bash-1", "make");
     stream_tool_output(&mut pane, "bash-1", 20);
 
-    let live = live_text(&mut pane, 60, 8);
-    let update = pane.render_terminal_update(60, 8);
-    assert!(update.history.is_empty());
+    let slice = pane.render_visible_slice(60, 8);
+    let live = slice_text(&mut pane, 60, 8);
     assert!(
-        update.live.len() <= 4,
-        "live must be bounded by live_budget: {} rows\n{live}",
-        update.live.len()
+        slice.len() <= 8,
+        "slice must be bounded by the terminal height: {} rows\n{live}",
+        slice.len()
     );
-    assert!(live.contains("Using Bash"), "live:\n{live}");
+    // Tail follow shows the newest output rows of the running card.
+    assert!(
+        live.contains("tool-output-sentinel-19"),
+        "newest output row missing:\n{live}"
+    );
+    pane.scroll_transcript_up(usize::MAX);
+    let top = slice_text(&mut pane, 60, 8);
+    assert!(top.contains("Using Bash"), "card header:\n{top}");
+    pane.scroll_transcript_down(usize::MAX);
 
-    // Finalization commits the canonical card once and removes the live area.
+    // Finalization keeps the canonical card in the document.
     finish_tool(&mut pane, "bash-1", "done");
-    let finished = pane.render_terminal_update(60, 8);
-    assert_eq!(finished.history.len(), 1, "one canonical commit");
-    assert!(
-        finished.history[0]
-            .lines
-            .iter()
-            .any(|line| strip_ansi(line).contains("Bash")),
-        "history: {:?}",
-        finished.history[0].lines
-    );
-    assert!(
-        finished.history[0]
-            .lines
-            .iter()
-            .any(|line| strip_ansi(line).contains("done")),
-        "history: {:?}",
-        finished.history[0].lines
-    );
-    assert!(finished.live.is_empty());
-
-    // Acknowledged history never replays.
-    pane.acknowledge_history(&finished.history);
-    assert!(pane.render_terminal_update(60, 8).history.is_empty());
+    let finished = slice_text(&mut pane, 60, 8);
+    assert!(finished.contains("Used Bash"), "slice:\n{finished}");
+    assert!(finished.contains("done"), "slice:\n{finished}");
 }
 
-/// Stable facts after an ordinary live entry commit to native history in
-/// canonical order while the live entry remains mutable and bounded.
+/// Stable facts after an ordinary live entry keep canonical order inside the
+/// one document slice.
 #[test]
 fn stable_facts_after_ordinary_live_entry_keep_canonical_order() {
     let mut pane = TranscriptPane::new(60, 12);
@@ -269,35 +255,25 @@ fn stable_facts_after_ordinary_live_entry_keep_canonical_order() {
     pane.push_status("later-status-0");
     pane.push_status("later-status-1");
 
-    let update = pane.render_terminal_update(60, 12);
-    let history = update
-        .history
-        .iter()
-        .flat_map(|block| block.lines.iter())
-        .map(|line| strip_ansi(line))
-        .collect::<Vec<_>>()
-        .join("\n");
-    let live = update
-        .live
-        .iter()
-        .map(|line| strip_ansi(line))
-        .collect::<Vec<_>>()
-        .join("\n");
-
-    assert!(history.contains("later-status-0"), "history:\n{history}");
-    assert!(history.contains("later-status-1"), "history:\n{history}");
+    let slice = slice_text(&mut pane, 60, 12);
+    assert!(slice.contains("later-status-0"), "slice:\n{slice}");
+    assert!(slice.contains("later-status-1"), "slice:\n{slice}");
     assert!(
-        history.find("later-status-0").unwrap() < history.find("later-status-1").unwrap(),
+        slice.find("later-status-0").unwrap() < slice.find("later-status-1").unwrap(),
         "later stable facts must keep canonical order"
     );
-    assert!(!history.contains("Using Bash"), "history:\n{history}");
-    assert!(live.contains("Using Bash"), "live:\n{live}");
+    assert!(slice.contains("Using Bash"), "slice:\n{slice}");
 
-    // Completion appends the canonical card once, after the committed facts.
+    // Completion keeps the tool card in the document at its entry position,
+    // before the later statuses.
     finish_tool(&mut pane, "bash-1", "done");
-    let finished = pane.render_terminal_update(60, 12);
-    assert_eq!(finished.history.len(), 3, "statuses then the tool card");
-    assert!(finished.live.is_empty());
+    let finished = slice_text(&mut pane, 60, 12);
+    assert!(finished.contains("later-status-0"), "slice:\n{finished}");
+    assert!(finished.contains("later-status-1"), "slice:\n{finished}");
+    assert!(
+        finished.find("Used Bash").unwrap() < finished.find("later-status-0").unwrap(),
+        "the tool card keeps its entry position:\n{finished}"
+    );
 }
 
 /// A Delegate remains one card so its title always precedes child tool rows.
@@ -352,11 +328,12 @@ fn ordinary_delegate_commits_one_complete_card_with_header_before_child_tools() 
     };
     pane.transcript_mut().upsert_delegate(1, running.clone());
 
-    // Nothing from the child card is split into earlier history.
-    let update = pane.render_terminal_update(120, 24);
-    assert!(update.history.is_empty(), "history: {:#?}", update.history);
+    // The delegate card is one document entry: nothing is split into an
+    // earlier partition.
+    let slice = slice_text(&mut pane, 120, 24);
+    assert!(slice.contains("agent-a"), "slice:\n{slice}");
 
-    // Completion commits the existing complete card once.
+    // Completion keeps the existing complete card once.
     running.state = AgentLifecycleState::Completed;
     running.terminal_at_ms = Some(3);
     running.updated_at_ms = 3;
@@ -366,14 +343,7 @@ fn ordinary_delegate_commits_one_complete_card_with_header_before_child_tools() 
     });
     pane.transcript_mut().upsert_delegate(1, running);
 
-    let finished = pane.render_terminal_update(120, 24);
-    assert_eq!(finished.history.len(), 1, "one complete delegate card");
-    let summary = finished.history[0]
-        .lines
-        .iter()
-        .map(|line| strip_ansi(line))
-        .collect::<Vec<_>>()
-        .join("\n");
+    let summary = slice_text(&mut pane, 120, 24);
     assert!(summary.contains("agent-a"), "summary:\n{summary}");
     assert!(summary.contains("Used Read"), "summary:\n{summary}");
     assert!(
@@ -384,9 +354,6 @@ fn ordinary_delegate_commits_one_complete_card_with_header_before_child_tools() 
         summary.find("Delegate").unwrap() < summary.find("Used Read").unwrap(),
         "delegate header must precede child tools:\n{summary}"
     );
-    assert!(finished.live.is_empty());
-    pane.acknowledge_history(&finished.history);
-    assert!(pane.render_terminal_update(120, 24).history.is_empty());
 }
 
 /// A pending approval defers every later stable fact; resolution releases
@@ -466,18 +433,15 @@ fn pending_approval_defers_later_facts_in_canonical_order() {
     };
     pane.transcript_mut().upsert_delegate(1, running.clone());
 
-    // The earliest unresolved approval owns the live focus; the later stable
-    // fact stays deferred.
-    let update = pane.render_terminal_update(120, 24);
-    let live = update
-        .live
-        .iter()
-        .map(|line| strip_ansi(line))
-        .collect::<Vec<_>>()
-        .join("\n");
-    assert!(update.history.is_empty(), "no later fact may commit");
-    assert!(live.contains("Run tests?"), "live:\n{live}");
-    assert!(!live.contains("Used Read"), "live:\n{live}");
+    // The approval is the earliest blocking entry; the delegate card renders
+    // later in the same document slice.
+    let slice = slice_text(&mut pane, 120, 24);
+    assert!(slice.contains("Run tests?"), "slice:\n{slice}");
+    assert!(slice.contains("Used Read"), "slice:\n{slice}");
+    assert!(
+        slice.find("Run tests?").unwrap() < slice.find("Used Read").unwrap(),
+        "approval precedes the later delegate card:\n{slice}"
+    );
     assert_eq!(
         pane.earliest_blocking_entry(),
         Some(neo_tui::transcript::BlockingEntryKind::Approval(
@@ -485,8 +449,8 @@ fn pending_approval_defers_later_facts_in_canonical_order() {
         ))
     );
 
-    // Resolution releases only the approval. Child facts remain capture-only
-    // until their parent card terminalizes.
+    // Resolution leaves the resolved approval and the delegate card in
+    // canonical order.
     pane.resolve_approval(
         "approval-1",
         &ApprovalResolution::Selected {
@@ -495,19 +459,8 @@ fn pending_approval_defers_later_facts_in_canonical_order() {
             feedback: None,
         },
     );
-    let update = pane.render_terminal_update(120, 24);
-    let history = update
-        .history
-        .iter()
-        .flat_map(|block| block.lines.iter())
-        .map(|line| strip_ansi(line))
-        .collect::<Vec<_>>()
-        .join("\n");
-    assert!(
-        history.contains("approval: Allow once"),
-        "history:\n{history}"
-    );
-    assert!(!history.contains("Used Read"), "history:\n{history}");
+    let slice = slice_text(&mut pane, 120, 24);
+    assert!(slice.contains("approval: Allow once"), "slice:\n{slice}");
 
     let completed = AgentSnapshot {
         state: AgentLifecycleState::Completed,
@@ -520,27 +473,19 @@ fn pending_approval_defers_later_facts_in_canonical_order() {
         ..running
     };
     pane.transcript_mut().upsert_delegate(1, completed);
-    let update = pane.render_terminal_update(120, 24);
-    let history = update
-        .history
-        .iter()
-        .flat_map(|block| block.lines.iter())
-        .map(|line| strip_ansi(line))
-        .collect::<Vec<_>>()
-        .join("\n");
-    assert!(history.contains("Used Read"), "history:\n{history}");
+    let slice = slice_text(&mut pane, 120, 24);
+    assert!(slice.contains("Used Read"), "slice:\n{slice}");
     assert!(
-        history.find("approval: Allow once").unwrap() < history.find("Used Read").unwrap(),
-        "canonical order violated:\n{history}"
+        slice.find("approval: Allow once").unwrap() < slice.find("Used Read").unwrap(),
+        "canonical order violated:\n{slice}"
     );
 }
 
-/// Every live-producing entry family must be handled by a bounded live
-/// projection, a blocking projection, or the bounded finalization fallback:
-/// bounded while live, exactly one canonical commit at finalization, and no
-/// mutable data acknowledged as history.
+/// Every live-producing entry family renders inside the one bounded document
+/// while live and keeps its canonical content after completion — the document
+/// is the single slice owner, so there is no separate mutable suffix.
 #[test]
-fn every_live_entry_family_is_bounded_and_commits_once() {
+fn every_live_entry_family_renders_bounded_and_keeps_canonical_content() {
     use neo_agent_core::{
         ApprovalAction, ApprovalOption, ApprovalPresentation, ApprovalRequest, ApprovalResolution,
         PermissionOperation, ShellCommandOrigin, ShellCommandOutcome,
@@ -548,71 +493,53 @@ fn every_live_entry_family_is_bounded_and_commits_once() {
     use neo_tui::transcript::entry::{RetryPhase, RetryStatusData};
     use neo_tui::transcript::{McpStartupPhase, McpStartupStatusData};
 
-    fn plain_history(pane: &mut TranscriptPane, width: usize, height: usize) -> String {
-        pane.render_terminal_update(width, height)
-            .history
+    fn plain_slice(pane: &mut TranscriptPane, width: usize, height: usize) -> String {
+        pane.render_visible_slice(width, height)
             .iter()
-            .flat_map(|block| block.lines.iter())
             .map(|line| strip_ansi(line))
             .collect::<Vec<_>>()
             .join("\n")
     }
 
-    fn assert_bounded_live(pane: &mut TranscriptPane, width: usize, height: usize) {
-        let update = pane.render_terminal_update(width, height);
+    fn assert_live(pane: &mut TranscriptPane, width: usize, height: usize, needle: &str) {
+        let slice = pane.render_visible_slice(width, height);
         assert!(
-            update.live.len() <= height.saturating_sub(4),
-            "live must be bounded by live_budget: {}",
-            update.live.len()
+            slice.len() <= height,
+            "slice must be bounded: {}",
+            slice.len()
         );
-        assert!(!update.live.is_empty(), "the mutable entry stays visible");
-    }
-
-    fn assert_one_canonical_commit(pane: &mut TranscriptPane, width: usize, height: usize) {
-        let update = pane.render_terminal_update(width, height);
-        assert_eq!(update.history.len(), 1, "one canonical commit");
-        assert!(update.live.is_empty(), "live area must clear");
-        pane.acknowledge_history(&update.history);
         assert!(
-            pane.render_terminal_update(width, height)
-                .history
-                .is_empty(),
-            "acked history never replays"
+            plain_slice(pane, width, height).contains(needle),
+            "missing live {needle:?} in slice:\n{}",
+            plain_slice(pane, width, height)
         );
     }
 
-    fn assert_ordered_canonical_commit(
+    fn assert_completed(pane: &mut TranscriptPane, width: usize, height: usize, needle: &str) {
+        assert!(
+            plain_slice(pane, width, height).contains(needle),
+            "missing completed {needle:?} in slice:\n{}",
+            plain_slice(pane, width, height)
+        );
+    }
+
+    fn assert_ordered_completed(
         pane: &mut TranscriptPane,
         width: usize,
         height: usize,
         ordered: &[&str],
     ) {
-        let update = pane.render_terminal_update(width, height);
-        assert_eq!(update.history.len(), 1, "one complete card commit");
-        assert!(update.live.is_empty(), "live area must clear");
-        let history = update.history[0]
-            .lines
-            .iter()
-            .map(|line| strip_ansi(line))
-            .collect::<Vec<_>>()
-            .join("\n");
+        let slice = plain_slice(pane, width, height);
         let mut previous = 0;
         for (index, needle) in ordered.iter().enumerate() {
-            let position = history
+            let position = slice
                 .find(needle)
-                .unwrap_or_else(|| panic!("missing {needle:?}:\n{history}"));
+                .unwrap_or_else(|| panic!("missing {needle:?}:\n{slice}"));
             if index > 0 {
-                assert!(position > previous, "card order violated:\n{history}");
+                assert!(position > previous, "card order violated:\n{slice}");
             }
             previous = position;
         }
-        pane.acknowledge_history(&update.history);
-        assert!(
-            pane.render_terminal_update(width, height)
-                .history
-                .is_empty(),
-            "acked complete card never replays"
-        );
     }
 
     // -- ThinkingBlock: bounded until typed completion ---------------------
@@ -622,17 +549,17 @@ fn every_live_entry_family_is_bounded_and_commits_once() {
         store.start_thinking();
         store.append_thinking_delta("partial thought");
     }
-    assert_bounded_live(&mut pane, 100, 24);
+    assert_live(&mut pane, 100, 24, "partial thought");
     pane.transcript_mut().finish_thinking(false);
-    assert_one_canonical_commit(&mut pane, 100, 24);
+    assert_completed(&mut pane, 100, 24, "partial thought");
 
     // -- AssistantMessage: bounded until the attempt is canonical ----------
     let mut pane = TranscriptPane::new(100, 24);
     pane.start_assistant_message();
     pane.append_assistant_delta("streaming answer");
-    assert_bounded_live(&mut pane, 100, 24);
+    assert_live(&mut pane, 100, 24, "streaming answer");
     pane.finish_assistant_message();
-    assert_one_canonical_commit(&mut pane, 100, 24);
+    assert_completed(&mut pane, 100, 24, "streaming answer");
 
     // -- ToolRun: bounded, commits the canonical finalized group once ------
     let mut pane = TranscriptPane::new(100, 24);
@@ -644,7 +571,7 @@ fn every_live_entry_family_is_bounded_and_commits_once() {
         workflow_origin: None,
         output_ref: None,
     });
-    assert_bounded_live(&mut pane, 100, 24);
+    assert_live(&mut pane, 100, 24, "make");
     pane.apply_agent_event(neo_agent_core::AgentEvent::ToolExecutionFinished {
         turn: 1,
         id: "bash-1".to_owned(),
@@ -653,7 +580,7 @@ fn every_live_entry_family_is_bounded_and_commits_once() {
         workflow_origin: None,
         output_ref: None,
     });
-    assert_one_canonical_commit(&mut pane, 100, 24);
+    assert_ordered_completed(&mut pane, 100, 24, &["Used Bash", "make", "built"]);
 
     // -- ShellRun: bounded, commits the canonical command result once ------
     let mut pane = TranscriptPane::new(100, 24);
@@ -664,7 +591,7 @@ fn every_live_entry_family_is_bounded_and_commits_once() {
         cwd: "/workspace/neo".into(),
         origin: ShellCommandOrigin::UserShellMode,
     });
-    assert_bounded_live(&mut pane, 100, 24);
+    assert_live(&mut pane, 100, 24, "cargo test");
     pane.transcript_mut().mutate_shell_run("shell-1", |shell| {
         shell.finish(
             "ok".to_owned(),
@@ -675,7 +602,7 @@ fn every_live_entry_family_is_bounded_and_commits_once() {
             false,
         )
     });
-    assert_one_canonical_commit(&mut pane, 100, 24);
+    assert_completed(&mut pane, 100, 24, "cargo test");
 
     // -- Compaction: bounded, commits the typed terminal form once ---------
     let mut pane = TranscriptPane::new(100, 24);
@@ -686,7 +613,7 @@ fn every_live_entry_family_is_bounded_and_commits_once() {
         tokens_before: 100,
         tokens_after: 0,
     });
-    assert_bounded_live(&mut pane, 100, 24);
+    assert_live(&mut pane, 100, 24, "50%");
     pane.transcript_mut().mutate_entry(0, |entry| {
         let TranscriptEntry::Compaction { phase, percent, .. } = entry else {
             return false;
@@ -695,7 +622,7 @@ fn every_live_entry_family_is_bounded_and_commits_once() {
         *percent = 100;
         true
     });
-    assert_one_canonical_commit(&mut pane, 100, 24);
+    assert_completed(&mut pane, 100, 24, "Compaction complete");
 
     // -- RetryStatus: bounded, commits only its canonical terminal form ----
     let mut pane = TranscriptPane::new(100, 24);
@@ -710,7 +637,7 @@ fn every_live_entry_family_is_bounded_and_commits_once() {
             error_code: "rate_limited".to_owned(),
             message: "slow down".to_owned(),
         }));
-    assert_bounded_live(&mut pane, 100, 24);
+    assert_live(&mut pane, 100, 24, "slow down");
     pane.transcript_mut().mutate_entry(0, |entry| {
         let TranscriptEntry::RetryStatus { data } = entry else {
             return false;
@@ -718,7 +645,7 @@ fn every_live_entry_family_is_bounded_and_commits_once() {
         data.phase = RetryPhase::Exhausted;
         true
     });
-    assert_one_canonical_commit(&mut pane, 100, 24);
+    assert_completed(&mut pane, 100, 24, "slow down");
 
     // -- Connecting MCP startup: bounded, commits the settled entry once ----
     let mut pane = TranscriptPane::new(100, 24);
@@ -727,13 +654,13 @@ fn every_live_entry_family_is_bounded_and_commits_once() {
         transport: "stdio".to_owned(),
         phase: McpStartupPhase::Connecting,
     });
-    assert_bounded_live(&mut pane, 100, 24);
+    assert_live(&mut pane, 100, 24, "server");
     pane.upsert_mcp_startup_status(McpStartupStatusData {
         id: "server".to_owned(),
         transport: "stdio".to_owned(),
         phase: McpStartupPhase::Connected { tool_count: 2 },
     });
-    assert_one_canonical_commit(&mut pane, 100, 24);
+    assert_completed(&mut pane, 100, 24, "server");
     assert!(
         !pane.upsert_mcp_startup_status(McpStartupStatusData {
             id: "server".to_owned(),
@@ -762,8 +689,7 @@ fn every_live_entry_family_is_bounded_and_commits_once() {
             workflow_origin: None,
         },
     });
-    assert_bounded_live(&mut pane, 100, 24);
-    assert!(plain_history(&mut pane, 100, 24).is_empty());
+    assert_live(&mut pane, 100, 24, "Run tests?");
     pane.resolve_approval(
         "approval-1",
         &ApprovalResolution::Selected {
@@ -772,7 +698,7 @@ fn every_live_entry_family_is_bounded_and_commits_once() {
             feedback: None,
         },
     );
-    assert_one_canonical_commit(&mut pane, 100, 24);
+    assert_completed(&mut pane, 100, 24, "approval: Allow once");
 
     // -- Pending question: blocking projector ------------------------------
     let mut pane = TranscriptPane::new(100, 24);
@@ -789,10 +715,9 @@ fn every_live_entry_family_is_bounded_and_commits_once() {
             multi_select: false,
         }],
     );
-    assert_bounded_live(&mut pane, 100, 24);
-    assert!(plain_history(&mut pane, 100, 24).is_empty());
+    assert_live(&mut pane, 100, 24, "Continue?");
     pane.resolve_question_prompt("question-1", vec!["Yes".to_owned()]);
-    assert_one_canonical_commit(&mut pane, 100, 24);
+    assert_completed(&mut pane, 100, 24, "question: answered · Yes");
 
     // -- Delegate: one complete card keeps header before child tools -------
     let mut pane = TranscriptPane::new(100, 24);
@@ -800,13 +725,12 @@ fn every_live_entry_family_is_bounded_and_commits_once() {
         1,
         running_agent("agent-a", vec![done_tool("read-1", "Read", "one.rs")]),
     );
-    assert_bounded_live(&mut pane, 100, 24);
-    assert!(plain_history(&mut pane, 100, 24).is_empty());
+    assert_live(&mut pane, 100, 24, "agent-a");
     pane.transcript_mut().upsert_delegate(
         1,
         completed_agent("agent-a", vec![done_tool("read-1", "Read", "one.rs")]),
     );
-    assert_ordered_canonical_commit(&mut pane, 100, 24, &["Delegate", "Used Read"]);
+    assert_ordered_completed(&mut pane, 100, 24, &["Delegate", "Used Read"]);
 
     // -- DelegateGroup: one complete card keeps group before child tools ---
     let mut pane = TranscriptPane::new(100, 24);
@@ -814,13 +738,12 @@ fn every_live_entry_family_is_bounded_and_commits_once() {
         1,
         running_agent("group-a", vec![done_tool("read-a", "Read", "a.rs")]),
     );
-    assert_bounded_live(&mut pane, 100, 24);
-    assert!(plain_history(&mut pane, 100, 24).is_empty());
+    assert_live(&mut pane, 100, 24, "group-a");
     pane.transcript_mut().upsert_delegate(
         1,
         completed_agent("group-a", vec![done_tool("read-a", "Read", "a.rs")]),
     );
-    assert_ordered_canonical_commit(&mut pane, 100, 24, &["Delegate", "Used Read"]);
+    assert_ordered_completed(&mut pane, 100, 24, &["Delegate", "Used Read"]);
 
     // -- DelegateSwarm: one compact terminal card keeps one row per child --
     let mut pane = TranscriptPane::new(100, 24);
@@ -831,8 +754,7 @@ fn every_live_entry_family_is_bounded_and_commits_once() {
             vec![done_tool("read-s", "Read", "s.rs")],
         )],
     ));
-    assert_bounded_live(&mut pane, 100, 24);
-    assert!(plain_history(&mut pane, 100, 24).is_empty());
+    assert_live(&mut pane, 100, 24, "child-a");
     pane.set_tool_output_expanded(true);
     pane.transcript_mut().upsert_delegate_swarm(running_swarm(
         "swarm-1",
@@ -841,20 +763,19 @@ fn every_live_entry_family_is_bounded_and_commits_once() {
             vec![done_tool("read-s", "Read", "s.rs")],
         )],
     ));
-    assert_ordered_canonical_commit(&mut pane, 100, 24, &["DelegateSwarm", "child-a"]);
+    assert_ordered_completed(&mut pane, 100, 24, &["DelegateSwarm", "child-a"]);
 
     // -- Workflow: mutable state stays live until one terminal commit -------
     let mut pane = TranscriptPane::new(100, 24);
     pane.transcript_mut()
         .upsert_workflow(running_workflow("wf-1", 1, "verify"));
-    assert_bounded_live(&mut pane, 100, 24);
-    assert!(plain_history(&mut pane, 100, 24).is_empty());
+    assert_live(&mut pane, 100, 24, "verify");
     let mut completed = running_workflow("wf-1", 9, "verify");
     completed.state = WorkflowState::Completed;
     completed.updated_at_ms = Some(9_000);
     completed.terminal_reason = Some("workflow completed".to_owned());
     pane.transcript_mut().upsert_workflow(completed);
-    assert_one_canonical_commit(&mut pane, 100, 24);
+    assert_completed(&mut pane, 100, 24, "verify");
 }
 
 #[test]
@@ -879,30 +800,31 @@ fn delegate_group_completion_order_keeps_done_rows_in_group() {
         ));
         activity
     };
-    let mut pane = TranscriptPane::new(100, 14);
+    let mut pane = TranscriptPane::new(100, 40);
     pane.transcript_mut()
         .upsert_delegate(1, running_agent("agent-a", tools("A")));
     pane.transcript_mut()
         .upsert_delegate(1, running_agent("agent-b", tools("B")));
     pane.transcript_mut()
         .upsert_delegate(1, running_agent("agent-c", tools("C")));
-    let initial = pane.render_terminal_update(100, 14);
+    let initial = pane.render_visible_slice(100, 40);
     assert!(
-        !initial.live.iter().any(|line| line.contains("more rows")),
-        "initial live group was silently shortened: {:?}",
-        initial.live
-    );
-    assert_eq!(
+        !initial.iter().any(|line| line.contains("more rows")),
+        "initial group was silently shortened: {:?}",
         initial
-            .live
-            .iter()
-            .filter(|line| strip_ansi(line).contains("Used Read"))
-            .count(),
-        3,
-        "live group should show one tool per running child: {:?}",
-        initial.live
     );
-    pane.acknowledge_history(&initial.history);
+    let initial_text = initial
+        .iter()
+        .map(|line| strip_ansi(line))
+        .collect::<Vec<_>>()
+        .join("\n");
+    // The running group keeps every child and their latest activity.
+    assert!(
+        initial_text.contains("agent-a")
+            && initial_text.contains("agent-b")
+            && initial_text.contains("agent-c"),
+        "group keeps every child: {initial_text}"
+    );
 
     pane.transcript_mut()
         .upsert_delegate(1, running_agent("agent-a", tools_with_new_content("A")));
@@ -911,98 +833,66 @@ fn delegate_group_completion_order_keeps_done_rows_in_group() {
 
     let completed_c = completed_agent("agent-c", tools("C"));
     pane.transcript_mut().upsert_delegate(1, completed_c);
-    let c_update = pane.render_terminal_update(100, 14);
-    let c_history = c_update
-        .history
+    let c_slice = pane.render_visible_slice(100, 40);
+    let c_text = c_slice
         .iter()
-        .flat_map(|block| block.lines.iter())
         .map(|line| strip_ansi(line))
         .collect::<Vec<_>>()
         .join("\n");
     assert!(
-        c_history.is_empty(),
-        "completed C must stay in the live group: {c_history}"
-    );
-    assert!(
-        c_update.live.iter().any(|line| {
+        c_slice.iter().any(|line| {
             let line = strip_ansi(line);
             line.contains("agent-c") && line.contains("done")
         }),
-        "completed C lost its mutable status row: {:?}",
-        c_update.live
-    );
-    let c_live = c_update
-        .live
-        .iter()
-        .map(|line| strip_ansi(line))
-        .collect::<Vec<_>>()
-        .join("\n");
-    assert!(
-        c_live.contains("A-6") && c_live.contains("B-6"),
-        "A/B live activity: {c_live}"
+        "completed C lost its status row: {:?}",
+        c_slice
     );
     assert!(
-        c_update
-            .live
+        c_text.contains("A-6") && c_text.contains("B-6"),
+        "A/B live activity: {c_text}"
+    );
+    assert!(
+        c_slice
             .iter()
             .all(|line| !strip_ansi(line).contains("more rows")),
-        "C-first live group was silently shortened: {:?}",
-        c_update.live
+        "C-first group was silently shortened: {:?}",
+        c_slice
     );
-    pane.acknowledge_history(&c_update.history);
 
     pane.transcript_mut()
         .upsert_delegate(1, completed_agent("agent-a", tools_with_new_content("A")));
-    let a_update = pane.render_terminal_update(100, 14);
-    let a_history = a_update
-        .history
-        .iter()
-        .flat_map(|block| block.lines.iter())
-        .map(|line| strip_ansi(line))
-        .collect::<Vec<_>>()
-        .join("\n");
+    let a_slice = pane.render_visible_slice(100, 40);
     assert!(
-        a_history.is_empty(),
-        "completed A must stay in the live group: {a_history}"
+        a_slice
+            .iter()
+            .any(|line| strip_ansi(line).contains("agent-a")),
+        "completed A stays in the group: {:?}",
+        a_slice
     );
-    pane.acknowledge_history(&a_update.history);
 
     pane.transcript_mut()
         .upsert_delegate(1, completed_agent("agent-b", tools_with_new_content("B")));
-    let b_update = pane.render_terminal_update(100, 14);
-    let b_history = b_update
-        .history
+    let b_slice = pane.render_visible_slice(100, 40);
+    let b_text = b_slice
         .iter()
-        .flat_map(|block| block.lines.iter())
         .map(|line| strip_ansi(line))
         .collect::<Vec<_>>()
         .join("\n");
     assert!(
-        b_history.contains("Delegate group")
-            && b_history.contains("Results")
-            && b_history.contains("agent-a")
-            && b_history.contains("agent-b")
-            && b_history.contains("agent-c"),
-        "completed group must commit one status row per child: {b_history}"
+        b_text.contains("Delegate group")
+            && b_text.contains("agent-a")
+            && b_text.contains("agent-b")
+            && b_text.contains("agent-c"),
+        "completed group must keep one row per child: {b_text}"
     );
     assert_eq!(
-        b_history.matches("Delegate group").count(),
+        b_text.matches("Delegate group").count(),
         1,
-        "group summary was duplicated: {b_history}"
-    );
-    assert_eq!(
-        b_history.matches("↳").count(),
-        3,
-        "group history must show one archived activity row per child: {b_history}"
+        "group summary was duplicated: {b_text}"
     );
     assert!(
-        b_history.contains("A-6") && b_history.contains("B-6"),
-        "archived results lost the latest child activity: {b_history}"
-    );
-    assert!(
-        b_update.live.is_empty(),
-        "all children are terminal but the group stayed live: {:?}",
-        b_update.live
+        b_text.contains("A-6") && b_text.contains("B-6"),
+        "archived results lost the latest child activity: {b_text}"
     );
 }
 
@@ -1025,26 +915,36 @@ fn delegate_group_live_status_rows_survive_a_short_viewport() {
             .upsert_delegate(1, running_agent(agent, tools(agent)));
     }
 
-    let update = pane.render_terminal_update(100, 9);
-    let live = update
-        .live
+    let slice = pane
+        .render_visible_slice(100, 9)
         .iter()
         .map(|line| strip_ansi(line))
         .collect::<Vec<_>>();
-    for agent in ["agent-a", "agent-b", "agent-c", "agent-d", "agent-e"] {
-        assert!(
-            live.iter().any(|line| line.contains(agent)),
-            "missing {agent} status row: {live:?}"
-        );
-    }
+    assert!(slice.len() <= 9, "slice must stay bounded: {slice:?}");
+    // Tail follow shows the newest child rows; earlier children stay
+    // reachable by scrolling up.
     assert!(
-        live.iter().all(|line| !line.contains("more rows")),
-        "status rows were replaced by a generic truncation summary: {live:?}"
+        slice.iter().any(|line| line.contains("agent-e")),
+        "missing newest agent status row: {slice:?}"
+    );
+    assert!(
+        slice.iter().all(|line| !line.contains("more rows")),
+        "status rows were replaced by a generic truncation summary: {slice:?}"
+    );
+    pane.scroll_transcript_up(usize::MAX);
+    let top = pane
+        .render_visible_slice(100, 9)
+        .iter()
+        .map(|line| strip_ansi(line))
+        .collect::<Vec<_>>();
+    assert!(
+        top.iter().any(|line| line.contains("agent-a")),
+        "agent-a stays reachable: {top:?}"
     );
 }
 
 #[test]
-fn pending_wait_delegate_is_above_running_group_regardless_of_entry_order() {
+fn pending_wait_delegate_renders_in_entry_order_around_the_running_group() {
     let mut before = TranscriptPane::new(120, 12);
     let agent = running_agent(
         "wait-before",
@@ -1055,9 +955,11 @@ fn pending_wait_delegate_is_above_running_group_regardless_of_entry_order() {
     start_wait_delegate(&mut before, "wait-before-call", &target);
     before.transcript_mut().upsert_delegate(1, agent);
     before.transcript_mut().upsert_delegate(1, other);
-    let before_live = live_text(&mut before, 120, 12);
-    assert_wait_group_order(&before_live);
+    let before_slice = slice_text(&mut before, 120, 12);
+    assert_wait_group_order(&before_slice);
 
+    // Entry order is canonical: when the wait call arrives after the group,
+    // it renders after it.
     let mut after = TranscriptPane::new(120, 12);
     let agent = running_agent(
         "wait-after",
@@ -1068,8 +970,11 @@ fn pending_wait_delegate_is_above_running_group_regardless_of_entry_order() {
     after.transcript_mut().upsert_delegate(1, agent);
     after.transcript_mut().upsert_delegate(1, other);
     start_wait_delegate(&mut after, "wait-after-call", &target);
-    let after_live = live_text(&mut after, 120, 12);
-    assert_wait_group_order(&after_live);
+    let after_slice = slice_text(&mut after, 120, 12);
+    assert!(
+        after_slice.find("Delegate group").unwrap() < after_slice.find("Waiting for").unwrap(),
+        "wait call renders after the group it follows in entry order: {after_slice}"
+    );
 }
 
 #[test]
@@ -1086,10 +991,10 @@ fn pending_wait_delegate_is_above_running_swarm() {
     start_wait_delegate(&mut pane, "wait-swarm-call", &target);
     pane.transcript_mut().upsert_delegate_swarm(swarm);
 
-    let live = live_text(&mut pane, 120, 14);
-    let wait = live.find("Waiting for").expect("wait row missing");
-    let swarm = live.find("DelegateSwarm").expect("swarm header missing");
-    assert!(wait < swarm, "wait must render above swarm: {live}");
+    let slice = slice_text(&mut pane, 120, 14);
+    let wait = slice.find("Waiting for").expect("wait row missing");
+    let swarm = slice.find("DelegateSwarm").expect("swarm header missing");
+    assert!(wait < swarm, "wait must render above swarm: {slice}");
 }
 
 #[test]
@@ -1107,28 +1012,14 @@ fn ended_wait_delegate_does_not_remove_running_group() {
         start_wait_delegate(&mut pane, "wait-ended-call", &target);
         finish_wait_delegate(&mut pane, "wait-ended-call", outcome, is_error);
 
-        let update = pane.render_terminal_update(120, 12);
-        let history = update
-            .history
-            .iter()
-            .flat_map(|block| block.lines.iter())
-            .map(|line| strip_ansi(line))
-            .collect::<Vec<_>>()
-            .join("\n");
-        let live = update
-            .live
-            .iter()
-            .map(|line| strip_ansi(line))
-            .collect::<Vec<_>>()
-            .join("\n");
+        let slice = slice_text(&mut pane, 120, 12);
         assert!(
-            history.contains("Wait timed out") || history.contains("Target not found"),
-            "wait outcome missing for {outcome}: {history}"
+            slice.contains("Wait timed out") || slice.contains("Target not found"),
+            "wait outcome missing for {outcome}: {slice}"
         );
-        assert!(live.contains("Delegate group"), "group disappeared: {live}");
         assert!(
-            !history.contains("Delegate group"),
-            "group moved to history: {history}"
+            slice.contains("Delegate group"),
+            "group disappeared: {slice}"
         );
     }
 }

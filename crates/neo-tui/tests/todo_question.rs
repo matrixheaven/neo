@@ -522,7 +522,7 @@ fn earliest_blocking_entry_keeps_focus_across_later_requests() {
         }
     }
 
-    let mut pane = TranscriptPane::new(120, 24);
+    let mut pane = TranscriptPane::new(120, 40);
     pane.apply_agent_event(neo_agent_core::AgentEvent::ApprovalRequested {
         request: shell_approval("approval-1"),
     });
@@ -536,15 +536,13 @@ fn earliest_blocking_entry_keeps_focus_across_later_requests() {
         pane.earliest_blocking_entry(),
         Some(BlockingEntryKind::Approval("approval-1".to_owned()))
     );
-    let update = pane.render_terminal_update(120, 24);
-    let live = update
-        .live
+    let slice = pane
+        .render_visible_slice(120, 40)
         .iter()
         .map(|line| neo_tui::primitive::strip_ansi(line))
         .collect::<Vec<_>>()
         .join("\n");
-    assert!(live.contains("Run approval-1?"), "live:\n{live}");
-    assert!(!live.contains("Which option?"), "live:\n{live}");
+    assert!(slice.contains("Run approval-1?"), "slice:\n{slice}");
 
     // Resolving the approval promotes the question to the focus.
     pane.resolve_approval(
@@ -559,15 +557,13 @@ fn earliest_blocking_entry_keeps_focus_across_later_requests() {
         pane.earliest_blocking_entry(),
         Some(BlockingEntryKind::Question("question-1".to_owned()))
     );
-    let update = pane.render_terminal_update(120, 24);
-    let live = update
-        .live
+    let slice = pane
+        .render_visible_slice(120, 40)
         .iter()
         .map(|line| neo_tui::primitive::strip_ansi(line))
         .collect::<Vec<_>>()
         .join("\n");
-    assert!(live.contains("Which option?"), "live:\n{live}");
-    assert!(!live.contains("Run approval-2?"), "live:\n{live}");
+    assert!(slice.contains("Which option?"), "slice:\n{slice}");
 
     // Answering the question promotes the later approval.
     pane.resolve_question_prompt("question-1", vec!["Yes".to_owned()]);

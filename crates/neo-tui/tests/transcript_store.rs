@@ -208,20 +208,11 @@ fn plain_rows(store: &TranscriptStore) -> Vec<String> {
         .collect()
 }
 
-fn plain_terminal_update(pane: &mut TranscriptPane) -> (Vec<String>, Vec<String>) {
-    let update = pane.render_terminal_update(80, 20);
-    let history = update
-        .history
-        .into_iter()
-        .flat_map(|block| block.lines)
-        .map(|line| strip_ansi(&line).trim_end().to_owned())
-        .collect();
-    let live = update
-        .live
+fn plain_slice(pane: &mut TranscriptPane) -> Vec<String> {
+    pane.render_visible_slice(80, 20)
         .into_iter()
         .map(|line| strip_ansi(&line).trim_end().to_owned())
-        .collect();
-    (history, live)
+        .collect()
 }
 
 #[test]
@@ -1136,8 +1127,7 @@ fn commentary_and_final_answer_render_as_separate_entries() {
         text: "Checking **the files**".to_owned(),
     });
 
-    let (_, live) = plain_terminal_update(&mut pane);
-    let live = live.join("\n");
+    let live = plain_slice(&mut pane).join("\n");
     assert!(
         live.contains("▸ Checking the files"),
         "commentary live: {live}"
@@ -1163,22 +1153,20 @@ fn commentary_and_final_answer_render_as_separate_entries() {
         text: "The final **answer**".to_owned(),
     });
 
-    let (history, live) = plain_terminal_update(&mut pane);
+    let slice = plain_slice(&mut pane).join("\n");
+    let commentary_offset = slice
+        .find("▸ Checking the files")
+        .expect("commentary remains in the document");
+    let final_offset = slice
+        .find("● The final answer")
+        .expect("final answer remains in the document");
     assert!(
-        history.join("\n").contains("▸ Checking the files"),
-        "commentary committed before final answer: {history:?}"
+        commentary_offset < final_offset,
+        "document order is preserved: {slice}"
     );
     assert!(
-        !history.join("\n").contains("The final"),
-        "final answer remains live: {history:?}"
-    );
-    assert!(
-        live.join("\n").contains("● The final answer"),
-        "final answer uses normal marker: {live:?}"
-    );
-    assert!(
-        !live.join("\n").contains("▸"),
-        "final answer is not commentary: {live:?}"
+        !slice.contains("● Checking"),
+        "commentary uses its own marker: {slice}"
     );
 
     pane.apply_agent_event(neo_agent_core::AgentEvent::MessageFinished {
@@ -1187,21 +1175,16 @@ fn commentary_and_final_answer_render_as_separate_entries() {
         stop_reason: neo_agent_core::StopReason::EndTurn,
         phase: neo_ai::MessagePhase::FinalAnswer,
     });
-    let (history, live) = plain_terminal_update(&mut pane);
-    let history = history.join("\n");
-    assert!(
-        live.is_empty(),
-        "completed messages leave no live rows: {live:?}"
-    );
-    let commentary_offset = history
+    let slice = plain_slice(&mut pane).join("\n");
+    let commentary_offset = slice
         .find("▸ Checking the files")
         .expect("commentary remains in canonical history");
-    let final_offset = history
+    let final_offset = slice
         .find("● The final answer")
         .expect("final answer remains in canonical history");
     assert!(
         commentary_offset < final_offset,
-        "canonical order is preserved: {history}"
+        "canonical order is preserved: {slice}"
     );
     let assistant_text = pane
         .transcript()
@@ -1240,8 +1223,7 @@ fn unknown_message_phase_preserves_legacy_rendering() {
         text: "Legacy answer".to_owned(),
     });
 
-    let (_, live) = plain_terminal_update(&mut pane);
-    let live = live.join("\n");
+    let live = plain_slice(&mut pane).join("\n");
     assert!(
         live.contains("● Legacy answer"),
         "legacy assistant rendering: {live}"
@@ -1432,33 +1414,21 @@ fn delegate_terminal_history_keeps_latest_four_tools_after_activity_trimming() {
     running.tool_count = 6;
     pane.transcript_mut().upsert_delegate(1, running);
 
-    let update = pane.render_terminal_update(100, 24);
-    let history = update
-        .history
-        .iter()
-        .flat_map(|block| block.lines.iter())
-        .map(|line| strip_ansi(line))
-        .collect::<Vec<_>>()
-        .join("\n");
-    let live = update
-        .live
-        .iter()
-        .map(|line| strip_ansi(line))
+    let slice = pane
+        .render_visible_slice(100, 24)
+        .into_iter()
+        .map(|line| strip_ansi(&line))
         .collect::<Vec<_>>()
         .join("\n");
 
-    assert!(
-        history.is_empty(),
-        "running facts entered history:\n{history}"
-    );
-    assert!(!live.contains("Used Read"), "live:\n{live}");
-    assert!(!live.contains("Failed Bash"), "live:\n{live}");
+    assert!(!slice.contains("Used Read"), "slice:\n{slice}");
+    assert!(!slice.contains("Failed Bash"), "slice:\n{slice}");
     for tool in ["Used Grep", "Used Find", "Used Edit", "Used Write"] {
-        assert!(live.contains(tool), "missing {tool}:\n{live}");
+        assert!(slice.contains(tool), "missing {tool}:\n{slice}");
     }
 
-    // A later snapshot trims the completed tools away. The captured facts
-    // were taken at update time and must survive the trimming.
+    // A later snapshot trims the completed tools away. The card re-renders
+    // from the trimmed snapshot inside the same document.
     let mut trimmed = agent_snapshot("delegate-a", AgentLifecycleState::Running);
     trimmed.activity = vec![tool_activity(
         "grep-1",
@@ -1467,13 +1437,19 @@ fn delegate_terminal_history_keeps_latest_four_tools_after_activity_trimming() {
         AgentToolActivityPhase::Ongoing,
     )];
     pane.transcript_mut().upsert_delegate(1, trimmed);
-
-    let after_trim = pane.render_terminal_update(100, 24);
+    let trimmed_slice = pane
+        .render_visible_slice(100, 24)
+        .into_iter()
+        .map(|line| strip_ansi(&line))
+        .collect::<Vec<_>>()
+        .join("\n");
     assert!(
-        after_trim.history.is_empty(),
-        "trimmed running card entered history"
+        trimmed_slice.contains("Using Grep"),
+        "trimmed card shows the surviving activity:\n{trimmed_slice}"
     );
 
+    // The completed card renders the terminal snapshot: the header and the
+    // terminal outcome, with no stale tool rows from earlier snapshots.
     let mut completed = agent_snapshot("delegate-a", AgentLifecycleState::Completed);
     completed.tool_count = 6;
     completed.outcome = Some(AgentTerminalOutcome {
@@ -1481,30 +1457,60 @@ fn delegate_terminal_history_keeps_latest_four_tools_after_activity_trimming() {
         is_error: false,
     });
     pane.transcript_mut().upsert_delegate(1, completed);
-    let terminal = pane.render_terminal_update(100, 24);
-    assert_eq!(terminal.history.len(), 1, "one complete parent card");
-    let history = terminal
-        .history
-        .iter()
-        .flat_map(|block| block.lines.iter())
-        .map(|line| strip_ansi(line))
+    let slice = pane
+        .render_visible_slice(100, 24)
+        .into_iter()
+        .map(|line| strip_ansi(&line))
         .collect::<Vec<_>>()
         .join("\n");
-    let header = history.find("delegate-a").expect("parent header");
-    let grep = history.find("Used Grep").expect("retained Grep fact");
-    let find = history.find("Used Find").expect("retained Find fact");
-    let edit = history.find("Used Edit").expect("retained Edit fact");
-    let write = history.find("Used Write").expect("retained Write fact");
-    let result = history.find("delegate result").expect("terminal result");
-    assert!(!history.contains("Used Read"), "history:\n{history}");
-    assert!(!history.contains("Failed Bash"), "history:\n{history}");
+    let header = slice.find("delegate-a").expect("parent header");
+    let result = slice.find("delegate result").expect("terminal result");
+    assert!(
+        header < result,
+        "header precedes the terminal result:\n{slice}"
+    );
+    assert!(
+        !slice.contains("Used Grep"),
+        "stale activity must not survive into the completed card:\n{slice}"
+    );
+}
+
+#[test]
+fn delegate_completed_card_keeps_latest_four_tools_from_its_snapshot() {
+    let mut pane = TranscriptPane::new(100, 24);
+    let mut completed = agent_snapshot("delegate-a", AgentLifecycleState::Completed);
+    completed.activity = vec![
+        tool_activity("read-1", "Read", "one.rs", AgentToolActivityPhase::Done),
+        tool_activity("bash-1", "Bash", "make", AgentToolActivityPhase::Failed),
+        tool_activity("grep-1", "Grep", "pattern", AgentToolActivityPhase::Done),
+        tool_activity("find-1", "Find", "src", AgentToolActivityPhase::Done),
+        tool_activity("edit-1", "Edit", "two.rs", AgentToolActivityPhase::Done),
+        tool_activity("write-1", "Write", "three.rs", AgentToolActivityPhase::Done),
+    ];
+    completed.tool_count = 6;
+    completed.outcome = Some(AgentTerminalOutcome {
+        summary: "delegate result".to_owned(),
+        is_error: false,
+    });
+    pane.transcript_mut().upsert_delegate(1, completed);
+    let slice = pane
+        .render_visible_slice(100, 24)
+        .into_iter()
+        .map(|line| strip_ansi(&line))
+        .collect::<Vec<_>>()
+        .join("\n");
+    let header = slice.find("delegate-a").expect("parent header");
+    let grep = slice.find("Used Grep").expect("retained Grep fact");
+    let find = slice.find("Used Find").expect("retained Find fact");
+    let edit = slice.find("Used Edit").expect("retained Edit fact");
+    let write = slice.find("Used Write").expect("retained Write fact");
+    let result = slice.find("delegate result").expect("terminal result");
+    assert!(!slice.contains("Used Read"), "slice:\n{slice}");
+    assert!(!slice.contains("Failed Bash"), "slice:\n{slice}");
     assert!(
         header < grep && grep < find && find < edit && edit < write && write < result,
-        "history:\n{history}"
+        "slice:\n{slice}"
     );
-
-    pane.acknowledge_history(&terminal.history);
-    assert!(pane.render_terminal_update(100, 24).history.is_empty());
 }
 
 #[test]
@@ -1520,17 +1526,15 @@ fn delegate_to_group_replacement_preserves_progressive_fact_identity() {
     first.tool_count = 1;
     pane.transcript_mut().upsert_delegate(7, first.clone());
 
-    let update = pane.render_terminal_update(120, 24);
-    let history = update
-        .history
+    let update = pane.render_visible_slice(120, 24);
+    let slice = update
         .iter()
-        .flat_map(|block| block.lines.iter())
         .map(|line| strip_ansi(line))
         .collect::<Vec<_>>()
         .join("\n");
     assert!(
-        history.is_empty(),
-        "running fact entered history:\n{history}"
+        slice.contains("first-agent"),
+        "running group shows first child: {slice}"
     );
 
     // A second root delegate replaces the card with a DelegateGroup in place;
@@ -1542,16 +1546,14 @@ fn delegate_to_group_replacement_preserves_progressive_fact_identity() {
         TranscriptEntry::DelegateGroup { .. }
     ));
 
-    let running = pane.render_terminal_update(120, 24);
-    assert!(running.history.is_empty());
-    let live = running
-        .live
+    let running = pane.render_visible_slice(120, 24);
+    let slice = running
         .iter()
         .map(|line| strip_ansi(line))
         .collect::<Vec<_>>()
         .join("\n");
-    assert!(live.contains("first-agent"), "live:\n{live}");
-    assert!(live.contains("second-agent"), "live:\n{live}");
+    assert!(slice.contains("first-agent"), "slice:\n{slice}");
+    assert!(slice.contains("second-agent"), "slice:\n{slice}");
 
     let mut second_completed = second;
     second_completed.state = AgentLifecycleState::Completed;
@@ -1575,27 +1577,25 @@ fn delegate_to_group_replacement_preserves_progressive_fact_identity() {
         is_error: false,
     });
     pane.transcript_mut().upsert_delegate(7, first_completed);
-    let terminal = pane.render_terminal_update(120, 24);
-    assert_eq!(terminal.history.len(), 1);
-    let history = terminal.history[0]
-        .lines
+    let terminal = pane.render_visible_slice(120, 24);
+    let slice = terminal
         .iter()
         .map(|line| strip_ansi(line))
         .collect::<Vec<_>>()
         .join("\n");
-    let header = history.find("2 agents finished").expect("parent header");
-    let first_agent = history.find("first-agent").expect("first child");
-    let second_agent = history.find("second-agent").expect("second child");
-    let tool = history.find("Used Read").expect("retained tool");
-    let first_result = history.find("first-agent result").expect("first result");
-    let second_result = history.find("second-agent result").expect("second result");
+    let header = slice.find("2 agents finished").expect("parent header");
+    let first_agent = slice.find("first-agent").expect("first child");
+    let second_agent = slice.find("second-agent").expect("second child");
+    let tool = slice.find("Used Read").expect("retained tool");
+    let first_result = slice.find("first-agent result").expect("first result");
+    let second_result = slice.find("second-agent result").expect("second result");
     assert!(
         header < first_agent
             && first_agent < tool
             && tool < first_result
             && first_result < second_agent
             && second_agent < second_result,
-        "history:\n{history}"
+        "slice:\n{slice}"
     );
 }
 
@@ -1615,7 +1615,12 @@ fn delegate_swarm_terminal_block_uses_one_row_per_child() {
         "swarm-a",
         vec![first.clone(), second.clone()],
     ));
-    assert!(pane.render_terminal_update(120, 24).history.is_empty());
+    assert!(
+        pane.render_visible_slice(120, 24)
+            .iter()
+            .any(|line| strip_ansi(line).contains("DelegateSwarm")),
+        "running swarm stays in the document slice"
+    );
 
     second.activity.clear();
     pane.transcript_mut().upsert_delegate_swarm(swarm_snapshot(
@@ -1648,18 +1653,19 @@ fn delegate_swarm_terminal_block_uses_one_row_per_child() {
     pane.transcript_mut()
         .upsert_delegate_swarm(swarm_snapshot("swarm-a", vec![first, second]));
 
-    let terminal = pane.render_terminal_update(120, 24);
-    assert_eq!(terminal.history.len(), 1);
-    let history = terminal.history[0]
-        .lines
+    let terminal = pane.render_visible_slice(120, 24);
+    let slice = terminal
         .iter()
         .map(|line| strip_ansi(line))
         .collect::<Vec<_>>();
-    assert_eq!(history.len(), 3, "history:\n{}", history.join("\n"));
-    assert!(history[0].contains("DelegateSwarm"), "{history:#?}");
-    assert!(history[1].contains("swarm-first"), "{history:#?}");
-    assert!(history[1].contains("swarm first result"), "{history:#?}");
-    assert!(history[2].contains("swarm-second"), "{history:#?}");
-    assert!(history[2].contains("swarm second result"), "{history:#?}");
-    assert!(!history.iter().any(|line| line.contains("Used Bash")));
+    assert!(slice.iter().any(|line| line.contains("DelegateSwarm")));
+    assert!(slice.iter().any(|line| line.contains("swarm-first")));
+    assert!(slice.iter().any(|line| line.contains("swarm first result")));
+    assert!(slice.iter().any(|line| line.contains("swarm-second")));
+    assert!(
+        slice
+            .iter()
+            .any(|line| line.contains("swarm second result"))
+    );
+    assert!(!slice.iter().any(|line| line.contains("Used Bash")));
 }

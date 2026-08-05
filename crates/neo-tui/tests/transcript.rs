@@ -34,27 +34,20 @@ fn strip_ansi(text: &str) -> String {
 }
 
 #[test]
-fn terminal_update_leaves_canonical_snapshot_to_render_frame() {
+fn visible_slice_and_snapshot_render_the_same_document() {
     let mut pane = TranscriptPane::new(80, 6);
-    pane.set_live_chrome_height(0);
     let status_lines = (0..12)
         .map(|index| format!("status line {index:02}"))
         .collect::<Vec<_>>()
         .join("\n");
     pane.push_status(status_lines);
 
-    let update = pane.render_terminal_update(80, 6);
-    let terminal_history = update
-        .history
-        .iter()
-        .flat_map(|block| block.lines.iter())
-        .cloned()
-        .collect::<Vec<_>>()
-        .join("\n");
-    let terminal_history = strip_ansi(&terminal_history);
-    assert!(terminal_history.contains("status line 00"));
-    assert!(terminal_history.contains("status line 11"));
-    assert!(pane.frame_ansi_lines().is_empty());
+    // The bounded slice follows the tail; the full snapshot composes the
+    // entire document. Both come from the same document geometry.
+    let slice = pane.render_visible_slice(80, 6).join("\n");
+    let slice = strip_ansi(&slice);
+    assert!(slice.contains("status line 11"), "slice:\n{slice}");
+    assert!(!slice.contains("status line 00"), "slice:\n{slice}");
 
     pane.mark_dirty();
     let _ = pane.render_frame(80, 6).expect("snapshot render");
@@ -65,25 +58,17 @@ fn terminal_update_leaves_canonical_snapshot_to_render_frame() {
 }
 
 #[test]
-fn terminal_update_does_not_replay_committed_history() {
+fn visible_slice_renders_committed_content_every_frame() {
     let mut pane = TranscriptPane::new(80, 6);
-    pane.set_live_chrome_height(0);
     pane.push_status("committed status");
 
-    let first = pane.render_terminal_update(80, 6);
-    let first_history = first
-        .history
-        .iter()
-        .flat_map(|block| block.lines.iter())
-        .cloned()
-        .collect::<Vec<_>>()
-        .join("\n");
-    assert!(strip_ansi(&first_history).contains("committed status"));
+    let first = pane.render_visible_slice(80, 6).join("\n");
+    assert!(strip_ansi(&first).contains("committed status"));
 
-    pane.acknowledge_history(&first.history);
-    let second = pane.render_terminal_update(80, 6);
-    assert!(second.history.is_empty());
-    assert!(!strip_ansi(&second.live.join("\n")).contains("committed status"));
+    // The fullscreen document owns the content: every frame re-renders the
+    // same bounded slice with no history acknowledgement between frames.
+    let second = pane.render_visible_slice(80, 6).join("\n");
+    assert!(strip_ansi(&second).contains("committed status"));
 }
 
 // ── Instruction epoch card (path-scoped AGENTS.md instructions) ─────────────
