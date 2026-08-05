@@ -127,6 +127,8 @@ pub struct DragUpdate {
 pub struct DocumentSelection {
     anchor: Option<DocumentPoint>,
     active: Option<DocumentPoint>,
+    /// Inclusive entry identities selected by keyboard actions.
+    keyboard_entries: Option<(TranscriptEntryId, TranscriptEntryId)>,
     /// Threshold crossed: the gesture is a drag, not a click.
     dragging: bool,
     /// A double-click established a word selection on the current press;
@@ -156,6 +158,7 @@ impl DocumentSelection {
         Self {
             anchor: None,
             active: None,
+            keyboard_entries: None,
             dragging: false,
             word_selected: false,
             press_row: 0,
@@ -225,6 +228,7 @@ impl DocumentSelection {
             });
         self.anchor = Some(point);
         self.active = Some(point);
+        self.keyboard_entries = None;
         self.dragging = false;
         self.word_selected = false;
         self.auto_scroll = None;
@@ -279,19 +283,26 @@ impl DocumentSelection {
     pub fn set_word_selection(&mut self, start: DocumentPoint, end: DocumentPoint) {
         self.anchor = Some(start);
         self.active = Some(end);
+        self.keyboard_entries = None;
         self.word_selected = true;
         self.dragging = false;
         self.auto_scroll = None;
     }
 
-    /// Start a keyboard-driven selection at `point` (no mouse gesture).
-    pub fn start_keyboard_selection(&mut self, point: DocumentPoint) {
-        self.anchor = Some(point);
-        self.active = Some(point);
+    /// Select an inclusive range of complete transcript entries by keyboard.
+    pub fn set_keyboard_entry_selection(&mut self, start: DocumentPoint, end: DocumentPoint) {
+        self.anchor = Some(start);
+        self.active = Some(end);
+        self.keyboard_entries = Some((start.entry_id, end.entry_id));
         self.dragging = false;
         self.word_selected = false;
         self.auto_scroll = None;
         self.materialized = None;
+    }
+
+    #[must_use]
+    pub const fn keyboard_entries(&self) -> Option<(TranscriptEntryId, TranscriptEntryId)> {
+        self.keyboard_entries
     }
 
     /// Move the active endpoint (keyboard extension). The anchor stays fixed.
@@ -320,6 +331,7 @@ impl DocumentSelection {
     pub fn clear(&mut self) {
         self.anchor = None;
         self.active = None;
+        self.keyboard_entries = None;
         self.dragging = false;
         self.word_selected = false;
         self.auto_scroll = None;

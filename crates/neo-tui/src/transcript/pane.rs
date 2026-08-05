@@ -662,10 +662,26 @@ impl TranscriptPane {
 
     pub fn select_visible_transcript_entry(&mut self) {
         self.ensure_layout_current();
-        let range = self.document.visible_row_range(self.body_height);
-        if let Some(point) = self.document.point_at(range.start, 0) {
-            self.selection.start_keyboard_selection(point);
-        }
+        let height = self.body_height.max(self.height);
+        let range = self.document.visible_row_range(height);
+        let Some(index) = self
+            .document
+            .layouts()
+            .iter()
+            .enumerate()
+            .rev()
+            .find(|(index, layout)| {
+                self.document
+                    .block_height(*index)
+                    .is_some_and(|rows| rows > 0)
+                    && layout.start_row < range.end
+                    && layout.start_row + layout.height > range.start
+            })
+            .map(|(index, _)| index)
+        else {
+            return;
+        };
+        self.set_keyboard_entry_selection(index, index);
     }
 
     pub fn clear_transcript_selection(&mut self) {
@@ -674,40 +690,74 @@ impl TranscriptPane {
 
     pub fn extend_transcript_selection_up(&mut self, rows: usize) {
         self.ensure_layout_current();
-        if !self.selection.has_anchor() {
+        if self.selection.keyboard_entries().is_none() {
             self.select_visible_transcript_entry();
         }
-        let Some(active) = self.selection.active() else {
+        let Some((start_id, end_id)) = self.selection.keyboard_entries() else {
             return;
         };
-        let Some(active_row) = self.document.row_of(active) else {
+        let Some((start, end)) = self.keyboard_entry_indices(start_id, end_id) else {
             return;
         };
-        if let Some(point) = self
-            .document
-            .point_at(active_row.saturating_sub(rows), active.display_cell)
-        {
-            self.selection.extend_to(point);
-        }
+        self.set_keyboard_entry_selection(start.saturating_sub(rows), end);
     }
 
     pub fn extend_transcript_selection_down(&mut self, rows: usize) {
         self.ensure_layout_current();
-        if !self.selection.has_anchor() {
+        if self.selection.keyboard_entries().is_none() {
             self.select_visible_transcript_entry();
         }
-        let Some(active) = self.selection.active() else {
+        let Some((start_id, end_id)) = self.selection.keyboard_entries() else {
             return;
         };
-        let Some(active_row) = self.document.row_of(active) else {
+        let Some((start, end)) = self.keyboard_entry_indices(start_id, end_id) else {
             return;
         };
-        let target = active_row
-            .saturating_add(rows)
-            .min(self.document.total_rows().saturating_sub(1));
-        if let Some(point) = self.document.point_at(target, active.display_cell) {
-            self.selection.extend_to(point);
+        let last = self.document.layouts().len().saturating_sub(1);
+        self.set_keyboard_entry_selection(start, end.saturating_add(rows).min(last));
+    }
+
+    fn keyboard_entry_indices(
+        &self,
+        start_id: TranscriptEntryId,
+        end_id: TranscriptEntryId,
+    ) -> Option<(usize, usize)> {
+        let layouts = self.document.layouts();
+        let start = layouts
+            .iter()
+            .position(|layout| layout.entry_id == start_id)?;
+        let end = layouts
+            .iter()
+            .position(|layout| layout.entry_id == end_id)?;
+        Some((start.min(end), start.max(end)))
+    }
+
+    fn set_keyboard_entry_selection(&mut self, start: usize, end: usize) {
+        let layouts = self.document.layouts();
+        let start = start.min(layouts.len().saturating_sub(1));
+        let end = end.min(layouts.len().saturating_sub(1));
+        if !self
+            .document
+            .block_height(start)
+            .is_some_and(|height| height > 0)
+        {
+            return;
         }
+        let Some(end_height) = self.document.block_height(end).filter(|height| *height > 0) else {
+            return;
+        };
+        self.selection.set_keyboard_entry_selection(
+            DocumentPoint {
+                entry_id: layouts[start].entry_id,
+                row_in_entry: 0,
+                display_cell: 0,
+            },
+            DocumentPoint {
+                entry_id: layouts[end].entry_id,
+                row_in_entry: end_height - 1,
+                display_cell: usize::MAX,
+            },
+        );
     }
 
     #[must_use]
@@ -883,6 +933,20 @@ impl TranscriptPane {
     /// the current document revision, clamping vanished endpoints.
     fn materialize_selection(&mut self) -> Option<String> {
         self.ensure_layout_current();
+        if let Some((start_id, end_id)) = self.selection.keyboard_entries() {
+            let (start, end) = self.keyboard_entry_indices(start_id, end_id)?;
+            let mut text = String::new();
+            for (offset, entry) in self.transcript.entries()[start..=end].iter().enumerate() {
+                if offset > 0 {
+                    text.push_str("\n\n");
+                }
+                let (label, content) = entry.copy_parts();
+                text.push_str(label);
+                text.push('\n');
+                text.push_str(&content);
+            }
+            return Some(text);
+        }
         let (anchor, active) = (self.selection.anchor()?, self.selection.active()?);
         let anchor = self.clamp_point(anchor)?;
         let active = self.clamp_point(active)?;
