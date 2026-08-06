@@ -528,3 +528,9 @@ Entries are workspace records, not authoritative runtime decisions.
 | 2026-08-07 | artifact | docs/aegis/work/2026-07-22-acp-research/resume-state-hint.json | resume-state-hint from 2026-07-22-acp-research |
 | 2026-08-07 | artifact | docs/aegis/work/2026-07-22-acp-research/task-intent-draft.json | task-intent-draft from 2026-07-22-acp-research |
 | 2026-08-07 | artifact | docs/aegis/work/2026-07-22-acp-research/todo-checkpoint-draft.json | todo-checkpoint-draft from 2026-07-22-acp-research |
+| 2026-08-07 | spec | docs/aegis/specs/2026-08-07-tui-mouse-text-selection-design.md | TUI Mouse Text Selection Design |
+| 2026-08-07 | artifact | docs/aegis/work/2026-08-07-tui-mouse-text-selection/resume-state-hint.json | 2026-08-07-tui-mouse-text-selection resume state hint |
+| 2026-08-07 | work | docs/aegis/work/2026-08-07-tui-mouse-text-selection/10-intent.md | TUI mouse text selection intent |
+| 2026-08-07 | work | docs/aegis/work/2026-08-07-tui-mouse-text-selection/20-checkpoint.md | TUI mouse text selection checkpoint |
+| 2026-08-07 | work | docs/aegis/work/2026-08-07-tui-mouse-text-selection/90-evidence.md | TUI mouse text selection evidence |
+| 2026-08-07 | work | docs/aegis/work/2026-08-07-tui-mouse-text-selection/99-reflection.md | TUI mouse text selection reflection |
