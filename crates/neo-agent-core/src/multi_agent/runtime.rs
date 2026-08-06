@@ -1813,6 +1813,10 @@ impl ChildRuntimeDeps {
         model: Arc<dyn ModelClient>,
         tools: Arc<ToolRegistry>,
     ) -> Self {
+        // Child tool events must stay on the child's emitter. Inheriting the
+        // parent's session route lets a nested child overwrite the parent's
+        // live Delegate projection route.
+        config.workflow_dispatch_resolver = Default::default();
         if let Ok(mode) = config.live_permission_mode.read().map(|guard| *guard) {
             config.permission_mode = mode;
         }
@@ -3961,6 +3965,34 @@ const _: fn() = || {
 mod tests {
     use super::*;
     use crate::ToolResult;
+
+    #[test]
+    fn child_runtime_does_not_inherit_parent_event_route() {
+        let session = tempfile::tempdir().expect("session");
+        let resolver = crate::runtime::WorkflowDispatchResolver::default();
+        let mut config = AgentConfig::for_model(neo_ai::ModelSpec {
+            provider: neo_ai::ProviderId("test".to_owned()),
+            model: "test-model".to_owned(),
+            api: neo_ai::ApiKind::OpenAi,
+            capabilities: neo_ai::ModelCapabilities::default(),
+        })
+        .with_session_directory(session.path().to_path_buf())
+        .with_workflow_dispatch_resolver(resolver);
+
+        let deps = ChildRuntimeDeps::new(
+            config,
+            Arc::new(neo_ai::providers::fake::FakeModelClient::default()),
+            Arc::new(ToolRegistry::new()),
+        );
+
+        assert!(
+            deps.config
+                .workflow_dispatch_resolver
+                .event_callback(Some(session.path()))
+                .is_none(),
+            "child runtime must use its own event emitter"
+        );
+    }
 
     #[test]
     fn structured_child_prompt_requires_json_only_output() {
