@@ -211,6 +211,10 @@ impl InteractiveController {
                         .apply_stream_update(StreamUpdate::Error {
                             text: error.to_string(),
                         });
+                    self.tui
+                        .chrome_mut()
+                        .pending_input_mut()
+                        .move_pending_steers_to_follow_ups();
                     frame_request = frame_request.merge(FrameRequest::Coalesced);
                 }
             }

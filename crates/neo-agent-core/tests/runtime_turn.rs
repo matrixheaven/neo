@@ -8957,8 +8957,13 @@ async fn runtime_drains_live_steer_input_at_step_boundary() {
         })
         .collect::<Vec<_>>();
     assert!(appended.contains(&AgentMessage::user_text("live steer")));
-    // The handle is drained after the turn.
+    // The handle is drained and closed after the turn.
     assert_eq!(steer_input.pending(), 0);
+    assert!(
+        !steer_input.try_push(neo_agent_core::ActiveTurnInput::SteerNow(
+            AgentMessage::user_text("too late"),
+        ))
+    );
 }
 
 #[tokio::test]

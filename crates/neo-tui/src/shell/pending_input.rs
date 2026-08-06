@@ -58,6 +58,16 @@ impl PendingInputState {
         self.optimistic_steer_acks.push_back(text);
     }
 
+    /// Preserve steers that missed the closing turn as follow-ups for the next one.
+    pub fn move_pending_steers_to_follow_ups(&mut self) {
+        if self.pending_steers.is_empty() {
+            return;
+        }
+        self.pending_steers.append(&mut self.queued_follow_ups);
+        self.queued_follow_ups = std::mem::take(&mut self.pending_steers);
+        self.optimistic_steer_acks.clear();
+    }
+
     /// Reclassify the oldest visible follow-up as a steer, mirroring the
     /// runtime promotion that will be acknowledged by queue events later.
     pub fn promote_oldest_follow_up_to_steer_optimistic(&mut self) -> Option<String> {
@@ -206,6 +216,26 @@ mod tests {
 
         state.drain(neo_agent_core::QueueKind::FollowUp, 1);
         assert!(state.is_empty());
+    }
+
+    #[test]
+    fn closing_turn_moves_unconsumed_steers_before_follow_ups() {
+        let mut state = PendingInputState::new();
+        state.queue_steer_optimistic("steer one");
+        state.queue_steer_optimistic("steer two");
+        state.queue_follow_up("follow up");
+
+        state.move_pending_steers_to_follow_ups();
+
+        assert!(state.pending_steers().is_empty());
+        assert_eq!(
+            state
+                .queued_follow_ups()
+                .iter()
+                .map(String::as_str)
+                .collect::<Vec<_>>(),
+            vec!["steer one", "steer two", "follow up"]
+        );
     }
 
     #[test]

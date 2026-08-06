@@ -15382,6 +15382,93 @@ async fn active_turn_enter_enqueues_follow_up_instead_of_rejecting() {
     );
 }
 
+async fn controller_with_closed_active_input() -> InteractiveController {
+    let captured_steer = Arc::new(std::sync::Mutex::new(
+        neo_agent_core::SteerInputHandle::new(),
+    ));
+    let observed_steer = Arc::clone(&captured_steer);
+    let run_turn: TurnDriver = Arc::new(move |_request, channels| {
+        *observed_steer.lock().expect("steer lock") = channels.steer_input.clone();
+        Box::pin(async move {
+            channels.cancel_token.cancelled().await;
+            Ok(TurnOutcome::default())
+        })
+    });
+    let mut controller = InteractiveController::new(
+        "neo",
+        "test-session",
+        "openai/gpt-4.1",
+        test_workspace_root(),
+        PickerCatalogs::default(),
+        ControllerCallbacks {
+            run_turn,
+            load_session: Arc::new(|session_id| Box::pin(empty_session_loader(session_id))),
+            fork_session: Arc::new(|session_id| Box::pin(empty_session_forker(session_id))),
+        },
+    );
+    controller.type_text("first prompt");
+    controller
+        .handle_input_event(InputEvent::Submit)
+        .await
+        .expect("first prompt starts turn");
+    assert!(
+        captured_steer.lock().expect("steer lock").close_if_empty(),
+        "test turn should close with no pending input"
+    );
+    controller
+}
+
+#[tokio::test]
+async fn enter_after_live_input_closes_becomes_next_follow_up() {
+    let mut controller = controller_with_closed_active_input().await;
+    controller.type_text("next prompt");
+    controller
+        .handle_input_event(InputEvent::Submit)
+        .await
+        .expect("closed turn should preserve follow-up");
+
+    assert_eq!(
+        controller
+            .chrome()
+            .pending_input()
+            .queued_follow_ups()
+            .iter()
+            .map(String::as_str)
+            .collect::<Vec<_>>(),
+        vec!["next prompt"]
+    );
+    controller.cancel_active_turn().await.expect("cancel turn");
+}
+
+#[tokio::test]
+async fn steer_after_live_input_closes_becomes_next_follow_up() {
+    let mut controller = controller_with_closed_active_input().await;
+    controller.type_text("late steer");
+    controller
+        .handle_input_event(InputEvent::Key(KeyId::new("ctrl+s").expect("valid key")))
+        .await
+        .expect("closed turn should preserve steer");
+
+    assert!(
+        controller
+            .chrome()
+            .pending_input()
+            .pending_steers()
+            .is_empty()
+    );
+    assert_eq!(
+        controller
+            .chrome()
+            .pending_input()
+            .queued_follow_ups()
+            .iter()
+            .map(String::as_str)
+            .collect::<Vec<_>>(),
+        vec!["late steer"]
+    );
+    controller.cancel_active_turn().await.expect("cancel turn");
+}
+
 #[tokio::test]
 async fn mcp_startup_queues_prompt_then_starts_it_when_settled() {
     let run_turn: TurnDriver = Arc::new(|_request, channels| {

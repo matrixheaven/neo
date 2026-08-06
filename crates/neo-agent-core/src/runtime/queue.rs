@@ -208,9 +208,32 @@ fn state_label(state: WorkflowState) -> &'static str {
 /// Created by the controller before a turn starts, threaded into the
 /// [`AgentRuntime`], and drained at each step boundary by `run_agent_turn`.
 /// Both the controller and the runtime share the same cell.
-#[derive(Debug, Clone, Default)]
+#[derive(Debug)]
+struct SteerInputState {
+    open: bool,
+    queue: VecDeque<ActiveTurnInput>,
+}
+
+impl SteerInputState {
+    fn new() -> Self {
+        Self {
+            open: true,
+            queue: VecDeque::new(),
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
 pub struct SteerInputHandle {
-    inner: Arc<Mutex<VecDeque<ActiveTurnInput>>>,
+    inner: Arc<Mutex<SteerInputState>>,
+}
+
+impl Default for SteerInputHandle {
+    fn default() -> Self {
+        Self {
+            inner: Arc::new(Mutex::new(SteerInputState::new())),
+        }
+    }
 }
 
 impl SteerInputHandle {
@@ -225,10 +248,13 @@ impl SteerInputHandle {
     /// otherwise unavailable queues report failure instead of silently dropping.
     #[must_use]
     pub fn try_push(&self, input: ActiveTurnInput) -> bool {
-        let Ok(mut queue) = self.inner.lock() else {
+        let Ok(mut state) = self.inner.lock() else {
             return false;
         };
-        queue.push_back(input);
+        if !state.open {
+            return false;
+        }
+        state.queue.push_back(input);
         true
     }
 
@@ -241,8 +267,30 @@ impl SteerInputHandle {
     fn drain(&self) -> Vec<ActiveTurnInput> {
         self.inner
             .lock()
-            .map(|mut queue| queue.drain(..).collect())
+            .map(|mut state| state.queue.drain(..).collect())
             .unwrap_or_default()
+    }
+
+    /// Close the live queue only when no input is waiting.
+    ///
+    /// A failed close means an input won the race and must be drained before
+    /// the runtime can finish the turn.
+    #[must_use]
+    pub fn close_if_empty(&self) -> bool {
+        let Ok(mut state) = self.inner.lock() else {
+            return true;
+        };
+        if !state.queue.is_empty() {
+            return false;
+        }
+        state.open = false;
+        true
+    }
+
+    pub(super) fn close(&self) {
+        if let Ok(mut state) = self.inner.lock() {
+            state.open = false;
+        }
     }
 
     /// Number of pending live inputs (for UI status).
@@ -250,8 +298,32 @@ impl SteerInputHandle {
     pub fn pending(&self) -> usize {
         self.inner
             .lock()
-            .map(|queue| queue.len())
+            .map(|state| state.queue.len())
             .unwrap_or_default()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{ActiveTurnInput, SteerInputHandle};
+    use crate::AgentMessage;
+
+    #[test]
+    fn steer_input_closes_only_after_pending_input_is_drained() {
+        let handle = SteerInputHandle::new();
+        assert!(
+            handle.try_push(ActiveTurnInput::SteerNow(AgentMessage::user_text(
+                "race input",
+            )))
+        );
+        assert!(!handle.close_if_empty());
+        assert_eq!(handle.drain().len(), 1);
+        assert!(handle.close_if_empty());
+        assert!(
+            !handle.try_push(ActiveTurnInput::SteerNow(AgentMessage::user_text(
+                "next turn",
+            )))
+        );
     }
 }
 

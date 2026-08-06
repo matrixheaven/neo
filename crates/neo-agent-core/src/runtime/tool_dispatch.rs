@@ -1576,7 +1576,7 @@ async fn execute_one_authorized_tool(
             tool_call.id.to_string(),
             tool_call.name.to_string(),
         ))
-        .with_tool_event(make_tool_event_callback(sink.clone()));
+        .with_tool_event(routed_tool_event_callback(config, sink.clone()));
     if uses_shell_admission(tool_call.name.as_ref(), arguments.as_ref()) {
         let workspace_root = context.workspace_root().to_path_buf();
         context = context.with_shell_admission_callback(make_shell_admission_callback(
@@ -1906,7 +1906,7 @@ async fn execute_authorized_parallel(
                     tool_call.id.to_string(),
                     tool_call.name.to_string(),
                 ))
-                .with_tool_event(make_tool_event_callback(sink.clone()));
+                .with_tool_event(routed_tool_event_callback(&config, sink.clone()));
             if uses_admission {
                 let workspace_root = tool_context.workspace_root().to_path_buf();
                 tool_context =
@@ -1976,6 +1976,16 @@ async fn execute_authorized_parallel(
             .collect(),
         executed_any,
     ))
+}
+
+fn routed_tool_event_callback(
+    config: &AgentConfig,
+    sink: EventSink,
+) -> crate::tools::ToolEventCallback {
+    config
+        .workflow_dispatch_resolver
+        .event_callback(config.session_directory.as_deref())
+        .unwrap_or_else(|| make_tool_event_callback(sink))
 }
 
 async fn parallel_terminal_result(
@@ -2252,11 +2262,12 @@ mod tests {
 
     use super::{
         EventEmitter, PreparedExecution, ToolExecutionDeps, execute_tool_calls, prepare_edit_calls,
-        prepare_tool_calls_for_execution, prepare_write_calls, run_tool_with_cancel,
-        skill_batch_isolation_violation, stamp_workflow_origin,
+        prepare_tool_calls_for_execution, prepare_write_calls, routed_tool_event_callback,
+        run_tool_with_cancel, skill_batch_isolation_violation, stamp_workflow_origin,
     };
     use crate::harness::fake_model;
     use crate::runtime::config::{AgentConfig, ToolExecutionMode};
+    use crate::runtime::events::EventSink;
     use crate::tools::{
         ShellAdmissionClass, ShellAdmissionRequest, ShellLimits, ShellRuntime, Tool, ToolContext,
         ToolError, ToolFuture, ToolRegistry,
@@ -2346,6 +2357,54 @@ mod tests {
                 workflow_origin: None,
             },
         ]
+    }
+
+    #[tokio::test]
+    async fn routed_tool_event_callback_does_not_retain_active_sender() {
+        let session = tempfile::tempdir().expect("session");
+        let resolver = crate::runtime::WorkflowDispatchResolver::default();
+        let idle_events = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let captured_idle = Arc::clone(&idle_events);
+        let _idle_lease = resolver
+            .lease_idle_event_route(
+                Some(session.path()),
+                Arc::new(move |event| captured_idle.lock().expect("idle events").push(event)),
+            )
+            .expect("idle route");
+        let (sender, mut receiver) = tokio::sync::mpsc::unbounded_channel();
+        let (producer_lease, drain_lease) = resolver
+            .lease_event_route(
+                Some(session.path()),
+                1,
+                crate::runtime::events::make_tool_event_callback(EventSink {
+                    sender: sender.clone(),
+                }),
+            )
+            .expect("active route");
+        let config = AgentConfig::for_model(fake_model())
+            .with_session_directory(session.path())
+            .with_workflow_dispatch_resolver(resolver);
+        let callback = routed_tool_event_callback(
+            &config,
+            EventSink {
+                sender: sender.clone(),
+            },
+        );
+
+        drop(sender);
+        drop(producer_lease);
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_secs(1), receiver.recv())
+                .await
+                .expect("active event receiver must close")
+                .is_none(),
+            "the routed callback must not retain the active sender"
+        );
+
+        callback(AgentEvent::RunStarted { turn: 2 });
+        assert!(idle_events.lock().expect("idle events").is_empty());
+        drop(drain_lease);
+        assert_eq!(idle_events.lock().expect("idle events").len(), 1);
     }
 
     fn workflow_origin_of(event: &AgentEvent) -> Option<&crate::workflow::WorkflowExecutionOrigin> {

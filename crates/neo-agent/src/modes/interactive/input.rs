@@ -1513,10 +1513,18 @@ impl InteractiveController {
     }
 
     fn dequeue_follow_up_into_prompt_for_edit(&mut self) {
-        let has_active_turn = self.active_turn.is_some();
+        let steer_input = self
+            .active_turn
+            .as_ref()
+            .map(|turn| turn.steer_input.clone());
+        if steer_input.as_ref().is_some_and(|handle| {
+            !handle.try_push(neo_agent_core::ActiveTurnInput::DequeueFollowUpForEdit)
+        }) {
+            return;
+        }
         let text = {
             let pending_input = self.tui.chrome_mut().pending_input_mut();
-            if has_active_turn {
+            if steer_input.is_some() {
                 pending_input.dequeue_oldest_follow_up_for_edit_optimistic()
             } else {
                 pending_input.dequeue_oldest_follow_up_for_edit()
@@ -1525,10 +1533,6 @@ impl InteractiveController {
         let Some(text) = text else {
             return;
         };
-        if let Some(turn) = &self.active_turn {
-            turn.steer_input
-                .push(neo_agent_core::ActiveTurnInput::DequeueFollowUpForEdit);
-        }
         self.tui.chrome_mut().exit_shell_mode();
         let prompt = self.tui.chrome_mut().prompt_mut();
         if prompt.text.is_empty() {

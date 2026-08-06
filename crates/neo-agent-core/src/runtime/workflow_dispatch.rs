@@ -441,6 +441,26 @@ impl WorkflowDispatchResolver {
         })
     }
 
+    /// Return a session-routed event callback without retaining the active turn sender.
+    ///
+    /// Active-turn events still reach the current stream. Once that turn ends,
+    /// the same callback queues through the drain boundary and then uses the
+    /// session's idle route.
+    pub(crate) fn event_callback(
+        &self,
+        session_directory: Option<&Path>,
+    ) -> Option<ToolEventCallback> {
+        let session = WorkflowDispatchSessionKey::from_directory(session_directory);
+        let has_route = self.state.read().ok().is_some_and(|state| {
+            state.event_routes.contains_key(&session)
+                || state.idle_event_routes.contains_key(&session)
+        });
+        has_route.then(|| {
+            let resolver = self.clone();
+            Arc::new(move |event| resolver.dispatch_event(&session, event)) as ToolEventCallback
+        })
+    }
+
     /// Register the live approval transport for one workflow session.
     ///
     /// # Errors

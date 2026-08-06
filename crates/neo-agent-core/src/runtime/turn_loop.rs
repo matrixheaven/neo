@@ -221,6 +221,14 @@ pub(super) struct AgentTurnRuntime {
     pub process_supervisor: ProcessSupervisor,
 }
 
+struct SteerInputCloseGuard(SteerInputHandle);
+
+impl Drop for SteerInputCloseGuard {
+    fn drop(&mut self) {
+        self.0.close();
+    }
+}
+
 enum ModelTurnOutcome {
     Assistant {
         turn: u32,
@@ -303,6 +311,7 @@ pub(super) async fn run_agent_turn(
         cancel_token,
         process_supervisor,
     } = runtime;
+    let _steer_input_close_guard = SteerInputCloseGuard(steer_input.clone());
     let mut final_turn: u32;
     let mut final_stop_reason = StopReason::EndTurn;
     let mut pending_compaction_debt: Option<DeferredCompaction> = None;
@@ -310,7 +319,7 @@ pub(super) async fn run_agent_turn(
     let mut pending_messages = drain_steering_queue(&config, emitter);
     let mut pending_is_follow_up = false;
 
-    loop {
+    'agent: loop {
         if !pending_messages.is_empty() {
             let has_user_message = pending_messages.iter().any(
                 |message| matches!(message, AgentMessage::User { origin, .. } if origin.is_user()),
@@ -353,15 +362,19 @@ pub(super) async fn run_agent_turn(
             ..
         }) = assistant.clone()
         else {
-            drain_live_steer_input(&steer_input, emitter);
-            if let Some((messages, is_follow_up)) =
-                next_pending_after_assistant(&config, emitter, goal_manager.as_deref())
-            {
-                pending_messages = messages;
-                pending_is_follow_up = is_follow_up;
-                continue;
+            loop {
+                drain_live_steer_input(&steer_input, emitter);
+                if let Some((messages, is_follow_up)) =
+                    next_pending_after_assistant(&config, emitter, goal_manager.as_deref())
+                {
+                    pending_messages = messages;
+                    pending_is_follow_up = is_follow_up;
+                    continue 'agent;
+                }
+                if steer_input.close_if_empty() {
+                    break 'agent;
+                }
             }
-            break;
         };
         let tool_calls = model_tool_calls.clone();
         if tool_calls.is_empty() {
@@ -502,6 +515,7 @@ pub(super) async fn run_agent_turn(
         pending_messages = drain_steering_queue(&config, emitter);
     }
 
+    steer_input.close();
     process_supervisor.cleanup_all().await;
     emit_run_finished(&config, emitter, final_turn, final_stop_reason).await;
     Ok(())

@@ -2130,12 +2130,20 @@ impl InteractiveController {
                 .queue_follow_up(display_text);
             return;
         };
-        self.tui
-            .chrome_mut()
-            .pending_input_mut()
-            .queue_follow_up_optimistic(display_text);
-        turn.steer_input
-            .push(neo_agent_core::ActiveTurnInput::FollowUp(message));
+        if turn
+            .steer_input
+            .try_push(neo_agent_core::ActiveTurnInput::FollowUp(message))
+        {
+            self.tui
+                .chrome_mut()
+                .pending_input_mut()
+                .queue_follow_up_optimistic(display_text);
+        } else {
+            self.tui
+                .chrome_mut()
+                .pending_input_mut()
+                .queue_follow_up(prompt.to_owned());
+        }
     }
 
     fn queue_prompt_until_mcp_startup_finishes(&mut self, prompt: &str) {
@@ -2175,14 +2183,19 @@ impl InteractiveController {
             return self.submit_current_prompt().await;
         };
         let steer_input = turn.steer_input.clone();
-        if self
+        if !self
             .tui
-            .chrome_mut()
-            .pending_input_mut()
-            .promote_oldest_follow_up_to_steer_optimistic()
-            .is_some()
+            .chrome()
+            .pending_input()
+            .queued_follow_ups()
+            .is_empty()
         {
-            steer_input.push(neo_agent_core::ActiveTurnInput::PromoteFollowUpToSteer);
+            if steer_input.try_push(neo_agent_core::ActiveTurnInput::PromoteFollowUpToSteer) {
+                self.tui
+                    .chrome_mut()
+                    .pending_input_mut()
+                    .promote_oldest_follow_up_to_steer_optimistic();
+            }
             return Ok(());
         }
 
@@ -2196,11 +2209,17 @@ impl InteractiveController {
             );
             let display_text = neo_tui::paste::markers_as_chips(&text);
             let message = AgentMessage::user_content_with_display(content, display_text.clone());
-            steer_input.push(neo_agent_core::ActiveTurnInput::SteerNow(message));
-            self.tui
-                .chrome_mut()
-                .pending_input_mut()
-                .queue_steer_optimistic(display_text);
+            if steer_input.try_push(neo_agent_core::ActiveTurnInput::SteerNow(message)) {
+                self.tui
+                    .chrome_mut()
+                    .pending_input_mut()
+                    .queue_steer_optimistic(display_text);
+            } else {
+                self.tui
+                    .chrome_mut()
+                    .pending_input_mut()
+                    .queue_follow_up(text);
+            }
             self.tui.chrome_mut().prompt_mut().clear_after_submit();
             return Ok(());
         }
@@ -2514,6 +2533,14 @@ impl InteractiveController {
                 .mark_projected(id);
         }
         self.render_appended_user_message_if_needed(&event);
+        if let AgentEvent::RunFinished { stop_reason, .. } = &event
+            && *stop_reason != neo_agent_core::StopReason::Cancelled
+        {
+            self.tui
+                .chrome_mut()
+                .pending_input_mut()
+                .move_pending_steers_to_follow_ups();
+        }
         if let AgentEvent::ToolExecutionFinished { name, result, .. } = &event
             && matches!(name.as_str(), "CreateSkill" | "MoveSkill")
             && !result.is_error
