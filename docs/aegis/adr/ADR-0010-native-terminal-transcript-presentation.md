@@ -1,7 +1,12 @@
 # ADR-0010 - Native Terminal Transcript Presentation
 
-Status: `amended`
+Status: `superseded by ADR-0012-fullscreen-transcript-document`
 Date: `2026-08-01`
+
+> Supersession note (2026-08-04): the interactive presentation direction
+> recorded below is replaced by the single application-owned fullscreen
+> transcript document (ADR-0012). This record is preserved unchanged as
+> historical evidence of the native normal-screen + `Ctrl+O` review direction.
 
 ## Source Evidence
 
