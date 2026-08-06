@@ -148,6 +148,32 @@ artifact was deleted or rewritten.
   error restore) requires a logged-in desktop session and was not runnable
   over the VM's ssh-only access; it remains residual risk.
 
+## Follow-up Repair (2026-08-06)
+
+Six follow-up fixes landed in the same architecture (plan
+`docs/aegis/plans/2026-08-06-fullscreen-transcript-follow-up-repair.md`,
+commits `b89c80ec`, `bac11068`, `f563df9a`, `706d9021`, `53726f62`,
+`74a5093b`): consecutive `ToolRun` groups re-measure on any span change; mouse
+drag gestures survive the input queue and SGR no-button motion (35) is never a
+release; the document-coordinate selection is painted on visible rows and
+stays routable while approvals/questions own the keyboard, with a visible copy
+hint; the earliest unresolved blocking entry owns the visible window (action
+area shown, later parallel `Preparing` deferred until it resolves, card-internal
+scrolling for tall cards); locked views render a `new activity · end to follow`
+notice that disappears on returning to the tail; and rich dialogs slice
+themselves to the actual terminal height instead of losing their top rows.
+
+Verified 2026-08-06: all 12 exact per-task regressions plus `cargo fmt
+--all --check` on macOS host, Fedora 43 aarch64 VM, and Windows 11 aarch64 VM;
+real-PTY lifecycle smokes on macOS and Fedora (balanced alternate-screen and
+mouse capture enter/restore, SGR press/drag/release/wheel accepted, exit
+projection after restore, no native-history writes) and the copy-path
+behavior of Ctrl+C over a live selection on Fedora. Graphical-terminal mouse
+hardware, system clipboard side effects, and Shift-drag bypass still require a
+human in a graphical terminal (macOS Terminal/iTerm2 and a Windows Terminal
+logged-in desktop session); they remain residual risk as in the original
+landing. Full evidence record in the landed baseline.
+
 ## Baseline Sync
 
 - New landed baseline: `docs/aegis/baseline/2026-08-04-fullscreen-transcript-document.md`.

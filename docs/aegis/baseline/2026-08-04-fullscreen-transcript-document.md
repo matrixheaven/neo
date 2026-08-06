@@ -130,3 +130,73 @@ legacy `TranscriptViewport`. Zero production references remain.
 
 This is an advisory Aegis Method Pack record. It records the landed
 architecture state and does not grant completion authority.
+
+## Follow-up Repair (2026-08-06)
+
+Deterministic regressions found after the initial landing were fixed in six
+task commits, all inside the existing owners (`TranscriptStore`,
+`DocumentLayout`, `TranscriptPane`, the raw-input chain, the outer frame, and
+the dialog renderers). No second viewport, second selection system, or
+compatibility fallback was added; Delegate-family card bodies, Workflow
+execution, model context, and tool-execution semantics were not touched.
+
+- `b89c80ec` — `fix(tui): remeasure dynamic tool groups`
+  (any consecutive `ToolRun` span shape change — append, insert between tools,
+  remove, hide/restore — or member content change now re-measures the span's
+  first member through the shared `touch_tool_run_span`; separator rows stay
+  document-owned; regression `dynamic_tool_group_remeasures_after_append_and_member_update`
+  plus remove-branch coverage).
+- `bac11068` — `fix(tui): preserve mouse drag gestures`
+  (a mouse release no longer discards the same gesture's last drag — the final
+  motion is delivered before the release; keyboard/blocking events still flush
+  stale wheel/drag; SGR no-button motion code 35 is classified before the
+  release check and never reaches `Release`).
+- `f563df9a` — `fix(tui): render and route transcript selection`
+  (`compose_rows` paints the document-coordinate selection background on the
+  final visible rows, preserving ANSI styles, wide graphemes, and cross-entry
+  spans; blank separator rows stay unpainted; pending approvals/questions keep
+  keyboard ownership while left-button selection events reach the transcript;
+  one visible hint line `selected · ctrl+c copy · ctrl+shift+space clear`
+  shrinks the body by one row).
+- `706d9021` — `fix(tui): keep blocking transcript entries visible`
+  (each frame derives the earliest unresolved approval/question from the
+  canonical entries; the visible window's lower boundary never passes that
+  entry's end, its action area is shown by default, cards taller than the
+  viewport scroll within their own rows, and later parallel `Preparing` tools
+  are deferred until the blocking entry resolves; the user's own follow/lock
+  state is untouched and restored on release).
+- `53726f62` — `fix(tui): show locked transcript activity`
+  (the previously orphaned Boolean `new_activity` now renders one bottom
+  status line `new activity · end to follow` while the viewport is locked and
+  revisions arrived; the hint counts into the chrome height and disappears on
+  returning to the tail; the unused `consume_new_activity` consumer was
+  deleted).
+- `74a5093b` — `fix(tui): preserve dialogs on short terminals`
+  (rich dialogs render against the actual available height: the help panel's
+  viewport tracks the frame budget, the confirm dialog drops separators then
+  trims body tail while title and action hint always survive, the choice
+  picker keeps the selected item visible with a shrinking page; the top
+  row-drain in `fit_chrome_to_height` remains a defensive backstop only).
+
+### Follow-up Verification (2026-08-06)
+
+- macOS host: all 12 exact per-task regressions pass (one package, one target
+  selector, one test-name filter each); `cargo fmt --all --check` and
+  `git diff --check` clean. Real-PTY lifecycle smoke: one balanced
+  `\x1b[?1049h`/`\x1b[?1049l` pair, balanced mouse enable/disable (5/5
+  sequences), SGR press/drag/release/wheel input accepted, double-Ctrl+C exit
+  prints the projection after restoration, no `\r\n` native-history writes
+  while the alternate screen is active.
+- Fedora 43 aarch64 VM (real PTY, 80x24): all 12 exact regressions pass and
+  `cargo fmt --all --check` clean; PTY lifecycle balanced enter/restore,
+  mouse 5/5, exit projection, no native-history writes; SGR
+  press/drag/release/wheel accepted without crash; Ctrl+C with a live
+  selection takes the copy path instead of exiting (the Task 3 feature).
+- Windows 11 aarch64 VM: all 12 exact regressions pass natively and
+  `cargo fmt --all --check` clean; the interactive binary stays static when
+  std handles are not console handles (unchanged).
+- Residual risk (unchanged in kind): real graphical-terminal mouse hardware,
+  system clipboard side effects, and Shift-drag bypass need a human in a
+  graphical terminal — macOS Terminal/iTerm2 mouse-drag highlight and
+  `Ctrl+C` clipboard verification, and a Windows Terminal logged-in desktop
+  session, were not runnable from this headless/automated session.
