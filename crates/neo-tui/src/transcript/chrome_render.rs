@@ -1,9 +1,12 @@
 use crate::primitive::Line;
+use crate::primitive::strip_ansi;
 use crate::primitive::theme::{DevelopmentMode, GoalModeStatus, TuiTheme};
 use crate::primitive::wrap_width;
 use crate::primitive::{Color, Style, paint, truncate_to_width, visible_width};
 use crate::screen_output::{CURSOR_MARKER, CursorPos};
-use crate::shell::{MAX_PROMPT_VISIBLE_LINES, NeoChromeState, PromptState};
+use crate::shell::{MAX_PROMPT_VISIBLE_LINES, NeoChromeState, PromptState, TodoSelection};
+use crate::shell::{visual_col_at_char_index, wrap_prompt_lines};
+use crate::transcript::selection::{paint_selection_range, slice_text_by_cells};
 use crate::transcript::{ToolCallComponent, ToolCallState, ToolGroup, render_tool_group};
 use crate::widgets::box_draw::{ROUNDED, repeat_char};
 use crate::widgets::{PendingInputPreview, TodoPanel, box_draw};
@@ -286,34 +289,54 @@ fn project_argument_change(state: &ToolCallState, name: &str) -> Value {
     }
 }
 
+/// Region classification of one chrome row, used to route mouse events to
+/// the widget that owns the row (transcript selection events are routed by
+/// body row separately). One entry per `ChromeRender::lines` row.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ChromeRowKind {
+    /// A row inside the Todo panel.
+    Todo,
+    /// A row inside the prompt input box (borders included; the app ignores
+    /// the border rows when mapping pointer positions).
+    Prompt,
+    /// Any other chrome row (banner, pending-input preview, footer, …).
+    Other,
+}
+
 /// Chrome lines, optional cursor position, and the row where the prompt box
-/// starts within those lines.
+/// starts within those lines. `row_kinds` classifies each line in parallel.
 pub struct ChromeRender {
     pub lines: Vec<String>,
     pub cursor: Option<CursorPos>,
     pub prompt_start_row: usize,
+    pub row_kinds: Vec<ChromeRowKind>,
 }
 
 #[must_use]
 pub fn render_chrome_lines(app: &NeoChromeState, width: usize, height: usize) -> ChromeRender {
     let content_width = frame_content_width(width);
     let mut lines = Vec::new();
+    let mut row_kinds = Vec::new();
     if app.has_todos() {
-        lines.extend(
+        let todo_rows = paint_todo_selection_rows(
             TodoPanel::new(app.todo_items())
                 .with_theme(app.theme())
                 .expanded(app.todo_panel_expanded())
                 .render(content_width),
+            app.todo_selection(),
+            app.theme(),
         );
+        row_kinds.extend(std::iter::repeat_n(ChromeRowKind::Todo, todo_rows.len()));
+        lines.extend(todo_rows);
     }
     if let Some(btw_state) = app.btw_panel_state() {
         let terminal_rows = u16::try_from(height).unwrap_or(u16::MAX);
         let mut btw_state = btw_state.clone();
-        lines.extend(
-            crate::widgets::BtwPanel::new(&mut btw_state)
-                .with_theme(app.theme())
-                .render(content_width, terminal_rows),
-        );
+        let btw_rows = crate::widgets::BtwPanel::new(&mut btw_state)
+            .with_theme(app.theme())
+            .render(content_width, terminal_rows);
+        row_kinds.extend(std::iter::repeat_n(ChromeRowKind::Other, btw_rows.len()));
+        lines.extend(btw_rows);
     }
     let pending_input = PendingInputPreview::new(
         app.pending_input().pending_steers(),
@@ -324,6 +347,9 @@ pub fn render_chrome_lines(app: &NeoChromeState, width: usize, height: usize) ->
     .render(content_width);
     if !pending_input.is_empty() {
         lines.push(String::new());
+        row_kinds.push(ChromeRowKind::Other);
+        let pending_len = pending_input.len();
+        row_kinds.extend(std::iter::repeat_n(ChromeRowKind::Other, pending_len));
         lines.extend(pending_input);
     }
     let prompt_start_row = lines.len();
@@ -332,17 +358,39 @@ pub fn render_chrome_lines(app: &NeoChromeState, width: usize, height: usize) ->
     } else {
         render_prompt_lines(app, content_width)
     };
+    // Only the content rows (inside the box borders) are pointer-selectable;
+    // the border rows stay `Other`.
+    if prompt_lines.len() >= 2 {
+        row_kinds.push(ChromeRowKind::Other);
+        row_kinds.extend(std::iter::repeat_n(
+            ChromeRowKind::Prompt,
+            prompt_lines.len() - 2,
+        ));
+        row_kinds.push(ChromeRowKind::Other);
+    } else {
+        row_kinds.extend(std::iter::repeat_n(
+            ChromeRowKind::Other,
+            prompt_lines.len(),
+        ));
+    }
     lines.extend(prompt_lines);
     if !app.focused_overlay_blocks_prompt()
         && let Some(dropdown) = render_prompt_completion_dropdown(app, content_width)
     {
+        let dropdown_len = dropdown.len();
+        row_kinds.extend(std::iter::repeat_n(ChromeRowKind::Other, dropdown_len));
         lines.extend(dropdown);
     }
-    lines.extend(render_footer_lines(app, content_width));
+    let footer_lines = render_footer_lines(app, content_width);
+    let footer_len = footer_lines.len();
+    row_kinds.extend(std::iter::repeat_n(ChromeRowKind::Other, footer_len));
+    lines.extend(footer_lines);
+    debug_assert_eq!(lines.len(), row_kinds.len(), "row kinds track chrome rows");
     ChromeRender {
         lines,
         cursor: prompt_cursor,
         prompt_start_row,
+        row_kinds,
     }
 }
 
@@ -356,22 +404,27 @@ pub fn render_chrome_lines_mut(
 ) -> ChromeRender {
     let content_width = frame_content_width(width);
     let mut lines = Vec::new();
+    let mut row_kinds = Vec::new();
     if app.has_todos() {
-        lines.extend(
+        let todo_rows = paint_todo_selection_rows(
             TodoPanel::new(app.todo_items())
                 .with_theme(app.theme())
                 .expanded(app.todo_panel_expanded())
                 .render(content_width),
+            app.todo_selection(),
+            app.theme(),
         );
+        row_kinds.extend(std::iter::repeat_n(ChromeRowKind::Todo, todo_rows.len()));
+        lines.extend(todo_rows);
     }
     let terminal_rows = u16::try_from(height).unwrap_or(u16::MAX);
     let theme = app.theme();
     if let Some(btw_state) = app.btw_panel_state_mut() {
-        lines.extend(
-            crate::widgets::BtwPanel::new(btw_state)
-                .with_theme(theme)
-                .render(content_width, terminal_rows),
-        );
+        let btw_rows = crate::widgets::BtwPanel::new(btw_state)
+            .with_theme(theme)
+            .render(content_width, terminal_rows);
+        row_kinds.extend(std::iter::repeat_n(ChromeRowKind::Other, btw_rows.len()));
+        lines.extend(btw_rows);
     }
     let pending_input = PendingInputPreview::new(
         app.pending_input().pending_steers(),
@@ -382,6 +435,9 @@ pub fn render_chrome_lines_mut(
     .render(content_width);
     if !pending_input.is_empty() {
         lines.push(String::new());
+        row_kinds.push(ChromeRowKind::Other);
+        let pending_len = pending_input.len();
+        row_kinds.extend(std::iter::repeat_n(ChromeRowKind::Other, pending_len));
         lines.extend(pending_input);
     }
     let prompt_start_row = lines.len();
@@ -390,17 +446,39 @@ pub fn render_chrome_lines_mut(
     } else {
         render_prompt_lines(app, content_width)
     };
+    // Only the content rows (inside the box borders) are pointer-selectable;
+    // the border rows stay `Other`.
+    if prompt_lines.len() >= 2 {
+        row_kinds.push(ChromeRowKind::Other);
+        row_kinds.extend(std::iter::repeat_n(
+            ChromeRowKind::Prompt,
+            prompt_lines.len() - 2,
+        ));
+        row_kinds.push(ChromeRowKind::Other);
+    } else {
+        row_kinds.extend(std::iter::repeat_n(
+            ChromeRowKind::Other,
+            prompt_lines.len(),
+        ));
+    }
     lines.extend(prompt_lines);
     if !app.focused_overlay_blocks_prompt()
         && let Some(dropdown) = render_prompt_completion_dropdown(app, content_width)
     {
+        let dropdown_len = dropdown.len();
+        row_kinds.extend(std::iter::repeat_n(ChromeRowKind::Other, dropdown_len));
         lines.extend(dropdown);
     }
-    lines.extend(render_footer_lines(app, content_width));
+    let footer_lines = render_footer_lines(app, content_width);
+    let footer_len = footer_lines.len();
+    row_kinds.extend(std::iter::repeat_n(ChromeRowKind::Other, footer_len));
+    lines.extend(footer_lines);
+    debug_assert_eq!(lines.len(), row_kinds.len(), "row kinds track chrome rows");
     ChromeRender {
         lines,
         cursor: prompt_cursor,
         prompt_start_row,
+        row_kinds,
     }
 }
 
@@ -415,6 +493,99 @@ pub fn render_footer_only_lines(app: &NeoChromeState, width: usize) -> Vec<Strin
 #[must_use]
 pub fn frame_content_width(width: usize) -> usize {
     width.saturating_sub(CHROME_GUTTER + 1).max(1)
+}
+
+/// Cell span on a rendered Todo row for `selection`, mirroring the transcript
+/// endpoint math: the min row is cut by its endpoint cell, the max row by
+/// the other endpoint cell, and rows between stay whole.
+fn todo_selection_cell_span(selection: TodoSelection, row: usize) -> (usize, usize) {
+    let (min_row, max_row) = selection.row_range();
+    let (min_start, min_end, max_start, max_end) =
+        match selection.anchor_row.cmp(&selection.active_row) {
+            std::cmp::Ordering::Equal => {
+                let start = selection.anchor_cell.min(selection.active_cell);
+                let end = selection
+                    .anchor_cell
+                    .max(selection.active_cell)
+                    .saturating_add(1);
+                (start, end, start, end)
+            }
+            std::cmp::Ordering::Less => (
+                selection.anchor_cell,
+                usize::MAX,
+                0,
+                selection.active_cell.saturating_add(1),
+            ),
+            std::cmp::Ordering::Greater => (
+                0,
+                selection.active_cell.saturating_add(1),
+                selection.anchor_cell,
+                usize::MAX,
+            ),
+        };
+    if row == min_row {
+        (min_start, min_end)
+    } else if row == max_row {
+        (max_start, max_end)
+    } else {
+        (0, usize::MAX)
+    }
+}
+
+/// Paint the active Todo selection onto the panel's rendered rows.
+#[must_use]
+fn paint_todo_selection_rows(
+    rows: Vec<String>,
+    selection: Option<TodoSelection>,
+    theme: TuiTheme,
+) -> Vec<String> {
+    let Some(selection) = selection else {
+        return rows;
+    };
+    let (min_row, max_row) = selection.row_range();
+    let bg = theme.selection_bg;
+    rows.into_iter()
+        .enumerate()
+        .map(|(index, row)| {
+            if index < min_row || index > max_row {
+                return row;
+            }
+            let (start, end) = todo_selection_cell_span(selection, index);
+            paint_selection_range(&row, start, end, bg)
+        })
+        .collect()
+}
+
+/// Plain text of the active Todo selection, sliced from the panel's rendered
+/// rows at mouse release (frozen against later todo updates).
+#[must_use]
+pub fn materialize_todo_selection(
+    app: &NeoChromeState,
+    selection: TodoSelection,
+    content_width: usize,
+) -> Option<String> {
+    let rows = TodoPanel::new(app.todo_items())
+        .with_theme(app.theme())
+        .expanded(app.todo_panel_expanded())
+        .render(content_width);
+    let (min_row, max_row) = selection.row_range();
+    let mut text = String::new();
+    for (index, row) in rows.iter().enumerate() {
+        if index < min_row {
+            continue;
+        }
+        if index > max_row {
+            break;
+        }
+        let (start, end) = todo_selection_cell_span(selection, index);
+        let plain = strip_ansi(row);
+        let slice = slice_text_by_cells(&plain, start, end);
+        if !text.is_empty() {
+            text.push('\n');
+        }
+        text.push_str(&slice);
+    }
+    (!text.is_empty()).then_some(text)
 }
 
 /// Render the `/` command dropdown below the prompt box, if active.
@@ -438,6 +609,17 @@ fn render_prompt_completion_dropdown(app: &NeoChromeState, width: usize) -> Opti
     Some(lines)
 }
 
+/// Display width of one prompt content row body (inside the box borders and
+/// the `> ` prefix). Shared by the renderer and the mouse hit-testing.
+#[must_use]
+pub fn prompt_body_width(content_width: usize) -> usize {
+    content_width
+        .saturating_sub(2)
+        .max(1)
+        .saturating_sub(4)
+        .max(1)
+}
+
 /// Render the rounded prompt input box. The first content line carries the
 /// `> ` prompt symbol; continuation lines use a 4-space hanging indent so
 /// wrapped/explicit-newline text aligns under the body (matching Neo's
@@ -458,9 +640,9 @@ fn render_prompt_lines(app: &NeoChromeState, width: usize) -> (Vec<String>, Opti
     };
     let border_style = Style::default().fg(border_color);
     let text_style = Style::default().fg(theme.text_primary);
+    let selection_bg = theme.selection_bg;
 
-    let inner_width = width.saturating_sub(2).max(1);
-    let body_width = inner_width.saturating_sub(4).max(1);
+    let body_width = prompt_body_width(width);
 
     let logical_lines = build_prompt_logical_lines(prompt, body_width);
 
@@ -499,7 +681,36 @@ fn render_prompt_lines(app: &NeoChromeState, width: usize) -> (Vec<String>, Opti
         } else {
             "   "
         };
-        let content = paint(&format!("{prefix}{line}"), text_style);
+        let mut content = paint(&format!("{prefix}{line}"), text_style);
+        // Paint the mouse selection over the content cells (after the 4-cell
+        // prefix), mapping the selected char range onto this visible row via
+        // the raw wrapped text.
+        if let Some((min_char, max_char)) = prompt.selection_range() {
+            let raw_row_index = scroll_offset + idx;
+            let raw_rows = wrap_prompt_lines(&prompt.text, body_width);
+            if let Some((char_start, raw_line)) = raw_rows.get(raw_row_index) {
+                let row_end = *char_start + raw_line.chars().count();
+                if min_char < row_end && max_char > *char_start {
+                    let start_cell = if min_char <= *char_start {
+                        0
+                    } else {
+                        visual_col_at_char_index(raw_line, min_char - char_start)
+                    };
+                    let end_cell = if max_char >= row_end {
+                        usize::MAX
+                    } else {
+                        visual_col_at_char_index(raw_line, max_char - char_start)
+                    };
+                    let start = 3 + start_cell;
+                    let end = if end_cell == usize::MAX {
+                        usize::MAX
+                    } else {
+                        3 + end_cell
+                    };
+                    content = paint_selection_range(&content, start, end, selection_bg);
+                }
+            }
+        }
         lines.push(box_draw::content_line(&content, width, border_style));
     }
     lines.push(if lines_below > 0 {
@@ -843,6 +1054,7 @@ mod tests {
     use super::*;
     use crate::primitive::theme::TuiTheme;
     use crate::shell::{NeoChromeState, PickerItem, PromptCompletionPrefix, PromptEdit};
+    use crate::widgets::{TodoDisplayItem, TodoDisplayStatus};
     use neo_ai::{ReasoningEffort, ReasoningSelection};
 
     #[test]
@@ -1052,5 +1264,94 @@ mod tests {
         assert!(footer.contains("custom/gpt-5.6-luna · max"), "{footer}");
         assert!(footer.contains("⠋ working · esc interrupt"), "{footer}");
         assert!(!footer.contains("thinking"), "{footer}");
+    }
+
+    #[test]
+    fn chrome_row_kinds_classify_prompt_and_todo_rows() {
+        let mut app = NeoChromeState::new("neo", "s", "m", "/tmp");
+        app.set_todo_items(vec![
+            TodoDisplayItem::new("write tests", TodoDisplayStatus::InProgress),
+            TodoDisplayItem::new("ship", TodoDisplayStatus::Pending),
+        ]);
+        let render = render_chrome_lines(&app, 60, 24);
+        assert_eq!(render.lines.len(), render.row_kinds.len());
+
+        // The Todo rows come first, then the prompt content rows between its
+        // borders; everything else (footer) is Other.
+        let todo_rows = render
+            .row_kinds
+            .iter()
+            .filter(|kind| **kind == ChromeRowKind::Todo)
+            .count();
+        assert!(todo_rows >= 4, "header + items + counts rows");
+        let prompt_rows: Vec<usize> = render
+            .row_kinds
+            .iter()
+            .enumerate()
+            .filter_map(|(index, kind)| (*kind == ChromeRowKind::Prompt).then_some(index))
+            .collect();
+        assert!(!prompt_rows.is_empty(), "prompt content rows classified");
+        // Prompt content rows are contiguous and sit between the borders.
+        assert!(prompt_rows.windows(2).all(|w| w[1] == w[0] + 1));
+        assert!(render.row_kinds[prompt_rows[0] - 1] == ChromeRowKind::Other);
+        assert!(render.row_kinds[prompt_rows[prompt_rows.len() - 1] + 1] == ChromeRowKind::Other);
+
+        // Without todos there are no Todo rows.
+        let mut app = NeoChromeState::new("neo", "s", "m", "/tmp");
+        let render = render_chrome_lines(&app, 60, 24);
+        assert!(
+            render
+                .row_kinds
+                .iter()
+                .all(|kind| *kind != ChromeRowKind::Todo)
+        );
+    }
+
+    #[test]
+    fn prompt_selection_paints_only_selected_cells() {
+        let mut app = NeoChromeState::new("neo", "s", "m", "/tmp");
+        app.set_theme(TuiTheme::default());
+        let prompt = app.prompt_mut();
+        prompt.set_text("hello world");
+        prompt.begin_drag_selection(0);
+        prompt.extend_drag_selection(5);
+        let render = render_chrome_lines(&app, 60, 24);
+        let content_line = render
+            .lines
+            .iter()
+            .find(|line| strip_ansi(line).contains("hello world"))
+            .expect("prompt content line");
+        let selection_bg = crate::primitive::bg_to_ansi(TuiTheme::default().selection_bg);
+        assert!(
+            content_line.contains(&selection_bg),
+            "selected cells carry the selection background: {content_line:?}"
+        );
+        // The four-cell prefix stays unpainted.
+        let prefix_start = strip_ansi(content_line).find('>').expect("prefix");
+        let before_prefix = &content_line[..prefix_start.min(content_line.len())];
+        assert!(
+            !before_prefix.contains(&selection_bg),
+            "the prompt prefix must stay unpainted"
+        );
+    }
+
+    #[test]
+    fn todo_selection_materializes_visible_text() {
+        let mut app = NeoChromeState::new("neo", "s", "m", "/tmp");
+        app.set_todo_items(vec![
+            TodoDisplayItem::new("first item", TodoDisplayStatus::Pending),
+            TodoDisplayItem::new("second item", TodoDisplayStatus::Done),
+        ]);
+        let selection = TodoSelection {
+            anchor_row: 2,
+            anchor_cell: 2,
+            active_row: 4,
+            active_cell: 6,
+        };
+        let text = materialize_todo_selection(&app, selection, frame_content_width(60))
+            .expect("materialized");
+        // The selection spans the two item rows plus any counts row between.
+        assert!(text.contains("first item"), "{text}");
+        assert!(text.contains("second item"), "{text}");
     }
 }

@@ -70,10 +70,11 @@ impl InteractiveController {
 
     /// Route one typed mouse event. Wheel events scroll the transcript
     /// (transcript-wide navigation, matching the historical wheel behavior);
-    /// a right-button press copies the current transcript selection (mouse
-    /// drag or keyboard entry selection); Shift-modified drags are not
-    /// interpreted by Neo — Shift selection stays with the terminal
-    /// emulator.
+    /// Shift-modified drags are not interpreted by Neo — Shift selection
+    /// stays with the terminal emulator. The TUI routes pointer events by
+    /// region (transcript body, prompt box, Todo panel) and records the text
+    /// a right-click asks to copy; the controller drains it into the system
+    /// clipboard.
     fn handle_mouse_event(&mut self, mouse: MouseEvent) {
         if mouse.is_wheel() {
             if mouse.is_wheel_up() {
@@ -86,21 +87,10 @@ impl InteractiveController {
         if mouse.is_shift_modified() {
             return;
         }
-        // Right-click copies the selection. Full-screen overlays still own
-        // the whole frame; pending approvals and questions keep selection
-        // events flowing, mirroring the left-button selection guard in the
-        // TUI frame.
-        if mouse.kind == MouseKind::Press && mouse.button == crossterm::event::MouseButton::Right {
-            if self.tui.chrome().focused_overlay_blocks_prompt()
-                && !self.tui.chrome().approval_is_pending()
-                && !self.tui.chrome().question_dialog_is_focused()
-            {
-                return;
-            }
-            self.copy_transcript_selection_to_clipboard();
-            return;
-        }
         self.tui.handle_mouse_event(mouse);
+        if let Some(text) = self.tui.take_pending_copy() {
+            self.write_clipboard_text(&text);
+        }
     }
 
     fn follow_transcript_tail(&mut self) {
@@ -1316,7 +1306,7 @@ impl InteractiveController {
         match action {
             KeybindingAction::InputNewLine => self.apply_prompt_edit(PromptEdit::Insert("\n")),
             KeybindingAction::InputTab => self.complete_prompt_or_insert_tab(),
-            KeybindingAction::InputCopy => self.copy_prompt_to_clipboard(),
+            KeybindingAction::InputCopy => self.copy_input_selection_to_clipboard(),
             KeybindingAction::PromptSteer => {
                 return self.handle_prompt_steer().await.map(|()| Some(false));
             }
@@ -1578,10 +1568,11 @@ impl InteractiveController {
             KeybindingAction::TranscriptSelectionStart => {
                 // Most terminals send the same byte for ctrl+shift+space as
                 // for ctrl+space, so the advertised clear key arrives here on
-                // non-kitty terminals. Toggle: an existing selection clears,
-                // otherwise the visible entry is selected.
-                if self.tui.transcript().has_transcript_selection() {
-                    self.transcript_mut().clear_transcript_selection();
+                // non-kitty terminals. Toggle: any active selection (mouse,
+                // keyboard, prompt, Todo) clears, otherwise the visible entry
+                // is selected.
+                if self.tui.has_any_selection() {
+                    self.tui.clear_all_selections();
                 } else {
                     self.transcript_mut().select_visible_transcript_entry();
                 }

@@ -9,6 +9,7 @@
 
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
+use std::time::Instant;
 
 use neo_agent_core::{
     ApprovalAction, ApprovalOption, ApprovalPresentation, ApprovalRequest, ApprovalResponse,
@@ -504,6 +505,238 @@ async fn ctrl_space_toggles_transcript_selection() {
         .await
         .expect("selection toggle handled");
     assert!(!controller.transcript().has_transcript_selection());
+}
+
+/// Row and display column of `needle` in the rendered TUI frame.
+fn locate_in_frame(frame: &[String], needle: &str) -> (usize, usize) {
+    for (row, line) in frame.iter().enumerate() {
+        let stripped = neo_tui::primitive::strip_ansi(line);
+        if let Some(byte_col) = stripped.find(needle) {
+            return (row, stripped[..byte_col].chars().count());
+        }
+    }
+    panic!("needle {needle:?} not found in frame: {frame:?}");
+}
+
+fn prompt_selection_controller() -> InteractiveController {
+    let mut controller = InteractiveController::new_for_test(
+        "neo",
+        "test-session",
+        "openai/gpt-4.1",
+        test_workspace_root(),
+        |_request| async move { Ok(Vec::<AgentEvent>::new()) },
+    );
+    controller
+        .tui
+        .chrome_mut()
+        .prompt_mut()
+        .set_text("hello world");
+    // Render a full frame so mouse routing has a layout and the prompt box
+    // occupies known screen rows.
+    let _ = controller
+        .tui
+        .render_terminal_frame_at(80, 24, Instant::now());
+    controller
+}
+
+#[tokio::test]
+async fn right_click_in_prompt_copies_prompt_selection() {
+    let mut controller = prompt_selection_controller();
+    let recorded = Arc::new(Mutex::new(Vec::new()));
+    let writer_recorded = Arc::clone(&recorded);
+    controller.set_clipboard_writer(Arc::new(move |text| {
+        let recorded = Arc::clone(&writer_recorded);
+        Box::pin(async move {
+            recorded.lock().expect("record clipboard text").push(text);
+            Ok(())
+        })
+    }));
+
+    let frame = controller
+        .tui
+        .render_terminal_frame_at(80, 24, Instant::now())
+        .lines;
+    let (row, hello_col) = locate_in_frame(&frame, "hello");
+
+    // Drag across "hello" in the prompt box.
+    for event in [
+        mouse_event(
+            MouseKind::Press,
+            hello_col as u16,
+            row as u16,
+            crossterm::event::KeyModifiers::NONE,
+        ),
+        mouse_event(
+            MouseKind::Drag,
+            (hello_col + 5) as u16,
+            row as u16,
+            crossterm::event::KeyModifiers::NONE,
+        ),
+        mouse_event(
+            MouseKind::Release,
+            (hello_col + 5) as u16,
+            row as u16,
+            crossterm::event::KeyModifiers::NONE,
+        ),
+    ] {
+        controller
+            .handle_input_event(event)
+            .await
+            .expect("prompt drag handled");
+    }
+    assert_eq!(
+        controller.tui.chrome().prompt().selection_text().as_deref(),
+        Some("hello")
+    );
+
+    // Right-click over the prompt copies the selection to the clipboard.
+    controller
+        .handle_input_event(right_button_event(
+            MouseKind::Press,
+            hello_col as u16,
+            row as u16,
+        ))
+        .await
+        .expect("right click handled");
+    wait_for_clipboard_write(&mut controller).await;
+    assert_eq!(
+        recorded.lock().expect("clipboard writes").as_slice(),
+        ["hello"],
+        "right-click in the prompt copies the prompt selection"
+    );
+}
+
+#[tokio::test]
+async fn ctrl_c_prefers_prompt_selection_over_whole_text() {
+    let mut controller = prompt_selection_controller();
+    let recorded = Arc::new(Mutex::new(Vec::new()));
+    let writer_recorded = Arc::clone(&recorded);
+    controller.set_clipboard_writer(Arc::new(move |text| {
+        let recorded = Arc::clone(&writer_recorded);
+        Box::pin(async move {
+            recorded.lock().expect("record clipboard text").push(text);
+            Ok(())
+        })
+    }));
+
+    let frame = controller
+        .tui
+        .render_terminal_frame_at(80, 24, Instant::now())
+        .lines;
+    let (row, hello_col) = locate_in_frame(&frame, "hello");
+    for event in [
+        mouse_event(
+            MouseKind::Press,
+            hello_col as u16,
+            row as u16,
+            crossterm::event::KeyModifiers::NONE,
+        ),
+        mouse_event(
+            MouseKind::Drag,
+            (hello_col + 5) as u16,
+            row as u16,
+            crossterm::event::KeyModifiers::NONE,
+        ),
+        mouse_event(
+            MouseKind::Release,
+            (hello_col + 5) as u16,
+            row as u16,
+            crossterm::event::KeyModifiers::NONE,
+        ),
+    ] {
+        controller
+            .handle_input_event(event)
+            .await
+            .expect("prompt drag handled");
+    }
+    controller
+        .handle_input_event(InputEvent::Action(KeybindingAction::InputCopy))
+        .await
+        .expect("copy action handled");
+    wait_for_clipboard_write(&mut controller).await;
+    assert_eq!(
+        recorded.lock().expect("clipboard writes").as_slice(),
+        ["hello"],
+        "ctrl+c copies the prompt selection, not the whole text"
+    );
+}
+
+#[tokio::test]
+async fn ctrl_c_copies_todo_selection() {
+    let mut controller = InteractiveController::new_for_test(
+        "neo",
+        "test-session",
+        "openai/gpt-4.1",
+        test_workspace_root(),
+        |_request| async move { Ok(Vec::<AgentEvent>::new()) },
+    );
+    controller.tui.chrome_mut().set_todo_items(vec![
+        neo_tui::widgets::todo_panel::TodoDisplayItem::new(
+            "first item",
+            neo_tui::widgets::todo_panel::TodoDisplayStatus::Pending,
+        ),
+        neo_tui::widgets::todo_panel::TodoDisplayItem::new(
+            "second item",
+            neo_tui::widgets::todo_panel::TodoDisplayStatus::Done,
+        ),
+    ]);
+    let _ = controller
+        .tui
+        .render_terminal_frame_at(80, 24, Instant::now());
+    let recorded = Arc::new(Mutex::new(Vec::new()));
+    let writer_recorded = Arc::clone(&recorded);
+    controller.set_clipboard_writer(Arc::new(move |text| {
+        let recorded = Arc::clone(&writer_recorded);
+        Box::pin(async move {
+            recorded.lock().expect("record clipboard text").push(text);
+            Ok(())
+        })
+    }));
+
+    let frame = controller
+        .tui
+        .render_terminal_frame_at(80, 24, Instant::now())
+        .lines;
+    let (row, col) = locate_in_frame(&frame, "first item");
+    let (row2, col2) = locate_in_frame(&frame, "second item");
+    let end_col = col2 + "second item".len();
+    for event in [
+        mouse_event(
+            MouseKind::Press,
+            col as u16,
+            row as u16,
+            crossterm::event::KeyModifiers::NONE,
+        ),
+        mouse_event(
+            MouseKind::Drag,
+            end_col as u16,
+            row2 as u16,
+            crossterm::event::KeyModifiers::NONE,
+        ),
+        mouse_event(
+            MouseKind::Release,
+            end_col as u16,
+            row2 as u16,
+            crossterm::event::KeyModifiers::NONE,
+        ),
+    ] {
+        controller
+            .handle_input_event(event)
+            .await
+            .expect("todo drag handled");
+    }
+    controller
+        .handle_input_event(InputEvent::Action(KeybindingAction::InputCopy))
+        .await
+        .expect("copy action handled");
+    wait_for_clipboard_write(&mut controller).await;
+    let copied = recorded.lock().expect("clipboard writes");
+    assert_eq!(copied.len(), 1, "{copied:?}");
+    assert!(
+        copied[0].contains("first item") && copied[0].contains("second item"),
+        "ctrl+c copies the todo selection: {:?}",
+        copied
+    );
 }
 
 /// Drain the controller-owned clipboard helper task. The helper runs on the

@@ -14,8 +14,9 @@ fn prompt_grapheme_width(grapheme: &str) -> usize {
 
 /// Wrap `text` into display rows of at most `body_width` columns, treating tabs
 /// as four columns. The returned strings preserve the original graphemes (tabs
-/// stay as tabs); only the segment boundaries depend on expanded widths.
-fn wrap_prompt_lines(text: &str, body_width: usize) -> Vec<(usize, String)> {
+/// stay as tabs); only the segment boundaries depend on expanded widths. Each
+/// entry carries the char index (in `text`) where the row starts.
+pub(crate) fn wrap_prompt_lines(text: &str, body_width: usize) -> Vec<(usize, String)> {
     if body_width == 0 {
         return vec![(0, String::new())];
     }
@@ -95,7 +96,7 @@ fn char_index_at_visual_col(text: &str, target_col: usize) -> usize {
 
 /// Return the display width of the first `char_index` characters of `text`.
 /// Tabs count as four columns and ANSI sequences contribute zero width.
-fn visual_col_at_char_index(text: &str, char_index: usize) -> usize {
+pub(crate) fn visual_col_at_char_index(text: &str, char_index: usize) -> usize {
     let mut walked = 0;
     let mut chars = 0;
     for grapheme in text.graphemes(true) {
@@ -121,6 +122,9 @@ pub struct PromptState {
     /// Byte range of a marker currently selected for deletion. The next
     /// backspace/delete while the same marker is selected removes it entirely.
     selected_marker: Option<(usize, usize)>,
+    /// Mouse text selection as an unordered pair of char indices (char, not
+    /// byte). Copy-only in v1: any edit clears it.
+    selection: Option<(usize, usize)>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -144,6 +148,7 @@ impl PromptState {
             undo_stack: Vec::new(),
             kill_ring: Vec::new(),
             selected_marker: None,
+            selection: None,
         }
     }
 
@@ -196,6 +201,7 @@ impl PromptState {
         self.undo_stack.clear();
         self.kill_ring.clear();
         self.selected_marker = None;
+        self.selection = None;
         self.stop_history_navigation();
     }
 
@@ -212,6 +218,7 @@ impl PromptState {
         self.cursor = self.char_len();
         self.scroll_offset = 0;
         self.selected_marker = None;
+        self.selection = None;
         self.stop_history_navigation();
     }
 
@@ -267,6 +274,8 @@ impl PromptState {
         body_width: usize,
     ) -> Option<String> {
         self.cursor = self.cursor.min(self.char_len());
+        // v1 selection is copy-only: any edit collapses it.
+        self.selection = None;
 
         let result = match edit {
             PromptEdit::Insert(text) => {
@@ -522,6 +531,75 @@ impl PromptState {
         (!self.text.is_empty()).then(|| self.text.clone())
     }
 
+    /// Normalized (min, max) char range of the mouse selection, if any.
+    #[must_use]
+    pub fn selection_range(&self) -> Option<(usize, usize)> {
+        self.selection
+            .map(|(start, end)| (start.min(end), start.max(end)))
+    }
+
+    /// The selected substring, or `None` when nothing is selected.
+    #[must_use]
+    pub fn selection_text(&self) -> Option<String> {
+        let (start, end) = self.selection_range()?;
+        if start == end {
+            return None;
+        }
+        Some(self.text[self.byte_index(start)..self.byte_index(end)].to_owned())
+    }
+
+    pub fn clear_selection(&mut self) {
+        self.selection = None;
+    }
+
+    /// Move the caret to `pos` (clamped to the text), collapsing any
+    /// selection, and keep the caret line visible.
+    pub fn move_cursor_to(&mut self, pos: usize, body_width: usize) {
+        self.cursor = pos.min(self.char_len());
+        self.selection = None;
+        if body_width > 0 {
+            self.clamp_scroll_offset(body_width);
+        }
+    }
+
+    /// Anchor a drag selection at `pos` and move the caret with it.
+    pub fn begin_drag_selection(&mut self, pos: usize) {
+        let pos = pos.min(self.char_len());
+        self.selection = Some((pos, pos));
+        self.cursor = pos;
+    }
+
+    /// Extend the drag selection to `pos`, moving the caret with it.
+    pub fn extend_drag_selection(&mut self, pos: usize) {
+        let pos = pos.min(self.char_len());
+        if let Some((anchor, _)) = self.selection {
+            self.selection = Some((anchor, pos));
+        } else {
+            self.selection = Some((pos, pos));
+        }
+        self.cursor = pos;
+    }
+
+    /// Char index under a pointer at content position `(row_in_prompt, col)`:
+    /// `row_in_prompt` is the zero-based visible content row (first line under
+    /// the prompt's top border) and `col` is the zero-based content column
+    /// without the `> ` prefix. Positions past the line end clamp to the line
+    /// end; positions past the last visible row clamp to the text end.
+    #[must_use]
+    pub fn char_index_at_content_position(
+        &self,
+        row_in_prompt: usize,
+        col: usize,
+        body_width: usize,
+    ) -> usize {
+        let wrapped = wrap_prompt_lines(&self.text, body_width);
+        let visible_start = self.scroll_offset.min(wrapped.len().saturating_sub(1));
+        let Some((char_start, line)) = wrapped.get(visible_start + row_in_prompt) else {
+            return self.char_len();
+        };
+        char_start + char_index_at_visual_col(line, col)
+    }
+
     /// Byte range of the marker immediately before or overlapping the cursor,
     /// if any.
     fn marker_before_cursor(&self) -> Option<(usize, usize)> {
@@ -684,6 +762,7 @@ impl PromptState {
         self.cursor = self.char_len();
         self.scroll_offset = 0;
         self.undo_stack.clear();
+        self.selection = None;
     }
 
     fn stop_history_navigation(&mut self) {
@@ -870,5 +949,59 @@ mod tests {
 
         assert_eq!(prefix.start, 0);
         assert_eq!(prefix.text, "email@example.com");
+    }
+
+    #[test]
+    fn mouse_selection_slices_text_and_edits_clear_it() {
+        let mut prompt = PromptState::new("hello world");
+        prompt.begin_drag_selection(0);
+        prompt.extend_drag_selection(5);
+        assert_eq!(prompt.selection_text().as_deref(), Some("hello"));
+        assert_eq!(prompt.selection_range(), Some((0, 5)));
+
+        // Reversed drags normalize to (min, max).
+        prompt.begin_drag_selection(11);
+        prompt.extend_drag_selection(6);
+        assert_eq!(prompt.selection_text().as_deref(), Some("world"));
+
+        // Any edit collapses the selection (v1 is copy-only).
+        prompt.apply_edit(PromptEdit::MoveLeft);
+        assert_eq!(prompt.selection_text(), None);
+    }
+
+    #[test]
+    fn click_moves_caret_without_selecting() {
+        let mut prompt = PromptState::new("hello world");
+        prompt.move_cursor_to(0, 80);
+        assert_eq!(prompt.cursor, 0);
+        assert_eq!(prompt.selection_range(), None);
+
+        // An empty drag that never leaves the anchor cell clears on release.
+        prompt.begin_drag_selection(3);
+        prompt.clear_selection();
+        assert_eq!(prompt.cursor, 3);
+        assert_eq!(prompt.selection_range(), None);
+    }
+
+    #[test]
+    fn char_index_at_content_position_maps_rows_and_wide_chars() {
+        // "你a" is 3 display cells wide (你 = 2, a = 1) on the first row.
+        let mut prompt = PromptState::new("你a");
+        prompt.move_cursor_to(0, 80);
+        // Clicking at cell 2 lands on 'a' (char index 1).
+        assert_eq!(prompt.char_index_at_content_position(0, 2, 80), 1);
+        // Clicking inside the wide char's first cell lands on it (index 0).
+        assert_eq!(prompt.char_index_at_content_position(0, 0, 80), 0);
+        // Past the line end clamps to the text end.
+        assert_eq!(prompt.char_index_at_content_position(0, 50, 80), 2);
+
+        // Multi-row prompt: a newline moves to the next wrapped row.
+        let prompt = PromptState::new("abc\ndef");
+        assert_eq!(prompt.char_index_at_content_position(1, 1, 80), 5);
+        assert_eq!(prompt.char_index_at_content_position(0, 2, 80), 2);
+
+        // Wrapping: with a narrow body the second row is a continuation.
+        let prompt = PromptState::new("abcdef");
+        assert_eq!(prompt.char_index_at_content_position(1, 2, 4), 6);
     }
 }

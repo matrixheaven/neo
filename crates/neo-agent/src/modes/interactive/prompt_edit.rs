@@ -841,10 +841,20 @@ impl InteractiveController {
     }
 
     pub(super) fn copy_prompt_to_clipboard(&mut self) {
-        let Some(copied) = self.tui.chrome_mut().copy_prompt_text() else {
+        let Some(copied) = self.tui.chrome_mut().copy_prompt_text_or_selection() else {
             return;
         };
         self.write_clipboard_text(&copied);
+    }
+
+    /// Ctrl+C fallback (no transcript selection): copy the Todo selection,
+    /// else the prompt selection, else the whole prompt text.
+    pub(super) fn copy_input_selection_to_clipboard(&mut self) {
+        if let Some(text) = self.tui.chrome().copy_todo_selection_text() {
+            self.write_clipboard_text(&text);
+            return;
+        }
+        self.copy_prompt_to_clipboard();
     }
 
     pub(super) fn copy_transcript_selection_to_clipboard(&mut self) {

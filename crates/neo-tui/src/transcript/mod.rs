@@ -38,8 +38,9 @@ pub(crate) use child_activity::{
     render_child_tool_row, role_badge_style, role_label,
 };
 pub use chrome_render::{
-    CHROME_GUTTER, ChromeRender, apply_gutter, frame_content_width, render_chrome_lines,
-    render_chrome_lines_mut, render_footer_only_lines,
+    CHROME_GUTTER, ChromeRender, ChromeRowKind, apply_gutter, frame_content_width,
+    materialize_todo_selection, prompt_body_width, render_chrome_lines, render_chrome_lines_mut,
+    render_footer_only_lines,
 };
 pub use delegate_card::DelegateCardComponent;
 pub use delegate_group::DelegateGroupComponent;
