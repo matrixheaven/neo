@@ -71,6 +71,69 @@ cargo test --package neo-agent --bin neo -- modes::task_browser::tests::task_bro
 
 Do not use broad `cargo test`, package-wide `cargo nextest run`, or vague substring filters as evidence. Deterministic model tests: `FakeModelClient` / `FakeHarness`. Resource-sensitive tests must be classified in `.config/nextest.toml`. Tests must not depend on shared cwd, ambient env, fixed ports, or other tests' side effects.
 
+## Test suite governance
+
+The four crates share one set of test rules. One-time migration lists (fixed top-level targets, current over-limit files) live in §5.8/§5.9 of `docs/aegis/specs/2026-08-07-test-suite-governance-design.md` and are not copied here.
+
+### Structure
+
+- **Unit tests** verify private pure logic, parsing, or local state transitions only. Small tests stay inline as `#[cfg(test)] mod tests`; an inline block targets ≤300 lines, hard cap 600 lines or 12 tests — exceeding either cap means split out by behavior.
+- Extracted unit-test files use explicit names (`permission_mode_tests.rs`). When private test files must group, the production module declares them with explicit `#[path = "test_cases/<behavior>.rs"]`; never create test-only `mod.rs` or `tests.rs` aggregates.
+- **Crate behavior tests** go in `crates/<crate>/tests/` only when they check cross-module behavior through public interfaces. Each top-level target is one domain (`provider_stream_behavior.rs`); the top-level file declares only same-name behavior submodules, with test bodies in `tests/<domain>/<behavior>.rs`. This avoids giant files and avoids each small file becoming its own test binary.
+- Shared fixtures live in purpose-named files (`http_server.rs`, `isolated_home.rs`) inside the domain directory, pulled in via explicit `#[path]`.
+- **Forbidden file names**: test-only `mod.rs`, `tests.rs`, `test.rs`, `misc.rs`, `common.rs`, `integration.rs`, and numeric shards (`part1.rs`, `_1.rs`).
+- Test body files target 300–800 lines, hard cap 1200 lines or 30 tests; top-level domain entries hold only module declarations and minimal domain fixtures, target ≤100 lines. A top-level file with 1–2 tests merges into its domain unless platform- or resource-specific. Line counts trigger split review only — never deletion justification.
+- Test names are condition-plus-observable-result (`closed_input_routes_enter_to_next_turn`): no `test_` prefix, no ticket numbers, no version suffixes. Platform files end `_windows`/`_unix`/`_macos` with real conditional compilation; resource-pressure files end `_resource` and cannot use the suffix to escape normal CI.
+
+### What earns a new test
+
+Answer all three before adding one:
+
+1. What observable behavior or fault does it guard?
+2. What is the cheapest layer that captures that fault?
+3. Does an existing primary guard already fail on the same fault?
+
+No forms, tags, coverage gates, layout checkers, or long-term ledgers. New features cover committed behavior and critical failure branches only. Names, assertions, and fixtures must make failure condition and result readable in 30 seconds; test data is the minimum that triggers the behavior; resource tests state where their thresholds come from. Any real wait, global-env mutation, process spawn, or file sync must justify why a cheaper deterministic substitute cannot work.
+
+### Test classes
+
+Classification language only — tests still run under Cargo and Nextest.
+
+| Class | Guards | Default location | Prohibited |
+|---|---|---|---|
+| Unit | private pure logic, parsing, local state transitions | inline or explicit source-side test file | process spawn, network, cross-crate |
+| Crate behavior | public interfaces, cross-module wiring | domain entry in `crates/<crate>/tests/` | duplicating unit parameter matrices |
+| Product boundary | CLI, RPC, terminal, persistence, real processes | final entry crate only | repeating all lower-layer cases |
+| Platform | Windows/Linux/macOS differences | explicit platform files, conditional compilation | non-native results for native evidence |
+| Resource | volume, output, concurrency, reclamation boundaries | explicit `_resource` domain | arbitrary large data as boundary proof |
+
+### Lifecycle
+
+- Fix a defect by extending the existing primary guard first; add a minimal regression only when nothing covers the fault.
+- Flaky tests are defects: fix the determinism. No retries, no permanent quarantine.
+- Retiring production behavior retires its tests in the same batch; replacing behavior migrates the primary guard and deletes the old one.
+
+### Value judgment
+
+- **Keep** when it uniquely guards user-visible behavior, public API, or cross-module integration; guards append-only context, cache prefix, persistence, permissions, security, data-loss, or recovery semantics; guards a real historical defect whose fault class can recur; guards platform differences, error branches, resource boundaries, protocol ordering, or concurrency final states; or no cheaper stronger test captures the same fault.
+- **Merge** into one table-driven test with named cases when tests vary only input values over the same branch and assertions, or repeat full fixtures for one mapping table. Each case must be named so a failure is directly locatable; never chain sequentially dependent scenarios into one test.
+- **Delete** only when all four hold: (1) no independent user behavior, risk boundary, or historical defect; (2) a retained test fails on the same production fault; (3) assertions verify only derived capabilities, stdlib behavior, test-helper interfaces, non-empty text, or duplicated snapshot details; (4) running the precise target shows retained tests still prove the same semantics. High-risk duplicates get one temporary fault injection (reverted before commit) when call paths cannot prove the overlap. Deletion ships with evidence: the retained guard failing on the same fault, the exact single-package/single-target command, and a non-zero run count.
+- **Rewrite** when behavior matters but the test depends on fixed waits, real network, fixed ports, shared cwd, global env, or incomplete process reclamation — use paused time, readiness signals, `127.0.0.1:0`, `tempfile`, and existing fake models instead.
+
+### Layering dedup
+
+Per behavior keep at most: one cheapest unit parameter matrix (local branches), one crate-behavior chain (module wiring), and one `neo-agent` end-to-end chain only when cross-process or final-entry risk is real. Upper layers verify only added risk — wiring, serialization, process boundaries, terminal state, persistence — never the lower layer's full case set.
+
+### Local performance
+
+- Measure three segments separately on this machine, never substitute remote numbers: cold build + test discovery; hot deterministic execution after compile; the serial resource group's standalone time.
+- Baseline uses the default Nextest config with identical commands (only full status output enabled). `--profile ci` has a different slow-test threshold and is remote-CI-only, never a local baseline.
+- `retries = 0` stays. Do not fake performance with `#[ignore]`, nightly escapes, or relaxed timeouts.
+- Resource tests still run in full CI, split only into attributable standalone steps.
+- Process tests carry readiness deadlines, operation deadlines, and reclamation assertions — state signals, not fixed waits.
+- Nextest grouping is precise to tests that actually share resources; never serialize a whole test binary.
+- A new test entering the 20-second slow range must show the resource boundary cannot be expressed with smaller data or virtual time.
+
 ## Code style
 
 - `unsafe_code = "forbid"`; `clippy::pedantic` warned; `missing_errors_doc`, `missing_panics_doc`, `module_name_repetitions` allowed.
