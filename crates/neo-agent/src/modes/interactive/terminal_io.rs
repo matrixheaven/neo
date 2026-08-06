@@ -10,6 +10,7 @@ use anyhow::Result;
 use crossterm::terminal::size;
 use neo_tui::input::{InputEvent, InputParser, KeybindingsManager};
 use neo_tui::screen_output::FullscreenTerminal;
+use neo_tui::transcript::MouseKind;
 
 /// Shared absolute geometry observation between the raw stdin owner and the
 /// interactive terminal. Cloneable; no process-global state.
@@ -200,9 +201,23 @@ impl RawStdinEvents {
                 self.pending.remove(index);
             }
         } else {
-            // Motion input is transient. A fresh event should never wait
-            // behind stale drag/wheel events captured by a blocking overlay.
-            self.pending.retain(|pending| !is_motion_event(pending));
+            // Motion input is transient: a fresh keyboard event should never
+            // wait behind stale drag/wheel events captured by a blocking
+            // overlay. The one exception is a mouse release closing a drag
+            // gesture: it must not discard the gesture's final drag, because
+            // the selection state machine needs that last motion to anchor
+            // the drag before the release is delivered. Preserve a trailing
+            // drag; flush every other motion event.
+            let preserves_trailing_drag = matches!(&event, InputEvent::Mouse(mouse) if mouse.kind == MouseKind::Release)
+                && self.pending.back().is_some_and(is_drag_event);
+            if preserves_trailing_drag {
+                if let Some(last_drag) = self.pending.pop_back() {
+                    self.pending.retain(|pending| !is_motion_event(pending));
+                    self.pending.push_back(last_drag);
+                }
+            } else {
+                self.pending.retain(|pending| !is_motion_event(pending));
+            }
         }
         self.pending.push_back(event);
     }
@@ -396,6 +411,10 @@ impl TerminalEvents for RawStdinEvents {
 /// press and release events are never classified as motion.
 fn is_motion_event(event: &InputEvent) -> bool {
     matches!(event, InputEvent::Mouse(mouse) if mouse.is_motion())
+}
+
+fn is_drag_event(event: &InputEvent) -> bool {
+    matches!(event, InputEvent::Mouse(mouse) if mouse.kind == MouseKind::Drag)
 }
 
 fn read_stdin_chunks(reader: &mut impl Read, mut on_chunk: impl FnMut(&[u8]) -> bool) {
@@ -721,14 +740,64 @@ mod tests {
                 .expect("poll input"),
             Some(mouse_event(MouseKind::Drag, 19, 3))
         );
-        // A release overtakes any stale drags and is itself never dropped.
+        // A release must not discard the gesture's final drag: the last
+        // motion is delivered before the release closes the gesture.
         events.enqueue_pending(mouse_event(MouseKind::Drag, 20, 3));
         events.enqueue_pending(mouse_event(MouseKind::Release, 20, 3));
         assert_eq!(
             events
                 .poll_input_event(Duration::from_millis(0))
                 .expect("poll input"),
+            Some(mouse_event(MouseKind::Drag, 20, 3))
+        );
+        assert_eq!(
+            events
+                .poll_input_event(Duration::from_millis(0))
+                .expect("poll input"),
             Some(mouse_event(MouseKind::Release, 20, 3))
+        );
+        assert!(events.pending.is_empty());
+    }
+
+    #[test]
+    fn drag_release_preserves_last_motion_in_same_batch() {
+        let (tx, rx) = std::sync::mpsc::channel::<Vec<u8>>();
+        let geometry = GeometryObservation::new(80, 24, 0, 0);
+        let mut events = RawStdinEvents {
+            parser: InputParser::with_keybindings(KeybindingsManager::default()),
+            pending: VecDeque::new(),
+            rx,
+            last_size: Some((80, 24)),
+            geometry,
+            stdin_disconnected: false,
+        };
+        // One raw byte batch: press, several drags, release. SGR coordinates
+        // are one-based on the wire and become zero-based in the parser.
+        let mut batch = b"\x1b[<0;5;3M".to_vec();
+        for column in 6..20 {
+            batch.extend_from_slice(format!("\x1b[<32;{column};3M").as_bytes());
+        }
+        batch.extend_from_slice(b"\x1b[<3;20;3m");
+        events.drain_parser_into_pending(&batch);
+
+        assert_eq!(
+            events
+                .poll_input_event(Duration::from_millis(0))
+                .expect("poll input"),
+            Some(mouse_event(MouseKind::Press, 4, 2))
+        );
+        // Drags coalesce, but the release must not discard the last one.
+        assert_eq!(
+            events
+                .poll_input_event(Duration::from_millis(0))
+                .expect("poll input"),
+            Some(mouse_event(MouseKind::Drag, 18, 2))
+        );
+        assert_eq!(
+            events
+                .poll_input_event(Duration::from_millis(0))
+                .expect("poll input"),
+            Some(mouse_event(MouseKind::Release, 19, 2))
         );
         assert!(events.pending.is_empty());
     }

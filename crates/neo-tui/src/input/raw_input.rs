@@ -217,10 +217,18 @@ pub(super) fn parse_sgr_mouse(sequence: &str) -> Option<MouseEvent> {
             1 => MouseKind::ScrollDown,
             _ => return None,
         }
+    } else if code & 32 != 0 {
+        // Motion bit: drags with a button held (32-34) and no-button motion
+        // (35). No-button motion is NOT a release — XTerm encodes releases
+        // as button bits 3 without the motion bit — so it must never reach
+        // the release branch: misclassifying it clears an established
+        // selection on plain mouse movement. Drag is the right kind: it is
+        // transient motion for queue coalescing, and the pane's drag handler
+        // is a no-op without a press anchor, so hover motion cannot start a
+        // selection.
+        MouseKind::Drag
     } else if release_suffix || code & 3 == 3 {
         MouseKind::Release
-    } else if code & 32 != 0 {
-        MouseKind::Drag
     } else {
         MouseKind::Press
     };
@@ -1978,5 +1986,34 @@ mod tests {
         let events = parser.feed_bytes(b" ");
         assert_eq!(events.len(), 1);
         assert_eq!(events[0], RawEvent::Key(" ".to_owned()));
+    }
+
+    #[test]
+    fn sgr_mouse_no_button_motion_is_not_release() {
+        // XTerm encodes motion with no button held as code 35 (motion bit 32
+        // + button bits 3). It must not be classified as a release, which
+        // would clear an established selection on plain mouse movement. It
+        // parses as a drag: transient motion for queue coalescing, and a
+        // no-op in the pane without a press anchor.
+        let motion = parse_sgr_mouse("\x1b[<35;10;10M").expect("no-button motion parses");
+        assert_ne!(motion.kind, MouseKind::Release);
+        assert_eq!(motion.kind, MouseKind::Drag);
+        assert_eq!(motion.button, MouseButton::Left);
+        assert_eq!(motion.column, 9);
+        assert_eq!(motion.row, 9);
+        // Modifier variants of no-button motion stay motion, never release.
+        assert_eq!(
+            parse_sgr_mouse("\x1b[<39;10;10M").map(|event| event.kind),
+            Some(MouseKind::Drag)
+        );
+        // Real releases and presses still classify correctly.
+        assert_eq!(
+            parse_sgr_mouse("\x1b[<3;10;10m").map(|event| event.kind),
+            Some(MouseKind::Release)
+        );
+        assert_eq!(
+            parse_sgr_mouse("\x1b[<0;10;10M").map(|event| event.kind),
+            Some(MouseKind::Press)
+        );
     }
 }
