@@ -12,6 +12,7 @@ use crate::shell::{StreamUpdate, ToolStatusKind};
 use crate::terminal_image::{
     ImageRenderPolicy, ImageSource, InlineImage, TerminalImageCapabilities,
 };
+use crate::transcript::store::EntryRenderParams;
 use crate::transcript::{
     DocumentLayout, McpStartupStatusData, QuestionPromptData, QuestionPromptState,
     ShellRunComponent, ToolCallComponent, ToolCallState, TranscriptEntry, TranscriptEntryId,
@@ -2347,12 +2348,14 @@ impl TranscriptPane {
         } else {
             let mut block = self.transcript.render_entry_ansi_cached(
                 index,
-                width,
-                &self.theme,
-                self.activity_frame,
-                self.image_render_policy,
-                self.image_capabilities,
-                self.body_height.max(1),
+                EntryRenderParams {
+                    width,
+                    theme: &self.theme,
+                    activity_frame: self.activity_frame,
+                    image_render_policy: self.image_render_policy,
+                    image_capabilities: self.image_capabilities,
+                    viewport_rows: self.body_height.max(1),
+                },
             );
             trim_ansi_transcript_block(&mut block);
             block

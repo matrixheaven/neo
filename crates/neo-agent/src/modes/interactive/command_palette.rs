@@ -12,9 +12,30 @@ use crate::prompt::templates::load_project_prompt_templates;
 
 use super::InteractiveController;
 
-#[allow(clippy::too_many_lines)]
 fn command_specs(project_dir: &Path, project_trusted: bool) -> (Vec<CommandSpec>, Option<String>) {
-    let mut commands = vec![
+    let mut commands = workspace_commands();
+    commands.extend(session_commands());
+    commands.extend(permission_commands());
+    commands.extend(plan_and_ui_commands());
+    let mut templates = match load_project_prompt_templates(project_dir, project_trusted) {
+        Ok(templates) => templates,
+        Err(error) => return (commands, Some(error.to_string())),
+    };
+    templates.sort_by(|left, right| left.name.cmp(&right.name));
+    commands.extend(templates.into_iter().map(|template| {
+        let label = format!("/{}", template.name);
+        let description = (!template.description.is_empty()).then_some(template.description);
+        CommandSpec::new(
+            format!("prompt-template.{}", template.name),
+            label,
+            description,
+        )
+    }));
+    (commands, None)
+}
+
+fn workspace_commands() -> Vec<CommandSpec> {
+    vec![
         CommandSpec::new("sessions", "Open sessions", Some("Browse local sessions")),
         CommandSpec::new("models", "Open models", Some("Switch active model")),
         CommandSpec::new(
@@ -28,6 +49,11 @@ fn command_specs(project_dir: &Path, project_trusted: bool) -> (Vec<CommandSpec>
             "Open workspace access",
             Some("Manage additional workspace directories"),
         ),
+    ]
+}
+
+fn session_commands() -> Vec<CommandSpec> {
+    vec![
         CommandSpec::new(
             "session.new",
             "New session",
@@ -64,6 +90,11 @@ fn command_specs(project_dir: &Path, project_trusted: bool) -> (Vec<CommandSpec>
             Some("Remove transcript selection"),
         ),
         CommandSpec::new("submit", "Submit prompt", Some("Submit the current prompt")),
+    ]
+}
+
+fn permission_commands() -> Vec<CommandSpec> {
+    vec![
         CommandSpec::new(
             "permissions",
             "Open permissions",
@@ -84,6 +115,11 @@ fn command_specs(project_dir: &Path, project_trusted: bool) -> (Vec<CommandSpec>
             "YOLO permission mode",
             Some("Skip confirmations"),
         ),
+    ]
+}
+
+fn plan_and_ui_commands() -> Vec<CommandSpec> {
+    vec![
         CommandSpec::new(
             "plan",
             "Toggle plan mode",
@@ -99,22 +135,7 @@ fn command_specs(project_dir: &Path, project_trusted: bool) -> (Vec<CommandSpec>
             "Theme manager",
             Some("Open and manage themes"),
         ),
-    ];
-    let mut templates = match load_project_prompt_templates(project_dir, project_trusted) {
-        Ok(templates) => templates,
-        Err(error) => return (commands, Some(error.to_string())),
-    };
-    templates.sort_by(|left, right| left.name.cmp(&right.name));
-    commands.extend(templates.into_iter().map(|template| {
-        let label = format!("/{}", template.name);
-        let description = (!template.description.is_empty()).then_some(template.description);
-        CommandSpec::new(
-            format!("prompt-template.{}", template.name),
-            label,
-            description,
-        )
-    }));
-    (commands, None)
+    ]
 }
 
 impl InteractiveController {

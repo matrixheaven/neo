@@ -303,30 +303,6 @@ impl SteerInputHandle {
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::{ActiveTurnInput, SteerInputHandle};
-    use crate::AgentMessage;
-
-    #[test]
-    fn steer_input_closes_only_after_pending_input_is_drained() {
-        let handle = SteerInputHandle::new();
-        assert!(
-            handle.try_push(ActiveTurnInput::SteerNow(AgentMessage::user_text(
-                "race input",
-            )))
-        );
-        assert!(!handle.close_if_empty());
-        assert_eq!(handle.drain().len(), 1);
-        assert!(handle.close_if_empty());
-        assert!(
-            !handle.try_push(ActiveTurnInput::SteerNow(AgentMessage::user_text(
-                "next turn",
-            )))
-        );
-    }
-}
-
 pub(super) fn drain_next_pending_queue(
     config: &AgentConfig,
     emitter: &mut EventEmitter,
@@ -411,4 +387,28 @@ fn take_messages(queue: &[AgentMessage], mode: QueueMode) -> Vec<AgentMessage> {
         QueueMode::OneAtATime => usize::from(!queue.is_empty()),
     };
     queue.iter().take(count).cloned().collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{ActiveTurnInput, SteerInputHandle};
+    use crate::AgentMessage;
+
+    #[test]
+    fn steer_input_closes_only_after_pending_input_is_drained() {
+        let handle = SteerInputHandle::new();
+        assert!(
+            handle.try_push(ActiveTurnInput::SteerNow(AgentMessage::user_text(
+                "race input",
+            )))
+        );
+        assert!(!handle.close_if_empty());
+        assert_eq!(handle.drain().len(), 1);
+        assert!(handle.close_if_empty());
+        assert!(
+            !handle.try_push(ActiveTurnInput::SteerNow(AgentMessage::user_text(
+                "next turn",
+            )))
+        );
+    }
 }

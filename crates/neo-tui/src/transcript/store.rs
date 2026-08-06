@@ -213,6 +213,27 @@ impl TranscriptEntryId {
     }
 }
 
+/// Render context shared by the entry renderers.
+///
+/// Bundles the terminal width, theme, activity frame, image rendering
+/// policy/capabilities, and viewport bounds so the render methods stay
+/// under the clippy argument-count threshold.
+pub struct EntryRenderParams<'a> {
+    /// Terminal content width in columns.
+    pub width: usize,
+    /// Active theme used to style the rendered lines.
+    pub theme: &'a TuiTheme,
+    /// Animation frame for live entries (spinners, elapsed headers).
+    pub activity_frame: usize,
+    /// Whether and how terminal images are rendered.
+    pub image_render_policy: ImageRenderPolicy,
+    /// Capabilities of the terminal for inline image rendering.
+    pub image_capabilities: TerminalImageCapabilities,
+    /// Bounds the visible complete-output range for expanded Workflow
+    /// direct tool reads; other entry kinds ignore it.
+    pub viewport_rows: usize,
+}
+
 impl TranscriptStore {
     #[must_use]
     pub fn new() -> Self {
@@ -1814,12 +1835,14 @@ impl TranscriptStore {
 
         let lines = self.render_entry_lines(
             index,
-            width,
-            theme,
-            activity_frame,
-            ImageRenderPolicy::default(),
-            TerminalImageCapabilities::default(),
-            viewport_rows,
+            EntryRenderParams {
+                width,
+                theme,
+                activity_frame,
+                image_render_policy: ImageRenderPolicy::default(),
+                image_capabilities: TerminalImageCapabilities::default(),
+                viewport_rows,
+            },
         );
 
         if cacheable && let Some(slot) = self.render_cache.get_mut(index) {
@@ -1838,21 +1861,17 @@ impl TranscriptStore {
     /// [`Self::render_entry_cached`] so transcript body composition can avoid
     /// cloning cached `Line` spans and re-running `to_ansi()` on every frame.
     ///
-    /// `viewport_rows` bounds the visible complete-output range an expanded
-    /// Workflow direct tool reads; other entry kinds ignore it.
-    #[allow(clippy::too_many_arguments)]
+    /// `EntryRenderParams::viewport_rows` bounds the visible complete-output
+    /// range an expanded Workflow direct tool reads; other entry kinds ignore
+    /// it.
     pub fn render_entry_ansi_cached(
         &mut self,
         index: usize,
-        width: usize,
-        theme: &TuiTheme,
-        activity_frame: usize,
-        image_render_policy: ImageRenderPolicy,
-        image_capabilities: TerminalImageCapabilities,
-        viewport_rows: usize,
+        params: EntryRenderParams<'_>,
     ) -> Vec<String> {
         self.sync_cache_len();
 
+        let width = params.width;
         let cacheable = self
             .entries
             .get(index)
@@ -1865,15 +1884,7 @@ impl TranscriptStore {
             return cached.ansi_lines.clone();
         }
 
-        let lines = self.render_entry_lines(
-            index,
-            width,
-            theme,
-            activity_frame,
-            image_render_policy,
-            image_capabilities,
-            viewport_rows,
-        );
+        let lines = self.render_entry_lines(index, params);
         let ansi_lines = lines.iter().map(Line::to_ansi).collect::<Vec<_>>();
 
         if cacheable && let Some(slot) = self.render_cache.get_mut(index) {
@@ -1887,19 +1898,18 @@ impl TranscriptStore {
         ansi_lines
     }
 
-    /// `viewport_rows` bounds the visible complete-output range an expanded
-    /// Workflow direct tool reads; other entry kinds ignore it.
-    #[allow(clippy::too_many_arguments)]
-    fn render_entry_lines(
-        &mut self,
-        index: usize,
-        width: usize,
-        theme: &TuiTheme,
-        activity_frame: usize,
-        image_render_policy: ImageRenderPolicy,
-        image_capabilities: TerminalImageCapabilities,
-        viewport_rows: usize,
-    ) -> Vec<Line> {
+    /// `EntryRenderParams::viewport_rows` bounds the visible complete-output
+    /// range an expanded Workflow direct tool reads; other entry kinds ignore
+    /// it.
+    fn render_entry_lines(&mut self, index: usize, params: EntryRenderParams<'_>) -> Vec<Line> {
+        let EntryRenderParams {
+            width,
+            theme,
+            activity_frame,
+            image_render_policy,
+            image_capabilities,
+            viewport_rows,
+        } = params;
         match self.entries.get(index) {
             Some(TranscriptEntry::Workflow { component }) => {
                 let output_store = self.output_store.as_ref();
@@ -2541,12 +2551,14 @@ mod tests {
 
         let first = store.render_entry_ansi_cached(
             0,
-            80,
-            &theme,
-            0,
-            ImageRenderPolicy::default(),
-            TerminalImageCapabilities::default(),
-            24,
+            EntryRenderParams {
+                width: 80,
+                theme: &theme,
+                activity_frame: 0,
+                image_render_policy: ImageRenderPolicy::default(),
+                image_capabilities: TerminalImageCapabilities::default(),
+                viewport_rows: 24,
+            },
         );
 
         assert!(first.iter().any(|line| line.contains("cached answer")));
@@ -2555,12 +2567,14 @@ mod tests {
         assert_eq!(
             store.render_entry_ansi_cached(
                 0,
-                80,
-                &theme,
-                99,
-                ImageRenderPolicy::default(),
-                TerminalImageCapabilities::default(),
-                24,
+                EntryRenderParams {
+                    width: 80,
+                    theme: &theme,
+                    activity_frame: 99,
+                    image_render_policy: ImageRenderPolicy::default(),
+                    image_capabilities: TerminalImageCapabilities::default(),
+                    viewport_rows: 24,
+                },
             ),
             first
         );
