@@ -663,25 +663,33 @@ fn diff_text(line: &DiffLine) -> &str {
 }
 
 fn render_omission(changes: &[Value], width: usize, theme: &TuiTheme) -> Vec<Line> {
-    let replacements = changes
-        .iter()
-        .filter_map(|change| change.get("replacements").and_then(Value::as_u64))
-        .sum::<u64>();
-    let changed_lines = changes
+    let muted = Style::default().fg(theme.text_muted);
+    let mut rows = changes
         .iter()
         .map(|change| {
-            change.get("added").and_then(Value::as_u64).unwrap_or(0)
-                + change.get("removed").and_then(Value::as_u64).unwrap_or(0)
+            let path = change.get("path").and_then(Value::as_str).unwrap_or("?");
+            let added = change.get("added").and_then(Value::as_u64).unwrap_or(0);
+            let removed = change.get("removed").and_then(Value::as_u64).unwrap_or(0);
+            Line::from_spans(vec![
+                Span::styled("M ", Style::default().fg(theme.diff_hunk)),
+                Span::styled(path.to_owned(), Style::default().fg(theme.text_primary)),
+                Span::styled("  ", muted),
+                Span::styled(format!("+{added}"), Style::default().fg(theme.diff_added)),
+                Span::styled(" ", Style::default()),
+                Span::styled(
+                    format!("-{removed}"),
+                    Style::default().fg(theme.diff_removed),
+                ),
+            ])
+            .truncate_to_width(width)
         })
-        .sum::<u64>();
-    styled_wrapped(
-        &format!(
-            "... {} files · {replacements} replacements · {changed_lines} changed lines hidden · ctrl+o to expand",
-            changes.len()
-        ),
+        .collect::<Vec<_>>();
+    rows.extend(styled_wrapped(
+        "... diff details hidden · ctrl+o to expand",
         width,
-        Style::default().fg(theme.text_muted),
-    )
+        muted,
+    ));
+    rows
 }
 
 fn select_change_indices(len: usize, expanded: bool) -> Vec<usize> {

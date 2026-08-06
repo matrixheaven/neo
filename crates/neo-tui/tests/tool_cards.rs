@@ -2087,8 +2087,14 @@ fn edit_batch_card_renders_collapsed_expanded_and_narrow() {
     assert!(
         collapsed
             .iter()
-            .any(|line| line.contains("hidden") || line.contains("ctrl+o")),
-        "collapsed should omit with explicit marker: {collapsed:?}"
+            .any(|line| line.contains("file2.rs") && line.contains("+2") && line.contains("-1")),
+        "collapsed should show omitted file stats: {collapsed:?}"
+    );
+    assert!(
+        collapsed
+            .iter()
+            .any(|line| line.contains("diff details hidden") && line.contains("ctrl+o")),
+        "collapsed should retain expand hint: {collapsed:?}"
     );
 
     card.set_expanded(true);
