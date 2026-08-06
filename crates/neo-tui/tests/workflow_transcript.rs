@@ -1701,6 +1701,121 @@ fn workflow_group_keeps_earliest_blocking_input_owner() {
     assert!(promoted.contains("Choose target?"), "{promoted}");
 }
 
+/// In a workflow session, the earliest unresolved approval owns the visible
+/// focus: later activity stays in the store but out of the current frame
+/// until the approval is handled, then the next blocking entry is revealed.
+#[test]
+fn workflow_approval_focus_defers_later_activity() {
+    let mut pane = neo_tui::transcript::TranscriptPane::new(120, 12);
+    pane.apply_agent_event(AgentEvent::WorkflowStarted {
+        turn: 1,
+        workflow: snapshot(WorkflowState::Running),
+    });
+    pane.apply_agent_event(AgentEvent::ApprovalRequested {
+        request: ApprovalRequest {
+            turn: 1,
+            id: "workflow-approval".to_owned(),
+            operation: PermissionOperation::Shell,
+            presentation: ApprovalPresentation::Tool {
+                title: "Approve workflow command?".to_owned(),
+                details: vec!["cargo test".to_owned()],
+            },
+            options: vec![ApprovalOption {
+                label: "Allow once".to_owned(),
+                description: None,
+                action: ApprovalAction::PermitOnce,
+            }],
+            workflow_origin: Some(origin("wf-test", "approval-call")),
+        },
+    });
+    // A later workflow question lands after the approval in the store.
+    pane.apply_question_stream_update(StreamUpdate::QuestionRequested {
+        id: "workflow-question".to_owned(),
+        questions: vec![QuestionDisplayData {
+            question: "Choose target?".to_owned(),
+            header: None,
+            body: None,
+            options: vec![QuestionDisplayOption {
+                label: "Local".to_owned(),
+                description: None,
+            }],
+            multi_select: false,
+        }],
+        workflow_origin: Some(origin("wf-test", "question-call")),
+    });
+
+    // The approval owns the visible focus: its action area is visible and
+    // the later question stays out of the current frame.
+    assert_eq!(
+        pane.earliest_blocking_entry(),
+        Some(BlockingEntryKind::Approval("workflow-approval".to_owned()))
+    );
+    let blocked = terminal_text(&pane.render_visible_slice(120, 12));
+    assert!(
+        blocked.contains("Approve workflow command?"),
+        "approval action area visible:\n{blocked}"
+    );
+    assert!(
+        blocked.contains("↑/↓ select"),
+        "approval action hint visible:\n{blocked}"
+    );
+    assert!(
+        !blocked.contains("Choose target?"),
+        "later workflow activity deferred while the approval is pending:\n{blocked}"
+    );
+    let entries = pane.transcript().entries();
+    let approval_position = entries
+        .iter()
+        .position(|entry| {
+            matches!(entry, TranscriptEntry::ApprovalPrompt(data) if data.id() == "workflow-approval")
+        })
+        .expect("approval entry");
+    let question_position = entries
+        .iter()
+        .position(|entry| {
+            matches!(entry, TranscriptEntry::QuestionPrompt(data) if data.id == "workflow-question")
+        })
+        .expect("question entry");
+    assert!(
+        approval_position < question_position,
+        "the store keeps the approval before the later question"
+    );
+
+    // Handling the approval reveals the next earliest blocking entry: the
+    // question's action area becomes visible.
+    pane.resolve_approval(
+        "workflow-approval",
+        &ApprovalResolution::Selected {
+            action: ApprovalAction::PermitOnce,
+            label: "Allow once".to_owned(),
+            feedback: None,
+        },
+    );
+    assert_eq!(
+        pane.earliest_blocking_entry(),
+        Some(BlockingEntryKind::Question("workflow-question".to_owned()))
+    );
+    let promoted = terminal_text(&pane.render_visible_slice(120, 12));
+    assert!(
+        promoted.contains("Choose target?"),
+        "the next blocking entry is revealed:\n{promoted}"
+    );
+
+    // Answering the question releases the focus entirely: the answered
+    // facts render in canonical order.
+    pane.resolve_question_prompt("workflow-question", vec!["Local".to_owned()]);
+    assert_eq!(pane.earliest_blocking_entry(), None);
+    let released = terminal_text(&pane.render_visible_slice(120, 12));
+    assert!(
+        released.contains("question: answered · Local"),
+        "release restores the ordinary view:\n{released}"
+    );
+    assert!(
+        released.contains("approval: Allow once"),
+        "resolved approval still rendered:\n{released}"
+    );
+}
+
 fn assert_finalized_workflow_tool(
     pane: &neo_tui::transcript::TranscriptPane,
     workflow_index: usize,

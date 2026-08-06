@@ -4,14 +4,16 @@
 
 use neo_agent_core::multi_agent::MultiAgentRuntime;
 use neo_agent_core::{
-    ApprovalAction, ApprovalOption, ApprovalPresentation, ApprovalRequest, PermissionOperation,
+    ApprovalAction, ApprovalOption, ApprovalPresentation, ApprovalRequest, ApprovalResolution,
+    PermissionOperation,
 };
+use neo_tui::dialogs::{QuestionDisplayData, QuestionDisplayOption};
 use neo_tui::primitive::strip_ansi;
 use neo_tui::screen_output::{FullscreenTerminal, TerminalFrame};
 use neo_tui::shell::ToolStatusKind;
 use neo_tui::transcript::{
-    ApprovalDisplayState, ApprovalPromptData, DelegateGroupComponent, TranscriptEntry,
-    TranscriptPane,
+    ApprovalDisplayState, ApprovalPromptData, BlockingEntryKind, DelegateGroupComponent,
+    TranscriptEntry, TranscriptPane,
 };
 
 /// The non-blank content lines of a rendered slice, in order.
@@ -624,11 +626,16 @@ fn dynamic_tool_group_remeasures_after_append_and_member_update() {
         "trailing entry shifts by exactly the re-measured entries"
     );
 
-    // The tail stays reachable: the bounded visible slice resolves to the
-    // document bottom and still shows the last entry.
-    assert!(
-        pane.document().total_rows() > 6,
-        "document is taller than the viewport"
+    // Resolving the approval releases the visible focus: the bounded
+    // visible slice resolves to the document bottom again and shows the
+    // last entry.
+    pane.resolve_approval(
+        "tool-1",
+        &ApprovalResolution::Selected {
+            action: ApprovalAction::PermitOnce,
+            label: "Approve".to_owned(),
+            feedback: None,
+        },
     );
     let tail = pane.render_visible_slice(80, 6);
     assert_eq!(tail.len(), 6, "the physical slice stays bounded");
@@ -773,5 +780,142 @@ fn removing_non_tool_between_tool_groups_merges_and_remesures() {
     assert!(
         tail.iter().any(|row| strip_ansi(row).contains("after")),
         "tail-following slice reaches the last entry: {tail:?}"
+    );
+}
+
+#[test]
+fn blocking_entry_keeps_action_area_visible_and_defers_later_tools() {
+    let mut pane = TranscriptPane::new(80, 10);
+    // Two parallel tool start events land in the store in event order; the
+    // second one stays Preparing.
+    pane.transcript_mut().push_tool_run("tool-1", "Bash", None);
+    pane.transcript_mut().push_tool_run("tool-2", "Bash", None);
+    pane.transcript_mut().mutate_tool("tool-2", |tool| {
+        tool.update_call_state("Bash".to_owned(), None, ToolStatusKind::Pending)
+    });
+    // The approval for the first tool is inserted right after its tool
+    // entry, between the two parallel tools.
+    pane.apply_agent_event(neo_agent_core::AgentEvent::ApprovalRequested {
+        request: approval_for_tool("tool-1").request,
+    });
+
+    // Canonical storage keeps every event in order: tool-1, approval,
+    // tool-2 — nothing is deleted, reordered, or delayed.
+    let entries = pane.transcript().entries();
+    assert!(
+        matches!(&entries[0], TranscriptEntry::ToolRun { component } if component.id() == "tool-1"),
+        "entries: {entries:?}"
+    );
+    assert!(
+        matches!(&entries[1], TranscriptEntry::ApprovalPrompt(data) if data.id() == "tool-1" && data.is_pending()),
+        "entries: {entries:?}"
+    );
+    assert!(
+        matches!(&entries[2], TranscriptEntry::ToolRun { component } if component.id() == "tool-2"),
+        "entries: {entries:?}"
+    );
+
+    // The visible window is confined to the blocking card: the action area
+    // is visible by default, and the second Preparing below the card is
+    // deferred out of the current frame.
+    assert_eq!(
+        pane.earliest_blocking_entry(),
+        Some(BlockingEntryKind::Approval("tool-1".to_owned()))
+    );
+    let rows = pane.render_visible_slice(80, 10);
+    let text = non_blank_lines(&rows).join("\n");
+    assert!(text.contains("1. Approve"), "action area visible:\n{text}");
+    assert!(text.contains("↑/↓ select"), "action hint visible:\n{text}");
+    assert!(
+        !text.contains("Preparing Bash"),
+        "later tool must not enter the visible window while the approval is pending:\n{text}"
+    );
+
+    // Resolving the approval releases the focus: the second Preparing
+    // appears and the canonical order is unchanged.
+    pane.resolve_approval(
+        "tool-1",
+        &ApprovalResolution::Selected {
+            action: ApprovalAction::PermitOnce,
+            label: "Approve".to_owned(),
+            feedback: None,
+        },
+    );
+    assert_eq!(pane.earliest_blocking_entry(), None);
+    let rows = pane.render_visible_slice(80, 10);
+    let text = non_blank_lines(&rows).join("\n");
+    assert!(
+        text.contains("Preparing Bash"),
+        "the deferred tool appears once the approval is handled:\n{text}"
+    );
+    let entries = pane.transcript().entries();
+    assert!(
+        matches!(&entries[1], TranscriptEntry::ApprovalPrompt(data) if data.id() == "tool-1"),
+        "canonical order unchanged: {entries:?}"
+    );
+}
+
+#[test]
+fn question_blocking_entry_keeps_action_area_visible_and_defers_later_content() {
+    let mut pane = TranscriptPane::new(80, 10);
+    pane.transcript_mut().push_tool_run("tool-1", "Bash", None);
+    pane.transcript_mut().push_tool_run("tool-2", "Bash", None);
+    pane.transcript_mut().mutate_tool("tool-2", |tool| {
+        tool.update_call_state("Bash".to_owned(), None, ToolStatusKind::Pending)
+    });
+    pane.upsert_question_prompt(
+        "question-1",
+        vec![QuestionDisplayData {
+            question: "Continue?".to_owned(),
+            header: None,
+            body: None,
+            options: vec![QuestionDisplayOption {
+                label: "Yes".to_owned(),
+                description: None,
+            }],
+            multi_select: false,
+        }],
+    );
+    pane.push_status("later-status");
+
+    // The question owns the visible focus: its action area is visible and
+    // the later status row stays out of the current frame.
+    assert_eq!(
+        pane.earliest_blocking_entry(),
+        Some(BlockingEntryKind::Question("question-1".to_owned()))
+    );
+    let rows = pane.render_visible_slice(80, 10);
+    let text = non_blank_lines(&rows).join("\n");
+    assert!(text.contains("Continue?"), "question card visible:\n{text}");
+    assert!(text.contains("Yes"), "option visible:\n{text}");
+    assert!(
+        text.contains("↑↓ select"),
+        "question action hint visible:\n{text}"
+    );
+    assert!(
+        !text.contains("later-status"),
+        "later content deferred while the question is pending:\n{text}"
+    );
+    assert!(
+        pane.transcript().entries().iter().any(|entry| matches!(
+            entry,
+            TranscriptEntry::QuestionPrompt(data) if data.id == "question-1" && data.is_pending()
+        )),
+        "the pending question stays in the store"
+    );
+
+    // Answering the question releases the focus: the later status row
+    // appears and the answered fact commits in place.
+    pane.resolve_question_prompt("question-1", vec!["Yes".to_owned()]);
+    assert_eq!(pane.earliest_blocking_entry(), None);
+    let rows = pane.render_visible_slice(80, 10);
+    let text = non_blank_lines(&rows).join("\n");
+    assert!(
+        text.contains("question: answered · Yes"),
+        "answered fact committed:\n{text}"
+    );
+    assert!(
+        text.contains("later-status"),
+        "later content revealed after resolution:\n{text}"
     );
 }

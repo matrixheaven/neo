@@ -42,6 +42,20 @@ pub struct DocumentViewport {
     pub new_activity: bool,
 }
 
+/// The visible-window constraint for the earliest unresolved blocking
+/// entry (pending approval or question), fed every frame by the pane.
+///
+/// While engaged, the window's lower boundary never passes the entry's last
+/// row: later entries stay in the document but out of the visible window
+/// until the entry resolves. The scroll offset moves the window inside the
+/// card (0 = action area at the viewport bottom).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct BlockingFocus {
+    entry_id: TranscriptEntryId,
+    entry_index: usize,
+    scroll_offset: usize,
+}
+
 /// Incremental document layout: per-entry heights, virtual start rows, and
 /// the logical scroll anchor.
 ///
@@ -70,6 +84,11 @@ pub struct DocumentLayout {
     viewport_height: usize,
     /// The document view state.
     view: DocumentViewport,
+    /// Earliest unresolved blocking entry constraining the visible window,
+    /// fed every frame by the pane. The user's own view state is never
+    /// mutated while a focus is engaged, so releasing it transparently
+    /// restores the ordinary follow or locked behavior.
+    blocking_focus: Option<BlockingFocus>,
 }
 
 impl Default for DocumentLayout {
@@ -94,6 +113,7 @@ impl DocumentLayout {
                 following_tail: true,
                 new_activity: false,
             },
+            blocking_focus: None,
         }
     }
 
@@ -268,9 +288,14 @@ impl DocumentLayout {
     }
 
     /// Move the view up by `rows` virtual rows, locking the current top
-    /// logical point as the anchor.
+    /// logical point as the anchor. While a blocking entry owns the view,
+    /// the scroll moves inside its card toward the card's top.
     pub fn scroll_up(&mut self, rows: usize) {
         if rows == 0 {
+            return;
+        }
+        if let Some(focus) = &mut self.blocking_focus {
+            focus.scroll_offset = focus.scroll_offset.saturating_add(rows);
             return;
         }
         let viewport = self.viewport_height.max(1);
@@ -286,8 +311,13 @@ impl DocumentLayout {
     }
 
     /// Move the view down by `rows` virtual rows. Reaching the document
-    /// bottom resumes tail following.
+    /// bottom resumes tail following; while a blocking entry owns the view,
+    /// scrolling down returns to its action area instead.
     pub fn scroll_down(&mut self, rows: usize) {
+        if let Some(focus) = &mut self.blocking_focus {
+            focus.scroll_offset = focus.scroll_offset.saturating_sub(rows);
+            return;
+        }
         if self.view.following_tail || self.total_rows == 0 {
             return;
         }
@@ -304,8 +334,14 @@ impl DocumentLayout {
         }
     }
 
-    /// Resolve the view directly to the new document bottom.
+    /// Resolve the view directly to the new document bottom. While a
+    /// blocking entry owns the view, "bottom" means that entry's action
+    /// area; the user's own view state is left untouched.
     pub fn follow_bottom(&mut self) {
+        if let Some(focus) = &mut self.blocking_focus {
+            focus.scroll_offset = 0;
+            return;
+        }
         self.view.following_tail = true;
         self.view.anchor = None;
         self.view.new_activity = false;
@@ -319,8 +355,48 @@ impl DocumentLayout {
         had
     }
 
+    /// Feed the earliest unresolved blocking entry (pending approval or
+    /// question) derived by the pane from the canonical entries, as a
+    /// layout index.
+    ///
+    /// While a focus is engaged, [`Self::visible_row_range`] confines the
+    /// visible window to that entry's rows and scrolls move inside its card
+    /// instead of the document. The user's own view state (anchor and
+    /// tail-following) is never mutated, so releasing the focus restores
+    /// the ordinary follow or locked behavior without any saved state.
+    /// Moving to a different entry re-anchors the window on the new card's
+    /// action area.
+    pub fn set_blocking_focus(&mut self, entry_index: Option<usize>) {
+        let Some(index) = entry_index else {
+            self.blocking_focus = None;
+            return;
+        };
+        let Some(layout) = self.layouts.get(index) else {
+            self.blocking_focus = None;
+            return;
+        };
+        let same_focus = self
+            .blocking_focus
+            .is_some_and(|focus| focus.entry_id == layout.entry_id);
+        let scroll_offset = if same_focus {
+            self.blocking_focus.map_or(0, |focus| focus.scroll_offset)
+        } else {
+            0
+        };
+        self.blocking_focus = Some(BlockingFocus {
+            entry_id: layout.entry_id,
+            entry_index: index,
+            scroll_offset,
+        });
+    }
+
     /// Resolve the visible virtual row range for a physical viewport of
     /// `height` rows, remembering the height for scroll arithmetic.
+    ///
+    /// While a blocking entry owns the view, the window's lower boundary
+    /// never passes the entry's last row and the default position puts its
+    /// action area at the viewport bottom; the user's own view state is
+    /// ignored until the entry resolves.
     pub fn visible_row_range(&mut self, height: usize) -> std::ops::Range<usize> {
         self.viewport_height = height;
         if height == 0 || self.total_rows == 0 {
@@ -336,7 +412,30 @@ impl DocumentLayout {
             anchor_row.min(self.total_rows.saturating_sub(1))
         };
         let end = (start + height).min(self.total_rows);
-        start..end
+        let Some(focus) = self.blocking_focus else {
+            return start..end;
+        };
+        let Some(layout) = self.layouts.get(focus.entry_index) else {
+            return start..end;
+        };
+        if layout.entry_id != focus.entry_id || layout.height == 0 {
+            return start..end;
+        }
+        let card_start = layout.start_row;
+        let card_end = layout.start_row + layout.height;
+        // Default: the card's action area at the viewport bottom; the
+        // scroll offset moves the window up inside the card.
+        let mut top = card_end
+            .saturating_sub(height)
+            .saturating_sub(focus.scroll_offset);
+        if layout.height > height {
+            // A card taller than the viewport scrolls within its own rows:
+            // the window never leaks into neighboring entries, so every
+            // card row is reachable without truncating the card.
+            top = top.max(card_start);
+        }
+        let end = (top + height).min(card_end);
+        top..end
     }
 
     /// The entry whose rendered block contains virtual `row`, if any.

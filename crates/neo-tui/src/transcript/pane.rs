@@ -1298,23 +1298,37 @@ impl TranscriptPane {
         Some(lines)
     }
 
+    /// The transcript index of the earliest unresolved blocking entry
+    /// (pending approval or question), in store order. Feeds the document's
+    /// visible-window constraint; kept in lockstep with
+    /// [`Self::earliest_blocking_entry`] so input focus and visible focus
+    /// can never disagree.
+    fn blocking_entry_index(&self) -> Option<usize> {
+        self.transcript
+            .entries()
+            .iter()
+            .position(|entry| match entry {
+                TranscriptEntry::ApprovalPrompt(data) => data.is_pending(),
+                TranscriptEntry::QuestionPrompt(data) => data.is_pending(),
+                _ => false,
+            })
+    }
+
     /// The earliest unresolved blocking entry (approval or question) in
     /// transcript order, if any. That entry owns interactive input until it
     /// resolves; later entries can never displace it.
     #[must_use]
     pub fn earliest_blocking_entry(&self) -> Option<BlockingEntryKind> {
-        self.transcript
-            .entries()
-            .iter()
-            .find_map(|entry| match entry {
-                TranscriptEntry::ApprovalPrompt(data) if data.is_pending() => {
-                    Some(BlockingEntryKind::Approval(data.id().to_owned()))
-                }
-                TranscriptEntry::QuestionPrompt(data) if data.is_pending() => {
-                    Some(BlockingEntryKind::Question(data.id.clone()))
-                }
-                _ => None,
-            })
+        let index = self.blocking_entry_index()?;
+        match &self.transcript.entries()[index] {
+            TranscriptEntry::ApprovalPrompt(data) => {
+                Some(BlockingEntryKind::Approval(data.id().to_owned()))
+            }
+            TranscriptEntry::QuestionPrompt(data) => {
+                Some(BlockingEntryKind::Question(data.id.clone()))
+            }
+            _ => None,
+        }
     }
 
     /// Upsert one question prompt entry on arrival. The runtime chrome
@@ -2020,12 +2034,18 @@ impl TranscriptPane {
     /// While a drag crosses the viewport edge, each frame-driven call also
     /// advances the document one row (the existing frame cadence) and extends
     /// the active endpoint into the revealed row.
+    ///
+    /// Every frame re-derives the earliest unresolved blocking entry from
+    /// the canonical entries and feeds it to the document, which confines
+    /// the visible window to that entry until it resolves.
     #[must_use]
     pub fn render_visible_slice(&mut self, width: usize, height: usize) -> Vec<String> {
         self.body_height = height;
         let content_width = super::chrome_render::frame_content_width(width);
         self.refresh_layout(content_width);
         self.apply_drag_autoscroll(height);
+        self.document
+            .set_blocking_focus(self.blocking_entry_index());
         let range = self.document.visible_row_range(height);
         self.visible_entries = self.visible_entry_indices(range.start, range.end);
         self.compose_rows(range.start, range.end, content_width)
