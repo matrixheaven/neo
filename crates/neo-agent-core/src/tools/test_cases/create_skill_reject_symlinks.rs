@@ -9,150 +9,140 @@ fn make_ctx() -> ToolContext {
 
 #[cfg(unix)]
 #[tokio::test]
-async fn create_skill_rejects_symlinked_skill_directory() {
-    let temp = tempfile::tempdir().expect("tempdir");
-    let outside = tempfile::tempdir().expect("outside tempdir");
-    let skills_dir = temp.path().join("skills");
-    fs::create_dir_all(&skills_dir).await.expect("mkdir skills");
-    std::os::unix::fs::symlink(outside.path(), skills_dir.join("linked-skill"))
-        .expect("symlink skill dir");
-    let tool = CreateSkillTool::new(temp.path());
-    let error = tool
-        .execute(
-            &make_ctx(),
-            json!({
-                "name": "linked-skill",
-                "description": "A test skill",
-                "body": "# Body"
+async fn create_skill_rejects_symlinked_directory_in_skill_or_backup_paths() {
+    struct Case {
+        name: &'static str,
+        /// Creates the on-disk state (including the symlink) and returns the
+        /// input payload for the rejected invocation.
+        setup: Box<dyn FnOnce(&Path, &Path) -> serde_json::Value>,
+        /// Case-specific assertions after the shared rejection check.
+        extra: Box<dyn FnOnce(&Path, &Path)>,
+    }
+
+    let cases = vec![
+        Case {
+            name: "skill_directory_symlink",
+            setup: Box::new(|temp, outside| {
+                std::fs::create_dir_all(temp.join("skills")).expect("mkdir skills");
+                std::os::unix::fs::symlink(outside, temp.join("skills").join("linked-skill"))
+                    .expect("symlink skill dir");
+                json!({"name": "linked-skill", "description": "A test skill", "body": "# Body"})
             }),
-        )
-        .await
-        .expect_err("symlinked skill directories should be invalid input");
-
-    assert!(error.to_string().contains("symlinked directory"));
-}
-
-#[cfg(unix)]
-#[tokio::test]
-async fn create_skill_rejects_symlinked_skills_root() {
-    let temp = tempfile::tempdir().expect("tempdir");
-    let outside = tempfile::tempdir().expect("outside tempdir");
-    std::os::unix::fs::symlink(outside.path(), temp.path().join("skills"))
-        .expect("symlink skills root");
-    let tool = CreateSkillTool::new(temp.path());
-    let error = tool
-        .execute(
-            &make_ctx(),
-            json!({
-                "name": "new-skill",
-                "description": "A test skill",
-                "body": "# Body"
+            extra: Box::new(|_, _| {}),
+        },
+        Case {
+            name: "skills_root_symlink",
+            setup: Box::new(|temp, outside| {
+                std::os::unix::fs::symlink(outside, temp.join("skills"))
+                    .expect("symlink skills root");
+                json!({"name": "new-skill", "description": "A test skill", "body": "# Body"})
             }),
-        )
-        .await
-        .expect_err("symlinked skills root should be invalid input");
-
-    assert!(error.to_string().contains("symlinked directory"));
-}
-
-#[cfg(unix)]
-#[tokio::test]
-async fn create_skill_rejects_symlinked_backup_parent() {
-    let temp = tempfile::tempdir().expect("tempdir");
-    let outside = tempfile::tempdir().expect("outside tempdir");
-    let skill_dir = temp.path().join("skills").join("safe-skill");
-    fs::create_dir_all(&skill_dir)
-        .await
-        .expect("mkdir skill dir");
-    fs::write(skill_dir.join("SKILL.md"), "old content")
-        .await
-        .expect("write old skill");
-    std::os::unix::fs::symlink(outside.path(), temp.path().join("backups"))
-        .expect("symlink backup parent");
-    let tool = CreateSkillTool::new(temp.path());
-
-    let error = tool
-        .execute(
-            &make_ctx(),
-            json!({
-                "name": "safe-skill",
-                "description": "A test skill",
-                "body": "# Body"
+            extra: Box::new(|_, _| {}),
+        },
+        Case {
+            name: "backup_parent_symlink",
+            setup: Box::new(|temp, outside| {
+                let skill_dir = temp.join("skills").join("safe-skill");
+                std::fs::create_dir_all(&skill_dir).expect("mkdir skill dir");
+                std::fs::write(skill_dir.join("SKILL.md"), "old content").expect("write old skill");
+                std::os::unix::fs::symlink(outside, temp.join("backups"))
+                    .expect("symlink backup parent");
+                json!({"name": "safe-skill", "description": "A test skill", "body": "# Body"})
             }),
-        )
-        .await
-        .expect_err("symlinked backup parent should be invalid input");
+            extra: Box::new(|temp, outside| {
+                assert!(
+                    !outside.join("skills").exists(),
+                    "backup must not follow a symlinked backup parent"
+                );
+                assert_eq!(
+                    std::fs::read_to_string(
+                        temp.join("skills").join("safe-skill").join("SKILL.md")
+                    )
+                    .expect("read original skill"),
+                    "old content"
+                );
+            }),
+        },
+    ];
 
-    assert!(error.to_string().contains("symlinked directory"));
-    assert!(
-        !outside.path().join("skills").exists(),
-        "backup must not follow a symlinked backup parent"
-    );
-    assert_eq!(
-        fs::read_to_string(skill_dir.join("SKILL.md"))
+    for case in cases {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let outside = tempfile::tempdir().expect("outside tempdir");
+        let input = (case.setup)(temp.path(), outside.path());
+        let error = CreateSkillTool::new(temp.path())
+            .execute(&make_ctx(), input)
             .await
-            .expect("read original skill"),
-        "old content"
-    );
+            .expect_err("symlinked directory should be rejected");
+
+        assert!(
+            error.to_string().contains("symlinked directory"),
+            "{}: {error}",
+            case.name
+        );
+        (case.extra)(temp.path(), outside.path());
+    }
 }
 
 #[cfg(unix)]
 #[tokio::test]
-async fn create_skill_rejects_symlinked_skill_file_without_following_it() {
-    let temp = tempfile::tempdir().expect("tempdir");
-    let outside = tempfile::tempdir().expect("outside tempdir");
-    let outside_file = outside.path().join("SKILL.md");
-    std::fs::write(&outside_file, "outside").expect("write outside");
-    let skill_dir = temp.path().join("skills").join("safe-skill");
-    fs::create_dir_all(&skill_dir)
-        .await
-        .expect("mkdir skill dir");
-    std::os::unix::fs::symlink(&outside_file, skill_dir.join("SKILL.md"))
-        .expect("symlink skill file");
-    let tool = CreateSkillTool::new(temp.path());
-    let error = tool
-        .execute(
-            &make_ctx(),
-            json!({
-                "name": "safe-skill",
-                "description": "A test skill",
-                "body": "# Body"
+async fn create_skill_rejects_symlinked_or_dangling_skill_file() {
+    struct Case {
+        name: &'static str,
+        /// Creates the on-disk state (including the symlink) and returns the
+        /// input payload for the rejected invocation.
+        setup: Box<dyn FnOnce(&Path, &Path) -> serde_json::Value>,
+        /// Case-specific assertions after the shared rejection check.
+        extra: Box<dyn FnOnce(&Path, &Path)>,
+    }
+
+    let cases = vec![
+        Case {
+            name: "symlinked_skill_file",
+            setup: Box::new(|temp, outside| {
+                let outside_file = outside.join("SKILL.md");
+                std::fs::write(&outside_file, "outside").expect("write outside");
+                let skill_dir = temp.join("skills").join("safe-skill");
+                std::fs::create_dir_all(&skill_dir).expect("mkdir skill dir");
+                std::os::unix::fs::symlink(&outside_file, skill_dir.join("SKILL.md"))
+                    .expect("symlink skill file");
+                json!({"name": "safe-skill", "description": "A test skill", "body": "# Body"})
             }),
-        )
-        .await
-        .expect_err("symlinked skill file should be invalid input");
-
-    assert!(error.to_string().contains("symlinked file"));
-    assert_eq!(
-        std::fs::read_to_string(outside_file).expect("read outside"),
-        "outside"
-    );
-}
-
-#[cfg(unix)]
-#[tokio::test]
-async fn create_skill_rejects_dangling_symlinked_skill_file() {
-    let temp = tempfile::tempdir().expect("tempdir");
-    let skill_dir = temp.path().join("skills").join("safe-skill");
-    fs::create_dir_all(&skill_dir)
-        .await
-        .expect("mkdir skill dir");
-    std::os::unix::fs::symlink(temp.path().join("missing.md"), skill_dir.join("SKILL.md"))
-        .expect("symlink dangling skill file");
-    let tool = CreateSkillTool::new(temp.path());
-    let error = tool
-        .execute(
-            &make_ctx(),
-            json!({
-                "name": "safe-skill",
-                "description": "A test skill",
-                "body": "# Body"
+            extra: Box::new(|_, outside| {
+                assert_eq!(
+                    std::fs::read_to_string(outside.join("SKILL.md")).expect("read outside"),
+                    "outside"
+                );
             }),
-        )
-        .await
-        .expect_err("dangling symlinked skill file should be invalid input");
+        },
+        Case {
+            name: "dangling_symlinked_skill_file",
+            setup: Box::new(|temp, _outside| {
+                let skill_dir = temp.join("skills").join("safe-skill");
+                std::fs::create_dir_all(&skill_dir).expect("mkdir skill dir");
+                std::os::unix::fs::symlink(temp.join("missing.md"), skill_dir.join("SKILL.md"))
+                    .expect("symlink dangling skill file");
+                json!({"name": "safe-skill", "description": "A test skill", "body": "# Body"})
+            }),
+            extra: Box::new(|_, _| {}),
+        },
+    ];
 
-    assert!(error.to_string().contains("symlinked file"));
+    for case in cases {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let outside = tempfile::tempdir().expect("outside tempdir");
+        let input = (case.setup)(temp.path(), outside.path());
+        let error = CreateSkillTool::new(temp.path())
+            .execute(&make_ctx(), input)
+            .await
+            .expect_err("symlinked skill file should be rejected");
+
+        assert!(
+            error.to_string().contains("symlinked file"),
+            "{}: {error}",
+            case.name
+        );
+        (case.extra)(temp.path(), outside.path());
+    }
 }
 
 #[cfg(any(unix, windows))]

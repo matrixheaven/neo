@@ -8,132 +8,57 @@ fn make_ctx() -> ToolContext {
 }
 
 #[tokio::test]
-async fn create_skill_rejects_resource_path_escape() {
-    let temp = tempfile::tempdir().expect("tempdir");
-    let tool = CreateSkillTool::new(temp.path());
-
-    let error = tool
-        .execute(
-            &make_ctx(),
-            json!({
-                "name": "bad-resource",
-                "description": "Bad resource",
-                "body": "# Bad",
-                "resources": [
-                    {
-                        "path": "references/../escaped.md",
-                        "content": "escaped"
-                    }
-                ]
-            }),
-        )
-        .await
-        .expect_err("resource path escapes must fail");
-
-    assert!(error.to_string().contains("invalid resource path"));
-    assert!(
-        !temp
-            .path()
-            .join("skills")
-            .join("bad-resource")
-            .join("escaped.md")
-            .exists()
-    );
-    assert!(!temp.path().join("skills").join("bad-resource").exists());
-}
-
-#[tokio::test]
-async fn create_skill_rejects_resource_outside_canonical_dirs() {
-    let temp = tempfile::tempdir().expect("tempdir");
-    let tool = CreateSkillTool::new(temp.path());
-
-    let error = tool
-        .execute(
-            &make_ctx(),
-            json!({
-                "name": "bad-resource",
-                "description": "Bad resource",
-                "body": "# Bad",
-                "resources": [
-                    {
-                        "path": "docs/guide.md",
-                        "content": "guide"
-                    }
-                ]
-            }),
-        )
-        .await
-        .expect_err("unsupported resource dir must fail");
-
-    assert!(error.to_string().contains("references, scripts, or assets"));
-}
-
-#[tokio::test]
-async fn create_skill_rejects_absolute_resource_path() {
+async fn create_skill_rejects_invalid_resource_paths_without_side_effects() {
     let temp = tempfile::tempdir().expect("tempdir");
     let outside = tempfile::tempdir().expect("outside tempdir");
     let absolute_resource_path = outside.path().join("guide.md");
+    let absolute_path_text = absolute_resource_path.to_string_lossy();
     let tool = CreateSkillTool::new(temp.path());
 
-    let error = tool
-        .execute(
-            &make_ctx(),
-            json!({
-                "name": "bad-resource",
-                "description": "Bad resource",
-                "body": "# Bad",
-                "resources": [
-                    {
-                        "path": absolute_resource_path.to_string_lossy(),
-                        "content": "guide"
-                    }
-                ]
-            }),
-        )
-        .await
-        .expect_err("absolute resource path must fail");
+    let cases = [
+        (
+            "parent_traversal",
+            "references/../escaped.md",
+            "path contains an unsafe component",
+        ),
+        (
+            "outside_canonical_dir",
+            "docs/guide.md",
+            "path must start with references, scripts, or assets",
+        ),
+        (
+            "absolute_path",
+            absolute_path_text.as_ref(),
+            "path contains an empty component",
+        ),
+        (
+            "skill_md_target",
+            "references/SKILL.md",
+            "resource path must not target SKILL.md",
+        ),
+        (
+            "windows_colon_component",
+            "references/bad:name.md",
+            "path component contains a Windows-illegal character",
+        ),
+        (
+            "windows_tab_component",
+            "references/bad\tname.md",
+            "path component contains a Windows-illegal character",
+        ),
+        (
+            "trailing_space_component",
+            "references/trailing-space.md ",
+            "path component must not end with a space",
+        ),
+        (
+            "trailing_space_dir",
+            "references/trailing-space /guide.md",
+            "path component must not end with a space",
+        ),
+    ];
 
-    assert!(error.to_string().contains("invalid resource path"));
-    assert!(!absolute_resource_path.exists());
-}
-
-#[tokio::test]
-async fn create_skill_rejects_skill_md_as_resource() {
-    let temp = tempfile::tempdir().expect("tempdir");
-    let tool = CreateSkillTool::new(temp.path());
-
-    let error = tool
-        .execute(
-            &make_ctx(),
-            json!({
-                "name": "bad-resource",
-                "description": "Bad resource",
-                "body": "# Bad",
-                "resources": [
-                    {
-                        "path": "references/SKILL.md",
-                        "content": "not a nested skill"
-                    }
-                ]
-            }),
-        )
-        .await
-        .expect_err("SKILL.md resources must fail");
-
-    assert!(error.to_string().contains("SKILL.md"));
-}
-
-#[tokio::test]
-async fn create_skill_rejects_windows_hostile_resource_path_components() {
-    let temp = tempfile::tempdir().expect("tempdir");
-    let tool = CreateSkillTool::new(temp.path());
-
-    for path in [
-        "references/bad:name.md",
-        "references/bad\tname.md",
-        "references/trailing-space.md ",
-        "references/trailing-space /guide.md",
-    ] {
+    for (case, path, reason) in cases {
         let error = tool
             .execute(
                 &make_ctx(),
@@ -150,14 +75,22 @@ async fn create_skill_rejects_windows_hostile_resource_path_components() {
                 }),
             )
             .await
-            .expect_err("Windows-hostile resource path must fail");
+            .expect_err("invalid resource path must fail");
 
         assert!(
             error.to_string().contains("invalid resource path"),
-            "{path}: {error}"
+            "{case}: {error}"
         );
+        assert!(error.to_string().contains(reason), "{case}: {error}");
     }
-    assert!(!temp.path().join("skills").join("bad-resource").exists());
+    assert!(
+        !temp.path().join("skills").join("bad-resource").exists(),
+        "rejected resource paths must not create the skill directory"
+    );
+    assert!(
+        !absolute_resource_path.exists(),
+        "rejected absolute resource path must not create the file"
+    );
 }
 
 #[tokio::test]
