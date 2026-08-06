@@ -1,11 +1,16 @@
 //! Document-coordinate selection integration tests: cross-entry drag with
 //! frame-driven auto-scroll materializes the exact document text,
 //! double-click selects one Unicode word, keyboard entry selection falls
-//! back to the tail before the first render, and mouse gestures interact
-//! with keyboard selection by the click/drag threshold.
+//! back to the tail before the first render, mouse gestures interact
+//! with keyboard selection by the click/drag threshold, and rendered frames
+//! paint the selection background on exactly the intersecting document cells.
 
 use crossterm::event::{KeyModifiers, MouseButton};
+use neo_tui::NeoTui;
+use neo_tui::primitive::{TuiTheme, strip_ansi, visible_width};
+use neo_tui::shell::NeoChromeState;
 use neo_tui::transcript::{MouseEvent, MouseKind, TranscriptPane};
+use std::time::Instant;
 
 fn pane_with_status_rows(count: usize) -> TranscriptPane {
     let mut pane = TranscriptPane::new(80, 20);
@@ -22,6 +27,79 @@ fn mouse(kind: MouseKind, column: u16, row: u16) -> MouseEvent {
         column,
         row,
         modifiers: KeyModifiers::NONE,
+    }
+}
+
+/// The display-cell ranges of `line` whose background is the selection color.
+/// Walks the raw ANSI stream with the same cell math as the painter, so the
+/// test asserts the exact painted range instead of a stripped view.
+fn selection_bg_ranges(line: &str) -> Vec<(usize, usize)> {
+    const SELECTION_BG: &str = "\x1b[100m"; // TuiTheme::default().selection_bg
+    const BG_RESET: &str = "\x1b[49m";
+    let mut ranges = Vec::new();
+    let mut active = false;
+    let mut range_start = 0usize;
+    let mut cell = 0usize;
+    let mut rest = line;
+    while !rest.is_empty() {
+        let Some(sequence) = take_ansi_sequence(rest) else {
+            let character = rest.chars().next().expect("non-empty slice");
+            cell += visible_width(&character.to_string());
+            rest = &rest[character.len_utf8()..];
+            continue;
+        };
+        if sequence == SELECTION_BG {
+            active = true;
+            range_start = cell;
+        } else if sequence == BG_RESET && active {
+            ranges.push((range_start, cell));
+            active = false;
+        }
+        rest = &rest[sequence.len()..];
+    }
+    if active {
+        ranges.push((range_start, cell));
+    }
+    ranges
+}
+
+/// The ANSI escape sequence starting at `s`, or `None` when `s` starts with
+/// plain text. Mirrors the parser's accepted sequence shapes.
+fn take_ansi_sequence(s: &str) -> Option<&str> {
+    if !s.starts_with('\x1b') {
+        return None;
+    }
+    let mut chars = s.chars();
+    chars.next();
+    match chars.next() {
+        Some('[') => {
+            let mut end = 2;
+            for ch in s[2..].chars() {
+                end += ch.len_utf8();
+                if ('\x40'..='\x7e').contains(&ch) {
+                    return Some(&s[..end]);
+                }
+            }
+            Some(s)
+        }
+        Some(']' | '_' | 'P' | '^' | 'X') => {
+            let mut end = 2;
+            let mut chars = s[2..].chars().peekable();
+            while let Some(ch) = chars.next() {
+                end += ch.len_utf8();
+                if ch == '\x07' {
+                    return Some(&s[..end]);
+                }
+                if ch == '\x1b' && chars.peek() == Some(&'\\') {
+                    let _ = chars.next();
+                    end += 1;
+                    return Some(&s[..end]);
+                }
+            }
+            Some(s)
+        }
+        Some(_) => Some(&s[..2]),
+        None => Some(s),
     }
 }
 
@@ -207,5 +285,166 @@ fn double_click_selects_one_unicode_word() {
     assert_eq!(
         pane.copy_selected_transcript_text().as_deref(),
         Some("hello")
+    );
+}
+
+#[test]
+fn rendered_selection_highlights_exact_document_cells() {
+    // Three status cards lay out as: ["alpha", sep, "select 你好 world",
+    // sep, "omega"] — the separator row belongs to the following card's
+    // span, one visible row per document row.
+    let mut pane = TranscriptPane::new(80, 20);
+    pane.push_status("alpha");
+    pane.push_status("select 你好 world");
+    pane.push_status("omega");
+    let lines = pane.render_visible_slice(80, 6);
+    assert_eq!(
+        lines
+            .iter()
+            .map(|line| strip_ansi(line))
+            .collect::<Vec<_>>(),
+        ["alpha", "", "select 你好 world", "", "omega"]
+    );
+    let selection_bg = neo_tui::primitive::bg_to_ansi(TuiTheme::default().selection_bg);
+    assert_eq!(selection_bg, "\x1b[100m");
+
+    // Same-row drag across cells [1, 5) of "alpha": exactly those cells are
+    // painted, with the original style and text preserved, and every other
+    // row stays unpainted.
+    pane.handle_mouse_event(mouse(MouseKind::Press, 1, 0), 0, 1);
+    pane.handle_mouse_event(mouse(MouseKind::Drag, 4, 0), 0, 4);
+    pane.handle_mouse_event(mouse(MouseKind::Release, 4, 0), 0, 4);
+    let lines = pane.render_visible_slice(80, 6);
+    assert_eq!(selection_bg_ranges(&lines[0]), vec![(1, 5)]);
+    assert_eq!(strip_ansi(&lines[0]), "alpha");
+    assert!(
+        lines[0].starts_with("\x1b[38;2;139;148;158m"),
+        "the row's original foreground style survives: {:?}",
+        lines[0]
+    );
+    for (index, line) in lines.iter().enumerate() {
+        if index != 0 {
+            assert!(
+                selection_bg_ranges(line).is_empty(),
+                "row {index} must stay unpainted: {line:?}"
+            );
+        }
+    }
+
+    // Cross-row, cross-entry drag: "select 你好 world" from cell 0 to the end
+    // of the line, the blank separator row between cards selected as a
+    // newline but not painted, and "omega" cut on the left of the active cell.
+    pane.handle_mouse_event(mouse(MouseKind::Press, 1, 2), 2, 0);
+    pane.handle_mouse_event(mouse(MouseKind::Drag, 4, 4), 4, 3);
+    pane.handle_mouse_event(mouse(MouseKind::Release, 4, 4), 4, 3);
+    let lines = pane.render_visible_slice(80, 6);
+    assert_eq!(selection_bg_ranges(&lines[2]), vec![(0, 17)]);
+    assert_eq!(selection_bg_ranges(&lines[3]), Vec::<(usize, usize)>::new());
+    assert_eq!(selection_bg_ranges(&lines[4]), vec![(0, 4)]);
+    assert_eq!(strip_ansi(&lines[2]), "select 你好 world");
+    assert_eq!(strip_ansi(&lines[4]), "omega");
+    assert!(selection_bg_ranges(&lines[0]).is_empty());
+    assert!(selection_bg_ranges(&lines[1]).is_empty());
+
+    // A double-click word selection paints the wide characters whole: 你好
+    // spans cells 7..11 and the background covers exactly that range.
+    pane.handle_mouse_event(mouse(MouseKind::Press, 9, 2), 2, 8);
+    pane.handle_mouse_event(mouse(MouseKind::Release, 9, 2), 2, 8);
+    pane.handle_mouse_event(mouse(MouseKind::Press, 9, 2), 2, 8);
+    pane.handle_mouse_event(mouse(MouseKind::Release, 9, 2), 2, 8);
+    let lines = pane.render_visible_slice(80, 6);
+    assert_eq!(selection_bg_ranges(&lines[2]), vec![(7, 11)]);
+    assert_eq!(
+        pane.copy_selected_transcript_text().as_deref(),
+        Some("你好"),
+        "the wide-character word selection stays materialized"
+    );
+
+    // A keyboard entry selection highlights the whole card the same way.
+    pane.select_visible_transcript_entry();
+    let lines = pane.render_visible_slice(80, 6);
+    assert_eq!(selection_bg_ranges(&lines[4]), vec![(0, 5)]);
+    assert!(selection_bg_ranges(&lines[0]).is_empty());
+    assert!(selection_bg_ranges(&lines[2]).is_empty());
+
+    // Clearing the selection removes every highlight.
+    pane.clear_transcript_selection();
+    let lines = pane.render_visible_slice(80, 6);
+    for (index, line) in lines.iter().enumerate() {
+        assert!(
+            selection_bg_ranges(line).is_empty(),
+            "row {index} must be unpainted after clear: {line:?}"
+        );
+    }
+}
+
+#[test]
+fn active_selection_shows_hint_line_without_covering_body() {
+    let mut tui = NeoTui::new(
+        NeoChromeState::new("neo", "s1", "m1", "/tmp/ws"),
+        TranscriptPane::new(80, 20),
+    );
+    tui.transcript_mut().push_status("alpha");
+    tui.transcript_mut().push_status("omega");
+
+    // Without a selection no hint line exists.
+    let frame = tui.render_terminal_frame_at(80, 12, Instant::now());
+    assert!(frame.lines.len() <= 12);
+    assert!(
+        frame
+            .lines
+            .iter()
+            .all(|line| !strip_ansi(line).contains("ctrl+c copy"))
+    );
+
+    // A drag over "alpha" activates the selection; the frame keeps the body
+    // and appends one hint line naming the copy/clear keybindings.
+    tui.handle_mouse_event(MouseEvent {
+        kind: MouseKind::Press,
+        button: MouseButton::Left,
+        column: 1,
+        row: 0,
+        modifiers: KeyModifiers::NONE,
+    });
+    tui.handle_mouse_event(MouseEvent {
+        kind: MouseKind::Drag,
+        button: MouseButton::Left,
+        column: 4,
+        row: 0,
+        modifiers: KeyModifiers::NONE,
+    });
+    tui.handle_mouse_event(MouseEvent {
+        kind: MouseKind::Release,
+        button: MouseButton::Left,
+        column: 4,
+        row: 0,
+        modifiers: KeyModifiers::NONE,
+    });
+    let frame = tui.render_terminal_frame_at(80, 12, Instant::now());
+    assert!(frame.lines.len() <= 12);
+    assert!(
+        frame
+            .lines
+            .iter()
+            .any(|line| strip_ansi(line).trim() == "alpha"),
+        "the body stays visible above the hint"
+    );
+    let hint = strip_ansi(frame.lines.last().expect("hint line"));
+    assert!(
+        hint.contains("selected")
+            && hint.contains("ctrl+c copy")
+            && hint.contains("ctrl+shift+space clear"),
+        "the hint names the real copy/clear keybindings: {hint:?}"
+    );
+
+    // Clearing the selection removes the hint line again.
+    tui.transcript_mut().clear_transcript_selection();
+    let frame = tui.render_terminal_frame_at(80, 12, Instant::now());
+    assert!(frame.lines.len() <= 12);
+    assert!(
+        frame
+            .lines
+            .iter()
+            .all(|line| !strip_ansi(line).contains("ctrl+c copy"))
     );
 }

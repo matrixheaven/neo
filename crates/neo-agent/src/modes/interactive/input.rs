@@ -102,6 +102,11 @@ impl InteractiveController {
         if event.is_wheel() {
             return Ok(false);
         }
+        // Approval owns keyboard selection and submission only; left-button
+        // selection events keep reaching the transcript selection.
+        if matches!(event, InputEvent::Mouse(mouse) if mouse.is_selection_event()) {
+            return Ok(false);
+        }
         // Interrupt rejects every visible approval (and any pending runtime
         // channels) instead of being swallowed by the dialog handler.
         if matches!(event, InputEvent::Interrupt) {
@@ -152,6 +157,11 @@ impl InteractiveController {
         }
         // The wheel owns transcript navigation while a blocking dialog is focused.
         if event.is_wheel() {
+            return Ok(false);
+        }
+        // The dialog owns keyboard input; left-button selection events keep
+        // reaching the transcript selection.
+        if matches!(event, InputEvent::Mouse(mouse) if mouse.is_selection_event()) {
             return Ok(false);
         }
         if matches!(event, InputEvent::Interrupt) {

@@ -21,7 +21,7 @@ use crate::transcript::{
 use super::entry::RetryStatusData;
 use super::selection::{
     AutoScroll, DocumentPoint, DocumentSelection, MouseEvent, MouseKind, cell_to_grapheme_index,
-    grapheme_index_to_cell, slice_text_by_cells, word_span_in_text,
+    grapheme_index_to_cell, paint_selection_range, slice_text_by_cells, word_span_in_text,
 };
 
 /// Clamp a body coordinate into the u16 mouse coordinate space. Body rows and
@@ -2157,7 +2157,108 @@ impl TranscriptPane {
             rows.drain(..offset.min(rows.len()));
         }
         rows.truncate(end_row.saturating_sub(start_row));
+        // Rows now map one-to-one onto the virtual range `[start_row, end_row)`.
+        self.apply_selection_highlight(&mut rows, start_row);
         rows
+    }
+
+    /// Paint the active document selection onto composed visible rows, by
+    /// document coordinates. Row `start_row + i` is the selection intersection
+    /// of row `i`; endpoint cells mirror [`Self::materialize_selection`] —
+    /// endpoints are inclusive, the min row cuts on the right (or left for an
+    /// upward drag), and blank separator rows stay unpainted. The keyboard
+    /// entry selection is already encoded as full-entry endpoints, so one
+    /// code path covers mouse and keyboard selections.
+    fn apply_selection_highlight(&self, rows: &mut [String], start_row: usize) {
+        let (Some(anchor), Some(active)) = (self.selection.anchor(), self.selection.active())
+        else {
+            return;
+        };
+        let (Some(anchor), Some(active)) = (self.clamp_point(anchor), self.clamp_point(active))
+        else {
+            return;
+        };
+        let (Some(anchor_row), Some(active_row)) =
+            (self.document.row_of(anchor), self.document.row_of(active))
+        else {
+            return;
+        };
+        let (min_row, max_row) = (anchor_row.min(active_row), anchor_row.max(active_row));
+        let (min_start_cell, min_end_cell, max_start_cell, max_end_cell) =
+            match anchor_row.cmp(&active_row) {
+                std::cmp::Ordering::Equal => {
+                    let start = anchor.display_cell.min(active.display_cell);
+                    let end = anchor
+                        .display_cell
+                        .max(active.display_cell)
+                        .saturating_add(1);
+                    (start, end, start, end)
+                }
+                std::cmp::Ordering::Less => (
+                    anchor.display_cell,
+                    usize::MAX,
+                    0,
+                    active.display_cell.saturating_add(1),
+                ),
+                std::cmp::Ordering::Greater => (
+                    0,
+                    active.display_cell.saturating_add(1),
+                    anchor.display_cell,
+                    usize::MAX,
+                ),
+            };
+        let mut entry = self.document.entry_at_row(min_row);
+        for (index, line) in rows.iter_mut().enumerate() {
+            let row = start_row.saturating_add(index);
+            if row > max_row {
+                break;
+            }
+            if row < min_row {
+                continue;
+            }
+            // Advance the entry cursor monotonically over the selection rows.
+            loop {
+                let Some(entry_index) = entry else {
+                    return;
+                };
+                let Some(layout) = self.document.entry_layout(entry_index) else {
+                    return;
+                };
+                if row < layout.start_row + layout.height {
+                    break;
+                }
+                entry =
+                    (entry_index + 1 < self.document.layouts().len()).then_some(entry_index + 1);
+            }
+            let Some(entry_index) = entry else {
+                return;
+            };
+            let Some(layout) = self.document.entry_layout(entry_index) else {
+                return;
+            };
+            let block = self.document.block_height(entry_index).unwrap_or(0);
+            let block_start = layout.start_row + layout.height.saturating_sub(block);
+            if row < block_start {
+                // Blank separator row: part of the selection as a newline but
+                // never painted as a full row background.
+                continue;
+            }
+            let start_cell = if row == min_row {
+                min_start_cell
+            } else if row == max_row {
+                max_start_cell
+            } else {
+                0
+            };
+            let end_cell = if row == max_row {
+                max_end_cell
+            } else if row == min_row {
+                min_end_cell
+            } else {
+                usize::MAX
+            };
+            *line = paint_selection_range(line, start_cell, end_cell, self.theme.selection_bg);
+        }
     }
 
     /// The rendered block for one entry: the per-entry render cache for

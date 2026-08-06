@@ -2,6 +2,7 @@ use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
 use crate::input::MouseEvent;
+use crate::primitive::{Style, TuiTheme, pad_to_width, paint};
 use crate::screen_output::{CursorPos, TerminalFrame};
 use crate::shell::{NeoChromeState, OverlayKind};
 use crate::transcript::chrome_render::extract_cursor;
@@ -130,11 +131,24 @@ impl NeoTui {
             .set_workspace_root(self.chrome.workspace_root());
         self.transcript.resize(width, height);
 
-        // Compose the visible document slice and the fitted chrome once. The
-        // document slice is bounded to the remaining body height, so the
-        // combined frame can never overflow the terminal.
+        // Compose the visible document slice and the fitted chrome once. A
+        // live selection appends one hint line to the chrome (the body shrinks
+        // by that row), so the hint can never cover transcript text or the
+        // approval/question chrome.
+        let hint = self
+            .transcript
+            .has_transcript_selection()
+            .then(|| selection_hint_line(width, &self.chrome.theme()));
+        let available = height.saturating_sub(usize::from(hint.is_some()));
         let chrome_render =
-            fit_chrome_to_height(render_chrome(&mut self.chrome, width, height), height);
+            fit_chrome_to_height(render_chrome(&mut self.chrome, width, available), available);
+        let chrome_render = if let Some(hint) = hint {
+            let mut render = chrome_render;
+            render.lines.push(hint);
+            render
+        } else {
+            chrome_render
+        };
         let chrome_height = chrome_render.lines.len();
         let mut lines = self
             .transcript
@@ -166,8 +180,15 @@ impl NeoTui {
         if !event.is_selection_event() || event.is_shift_modified() {
             return;
         }
-        if self.chrome.focused_overlay_blocks_prompt() {
-            // Blocking overlays own the full screen; they keep input priority.
+        if self.chrome.focused_overlay_blocks_prompt()
+            && !self.chrome.approval_is_pending()
+            && !self.chrome.question_dialog_is_focused()
+        {
+            // Pending approvals and question dialogs own keyboard selection
+            // and submission only — the transcript body stays visible behind
+            // them, so left-button selection events keep reaching the
+            // document. Full-screen overlays (Task Browser, Theme Manager)
+            // still own the whole frame.
             return;
         }
         let body_col = usize::from(event.column).saturating_sub(CHROME_GUTTER);
@@ -178,6 +199,22 @@ impl NeoTui {
     pub fn render(&mut self, width: usize, height: usize) -> Vec<String> {
         self.render_frame(width, height).0
     }
+}
+
+/// One muted status line naming the live transcript-selection keybindings.
+/// Rendered as the last chrome row (below the approval/question chrome and
+/// the footer) while a selection exists, with the body shrunk by one row so
+/// it never covers transcript text. The selection-colored bar spans the
+/// content width so the hint reads as an extension of the selection.
+fn selection_hint_line(width: usize, theme: &TuiTheme) -> String {
+    let content_width = frame_content_width(width);
+    let text = "selected · ctrl+c copy · ctrl+shift+space clear";
+    let label = format!(" {text} ");
+    let padded = pad_to_width(&label, content_width);
+    paint(
+        &padded,
+        Style::default().fg(theme.text_muted).bg(theme.selection_bg),
+    )
 }
 
 fn current_time_ms() -> u64 {

@@ -1,11 +1,19 @@
 //! Focused interactive tests for document-coordinate selection: mouse events
 //! reach the transcript selection through the controller, Shift-modified
-//! drags stay uninterpreted, and Task Browser input priority is preserved.
+//! drags stay uninterpreted, Task Browser input priority is preserved, and
+//! pending approvals/questions keep keyboard ownership while left-button
+//! selection drags keep reaching the transcript.
 //!
 //! Kept outside `tests.rs` per the fullscreen transcript plan so the growing
 //! controller test file does not absorb more surface.
 
 use std::path::PathBuf;
+
+use neo_agent_core::{
+    ApprovalAction, ApprovalOption, ApprovalPresentation, ApprovalRequest, ApprovalResponse,
+    PendingQuestion, PermissionOperation, QuestionEventData, QuestionOptionData,
+};
+use tokio::sync::oneshot;
 
 use super::*;
 
@@ -28,6 +36,88 @@ fn mouse_event(
         row,
         modifiers,
     })
+}
+
+/// A shell approval with two options, ready for `register_pending_approval`.
+fn pending_shell_approval(
+    id: &str,
+    command: &str,
+) -> (
+    crate::modes::run::PendingApproval,
+    oneshot::Receiver<ApprovalResponse>,
+) {
+    let (response_tx, response_rx) = oneshot::channel();
+    (
+        crate::modes::run::PendingApproval {
+            request: ApprovalRequest {
+                turn: 1,
+                id: id.to_owned(),
+                operation: PermissionOperation::Shell,
+                presentation: ApprovalPresentation::Command {
+                    title: "Run this command?".to_owned(),
+                    command: command.to_owned(),
+                    cwd: None,
+                },
+                options: vec![
+                    ApprovalOption {
+                        label: "Approve once".to_owned(),
+                        description: None,
+                        action: ApprovalAction::PermitOnce,
+                    },
+                    ApprovalOption {
+                        label: "Reject".to_owned(),
+                        description: None,
+                        action: ApprovalAction::Reject,
+                    },
+                ],
+                workflow_origin: None,
+            },
+            response_tx,
+        },
+        response_rx,
+    )
+}
+
+/// A controller with eight status rows and a rendered 6-row tail view.
+fn selection_controller() -> InteractiveController {
+    let mut controller = InteractiveController::new_for_test(
+        "neo",
+        "test-session",
+        "openai/gpt-4.1",
+        test_workspace_root(),
+        |_request| async move { Ok(Vec::<AgentEvent>::new()) },
+    );
+    for index in 0..8 {
+        controller
+            .transcript_mut()
+            .push_status(format!("row-{index}"));
+    }
+    let _ = controller.transcript_mut().render_visible_slice(80, 6);
+    controller
+}
+
+/// Drag across the whole visible body. The tail view shows the pending
+/// approval/question card, so the materialized text covers the card's
+/// visible rows; the caller asserts on the card's stable labels.
+async fn drag_visible_tail(controller: &mut InteractiveController) {
+    // Re-render so a pending approval/question card joins the layout; the
+    // tail-following view then shows that card.
+    let _ = controller.transcript_mut().render_visible_slice(80, 6);
+    for event in [
+        mouse_event(MouseKind::Press, 1, 0, crossterm::event::KeyModifiers::NONE),
+        mouse_event(MouseKind::Drag, 4, 5, crossterm::event::KeyModifiers::NONE),
+        mouse_event(
+            MouseKind::Release,
+            4,
+            5,
+            crossterm::event::KeyModifiers::NONE,
+        ),
+    ] {
+        controller
+            .handle_input_event(event)
+            .await
+            .expect("mouse event routed");
+    }
 }
 
 #[tokio::test]
@@ -141,5 +231,124 @@ async fn selection_and_task_browser_preserve_input_priority() {
             .expect("selection still active"),
         before_browser,
         "selection untouched while task browser is open"
+    );
+}
+
+#[tokio::test]
+async fn mouse_selection_works_while_approval_owns_keyboard() {
+    let mut controller = selection_controller();
+
+    let (pending, mut response_rx) = pending_shell_approval("approval-1", "sudo --version");
+    assert!(controller.register_pending_approval(pending));
+    assert!(controller.chrome().approval_is_pending());
+
+    // Left-button selection events keep reaching the transcript selection
+    // while the approval owns keyboard selection and submission. The tail
+    // view shows the pending approval card, so the drag selects its rows.
+    drag_visible_tail(&mut controller).await;
+    let selected = controller
+        .transcript_mut()
+        .copy_selected_transcript_text()
+        .expect("drag built a transcript selection");
+    assert!(
+        selected.contains("Approve once"),
+        "approval must not swallow transcript selection drags: {selected:?}"
+    );
+
+    // The mouse gesture never moved the approval's keyboard selection.
+    assert_eq!(
+        controller
+            .chrome()
+            .approval_selection()
+            .map(|value| value.1),
+        Some(0),
+        "approval keyboard selection stays on the first option"
+    );
+
+    // Keyboard still owns the approval: arrows move the selection and
+    // confirm submits it.
+    controller
+        .handle_input_event(InputEvent::Action(KeybindingAction::SelectDown))
+        .await
+        .expect("arrow down reaches the approval");
+    assert_eq!(
+        controller
+            .chrome()
+            .approval_selection()
+            .map(|value| value.1),
+        Some(1)
+    );
+    controller
+        .handle_input_event(InputEvent::Action(KeybindingAction::SelectConfirm))
+        .await
+        .expect("confirm submits the approval");
+    assert!(
+        !controller.chrome().approval_is_pending(),
+        "keyboard submit resolves the approval"
+    );
+    assert!(
+        response_rx.try_recv().is_ok(),
+        "the approval response reaches the runtime"
+    );
+}
+
+#[tokio::test]
+async fn mouse_selection_works_while_question_owns_keyboard() {
+    let mut controller = selection_controller();
+
+    let (response_tx, mut response_rx) = oneshot::channel();
+    controller.register_pending_question(PendingQuestion {
+        id: "q-1".to_owned(),
+        questions: vec![QuestionEventData {
+            question: "Pick a side?".to_owned(),
+            header: Some("Choice".into()),
+            body: None,
+            options: vec![
+                QuestionOptionData {
+                    label: "Left".to_owned(),
+                    description: None,
+                },
+                QuestionOptionData {
+                    label: "Right".to_owned(),
+                    description: None,
+                },
+            ],
+            multi_select: false,
+        }],
+        response_tx,
+        workflow_origin: None,
+    });
+    assert!(controller.chrome().question_dialog_is_focused());
+
+    // Left-button selection events keep reaching the transcript while the
+    // question dialog owns keyboard input. The tail view shows the pending
+    // question card, so the drag selects its option rows.
+    drag_visible_tail(&mut controller).await;
+    let selected = controller
+        .transcript_mut()
+        .copy_selected_transcript_text()
+        .expect("drag built a transcript selection");
+    assert!(
+        selected.contains("Left") && selected.contains("Right"),
+        "question dialog must not swallow transcript selection drags: {selected:?}"
+    );
+    assert!(
+        controller.chrome().question_dialog_is_focused(),
+        "the question dialog keeps focus through mouse events"
+    );
+
+    // Keyboard still owns the question: escape cancels it and delivers the
+    // response.
+    controller
+        .handle_input_event(InputEvent::Cancel)
+        .await
+        .expect("escape reaches the question");
+    assert!(
+        !controller.chrome().question_dialog_is_focused(),
+        "escape cancels the question dialog"
+    );
+    assert!(
+        response_rx.try_recv().is_err(),
+        "cancelling drops the response channel without a reply"
     );
 }

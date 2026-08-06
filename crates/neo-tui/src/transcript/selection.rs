@@ -15,6 +15,7 @@ use crossterm::event::{KeyModifiers, MouseButton};
 
 use super::store::TranscriptEntryId;
 use crate::primitive::text_layout::display_width;
+use crate::primitive::{Color, bg_to_ansi, next_sequence};
 use unicode_segmentation::UnicodeSegmentation;
 
 /// The number of rows one wheel notch scrolls. Historical SGR wheel events
@@ -377,6 +378,121 @@ pub fn slice_text_by_cells(text: &str, start_cell: usize, end_cell: usize) -> St
     sliced
 }
 
+/// Paint the display-cell range `[start_cell, end_cell)` of an ANSI line
+/// with `bg`, preserving the line's existing styles.
+///
+/// Graphemes are kept whole, mirroring [`slice_text_by_cells`]: a wide
+/// character intersecting the range is painted entirely. Mid-line resets
+/// (multi-span lines) re-apply the selection background, and a line's own
+/// background resumes after the painted segment. The background is cleared
+/// at the end of the line so the next terminal row never inherits it; only
+/// the background attribute is touched, so foreground colors and modifiers
+/// stay active.
+#[must_use]
+pub fn paint_selection_range(line: &str, start_cell: usize, end_cell: usize, bg: Color) -> String {
+    if start_cell >= end_cell {
+        return line.to_owned();
+    }
+    let bg_ansi = bg_to_ansi(bg);
+    let bg_reset = bg_to_ansi(Color::Reset);
+    let mut output = String::with_capacity(line.len() + 16);
+    let mut cell = 0usize;
+    let mut index = 0usize;
+    let mut painted = false;
+    // A mid-line reset dropped the background while the run is still painted;
+    // re-apply it right before the next selected grapheme.
+    let mut reapply_bg = false;
+    // The line's own background at the current text position, so the
+    // original style resumes after the painted segment.
+    let mut original_bg: Option<String> = None;
+    while index < line.len() {
+        if let Some(sequence) = next_sequence(line, index) {
+            if let Some(effect) = sgr_background_effect(sequence) {
+                match effect {
+                    BackgroundEffect::Cleared => original_bg = None,
+                    BackgroundEffect::Set(sgr) => original_bg = Some(sgr),
+                }
+            }
+            output.push_str(sequence);
+            if painted && clears_background(sequence) {
+                reapply_bg = true;
+            }
+            index += sequence.len();
+            continue;
+        }
+        // One plain-text run ending at the next escape sequence.
+        let run_start = index;
+        while index < line.len() && next_sequence(line, index).is_none() {
+            let character = line[index..]
+                .chars()
+                .next()
+                .expect("index stays on a char boundary");
+            index += character.len_utf8();
+        }
+        for grapheme in line[run_start..index].graphemes(true) {
+            let grapheme_width = display_width(grapheme);
+            let span_end = cell + grapheme_width;
+            let selected = span_end > start_cell && cell < end_cell;
+            if selected && !painted {
+                output.push_str(&bg_ansi);
+                painted = true;
+            } else if selected && reapply_bg {
+                output.push_str(&bg_ansi);
+            } else if !selected && painted {
+                output.push_str(&bg_reset);
+                if let Some(original) = &original_bg {
+                    output.push_str(original);
+                }
+                painted = false;
+            }
+            reapply_bg = false;
+            output.push_str(grapheme);
+            cell = span_end;
+        }
+    }
+    if painted {
+        output.push_str(&bg_reset);
+    }
+    output
+}
+
+/// Whether an SGR sequence clears the background attribute entirely.
+fn clears_background(sequence: &str) -> bool {
+    matches!(sequence, "\x1b[m" | "\x1b[0m" | "\x1b[49m")
+}
+
+/// How one SGR sequence affects the line's own background.
+enum BackgroundEffect {
+    Cleared,
+    Set(String),
+}
+
+/// The background effect of one SGR sequence, or `None` when it leaves the
+/// background unchanged.
+fn sgr_background_effect(sequence: &str) -> Option<BackgroundEffect> {
+    let params = sequence
+        .strip_prefix("\x1b[")
+        .and_then(|tail| tail.strip_suffix('m'))?;
+    let params: Vec<&str> = params.split(';').collect();
+    if params
+        .iter()
+        .any(|param| param.is_empty() || *param == "0" || *param == "49")
+    {
+        return Some(BackgroundEffect::Cleared);
+    }
+    if params.contains(&"48") {
+        return Some(BackgroundEffect::Set(sequence.to_owned()));
+    }
+    if params.iter().any(|param| {
+        param
+            .parse::<u8>()
+            .is_ok_and(|value| (40..=47).contains(&value) || (100..=107).contains(&value))
+    }) {
+        return Some(BackgroundEffect::Set(sequence.to_owned()));
+    }
+    None
+}
+
 /// The grapheme index whose cell span contains `cell` (clamped to the end
 /// of the text). Returns the grapheme count when the text is exhausted.
 #[must_use]
@@ -433,6 +549,44 @@ pub fn word_span_in_text(text: &str, grapheme_index: usize) -> (usize, usize) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn paint_selection_range_highlights_exact_cells_and_preserves_style() {
+        let bg = Color::DarkGray;
+        // Plain line: only the intersecting cells carry the background.
+        let painted = paint_selection_range("alpha", 1, 5, bg);
+        assert_eq!(painted, "a\x1b[100mlpha\x1b[49m");
+        // Wide characters intersecting the range are painted whole: 你 spans
+        // cells 7..9, so a range starting inside it still paints both cells.
+        let painted = paint_selection_range("select 你好 world", 7, 11, bg);
+        assert_eq!(painted, "select \x1b[100m你好\x1b[49m world");
+        // Existing styles survive: the fg sequence stays before the bg.
+        let painted = paint_selection_range("\x1b[38;2;139;148;158malpha\x1b[0m", 1, 3, bg);
+        assert_eq!(
+            painted,
+            "\x1b[38;2;139;148;158ma\x1b[100mlp\x1b[49mha\x1b[0m"
+        );
+        // An empty or non-intersecting range returns the line untouched.
+        assert_eq!(paint_selection_range("alpha", 3, 3, bg), "alpha");
+        assert_eq!(paint_selection_range("alpha", 9, 12, bg), "alpha");
+        // The background never bleeds past the end of the line.
+        assert!(paint_selection_range("alpha", 0, usize::MAX, bg).ends_with("\x1b[49m"));
+        // A mid-line reset (multi-span lines) re-applies the selection
+        // background for the rest of the painted run.
+        let painted = paint_selection_range("\x1b[31mA\x1b[0mB", 0, 2, bg);
+        assert_eq!(painted, "\x1b[31m\x1b[100mA\x1b[0m\x1b[100mB\x1b[49m");
+        // The line's own background resumes after the painted segment.
+        let painted = paint_selection_range("\x1b[48;2;1;2;3mAB", 0, 1, bg);
+        assert_eq!(
+            painted,
+            "\x1b[48;2;1;2;3m\x1b[100mA\x1b[49m\x1b[48;2;1;2;3mB"
+        );
+        // A background reset mid-line is treated like any other clear.
+        assert_eq!(
+            paint_selection_range("\x1b[41m\x1b[49mB", 0, 1, bg),
+            "\x1b[41m\x1b[49m\x1b[100mB\x1b[49m"
+        );
+    }
 
     #[test]
     fn slice_text_by_cells_keeps_wide_characters_whole() {
