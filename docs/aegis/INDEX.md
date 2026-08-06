@@ -534,3 +534,7 @@ Entries are workspace records, not authoritative runtime decisions.
 | 2026-08-07 | work | docs/aegis/work/2026-08-07-tui-mouse-text-selection/20-checkpoint.md | TUI mouse text selection checkpoint |
 | 2026-08-07 | work | docs/aegis/work/2026-08-07-tui-mouse-text-selection/90-evidence.md | TUI mouse text selection evidence |
 | 2026-08-07 | work | docs/aegis/work/2026-08-07-tui-mouse-text-selection/99-reflection.md | TUI mouse text selection reflection |
+| 2026-08-07 | plan | docs/aegis/plans/2026-08-07-tui-mouse-text-selection.md | Neo TUI Mouse Text Selection Implementation Plan |
+| 2026-08-07 | handoff | docs/aegis/handoffs/2026-08-07-tui-mouse-text-selection.md | Neo TUI Mouse Text Selection Handoff |
+| 2026-08-07 | artifact | docs/aegis/work/2026-08-07-tui-mouse-text-selection/baseline-usage-draft.json | 2026-08-07-tui-mouse-text-selection baseline usage draft |
+| 2026-08-07 | artifact | docs/aegis/work/2026-08-07-tui-mouse-text-selection/evidence-bundle-draft-approved-plan-handoff.json | 2026-08-07-tui-mouse-text-selection evidence approved-plan-handoff |

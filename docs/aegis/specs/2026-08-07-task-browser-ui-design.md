@@ -1,10 +1,10 @@
 # Neo Task Browser UI Design
 
-Status: `draft-user-review`
+Status: `approved; implementation plan authorized`
 Date: `2026-08-07`
 Approved direction: the user approved the task-browser and Workflow character
-mockups on `2026-08-07`; this document fixes the exact behavior and boundaries
-for written review before implementation planning.
+mockups and this written design on `2026-08-07`. Implementation remains a
+separate step governed by the matching plan and handoff.
 
 ## 1. Summary
 

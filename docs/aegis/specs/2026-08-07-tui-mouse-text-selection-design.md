@@ -2,14 +2,15 @@
 
 ## Status
 
-The user approved the design direction in three sections on 2026-08-07:
+The user approved the design direction in three sections and then approved
+this written design on 2026-08-07:
 
 1. selection owners and product boundaries;
 2. event flow, copying, and invalidation;
 3. acceptance, retirement, and residual risk.
 
-This written design still requires user review. Product source changes and the
-implementation plan remain separate authorization boundaries.
+Product source changes remain a separate authorization boundary. Approval of
+this document authorizes implementation planning and handoff only.
 
 This design extends the single fullscreen transcript direction recorded in:
 
@@ -642,7 +643,8 @@ After implementation and verification:
 - Approved sections: ownership/boundaries, event/copy/invalidation, and
   acceptance/retirement/risk.
 - Open blocker questions: none.
-- Decision: ready for written-spec review.
+- Decision: ready for implementation planning and handoff; product source
+  changes still require separate user authorization.
 
 ## Task Intent And Impact Summary
 
