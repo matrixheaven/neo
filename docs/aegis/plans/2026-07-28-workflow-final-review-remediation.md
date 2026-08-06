@@ -2,7 +2,13 @@
 
 Date: 2026-07-28
 
-Parent authority: `docs/aegis/work/2026-07-28-workflow-final-review/final-review.md`
+Parent authority: `docs/aegis/adr/ADR-0008-workflow-product-surface-contract.md`
+
+Source review summary: the original detailed review remains in the historical
+work record; its accepted decisions are preserved by ADR-0008 and
+`docs/aegis/baseline/2026-07-28-workflow-product-surface-contract.md`.
+
+Implementation status: landed by commit `96bc90ed`.
 
 ## Goal
 

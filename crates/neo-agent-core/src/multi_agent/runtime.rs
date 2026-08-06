@@ -3970,7 +3970,7 @@ mod tests {
     fn child_runtime_does_not_inherit_parent_event_route() {
         let session = tempfile::tempdir().expect("session");
         let resolver = crate::runtime::WorkflowDispatchResolver::default();
-        let mut config = AgentConfig::for_model(neo_ai::ModelSpec {
+        let config = AgentConfig::for_model(neo_ai::ModelSpec {
             provider: neo_ai::ProviderId("test".to_owned()),
             model: "test-model".to_owned(),
             api: neo_ai::ApiKind::OpenAi,

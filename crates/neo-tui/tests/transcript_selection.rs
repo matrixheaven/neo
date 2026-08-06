@@ -131,7 +131,7 @@ fn keyboard_selection_without_render_falls_back_to_tail() {
 #[test]
 fn mouse_click_preserves_keyboard_selection_but_confirmed_drag_replaces() {
     let mut pane = pane_with_status_rows(8);
-    pane.render_visible_slice(80, 6);
+    let _ = pane.render_visible_slice(80, 6);
     // Keyboard-select the tail entry.
     pane.select_visible_transcript_entry();
     let keyboard_text = pane
@@ -261,7 +261,7 @@ fn click_never_selects_but_long_press_activates_after_delay() {
 fn selection_crosses_entries_autoscrolls_and_materializes_text() {
     let mut pane = pane_with_status_rows(8);
     // Establish the body height (6 rows) and the tail-following layout.
-    pane.render_visible_slice(80, 6);
+    let _ = pane.render_visible_slice(80, 6);
 
     // A downward drag across the card boundary selects the exact rendered
     // text, including the blank separator row between the cards.
@@ -278,7 +278,7 @@ fn selection_crosses_entries_autoscrolls_and_materializes_text() {
     pane.handle_mouse_event(mouse(MouseKind::Press, 1, 5), 5, 0);
     pane.handle_mouse_event(mouse(MouseKind::Drag, 6, 0), 0, 5);
     for _ in 0..9 {
-        pane.render_visible_slice(80, 6);
+        let _ = pane.render_visible_slice(80, 6);
     }
     pane.handle_mouse_event(mouse(MouseKind::Release, 6, 0), 0, 5);
 
@@ -326,7 +326,7 @@ fn selection_crosses_entries_autoscrolls_and_materializes_text() {
 #[test]
 fn upward_drag_materialization_respects_endpoint_cells() {
     let mut pane = pane_with_status_rows(8);
-    pane.render_visible_slice(80, 6);
+    let _ = pane.render_visible_slice(80, 6);
 
     // Press inside "row-7" at cell 2 and drag upward to "row-5" at cell 10:
     // the materialized range must start at the active cell on the min row
@@ -346,7 +346,7 @@ fn upward_drag_materialization_respects_endpoint_cells() {
 fn double_click_selects_one_unicode_word() {
     let mut pane = TranscriptPane::new(80, 20);
     pane.push_status("select 你好 world");
-    pane.render_visible_slice(80, 6);
+    let _ = pane.render_visible_slice(80, 6);
 
     // 你 occupies display cells 7..9 (each CJK char is two cells wide).
     let word_cell: usize = 8;
@@ -364,7 +364,7 @@ fn double_click_selects_one_unicode_word() {
     // A single click on a Latin word does not select; a double-click does.
     let mut pane = TranscriptPane::new(80, 20);
     pane.push_status("select hello world");
-    pane.render_visible_slice(80, 6);
+    let _ = pane.render_visible_slice(80, 6);
     let column = 9;
     pane.handle_mouse_event(mouse(MouseKind::Press, column, 0), 0, 8);
     pane.handle_mouse_event(mouse(MouseKind::Release, column, 0), 0, 8);

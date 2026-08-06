@@ -174,6 +174,22 @@ human in a graphical terminal (macOS Terminal/iTerm2 and a Windows Terminal
 logged-in desktop session); they remain residual risk as in the original
 landing. Full evidence record in the landed baseline.
 
+## Consequences
+
+- Neo owns one fullscreen transcript document and one terminal lifecycle.
+- Complete Bash and Terminal display output remains outside model context while
+  staying recoverable for transcript rendering.
+- Old sessions remain readable through optional output references.
+- Graphical-terminal mouse and clipboard side effects remain explicit residual
+  native risk rather than being inferred from non-interactive automation.
+
+## Evidence References
+
+- `docs/aegis/baseline/2026-08-04-fullscreen-transcript-document.md`
+- `docs/aegis/plans/2026-08-06-fullscreen-transcript-follow-up-repair.md`
+- `docs/aegis/handoffs/2026-08-06-fullscreen-transcript-follow-up-repair.md`
+- Landed implementation and repair commits listed in Source Evidence and Follow-up Repair
+
 ## Baseline Sync
 
 - New landed baseline: `docs/aegis/baseline/2026-08-04-fullscreen-transcript-document.md`.

@@ -358,9 +358,6 @@ Entries are workspace records, not authoritative runtime decisions.
 | 2026-08-01 | artifact | docs/aegis/work/2026-08-01-workflow-dynamic-transcript/evidence-bundle-draft-baseline-question-event-serialization.json | 2026-08-01-workflow-dynamic-transcript evidence baseline-question-event-serialization |
 | 2026-08-01 | artifact | docs/aegis/work/2026-08-01-workflow-dynamic-transcript/evidence-bundle-draft-task1-workflow-origin-tests.json | 2026-08-01-workflow-dynamic-transcript evidence task1-workflow-origin-tests |
 | 2026-08-01 | artifact | docs/aegis/work/2026-08-01-workflow-dynamic-transcript/evidence-bundle-draft-task1-two-stage-review.json | 2026-08-01-workflow-dynamic-transcript evidence task1-two-stage-review |
-| 2026-08-01 | artifact | docs/aegis/work/2026-08-01-workflow-dynamic-transcript/evidence-bundle-draft-task2-typed-workflow-activity.json | 2026-08-01-workflow-dynamic-transcript evidence task2-typed-workflow-activity |
-| 2026-08-01 | artifact | docs/aegis/work/2026-08-01-workflow-dynamic-transcript/gate-input-pack.json | 2026-08-01-workflow-dynamic-transcript gate input pack |
-| 2026-08-01 | work | docs/aegis/work/2026-08-01-workflow-dynamic-transcript/proof-bundle.md | 2026-08-01-workflow-dynamic-transcript proof bundle |
 | 2026-08-01 | spec | docs/aegis/specs/2026-08-01-provider-model-refresh-brief.md | Provider Model Refresh Spec Brief |
 | 2026-08-01 | plan | docs/aegis/plans/2026-08-01-provider-model-refresh.md | Provider Model Refresh Implementation Plan |
 | 2026-08-03 | work | docs/aegis/work/2026-08-03-thinking-and-message-presentation/10-intent.md | Thinking and Message Presentation intent |
@@ -407,3 +404,127 @@ Entries are workspace records, not authoritative runtime decisions.
 | 2026-08-06 | plan | docs/aegis/plans/2026-08-06-fullscreen-transcript-follow-up-repair.md | 全屏转录文档后续修复实施计划 |
 | 2026-08-06 | handoff | docs/aegis/handoffs/2026-08-06-fullscreen-transcript-follow-up-repair.md | 全屏转录文档后续修复交接 |
 | 2026-08-07 | spec | docs/aegis/specs/2026-08-07-task-browser-ui-design.md | Neo Task Browser UI Design |
+| 2026-08-07 | spec | docs/aegis/specs/2026-08-07-test-suite-governance-design.md | Neo 测试套件治理设计 |
+| 2026-08-07 | plan | docs/aegis/plans/2026-08-07-test-suite-governance.md | Neo 测试套件治理实施计划 |
+| 2026-08-07 | handoff | docs/aegis/handoffs/2026-08-07-test-suite-governance.md | Neo 测试套件治理执行交接 |
+| 2026-08-07 | work | docs/aegis/work/2026-08-07-test-suite-governance/10-intent.md | 测试套件治理意图 |
+| 2026-08-07 | work | docs/aegis/work/2026-08-07-test-suite-governance/20-checkpoint.md | 测试套件治理检查点 |
+| 2026-08-07 | work | docs/aegis/work/2026-08-07-test-suite-governance/90-evidence.md | 测试套件治理证据 |
+| 2026-08-07 | work | docs/aegis/work/2026-08-07-test-suite-governance/99-reflection.md | 测试套件治理反思 |
+| 2026-08-07 | artifact | docs/aegis/work/2026-08-07-test-suite-governance/task-intent-draft.json | 测试套件治理任务意图 |
+| 2026-08-07 | artifact | docs/aegis/work/2026-08-07-test-suite-governance/baseline-read-set-hint.json | 测试套件治理基线候选 |
+| 2026-08-07 | artifact | docs/aegis/work/2026-08-07-test-suite-governance/baseline-usage-draft.json | 测试套件治理基线使用 |
+| 2026-08-07 | artifact | docs/aegis/work/2026-08-07-test-suite-governance/impact-statement-draft.json | 测试套件治理影响范围 |
+| 2026-08-07 | artifact | docs/aegis/work/2026-08-07-test-suite-governance/todo-checkpoint-draft.json | 测试套件治理任务检查点 |
+| 2026-08-07 | artifact | docs/aegis/work/2026-08-07-test-suite-governance/drift-check-draft.json | 测试套件治理漂移检查 |
+| 2026-08-07 | artifact | docs/aegis/work/2026-08-07-test-suite-governance/evidence-bundle-draft-static-test-inventory.json | 2026-08-07-test-suite-governance evidence static-test-inventory |
+| 2026-08-07 | artifact | docs/aegis/work/2026-08-07-test-suite-governance/gate-input-pack.json | 2026-08-07-test-suite-governance gate input pack |
+| 2026-08-07 | work | docs/aegis/work/2026-08-07-test-suite-governance/proof-bundle.md | 2026-08-07-test-suite-governance proof bundle |
+| 2026-07-27 | adr | docs/aegis/adr/ADR-0007-assistant-native-workflow-contract.md | ADR-0007: Assistant-native Workflow |
+| 2026-07-28 | adr | docs/aegis/adr/ADR-0008-workflow-product-surface-contract.md | ADR-0008: Workflow Product Surface |
+| 2026-07-27 | baseline | docs/aegis/baseline/2026-07-27-assistant-native-workflow-contract.md | Historical Assistant-native Workflow Baseline |
+| 2026-07-28 | baseline | docs/aegis/baseline/2026-07-28-workflow-product-surface-contract.md | Workflow Product Surface Baseline |
+| 2026-08-02 | handoff | docs/aegis/handoffs/2026-08-02-cache-probe-dashboard-usability.md | Cache Probe Dashboard Usability Handoff |
+| 2026-07-28 | plan | docs/aegis/plans/2026-07-28-workflow-final-review-remediation.md | Workflow Final Review Remediation Plan |
+| 2026-08-03 | plan | docs/aegis/plans/2026-08-03-instruction-body-deduplication.md | Instruction Body Deduplication Plan |
+| 2026-08-07 | work | docs/aegis/work/2026-07-17-canonical-approval-protocol/20-checkpoint.md | 20-checkpoint from 2026-07-17-canonical-approval-protocol |
+| 2026-08-07 | work | docs/aegis/work/2026-07-17-canonical-approval-protocol/final-whole-diff-review.md | final-whole-diff-review from 2026-07-17-canonical-approval-protocol |
+| 2026-08-07 | work | docs/aegis/work/2026-07-17-canonical-approval-protocol/task-1-quality-review.md | task-1-quality-review from 2026-07-17-canonical-approval-protocol |
+| 2026-08-07 | work | docs/aegis/work/2026-07-17-canonical-approval-protocol/task-1-report.md | task-1-report from 2026-07-17-canonical-approval-protocol |
+| 2026-08-07 | work | docs/aegis/work/2026-07-17-canonical-approval-protocol/task-1-spec-review.md | task-1-spec-review from 2026-07-17-canonical-approval-protocol |
+| 2026-08-07 | work | docs/aegis/work/2026-07-17-canonical-approval-protocol/task-2-fix-report.md | task-2-fix-report from 2026-07-17-canonical-approval-protocol |
+| 2026-08-07 | work | docs/aegis/work/2026-07-17-canonical-approval-protocol/task-2-quality-rereview.md | task-2-quality-rereview from 2026-07-17-canonical-approval-protocol |
+| 2026-08-07 | work | docs/aegis/work/2026-07-17-canonical-approval-protocol/task-2-quality-review.md | task-2-quality-review from 2026-07-17-canonical-approval-protocol |
+| 2026-08-07 | work | docs/aegis/work/2026-07-17-canonical-approval-protocol/task-2-report.md | task-2-report from 2026-07-17-canonical-approval-protocol |
+| 2026-08-07 | work | docs/aegis/work/2026-07-17-canonical-approval-protocol/task-2-spec-review.md | task-2-spec-review from 2026-07-17-canonical-approval-protocol |
+| 2026-08-07 | work | docs/aegis/work/2026-07-17-canonical-approval-protocol/task-3-fix-report.md | task-3-fix-report from 2026-07-17-canonical-approval-protocol |
+| 2026-08-07 | work | docs/aegis/work/2026-07-17-canonical-approval-protocol/task-3-quality-rereview.md | task-3-quality-rereview from 2026-07-17-canonical-approval-protocol |
+| 2026-08-07 | work | docs/aegis/work/2026-07-17-canonical-approval-protocol/task-3-quality-review.md | task-3-quality-review from 2026-07-17-canonical-approval-protocol |
+| 2026-08-07 | work | docs/aegis/work/2026-07-17-canonical-approval-protocol/task-3-report.md | task-3-report from 2026-07-17-canonical-approval-protocol |
+| 2026-08-07 | work | docs/aegis/work/2026-07-17-canonical-approval-protocol/task-3-spec-review.md | task-3-spec-review from 2026-07-17-canonical-approval-protocol |
+| 2026-08-07 | work | docs/aegis/work/2026-07-17-canonical-approval-protocol/task-4-fix-report.md | task-4-fix-report from 2026-07-17-canonical-approval-protocol |
+| 2026-08-07 | work | docs/aegis/work/2026-07-17-canonical-approval-protocol/task-4-quality-rereview.md | task-4-quality-rereview from 2026-07-17-canonical-approval-protocol |
+| 2026-08-07 | work | docs/aegis/work/2026-07-17-canonical-approval-protocol/task-4-quality-review.md | task-4-quality-review from 2026-07-17-canonical-approval-protocol |
+| 2026-08-07 | work | docs/aegis/work/2026-07-17-canonical-approval-protocol/task-4-report.md | task-4-report from 2026-07-17-canonical-approval-protocol |
+| 2026-08-07 | work | docs/aegis/work/2026-07-17-canonical-approval-protocol/task-4-spec-review.md | task-4-spec-review from 2026-07-17-canonical-approval-protocol |
+| 2026-08-07 | work | docs/aegis/work/2026-07-17-canonical-approval-protocol/task-5-quality-review.md | task-5-quality-review from 2026-07-17-canonical-approval-protocol |
+| 2026-08-07 | work | docs/aegis/work/2026-07-17-canonical-approval-protocol/task-5-report.md | task-5-report from 2026-07-17-canonical-approval-protocol |
+| 2026-08-07 | work | docs/aegis/work/2026-07-17-canonical-approval-protocol/task-5-spec-review.md | task-5-spec-review from 2026-07-17-canonical-approval-protocol |
+| 2026-08-07 | work | docs/aegis/work/2026-07-17-canonical-approval-protocol/task-6-quality-review.md | task-6-quality-review from 2026-07-17-canonical-approval-protocol |
+| 2026-08-07 | work | docs/aegis/work/2026-07-17-canonical-approval-protocol/task-6-report.md | task-6-report from 2026-07-17-canonical-approval-protocol |
+| 2026-08-07 | work | docs/aegis/work/2026-07-17-canonical-approval-protocol/task-6-spec-review.md | task-6-spec-review from 2026-07-17-canonical-approval-protocol |
+| 2026-08-07 | work | docs/aegis/work/2026-07-17-canonical-approval-protocol/task-7-fix-report.md | task-7-fix-report from 2026-07-17-canonical-approval-protocol |
+| 2026-08-07 | work | docs/aegis/work/2026-07-17-canonical-approval-protocol/task-7-quality-rereview.md | task-7-quality-rereview from 2026-07-17-canonical-approval-protocol |
+| 2026-08-07 | work | docs/aegis/work/2026-07-17-canonical-approval-protocol/task-7-quality-review.md | task-7-quality-review from 2026-07-17-canonical-approval-protocol |
+| 2026-08-07 | work | docs/aegis/work/2026-07-17-canonical-approval-protocol/task-7-report.md | task-7-report from 2026-07-17-canonical-approval-protocol |
+| 2026-08-07 | work | docs/aegis/work/2026-07-17-canonical-approval-protocol/task-7-spec-review.md | task-7-spec-review from 2026-07-17-canonical-approval-protocol |
+| 2026-08-07 | work | docs/aegis/work/2026-07-18-shell-admission-scheduler/10-intent.md | 10-intent from 2026-07-18-shell-admission-scheduler |
+| 2026-08-07 | work | docs/aegis/work/2026-07-18-shell-admission-scheduler/20-checkpoint.md | 20-checkpoint from 2026-07-18-shell-admission-scheduler |
+| 2026-08-07 | work | docs/aegis/work/2026-07-18-shell-admission-scheduler/90-evidence.md | 90-evidence from 2026-07-18-shell-admission-scheduler |
+| 2026-08-07 | work | docs/aegis/work/2026-07-19-terminal-bounded-yield-remediation/10-intent.md | 10-intent from 2026-07-19-terminal-bounded-yield-remediation |
+| 2026-08-07 | work | docs/aegis/work/2026-07-19-terminal-bounded-yield-remediation/20-checkpoint.md | 20-checkpoint from 2026-07-19-terminal-bounded-yield-remediation |
+| 2026-08-07 | work | docs/aegis/work/2026-07-19-terminal-bounded-yield-remediation/90-evidence.md | 90-evidence from 2026-07-19-terminal-bounded-yield-remediation |
+| 2026-08-07 | work | docs/aegis/work/2026-07-19-terminal-bounded-yield-remediation/99-reflection.md | 99-reflection from 2026-07-19-terminal-bounded-yield-remediation |
+| 2026-08-07 | work | docs/aegis/work/2026-07-19-terminal-bounded-yield-remediation/proof-bundle.md | proof-bundle from 2026-07-19-terminal-bounded-yield-remediation |
+| 2026-08-07 | work | docs/aegis/work/2026-07-22-acp-research/10-intent.md | 10-intent from 2026-07-22-acp-research |
+| 2026-08-07 | work | docs/aegis/work/2026-07-22-acp-research/20-checkpoint.md | 20-checkpoint from 2026-07-22-acp-research |
+| 2026-08-07 | work | docs/aegis/work/2026-07-22-acp-research/90-evidence.md | 90-evidence from 2026-07-22-acp-research |
+| 2026-08-07 | work | docs/aegis/work/2026-07-22-acp-research/99-reflection.md | 99-reflection from 2026-07-22-acp-research |
+| 2026-08-07 | work | docs/aegis/work/2026-07-22-acp-research/proof-bundle.md | proof-bundle from 2026-07-22-acp-research |
+| 2026-08-07 | work | docs/aegis/work/2026-07-24-crates-audit-remediation-continuation/10-intent.md | 10-intent from 2026-07-24-crates-audit-remediation-continuation |
+| 2026-08-07 | work | docs/aegis/work/2026-07-24-crates-audit-remediation-continuation/20-checkpoint.md | 20-checkpoint from 2026-07-24-crates-audit-remediation-continuation |
+| 2026-08-07 | work | docs/aegis/work/2026-07-24-crates-audit-remediation-continuation/30-drift-audit-report.md | 30-drift-audit-report from 2026-07-24-crates-audit-remediation-continuation |
+| 2026-08-07 | work | docs/aegis/work/2026-07-24-crates-audit-remediation-continuation/40-adr-decision.md | 40-adr-decision from 2026-07-24-crates-audit-remediation-continuation |
+| 2026-08-07 | work | docs/aegis/work/2026-07-24-crates-audit-remediation-continuation/50-vm-verification-report.md | 50-vm-verification-report from 2026-07-24-crates-audit-remediation-continuation |
+| 2026-08-07 | work | docs/aegis/work/2026-07-25-crates-audit-remediation/FINAL-INTEGRATION-REPORT.md | FINAL-INTEGRATION-REPORT from 2026-07-25-crates-audit-remediation |
+| 2026-08-07 | work | docs/aegis/work/2026-07-25-workflow-platform/10-intent.md | 10-intent from 2026-07-25-workflow-platform |
+| 2026-08-07 | work | docs/aegis/work/2026-07-25-workflow-platform/20-checkpoint.md | 20-checkpoint from 2026-07-25-workflow-platform |
+| 2026-08-07 | work | docs/aegis/work/2026-07-25-workflow-platform/90-evidence.md | 90-evidence from 2026-07-25-workflow-platform |
+| 2026-08-07 | work | docs/aegis/work/2026-07-28-workflow-final-review/10-intent.md | 10-intent from 2026-07-28-workflow-final-review |
+| 2026-08-07 | work | docs/aegis/work/2026-07-28-workflow-final-review/20-checkpoint.md | 20-checkpoint from 2026-07-28-workflow-final-review |
+| 2026-08-07 | work | docs/aegis/work/2026-07-28-workflow-final-review/90-evidence.md | 90-evidence from 2026-07-28-workflow-final-review |
+| 2026-08-07 | work | docs/aegis/work/2026-07-28-workflow-final-review/99-reflection.md | 99-reflection from 2026-07-28-workflow-final-review |
+| 2026-08-07 | work | docs/aegis/work/2026-07-28-workflow-final-review/final-review.md | final-review from 2026-07-28-workflow-final-review |
+| 2026-08-07 | work | docs/aegis/work/2026-07-28-workflow-product-surface-redesign/20-checkpoint.md | 20-checkpoint from 2026-07-28-workflow-product-surface-redesign |
+| 2026-08-07 | work | docs/aegis/work/2026-07-28-workflow-product-surface-redesign/90-evidence.md | 90-evidence from 2026-07-28-workflow-product-surface-redesign |
+| 2026-08-07 | work | docs/aegis/work/2026-07-28-workflow-product-surface-redesign/99-reflection.md | 99-reflection from 2026-07-28-workflow-product-surface-redesign |
+| 2026-08-07 | work | docs/aegis/work/2026-07-29-workflow-final-review-remediation/10-intent.md | 10-intent from 2026-07-29-workflow-final-review-remediation |
+| 2026-08-07 | work | docs/aegis/work/2026-07-29-workflow-final-review-remediation/20-checkpoint.md | 20-checkpoint from 2026-07-29-workflow-final-review-remediation |
+| 2026-08-07 | work | docs/aegis/work/2026-07-29-workflow-final-review-remediation/90-evidence.md | 90-evidence from 2026-07-29-workflow-final-review-remediation |
+| 2026-08-07 | work | docs/aegis/work/2026-07-29-workflow-final-review-remediation/99-reflection.md | 99-reflection from 2026-07-29-workflow-final-review-remediation |
+| 2026-08-07 | work | docs/aegis/work/2026-08-02-read-token-cache-optimization/10-intent.md | 10-intent from 2026-08-02-read-token-cache-optimization |
+| 2026-08-07 | work | docs/aegis/work/2026-08-02-read-token-cache-optimization/20-checkpoint.md | 20-checkpoint from 2026-08-02-read-token-cache-optimization |
+| 2026-08-07 | work | docs/aegis/work/2026-08-02-read-token-cache-optimization/90-evidence.md | 90-evidence from 2026-08-02-read-token-cache-optimization |
+| 2026-08-07 | work | docs/aegis/work/2026-08-02-read-token-cache-optimization/99-reflection.md | 99-reflection from 2026-08-02-read-token-cache-optimization |
+| 2026-08-07 | work | docs/aegis/work/2026-08-03-same-file-edit-transaction/10-intent.md | 10-intent from 2026-08-03-same-file-edit-transaction |
+| 2026-08-07 | work | docs/aegis/work/2026-08-03-same-file-edit-transaction/20-checkpoint.md | 20-checkpoint from 2026-08-03-same-file-edit-transaction |
+| 2026-08-07 | work | docs/aegis/work/2026-08-03-same-file-edit-transaction/90-evidence.md | 90-evidence from 2026-08-03-same-file-edit-transaction |
+| 2026-08-07 | work | docs/aegis/work/2026-08-03-same-file-edit-transaction/99-reflection.md | 99-reflection from 2026-08-03-same-file-edit-transaction |
+| 2026-08-07 | work | docs/aegis/work/2026-08-04-theme-manager/10-intent.md | 10-intent from 2026-08-04-theme-manager |
+| 2026-08-07 | work | docs/aegis/work/2026-08-04-theme-manager/20-checkpoint.md | 20-checkpoint from 2026-08-04-theme-manager |
+| 2026-08-07 | work | docs/aegis/work/2026-08-04-theme-manager/90-evidence.md | 90-evidence from 2026-08-04-theme-manager |
+| 2026-08-07 | work | docs/aegis/work/2026-08-04-theme-manager/99-reflection.md | 99-reflection from 2026-08-04-theme-manager |
+| 2026-08-07 | work | docs/aegis/work/2026-08-06-ci-green/10-intent.md | 10-intent from 2026-08-06-ci-green |
+| 2026-08-07 | work | docs/aegis/work/2026-08-06-ci-green/20-checkpoint.md | 20-checkpoint from 2026-08-06-ci-green |
+| 2026-08-07 | work | docs/aegis/work/2026-08-06-fullscreen-transcript-follow-up-repair/10-intent.md | 10-intent from 2026-08-06-fullscreen-transcript-follow-up-repair |
+| 2026-08-07 | work | docs/aegis/work/2026-08-06-fullscreen-transcript-follow-up-repair/20-checkpoint.md | 20-checkpoint from 2026-08-06-fullscreen-transcript-follow-up-repair |
+| 2026-08-07 | artifact | docs/aegis/work/2026-07-19-terminal-bounded-yield-remediation/baseline-read-set-hint.json | baseline-read-set-hint from 2026-07-19-terminal-bounded-yield-remediation |
+| 2026-08-07 | artifact | docs/aegis/work/2026-07-19-terminal-bounded-yield-remediation/baseline-usage-draft.json | baseline-usage-draft from 2026-07-19-terminal-bounded-yield-remediation |
+| 2026-08-07 | artifact | docs/aegis/work/2026-07-19-terminal-bounded-yield-remediation/drift-check-draft.json | drift-check-draft from 2026-07-19-terminal-bounded-yield-remediation |
+| 2026-08-07 | artifact | docs/aegis/work/2026-07-19-terminal-bounded-yield-remediation/evidence-bundle-draft-windows-conpty-inherit-cursor-root-cause.json | evidence-bundle-draft-windows-conpty-inherit-cursor-root-cause from 2026-07-19-terminal-bounded-yield-remediation |
+| 2026-08-07 | artifact | docs/aegis/work/2026-07-19-terminal-bounded-yield-remediation/gate-input-pack.json | gate-input-pack from 2026-07-19-terminal-bounded-yield-remediation |
+| 2026-08-07 | artifact | docs/aegis/work/2026-07-19-terminal-bounded-yield-remediation/impact-statement-draft.json | impact-statement-draft from 2026-07-19-terminal-bounded-yield-remediation |
+| 2026-08-07 | artifact | docs/aegis/work/2026-07-19-terminal-bounded-yield-remediation/resume-state-hint.json | resume-state-hint from 2026-07-19-terminal-bounded-yield-remediation |
+| 2026-08-07 | artifact | docs/aegis/work/2026-07-19-terminal-bounded-yield-remediation/task-intent-draft.json | task-intent-draft from 2026-07-19-terminal-bounded-yield-remediation |
+| 2026-08-07 | artifact | docs/aegis/work/2026-07-19-terminal-bounded-yield-remediation/todo-checkpoint-draft.json | todo-checkpoint-draft from 2026-07-19-terminal-bounded-yield-remediation |
+| 2026-08-07 | artifact | docs/aegis/work/2026-07-22-acp-research/baseline-read-set-hint.json | baseline-read-set-hint from 2026-07-22-acp-research |
+| 2026-08-07 | artifact | docs/aegis/work/2026-07-22-acp-research/baseline-usage-draft.json | baseline-usage-draft from 2026-07-22-acp-research |
+| 2026-08-07 | artifact | docs/aegis/work/2026-07-22-acp-research/drift-check-draft.json | drift-check-draft from 2026-07-22-acp-research |
+| 2026-08-07 | artifact | docs/aegis/work/2026-07-22-acp-research/evidence-bundle-draft-neo-owner-map.json | evidence-bundle-draft-neo-owner-map from 2026-07-22-acp-research |
+| 2026-08-07 | artifact | docs/aegis/work/2026-07-22-acp-research/evidence-bundle-draft-official-acp.json | evidence-bundle-draft-official-acp from 2026-07-22-acp-research |
+| 2026-08-07 | artifact | docs/aegis/work/2026-07-22-acp-research/evidence-bundle-draft-reference-implementations.json | evidence-bundle-draft-reference-implementations from 2026-07-22-acp-research |
+| 2026-08-07 | artifact | docs/aegis/work/2026-07-22-acp-research/gate-input-pack.json | gate-input-pack from 2026-07-22-acp-research |
+| 2026-08-07 | artifact | docs/aegis/work/2026-07-22-acp-research/impact-statement-draft.json | impact-statement-draft from 2026-07-22-acp-research |
+| 2026-08-07 | artifact | docs/aegis/work/2026-07-22-acp-research/resume-state-hint.json | resume-state-hint from 2026-07-22-acp-research |
+| 2026-08-07 | artifact | docs/aegis/work/2026-07-22-acp-research/task-intent-draft.json | task-intent-draft from 2026-07-22-acp-research |
+| 2026-08-07 | artifact | docs/aegis/work/2026-07-22-acp-research/todo-checkpoint-draft.json | todo-checkpoint-draft from 2026-07-22-acp-research |

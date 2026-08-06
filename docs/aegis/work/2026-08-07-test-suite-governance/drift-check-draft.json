@@ -1,0 +1,18 @@
+{
+  "schemaVersion": "aegis.schema.v0",
+  "taskId": "2026-08-07-test-suite-governance",
+  "taskIntentRef": "docs/aegis/work/2026-08-07-test-suite-governance/task-intent-draft.json",
+  "baselineRefs": [
+    "AGENTS.md",
+    ".config/nextest.toml",
+    ".github/workflows/ci.yml"
+  ],
+  "scopeStatus": "documentation-only",
+  "compatStatus": "production-unchanged",
+  "retirementStatus": "obsolete-aegis-docs-retired-test-implementation-pending",
+  "newRiskSignals": [
+    "本机真实性能尚待实施首步测量",
+    "跨平台原生结果尚待测试治理实施完成后验证"
+  ],
+  "decision": "continue"
+}

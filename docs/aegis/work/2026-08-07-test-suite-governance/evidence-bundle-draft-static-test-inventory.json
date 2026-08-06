@@ -1,0 +1,8 @@
+{
+  "schemaVersion": "aegis.schema.v0",
+  "artifactKey": "static-test-inventory",
+  "type": "static-analysis",
+  "source": "CodeGraph, rg, wc, Cargo metadata, four crate audits",
+  "summary": "Current worktree has about 3519 test definitions and 83 top-level integration targets; no local full-suite run was performed.",
+  "verifier": "root-agent"
+}

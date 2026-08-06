@@ -436,7 +436,7 @@ Excluded:
 - `crates/neo-tui/tests/transcript_selection.rs`
 - `crates/neo-agent/src/modes/interactive/fullscreen_tests.rs`
 - `crates/neo-agent/tests/fullscreen_output.rs`
-- `docs/aegis/adr/ADR-0011-fullscreen-transcript-document.md`
+- `docs/aegis/adr/ADR-0012-fullscreen-transcript-document.md`
 - `docs/aegis/baseline/2026-08-04-fullscreen-transcript-document.md`
 
 ### Modify
@@ -1111,7 +1111,7 @@ fullscreen sequences, resume remains lazy, and context integrity holds.
 
 **Files:**
 
-- Create `docs/aegis/adr/ADR-0011-fullscreen-transcript-document.md`.
+- Create `docs/aegis/adr/ADR-0012-fullscreen-transcript-document.md`.
 - Create `docs/aegis/baseline/2026-08-04-fullscreen-transcript-document.md`.
 - Mark `docs/aegis/adr/ADR-0010-native-terminal-transcript-presentation.md`
   superseded without rewriting its historical decision or evidence.
@@ -1166,7 +1166,7 @@ test-name filter. Do not replace them with a workspace-wide test run.
 
 - Mark ADR-0010 superseded by the landed single fullscreen document decision,
   preserving its original history.
-- Create ADR-0011 with the landed decision, rejected alternatives, compatibility
+- Create ADR-0012 with the landed decision, rejected alternatives, compatibility
   boundary, and retirement evidence.
 - Create a new landed baseline with verified owner/file/test evidence. Keep the
   old baseline unchanged as historical evidence, and do not carry its native

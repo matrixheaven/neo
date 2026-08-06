@@ -3,6 +3,12 @@
 Date: `2026-07-24`
 Status: `accepted`
 
+## Source Evidence
+
+- Approved design and implementation plan: `docs/aegis/plans/2026-07-24-self-update-and-uninstall.md`.
+- Landed command, lifecycle, release, rollback, and uninstall implementation referenced by that plan.
+- Focused verification scope and native acceptance requirements summarized in this record's Verification section.
+
 ## Context
 
 Neo previously had no mechanism to update, rollback, or uninstall itself. The
@@ -111,7 +117,7 @@ Any failure at an earlier step blocks later ones.
 - Windows: `remove_file` fails for occupied `.exe`; reports error without
   self_delete, helper process, shell script, or delayed delete.
 
-## Alternatives Rejected
+## Alternatives Considered
 
 - **Fully custom pipeline**: duplicates established archive/replacement logic.
 - **Package-manager integration**: different behavior per platform, not
@@ -133,6 +139,35 @@ Any failure at an earlier step blocks later ones.
 - Signed publisher assets are deferred until Neo has a release-signing key
   contract.
 
+## Compatibility Boundary
+
+The Cargo package version remains the sole release identity. Existing stable,
+prerelease, six-platform asset naming, one-backup rollback, guarded uninstall,
+and occupied Windows executable behavior remain unchanged. No additional
+package-manager path or update history store is introduced.
+
+## Retirement Impact
+
+The pre-update manual replacement path is historical user practice rather than
+an active code owner. This decision does not retain a second version source,
+multiple backup generations, a Windows helper process, or a package-manager
+adapter.
+
+## Baseline Sync
+
+- Needed: `not-needed`
+- Target: `docs/aegis/adr/ADR-0005-self-update-lifecycle.md`
+- Action: cite unchanged
+- Reason: this round only adds historical record structure and evidence; it
+  does not change the self-update architecture, owner, or compatibility
+  boundary.
+
+## Evidence References
+
+- `docs/aegis/plans/2026-07-24-self-update-and-uninstall.md`
+- Focused lifecycle tests summarized below
+- Native macOS, Fedora, and Windows acceptance requirements summarized below
+
 ## Verification
 
 Seven focused binary tests cover:
@@ -151,3 +186,5 @@ Seven focused binary tests cover:
 
 Cross-platform acceptance on macOS (native), Fedora, and Windows is required
 before release. Six target builds must pass or baseline failures be separated.
+
+This ADR is an advisory Aegis Method Pack record. It does not grant completion authority or replace project-authoritative architecture sources.

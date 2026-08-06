@@ -1,0 +1,27 @@
+{
+  "schemaVersion": "aegis.schema.v0",
+  "requestedOutcome": "形成 Neo 四个 crate 共用的测试治理设计、实施计划和执行交接",
+  "goal": "以本机性能为主基线，将现有测试收敛为少而强的长期行为守护",
+  "successEvidence": [
+    "四个 crate 的静态测试基线",
+    "统一结构和价值判定规则",
+    "可执行的分阶段计划",
+    "强约束执行交接"
+  ],
+  "stopCondition": "文档完成并通过任务范围复核；测试治理实施留给接手 AI",
+  "nonGoals": [
+    "本轮不删除或运行测试",
+    "不修改生产行为",
+    "不新增依赖或测试框架"
+  ],
+  "scope": "测试治理文档、静态基线和执行边界",
+  "changeKinds": [
+    "governance",
+    "planning",
+    "handoff"
+  ],
+  "riskHints": [
+    "远端性能不能替代本机性能",
+    "无证据删除会损失回归保护"
+  ]
+}

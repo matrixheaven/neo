@@ -4,6 +4,13 @@ Status: `recorded-from-work`
 Date: `2026-07-28`
 Updated: `2026-08-01`
 
+## Source Evidence
+
+- Approved redesign: `docs/aegis/specs/2026-07-27-workflow-product-surface-redesign.md`.
+- Implementation plan and handoff: `docs/aegis/plans/2026-07-28-workflow-product-surface-redesign.md` and `docs/aegis/handoffs/2026-07-28-workflow-product-surface-redesign.md`.
+- Landed baseline: `docs/aegis/baseline/2026-07-28-workflow-product-surface-contract.md`.
+- Provider-safe child-output amendment: `docs/aegis/specs/2026-08-01-workflow-ai-usability-repair-design.md` and its linked plan, handoff, and evidence.
+
 ## Context
 
 ADR-0007 established the assistant-native `Workflow` tool and deleted the
@@ -157,6 +164,35 @@ parsers/validators/prompt owners. None of these paths exist in the codebase.
   adherence without weakening host validation. Provider capability and model
   authoring quality remain runtime verification concerns.
 
+## Compatibility Boundary
+
+Saved definitions, the seven assistant actions, canonical workflow journals,
+resume and recovery, task controls, headless CLI, permission ownership, and
+Delegate-family card presentation remain intact. ADR-0009 changes only the
+interactive slash-entry route; it does not replace these product and runtime
+boundaries.
+
+## Retirement Impact
+
+The broad nine-command CLI, mandatory validate-before-run choreography,
+swarm-only child records, duplicate journal readers and writers, and the
+assumption that lifecycle completion proves structured-result acceptance are
+retired without active aliases.
+
+## Baseline Sync
+
+- Needed: `resolved`
+- Target: `docs/aegis/baseline/2026-07-28-workflow-product-surface-contract.md`
+- Action: current landed baseline exists
+- Reason: product surface, journal, retention, and result ownership are recorded there.
+
+## Evidence References
+
+- `docs/aegis/baseline/2026-07-28-workflow-product-surface-contract.md`
+- `docs/aegis/work/2026-07-28-workflow-product-surface-redesign/20-checkpoint.md`
+- `docs/aegis/work/2026-07-28-workflow-product-surface-redesign/90-evidence.md`
+- `docs/aegis/work/2026-07-28-workflow-final-review/final-review.md`
+
 ## Supersedes
 
 Supersedes the human CLI, model action semantics, journal event model, and
@@ -164,3 +200,9 @@ operator-surface portions of ADR-0007. ADR-0006/0007 remain historical context
 for the runtime, registry, and platform durability decisions recorded there;
 this ADR is authoritative for the current Workflow product surface and journal
 contract.
+
+ADR-0009 later supersedes only the interactive slash-entry portion. The
+remaining product surface, journal, task, result, and retention decisions here
+remain current.
+
+This ADR is an advisory Aegis Method Pack record. It does not grant completion authority or replace project-authoritative architecture sources.

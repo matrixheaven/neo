@@ -314,28 +314,28 @@ fn focused_dialog_input_drives_question_dialog_other_text() {
 fn other_text_supports_cursor_editing() {
     let mut state = QuestionStateMachine::new("q-1", make_single_question());
     state.cursor = 2;
-    state.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+    let _ = state.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
 
     for character in "abcd".chars() {
-        state.handle_key(KeyEvent::new(KeyCode::Char(character), KeyModifiers::NONE));
+        let _ = state.handle_key(KeyEvent::new(KeyCode::Char(character), KeyModifiers::NONE));
     }
     assert_eq!(state.questions[0].other_text, "abcd");
 
-    state.handle_key(KeyEvent::new(KeyCode::Left, KeyModifiers::NONE));
-    state.handle_key(KeyEvent::new(KeyCode::Left, KeyModifiers::NONE));
-    state.handle_key(KeyEvent::new(KeyCode::Char('X'), KeyModifiers::NONE));
+    let _ = state.handle_key(KeyEvent::new(KeyCode::Left, KeyModifiers::NONE));
+    let _ = state.handle_key(KeyEvent::new(KeyCode::Left, KeyModifiers::NONE));
+    let _ = state.handle_key(KeyEvent::new(KeyCode::Char('X'), KeyModifiers::NONE));
     assert_eq!(state.questions[0].other_text, "abXcd");
 
-    state.handle_key(KeyEvent::new(KeyCode::Backspace, KeyModifiers::NONE));
+    let _ = state.handle_key(KeyEvent::new(KeyCode::Backspace, KeyModifiers::NONE));
     assert_eq!(state.questions[0].other_text, "abcd");
 
-    state.handle_key(KeyEvent::new(KeyCode::Home, KeyModifiers::NONE));
-    state.handle_key(KeyEvent::new(KeyCode::Delete, KeyModifiers::NONE));
+    let _ = state.handle_key(KeyEvent::new(KeyCode::Home, KeyModifiers::NONE));
+    let _ = state.handle_key(KeyEvent::new(KeyCode::Delete, KeyModifiers::NONE));
     assert_eq!(state.questions[0].other_text, "bcd");
 
-    state.handle_key(KeyEvent::new(KeyCode::End, KeyModifiers::NONE));
-    state.handle_key(KeyEvent::new(KeyCode::Left, KeyModifiers::NONE));
-    state.handle_key(KeyEvent::new(KeyCode::Delete, KeyModifiers::NONE));
+    let _ = state.handle_key(KeyEvent::new(KeyCode::End, KeyModifiers::NONE));
+    let _ = state.handle_key(KeyEvent::new(KeyCode::Left, KeyModifiers::NONE));
+    let _ = state.handle_key(KeyEvent::new(KeyCode::Delete, KeyModifiers::NONE));
     assert_eq!(state.questions[0].other_text, "bc");
     assert!(
         state

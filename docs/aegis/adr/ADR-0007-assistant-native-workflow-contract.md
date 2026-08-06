@@ -106,11 +106,11 @@ authorization-mode, nonce, or capability-type references in product source.
 
 ## Baseline Sync
 
-- Needed: needed
-- Target: `docs/aegis/baseline/2026-07-27-assistant-native-workflow-contract.md`
-- Action: create superseding snapshot
-- Reason: The assistant-native contract replaces the capability-based launch
-  baseline from ADR-0006; fresh three-session acceptance remains pending.
+- Needed: resolved
+- Target: `docs/aegis/baseline/2026-07-28-workflow-product-surface-contract.md`
+- Action: current superseding snapshot exists; retain the 2026-07-27 snapshot as historical evidence
+- Reason: ADR-0008 and the 2026-07-28 baseline supersede the product-surface
+  portion while retaining unchanged assistant-tool and retirement history.
 
 ## Evidence References
 
@@ -130,7 +130,11 @@ authorization-mode, nonce, or capability-type references in product source.
   boundaries. ADR-0006 remains historical for runtime, registry, journal,
   lineage, and platform durable boundaries.
 
+ADR-0008 later supersedes the product surface and journal portions, and
+ADR-0009 later supersedes only the interactive slash-entry portion. All other
+runtime, registry, tool, permission, and retirement decisions in this record
+remain current.
+
 ## Boundary
 
-This ADR is an advisory Aegis Method Pack record. It does not grant completion
-authority or replace project-authoritative architecture sources.
+This ADR is an advisory Aegis Method Pack record. It does not grant completion authority or replace project-authoritative architecture sources.

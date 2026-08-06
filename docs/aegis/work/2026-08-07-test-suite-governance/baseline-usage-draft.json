@@ -1,0 +1,22 @@
+{
+  "schemaVersion": "aegis.schema.v0",
+  "taskId": "2026-08-07-test-suite-governance",
+  "requiredBaselineRefs": [
+    "AGENTS.md",
+    ".config/nextest.toml",
+    ".github/workflows/ci.yml"
+  ],
+  "deliveredContextRefs": [],
+  "acknowledgedBeforePlanRefs": [
+    "AGENTS.md",
+    ".config/nextest.toml",
+    ".github/workflows/ci.yml"
+  ],
+  "citedInPlanRefs": [
+    "AGENTS.md",
+    ".config/nextest.toml",
+    ".github/workflows/ci.yml"
+  ],
+  "missingRefs": [],
+  "decision": "continue"
+}

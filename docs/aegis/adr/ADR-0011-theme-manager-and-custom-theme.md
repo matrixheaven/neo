@@ -90,3 +90,34 @@ save boundary.
   are covered by focused tests but not a manual full-terminal walkthrough;
   `docs/current/AEGIS_MINIMALITY_REFERENCE.md` remains missing and is recorded as
   an authority gap, not silently satisfied.
+
+## Compatibility Boundary
+
+Existing built-in themes, explicit startup selection, absent-field sorted
+discovery, current-session application, config reload, transcript and context
+semantics remain unchanged. AI theme save never applies a theme and never gains
+generic file-write permission.
+
+## Retirement Impact
+
+The undocumented `/theme <name>` stub behavior, project-local theme directory,
+ordinary Write-based AI save, per-turn draft store, and duplicate theme owner
+are retired. The absent-field sorted discovery is the only bounded compatibility
+exception and has an explicit startup-only scope.
+
+## Baseline Sync
+
+- Needed: `resolved`
+- Target: `docs/aegis/baseline/2026-08-04-theme-manager.md`
+- Action: current landed baseline exists
+- Reason: repository, manager, startup selection, draft lifetime, permission,
+  and confirmation boundaries are recorded there.
+
+## Evidence References
+
+- `docs/aegis/specs/2026-08-04-theme-manager-design.md`
+- `docs/aegis/plans/2026-08-04-theme-manager.md`
+- `docs/aegis/baseline/2026-08-04-theme-manager.md`
+- Landed commits listed in Source Evidence
+
+This ADR is an advisory Aegis Method Pack record. It does not grant completion authority or replace project-authoritative architecture sources.

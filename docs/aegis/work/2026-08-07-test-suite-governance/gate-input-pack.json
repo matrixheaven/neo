@@ -1,0 +1,14 @@
+{
+  "schemaVersion": "aegis.schema.v0",
+  "baselineRefs": [
+    "AGENTS.md",
+    ".config/nextest.toml",
+    ".github/workflows/ci.yml"
+  ],
+  "impactStatement": "docs/aegis/work/2026-08-07-test-suite-governance/impact-statement-draft.json",
+  "compatPlan": "不改变公开接口、生产语义、上下文记录、终端展示或平台行为",
+  "retirementPlan": "obsolete-aegis-docs-retired-test-implementation-pending",
+  "evidenceBundle": [
+    "docs/aegis/work/2026-08-07-test-suite-governance/evidence-bundle-draft-static-test-inventory.json"
+  ]
+}

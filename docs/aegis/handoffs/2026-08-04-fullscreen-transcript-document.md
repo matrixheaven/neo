@@ -478,7 +478,7 @@ starting native closeout.
   mouse, clipboard, resize, suspend, error restoration, and normal exit smoke.
 - `prlctl exec` does not prove real terminal selection or alternate-screen
   behavior.
-- Create ADR-0011 and a new 2026-08-04 landed baseline only from verified
+- Create ADR-0012 and a new 2026-08-04 landed baseline only from verified
   evidence. Mark ADR-0010 superseded without rewriting it. Keep the 2026-07-31
   baseline unchanged as historical evidence.
 - Commit: `docs(tui): record fullscreen transcript architecture`.
@@ -504,7 +504,7 @@ The final reviewer must check:
 - one fullscreen lifecycle restores on every supported path;
 - static modes remain static;
 - cross-platform claims match actual native evidence;
-- ADR-0011 and the new baseline state only what evidence proves.
+- ADR-0012 and the new baseline state only what evidence proves.
 
 If the final reviewer finds a defect, route it back to the owning task with a
 fresh fix subagent and repeat that task's two reviews and verification. Do not

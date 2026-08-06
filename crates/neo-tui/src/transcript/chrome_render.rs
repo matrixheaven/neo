@@ -1297,7 +1297,7 @@ mod tests {
         assert!(render.row_kinds[prompt_rows[prompt_rows.len() - 1] + 1] == ChromeRowKind::Other);
 
         // Without todos there are no Todo rows.
-        let mut app = NeoChromeState::new("neo", "s", "m", "/tmp");
+        let app = NeoChromeState::new("neo", "s", "m", "/tmp");
         let render = render_chrome_lines(&app, 60, 24);
         assert!(
             render

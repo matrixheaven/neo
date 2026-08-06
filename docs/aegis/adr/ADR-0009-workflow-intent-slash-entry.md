@@ -89,6 +89,13 @@ space-form named launch, and static built-in-only workflow completion.
 - Reason: the canonical interactive entry point, context ownership, capacity
   boundary, and retired host path changed.
 
+## Retirement Impact
+
+The host-direct JSON slash launcher, space-form named launch, direct slash
+approval state, and static workflow completion candidates are retired without
+aliases. Saved definitions, authoring, headless CLI, and the assistant Workflow
+tool remain active through their existing owners.
+
 ## Evidence References
 
 - `modes::interactive::tests::bare_workflow_slash_opens_picker_and_selection_only_fills_composer`
@@ -109,5 +116,4 @@ registry, tool, journal, task, and product decisions not changed here.
 
 ## Boundary
 
-This ADR is an Aegis Method Pack record. It does not grant completion
-authority or replace project-authoritative architecture sources.
+This ADR is an advisory Aegis Method Pack record. It does not grant completion authority or replace project-authoritative architecture sources.

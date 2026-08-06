@@ -1,0 +1,23 @@
+{
+  "schemaVersion": "aegis.schema.v0",
+  "taskId": "2026-08-07-test-suite-governance",
+  "currentTodo": "完成独立复核、结构校验和提交",
+  "completedTodos": [
+    "ICM 回忆",
+    "四个 crate 只读审计",
+    "测试基础设施审计",
+    "设计说明",
+    "实施计划",
+    "执行交接",
+    "固定迁移与提交清单",
+    "Aegis 历史文档清理",
+    "Aegis 全仓结构校验"
+  ],
+  "activeSlice": "independent-review-and-closeout",
+  "evidenceRefs": [
+    "docs/aegis/work/2026-08-07-test-suite-governance/90-evidence.md"
+  ],
+  "blockedOn": null,
+  "nextStep": "独立复核通过后提交；接手 AI 按计划先测量本机分段基线",
+  "updatedAt": "2026-08-07"
+}

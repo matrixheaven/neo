@@ -1,0 +1,10 @@
+{
+  "schemaVersion": "aegis.schema.v0",
+  "candidateDocs": [
+    "AGENTS.md",
+    ".config/nextest.toml",
+    ".github/workflows/ci.yml"
+  ],
+  "whyRelevant": "根规则、测试调度和持续集成共同限定测试治理边界",
+  "missingAuthority": []
+}

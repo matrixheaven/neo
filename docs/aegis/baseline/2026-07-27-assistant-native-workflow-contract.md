@@ -1,12 +1,17 @@
 # Local Workflow Platform — Assistant-Native Contract Baseline
 
-Status: `recorded-from-adr`
+Status: `historical-superseded`
 Date: `2026-07-27`
 ADR: `docs/aegis/adr/ADR-0007-assistant-native-workflow-contract.md`
+Superseded by: `docs/aegis/baseline/2026-07-28-workflow-product-surface-contract.md`
 
 This baseline records the **landed assistant-native workflow contract** plus
 focused test evidence from Tasks 1-7. The exact fresh three-session black-box
 acceptance remains pending.
+
+This snapshot is retained as historical evidence. Use the superseding 2026-07-28
+baseline for current Workflow product-surface decisions; use this file only for
+unchanged assistant-tool and retirement history.
 
 ## Product / Requirement Baseline
 
