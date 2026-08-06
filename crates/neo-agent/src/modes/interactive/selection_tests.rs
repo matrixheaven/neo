@@ -8,6 +8,7 @@
 //! controller test file does not absorb more surface.
 
 use std::path::PathBuf;
+use std::sync::{Arc, Mutex};
 
 use neo_agent_core::{
     ApprovalAction, ApprovalOption, ApprovalPresentation, ApprovalRequest, ApprovalResponse,
@@ -35,6 +36,16 @@ fn mouse_event(
         column,
         row,
         modifiers,
+    })
+}
+
+fn right_button_event(kind: MouseKind, column: u16, row: u16) -> InputEvent {
+    InputEvent::Mouse(MouseEvent {
+        kind,
+        button: crossterm::event::MouseButton::Right,
+        column,
+        row,
+        modifiers: crossterm::event::KeyModifiers::NONE,
     })
 }
 
@@ -351,4 +362,105 @@ async fn mouse_selection_works_while_question_owns_keyboard() {
         response_rx.try_recv().is_err(),
         "cancelling drops the response channel without a reply"
     );
+}
+
+#[tokio::test]
+async fn right_click_copies_current_selection_to_clipboard() {
+    let mut controller = selection_controller();
+    let recorded = Arc::new(Mutex::new(Vec::new()));
+    let writer_recorded = Arc::clone(&recorded);
+    controller.set_clipboard_writer(Arc::new(move |text| {
+        let recorded = Arc::clone(&writer_recorded);
+        Box::pin(async move {
+            recorded.lock().expect("record clipboard text").push(text);
+            Ok(())
+        })
+    }));
+
+    // A plain left-button drag materializes the selection first.
+    for event in [
+        mouse_event(MouseKind::Press, 1, 1, crossterm::event::KeyModifiers::NONE),
+        mouse_event(MouseKind::Drag, 7, 3, crossterm::event::KeyModifiers::NONE),
+        mouse_event(
+            MouseKind::Release,
+            7,
+            3,
+            crossterm::event::KeyModifiers::NONE,
+        ),
+    ] {
+        controller
+            .handle_input_event(event)
+            .await
+            .expect("mouse drag handled");
+    }
+    let expected = controller
+        .transcript_mut()
+        .copy_selected_transcript_text()
+        .expect("drag produced a selection");
+    assert_eq!(expected, "row-5\n\nrow-6");
+
+    // Right-click copies the selection to the system clipboard.
+    controller
+        .handle_input_event(right_button_event(MouseKind::Press, 10, 3))
+        .await
+        .expect("right click handled");
+    wait_for_clipboard_write(&mut controller).await;
+    assert_eq!(
+        recorded.lock().expect("clipboard writes").as_slice(),
+        [expected.as_str()],
+        "right-click must copy the current selection"
+    );
+
+    // A keyboard entry selection is copied by right-click too.
+    controller.transcript_mut().clear_transcript_selection();
+    controller
+        .transcript_mut()
+        .select_visible_transcript_entry();
+    let keyboard_text = controller
+        .transcript_mut()
+        .copy_selected_transcript_text()
+        .expect("keyboard selection materializes");
+    controller
+        .handle_input_event(right_button_event(MouseKind::Press, 10, 3))
+        .await
+        .expect("right click handled");
+    wait_for_clipboard_write(&mut controller).await;
+    assert_eq!(
+        recorded.lock().expect("clipboard writes").as_slice(),
+        [expected.as_str(), keyboard_text.as_str()],
+        "right-click must copy a keyboard selection too"
+    );
+}
+
+#[tokio::test]
+async fn right_click_without_selection_writes_nothing() {
+    let mut controller = selection_controller();
+    let recorded = Arc::new(Mutex::new(Vec::new()));
+    let writer_recorded = Arc::clone(&recorded);
+    controller.set_clipboard_writer(Arc::new(move |text| {
+        let recorded = Arc::clone(&writer_recorded);
+        Box::pin(async move {
+            recorded.lock().expect("record clipboard text").push(text);
+            Ok(())
+        })
+    }));
+
+    controller
+        .handle_input_event(right_button_event(MouseKind::Press, 10, 3))
+        .await
+        .expect("right click handled");
+    wait_for_clipboard_write(&mut controller).await;
+    assert!(
+        recorded.lock().expect("clipboard writes").is_empty(),
+        "right-click without a selection must not touch the clipboard"
+    );
+}
+
+/// Drain the controller-owned clipboard helper task. The helper runs on the
+/// test runtime, so the poll loop must yield for it to make progress.
+async fn wait_for_clipboard_write(controller: &mut InteractiveController) {
+    while controller.pending_clipboard.is_some() {
+        let _ = controller.poll_pending_clipboard().await;
+        tokio::task::yield_now().await;
+    }
 }

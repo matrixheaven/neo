@@ -170,6 +170,47 @@ fn mouse_click_preserves_keyboard_selection_but_confirmed_drag_replaces() {
 }
 
 #[test]
+fn release_ends_drag_and_hover_motion_never_extends() {
+    let mut pane = pane_with_status_rows(8);
+    let _ = pane.render_visible_slice(80, 6);
+
+    // A confirmed downward drag selects "row-5" through "row-6".
+    pane.handle_mouse_event(mouse(MouseKind::Press, 1, 1), 1, 0);
+    pane.handle_mouse_event(mouse(MouseKind::Drag, 7, 3), 3, 6);
+    pane.handle_mouse_event(mouse(MouseKind::Release, 7, 3), 3, 6);
+    let released = pane.copy_selected_transcript_text();
+    assert_eq!(released.as_deref(), Some("row-5\n\nrow-6"));
+    let released_highlights: Vec<Vec<(usize, usize)>> = pane
+        .render_visible_slice(80, 6)
+        .iter()
+        .map(|line| selection_bg_ranges(line))
+        .collect();
+    assert!(
+        released_highlights.iter().any(|ranges| !ranges.is_empty()),
+        "the released selection must stay highlighted"
+    );
+
+    // Any-event terminals keep reporting no-button hover motion as drags
+    // after the release; it must never re-arm the drag or move the endpoint.
+    pane.handle_mouse_event(mouse(MouseKind::Drag, 9, 0), 0, 8);
+    pane.handle_mouse_event(mouse(MouseKind::Drag, 11, 5), 5, 10);
+    let after_motion: Vec<Vec<(usize, usize)>> = pane
+        .render_visible_slice(80, 6)
+        .iter()
+        .map(|line| selection_bg_ranges(line))
+        .collect();
+    assert_eq!(
+        after_motion, released_highlights,
+        "hover motion after release must not extend the painted selection"
+    );
+    assert_eq!(
+        pane.copy_selected_transcript_text(),
+        released,
+        "hover motion after release must not change the selection"
+    );
+}
+
+#[test]
 fn selection_crosses_entries_autoscrolls_and_materializes_text() {
     let mut pane = pane_with_status_rows(8);
     // Establish the body height (6 rows) and the tail-following layout.

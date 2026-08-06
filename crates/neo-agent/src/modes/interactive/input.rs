@@ -70,8 +70,10 @@ impl InteractiveController {
 
     /// Route one typed mouse event. Wheel events scroll the transcript
     /// (transcript-wide navigation, matching the historical wheel behavior);
-    /// other buttons and Shift-modified drags are not interpreted by Neo —
-    /// Shift selection stays with the terminal emulator.
+    /// a right-button press copies the current transcript selection (mouse
+    /// drag or keyboard entry selection); Shift-modified drags are not
+    /// interpreted by Neo — Shift selection stays with the terminal
+    /// emulator.
     fn handle_mouse_event(&mut self, mouse: MouseEvent) {
         if mouse.is_wheel() {
             if mouse.is_wheel_up() {
@@ -82,6 +84,20 @@ impl InteractiveController {
             return;
         }
         if mouse.is_shift_modified() {
+            return;
+        }
+        // Right-click copies the selection. Full-screen overlays still own
+        // the whole frame; pending approvals and questions keep selection
+        // events flowing, mirroring the left-button selection guard in the
+        // TUI frame.
+        if mouse.kind == MouseKind::Press && mouse.button == crossterm::event::MouseButton::Right {
+            if self.tui.chrome().focused_overlay_blocks_prompt()
+                && !self.tui.chrome().approval_is_pending()
+                && !self.tui.chrome().question_dialog_is_focused()
+            {
+                return;
+            }
+            self.copy_transcript_selection_to_clipboard();
             return;
         }
         self.tui.handle_mouse_event(mouse);

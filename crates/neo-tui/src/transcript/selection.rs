@@ -137,6 +137,12 @@ pub struct DocumentSelection {
     keyboard_entries: Option<(TranscriptEntryId, TranscriptEntryId)>,
     /// Threshold crossed: the gesture is a drag, not a click.
     dragging: bool,
+    /// Whether the mouse button gesture between a press and its release is
+    /// still open. Any-event terminals keep reporting hover motion (parsed
+    /// as drags) after the release; without this flag that motion re-arms
+    /// the drag against the stale press position and keeps extending the
+    /// selection after the button is up.
+    gesture_active: bool,
     /// A double-click established a word selection on the current press;
     /// its release must keep the selection instead of clearing it.
     word_selected: bool,
@@ -166,6 +172,7 @@ impl DocumentSelection {
             active: None,
             keyboard_entries: None,
             dragging: false,
+            gesture_active: false,
             word_selected: false,
             press_row: 0,
             press_col: 0,
@@ -240,6 +247,7 @@ impl DocumentSelection {
         self.anchor = Some(point);
         self.active = Some(point);
         self.dragging = false;
+        self.gesture_active = true;
         self.word_selected = false;
         self.auto_scroll = None;
         self.materialized = None;
@@ -252,10 +260,13 @@ impl DocumentSelection {
 
     /// Feed one drag-motion event. `point` is the resolved document point,
     /// or `None` when the pointer is outside the body. The active endpoint
-    /// moves only after the movement threshold distinguishes a drag.
+    /// moves only while the press gesture is still open and after the
+    /// movement threshold distinguishes a drag; hover motion arriving after
+    /// the release is inert.
     pub fn drag(&mut self, point: Option<DocumentPoint>, row: u16, col: u16) -> DragUpdate {
         let was_dragging = self.dragging;
-        if self.anchor.is_some()
+        if self.gesture_active
+            && self.anchor.is_some()
             && !self.dragging
             && (row.abs_diff(self.press_row) > MOVEMENT_THRESHOLD
                 || col.abs_diff(self.press_col) > MOVEMENT_THRESHOLD)
@@ -265,7 +276,8 @@ impl DocumentSelection {
             // keyboard entry selection, which clicks never destroy.
             self.keyboard_entries = None;
         }
-        if self.dragging
+        if self.gesture_active
+            && self.dragging
             && let Some(point) = point
         {
             self.active = Some(point);
@@ -283,6 +295,7 @@ impl DocumentSelection {
     pub fn release(&mut self) -> bool {
         let keep = self.dragging || self.word_selected;
         self.dragging = false;
+        self.gesture_active = false;
         self.word_selected = false;
         self.auto_scroll = None;
         if !keep && self.keyboard_entries.is_none() {
@@ -309,6 +322,7 @@ impl DocumentSelection {
         self.active = Some(end);
         self.keyboard_entries = Some((start.entry_id, end.entry_id));
         self.dragging = false;
+        self.gesture_active = false;
         self.word_selected = false;
         self.auto_scroll = None;
         self.materialized = None;
@@ -347,6 +361,7 @@ impl DocumentSelection {
         self.active = None;
         self.keyboard_entries = None;
         self.dragging = false;
+        self.gesture_active = false;
         self.word_selected = false;
         self.auto_scroll = None;
         self.materialized = None;

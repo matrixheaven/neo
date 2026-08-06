@@ -212,7 +212,7 @@ impl NeoTui {
 /// content width so the hint reads as an extension of the selection.
 fn selection_hint_line(width: usize, theme: &TuiTheme) -> String {
     let content_width = frame_content_width(width);
-    let text = "selected · ctrl+c copy · ctrl+shift+space clear";
+    let text = "selected · right-click or ctrl+c copy · ctrl+shift+space clear";
     let label = format!(" {text} ");
     let padded = pad_to_width(&label, content_width);
     paint(

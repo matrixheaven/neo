@@ -484,7 +484,7 @@ fn transcript_keybinding_definitions() -> Vec<KeybindingDefinition> {
         ),
         definition(
             Action::TranscriptCopySelection,
-            &["ctrl+c"],
+            &["ctrl+c", "ctrl+shift+c"],
             "Copy transcript selection",
         ),
         definition(Action::ToolOutputToggle, &["ctrl+o"], "Toggle tool output"),
