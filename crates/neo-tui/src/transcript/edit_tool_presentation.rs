@@ -3,7 +3,7 @@
 use crate::diff_model::{DiffLine, DiffModel};
 use crate::markdown::{highlight_code_lines, wrap_spans};
 use crate::primitive::theme::TuiTheme;
-use crate::primitive::{Color, Line, Span, Style};
+use crate::primitive::{Color, Line, Span, Style, truncate_to_width, visible_width};
 use crate::shell::ToolStatusKind;
 use neo_agent_core::EditApprovalPresentation;
 use serde_json::Value;
@@ -670,14 +670,15 @@ fn render_omission(changes: &[Value], width: usize, theme: &TuiTheme) -> Vec<Lin
             let path = change.get("path").and_then(Value::as_str).unwrap_or("?");
             let added = change.get("added").and_then(Value::as_u64).unwrap_or(0);
             let removed = change.get("removed").and_then(Value::as_u64).unwrap_or(0);
+            let suffix = format!("  +{added} -{removed}");
+            let path_width = width.saturating_sub(visible_width("M ") + visible_width(&suffix));
+            let path = truncate_to_width(path, path_width);
             Line::from_spans(vec![
                 Span::styled("M ", Style::default().fg(theme.diff_hunk)),
-                Span::styled(path.to_owned(), Style::default().fg(theme.text_primary)),
-                Span::styled("  ", muted),
-                Span::styled(format!("+{added}"), Style::default().fg(theme.diff_added)),
-                Span::styled(" ", Style::default()),
+                Span::styled(path, Style::default().fg(theme.text_primary)),
+                Span::styled(format!("  +{added}"), Style::default().fg(theme.diff_added)),
                 Span::styled(
-                    format!("-{removed}"),
+                    format!(" -{removed}"),
                     Style::default().fg(theme.diff_removed),
                 ),
             ])

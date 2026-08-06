@@ -2065,7 +2065,11 @@ fn edit_batch_card_renders_collapsed_expanded_and_narrow() {
         "added": 28,
         "removed": 17,
         "changes": (0..5).map(|i| serde_json::json!({
-            "path": format!("src/file{i}.rs"),
+            "path": if i == 2 {
+                format!("src/very/long/nested/path/file{i}.rs")
+            } else {
+                format!("src/file{i}.rs")
+            },
             "status": "committed",
             "replacements": 1,
             "added": 2,
@@ -2095,6 +2099,13 @@ fn edit_batch_card_renders_collapsed_expanded_and_narrow() {
             .iter()
             .any(|line| line.contains("diff details hidden") && line.contains("ctrl+o")),
         "collapsed should retain expand hint: {collapsed:?}"
+    );
+    let narrow_collapsed = plain(card.render(30));
+    assert!(
+        narrow_collapsed
+            .iter()
+            .any(|line| line.contains("+2") && line.contains("-1")),
+        "narrow collapsed rows should retain file stats: {narrow_collapsed:?}"
     );
 
     card.set_expanded(true);
