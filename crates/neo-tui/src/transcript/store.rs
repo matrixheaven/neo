@@ -1482,12 +1482,23 @@ impl TranscriptStore {
         index: usize,
         mutate: impl FnOnce(&mut TranscriptEntry) -> bool,
     ) -> bool {
+        let was_tool_run = matches!(
+            self.entries.get(index),
+            Some(TranscriptEntry::ToolRun { .. })
+        );
         let changed = match self.entries.get_mut(index) {
             Some(entry) => mutate(entry),
             None => return false,
         };
         if changed {
-            self.touch_entry(index);
+            if was_tool_run || matches!(self.entries[index], TranscriptEntry::ToolRun { .. }) {
+                // The grouped tool-card block is attributed to the span's
+                // first member: any member content change re-shapes that
+                // block, so the whole consecutive span re-measures.
+                self.touch_tool_run_span(index);
+            } else {
+                self.touch_entry(index);
+            }
         }
         changed
     }
@@ -1558,6 +1569,12 @@ impl TranscriptStore {
         if index >= self.entries.len() {
             return None;
         }
+        let removed_is_tool_run = matches!(self.entries[index], TranscriptEntry::ToolRun { .. });
+        let merges_groups = !removed_is_tool_run
+            && index > 0
+            && index + 1 < self.entries.len()
+            && matches!(self.entries[index - 1], TranscriptEntry::ToolRun { .. })
+            && matches!(self.entries[index + 1], TranscriptEntry::ToolRun { .. });
         let entry = self.entries.remove(index);
         self.entry_ids.remove(index);
         self.entry_revisions.remove(index);
@@ -1571,6 +1588,28 @@ impl TranscriptStore {
             && *start > index
         {
             *start -= 1;
+        }
+        if removed_is_tool_run {
+            // The containing group shrank or split; both flanks can re-shape
+            // (a following member becomes the group's first block owner).
+            if index > 0
+                && matches!(
+                    self.entries.get(index - 1),
+                    Some(TranscriptEntry::ToolRun { .. })
+                )
+            {
+                self.touch_tool_run_span(index - 1);
+            }
+            if matches!(
+                self.entries.get(index),
+                Some(TranscriptEntry::ToolRun { .. })
+            ) {
+                self.touch_tool_run_span(index);
+            }
+        } else if merges_groups {
+            // Removing a non-tool between two tool runs merges the groups,
+            // re-shaping the merged span's first-member block.
+            self.touch_tool_run_span(index - 1);
         }
         Some(entry)
     }
@@ -1625,6 +1664,8 @@ impl TranscriptStore {
     // ── Render cache management ───────────────────────────────────────────
 
     fn append_entry(&mut self, entry: TranscriptEntry) -> usize {
+        let extends_group = matches!(entry, TranscriptEntry::ToolRun { .. })
+            && matches!(self.entries.last(), Some(TranscriptEntry::ToolRun { .. }));
         let index = self.entries.len();
         let id = self.allocate_entry_id();
         self.entries.push(entry);
@@ -1632,10 +1673,30 @@ impl TranscriptStore {
         self.entry_revisions.push(0);
         self.assistant_phases.push(MessagePhase::Unknown);
         self.render_cache.push(None);
+        if extends_group {
+            // The new member grows the consecutive group, whose rendered
+            // block is attributed to the group's first member: re-measure
+            // the whole span so the document geometry stays exact.
+            self.touch_tool_run_span(index);
+        }
         index
     }
 
     fn insert_entry(&mut self, index: usize, entry: TranscriptEntry) {
+        let is_tool_run = matches!(entry, TranscriptEntry::ToolRun { .. });
+        let joins_group = is_tool_run
+            && (matches!(
+                index.checked_sub(1).and_then(|i| self.entries.get(i)),
+                Some(TranscriptEntry::ToolRun { .. })
+            ) || matches!(
+                self.entries.get(index),
+                Some(TranscriptEntry::ToolRun { .. })
+            ));
+        let splits_group = !is_tool_run
+            && index > 0
+            && index < self.entries.len()
+            && matches!(self.entries[index - 1], TranscriptEntry::ToolRun { .. })
+            && matches!(self.entries[index], TranscriptEntry::ToolRun { .. });
         let id = self.allocate_entry_id();
         self.entries.insert(index, entry);
         self.entry_ids.insert(index, id);
@@ -1656,6 +1717,16 @@ impl TranscriptStore {
             && *start >= index
         {
             *start += 1;
+        }
+        if joins_group {
+            // The inserted member extends or merges the consecutive group:
+            // re-measure the span whose first member owns the group block.
+            self.touch_tool_run_span(index);
+        } else if splits_group {
+            // Inserting a non-tool between two tool runs splits one group
+            // into two; both resulting first members re-measure.
+            self.touch_tool_run_span(index - 1);
+            self.touch_tool_run_span(index + 1);
         }
     }
 

@@ -3,9 +3,16 @@
 //! resolution.
 
 use neo_agent_core::multi_agent::MultiAgentRuntime;
+use neo_agent_core::{
+    ApprovalAction, ApprovalOption, ApprovalPresentation, ApprovalRequest, PermissionOperation,
+};
 use neo_tui::primitive::strip_ansi;
 use neo_tui::screen_output::{FullscreenTerminal, TerminalFrame};
-use neo_tui::transcript::{DelegateGroupComponent, TranscriptEntry, TranscriptPane};
+use neo_tui::shell::ToolStatusKind;
+use neo_tui::transcript::{
+    ApprovalDisplayState, ApprovalPromptData, DelegateGroupComponent, TranscriptEntry,
+    TranscriptPane,
+};
 
 /// The non-blank content lines of a rendered slice, in order.
 fn non_blank_lines(rows: &[String]) -> Vec<String> {
@@ -13,6 +20,76 @@ fn non_blank_lines(rows: &[String]) -> Vec<String> {
         .map(|row| strip_ansi(row))
         .filter(|row| !row.trim().is_empty())
         .collect()
+}
+
+/// The number of tool-card header rows in a composed frame.
+fn count_tool_cards(rows: &[String]) -> usize {
+    rows.iter()
+        .filter(|row| {
+            let text = strip_ansi(row);
+            ["Using Bash", "Used Bash", "Preparing Bash"]
+                .iter()
+                .any(|verb| text.contains(verb))
+        })
+        .count()
+}
+
+/// Assert the tool group is framed by exactly one document-owned blank row
+/// above and below: `before`, one blank, the group block, one blank, `after`.
+fn assert_single_blank_framing(rows: &[String], before: &str, after: &str) {
+    let before_idx = rows
+        .iter()
+        .position(|row| strip_ansi(row).contains(before))
+        .expect("leading entry");
+    let after_idx = rows
+        .iter()
+        .rposition(|row| strip_ansi(row).contains(after))
+        .expect("trailing entry");
+    assert!(
+        before_idx + 2 < after_idx,
+        "group sits between the framing entries: {rows:?}"
+    );
+    assert!(
+        strip_ansi(&rows[before_idx + 1]).trim().is_empty(),
+        "exactly one blank row below the leading entry: {rows:?}"
+    );
+    assert!(
+        !strip_ansi(&rows[before_idx + 2]).trim().is_empty(),
+        "the group starts immediately after the single blank row: {rows:?}"
+    );
+    assert!(
+        strip_ansi(&rows[after_idx - 1]).trim().is_empty(),
+        "exactly one blank row above the trailing entry: {rows:?}"
+    );
+    assert!(
+        !strip_ansi(&rows[after_idx - 2]).trim().is_empty(),
+        "the group ends immediately before the single blank row: {rows:?}"
+    );
+}
+
+fn approval_for_tool(tool_id: &str) -> ApprovalPromptData {
+    ApprovalPromptData {
+        request: ApprovalRequest {
+            turn: 1,
+            id: tool_id.to_owned(),
+            operation: PermissionOperation::Tool,
+            presentation: ApprovalPresentation::Tool {
+                title: "Approve Bash".to_owned(),
+                details: vec!["run the tool?".to_owned()],
+            },
+            options: vec![ApprovalOption {
+                label: "Approve".to_owned(),
+                description: None,
+                action: ApprovalAction::PermitOnce,
+            }],
+            workflow_origin: None,
+        },
+        selected: 0,
+        feedback_input: String::new(),
+        feedback_active: false,
+        expanded: false,
+        state: ApprovalDisplayState::Pending,
+    }
 }
 
 #[test]
@@ -405,5 +482,296 @@ fn tool_run_suppression_toggle_remesures_heights_and_keeps_geometry_exact() {
             .count(),
         3,
         "all three tool cards render again after unsuppression"
+    );
+}
+
+#[test]
+fn dynamic_tool_group_remeasures_after_append_and_member_update() {
+    let mut pane = TranscriptPane::new(80, 16);
+    pane.push_status("before");
+    pane.transcript_mut().push_tool_run("tool-1", "Bash", None);
+
+    // Stage 1 — a solo tool card: the document is exact, and the group is
+    // framed by exactly one document-owned blank row below the leading entry.
+    let full_solo = pane.render_frame(80, 16).expect("solo frame");
+    let solo_total = pane.document().total_rows();
+    assert_eq!(solo_total, full_solo.len(), "solo geometry exact");
+    assert_eq!(count_tool_cards(&full_solo), 1);
+    assert!(
+        strip_ansi(&full_solo[1]).trim().is_empty(),
+        "one blank row below the leading entry: {full_solo:?}"
+    );
+    let solo_group_height = pane.document().entry_layout(1).expect("group").height;
+
+    // Stage 2 — appending a second tool joins the group: the first member
+    // re-measures, the document grows by exactly the group's height delta.
+    pane.transcript_mut().push_tool_run("tool-2", "Bash", None);
+    let full_pair = pane.render_frame(80, 16).expect("pair frame");
+    let pair_total = pane.document().total_rows();
+    assert!(
+        pair_total > solo_total,
+        "group grows: {solo_total} -> {pair_total}"
+    );
+    assert_eq!(pair_total, full_pair.len(), "pair geometry exact");
+    assert_eq!(count_tool_cards(&full_pair), 2, "both cards visible");
+    let pair_group_height = pane.document().entry_layout(1).expect("group").height;
+    assert_eq!(
+        pair_total.saturating_sub(solo_total),
+        pair_group_height.saturating_sub(solo_group_height),
+        "the growth is entirely the group's re-measured block"
+    );
+
+    // Stage 3 — a trailing entry lands after the group: it starts exactly at
+    // the re-measured group's end, one blank row below the group block.
+    pane.push_status("after");
+    let full_trailed = pane.render_frame(80, 16).expect("trailed frame");
+    let trailed_total = pane.document().total_rows();
+    assert_eq!(trailed_total, full_trailed.len(), "trailed geometry exact");
+    assert_single_blank_framing(&full_trailed, "before", "after");
+    let trailed_trailing_start = pane.document().entry_layout(3).expect("trailing").start_row;
+    assert_eq!(
+        trailed_trailing_start.saturating_sub(pair_total),
+        0,
+        "the trailing entry starts at the group's re-measured end"
+    );
+
+    // Stage 4 — the second member becomes a Preparing tool: the member
+    // content change re-measures the span without disturbing geometry.
+    pane.transcript_mut().mutate_tool("tool-2", |tool| {
+        tool.update_call_state("Bash".to_owned(), None, ToolStatusKind::Pending)
+    });
+    let full_preparing = pane.render_frame(80, 16).expect("preparing frame");
+    let preparing_total = pane.document().total_rows();
+    assert_eq!(
+        preparing_total,
+        full_preparing.len(),
+        "preparing geometry exact"
+    );
+    assert!(
+        full_preparing
+            .iter()
+            .any(|row| strip_ansi(row).contains("Preparing Bash")),
+        "the second card renders its new status"
+    );
+    assert_single_blank_framing(&full_preparing, "before", "after");
+    let preparing_trailing_start = pane.document().entry_layout(3).expect("trailing").start_row;
+    assert_eq!(
+        preparing_trailing_start.saturating_sub(trailed_trailing_start),
+        preparing_total.saturating_sub(trailed_total),
+        "trailing entry tracks the re-measured group"
+    );
+
+    // Stage 5 — the second member completes with a two-line result: the
+    // group block grows and the trailing entry shifts by exactly that delta.
+    pane.transcript_mut().mutate_tool("tool-2", |tool| {
+        tool.set_result(
+            Some("first line\nsecond line".to_owned()),
+            None,
+            false,
+            Some(0),
+        )
+    });
+    let full_result = pane.render_frame(80, 16).expect("result frame");
+    let result_total = pane.document().total_rows();
+    assert!(
+        result_total > preparing_total,
+        "result body grows the group"
+    );
+    assert_eq!(result_total, full_result.len(), "result geometry exact");
+    assert_single_blank_framing(&full_result, "before", "after");
+    let result_trailing_start = pane.document().entry_layout(3).expect("trailing").start_row;
+    assert_eq!(
+        result_trailing_start.saturating_sub(preparing_trailing_start),
+        result_total.saturating_sub(preparing_total),
+        "trailing entry shifts by exactly the group's height delta"
+    );
+
+    // Stage 6 — an approval inserted between the two tools splits the group
+    // into two solo groups: both new first members re-measure, the document
+    // stays byte-exact, and the trailing entry still tracks the delta.
+    pane.transcript_mut()
+        .insert_approval_after_tool_or_push(approval_for_tool("tool-1"));
+    let full_split = pane.render_frame(80, 16).expect("split frame");
+    let split_total = pane.document().total_rows();
+    assert!(split_total > result_total, "approval card adds rows");
+    assert_eq!(split_total, full_split.len(), "split geometry exact");
+    assert_eq!(
+        count_tool_cards(&full_split),
+        2,
+        "both tool cards survive the split"
+    );
+    assert_single_blank_framing(&full_split, "before", "after");
+    let using_idx = full_split
+        .iter()
+        .position(|row| strip_ansi(row).contains("Using Bash"))
+        .expect("first tool card");
+    let approval_idx = full_split
+        .iter()
+        .position(|row| strip_ansi(row).contains("Approve Bash"))
+        .expect("approval card");
+    let used_idx = full_split
+        .iter()
+        .position(|row| strip_ansi(row).contains("Used Bash"))
+        .expect("second tool card");
+    assert!(
+        using_idx < approval_idx && approval_idx < used_idx,
+        "approval sits between the two tool cards: {full_split:?}"
+    );
+    let split_trailing_start = pane.document().entry_layout(4).expect("trailing").start_row;
+    assert_eq!(
+        split_trailing_start.saturating_sub(result_trailing_start),
+        split_total.saturating_sub(result_total),
+        "trailing entry shifts by exactly the re-measured entries"
+    );
+
+    // The tail stays reachable: the bounded visible slice resolves to the
+    // document bottom and still shows the last entry.
+    assert!(
+        pane.document().total_rows() > 6,
+        "document is taller than the viewport"
+    );
+    let tail = pane.render_visible_slice(80, 6);
+    assert_eq!(tail.len(), 6, "the physical slice stays bounded");
+    assert!(
+        tail.iter().any(|row| strip_ansi(row).contains("after")),
+        "tail-following slice reaches the last entry: {tail:?}"
+    );
+}
+
+#[test]
+fn removing_tool_run_members_remesures_shrunk_and_handed_off_groups() {
+    let mut pane = TranscriptPane::new(80, 16);
+    pane.push_status("before");
+    for id in ["tool-1", "tool-2", "tool-3"] {
+        pane.transcript_mut().push_tool_run(id, "Bash", None);
+    }
+    pane.push_status("after");
+
+    // Stage 1 — a three-member group; remove the middle member: the group
+    // shrinks, the first member re-measures, and the trailing entry shifts
+    // up by exactly the removed rows.
+    let full_before = pane.render_frame(80, 16).expect("three-member frame");
+    let total_before = pane.document().total_rows();
+    assert_eq!(
+        total_before,
+        full_before.len(),
+        "three-member geometry exact"
+    );
+    assert_eq!(count_tool_cards(&full_before), 3);
+    assert_single_blank_framing(&full_before, "before", "after");
+    let trailing_start_before = pane.document().entry_layout(4).expect("trailing").start_row;
+
+    pane.transcript_mut().remove(2); // drop "tool-2" from the middle
+    let full_shrunk = pane.render_frame(80, 16).expect("shrunk frame");
+    let total_shrunk = pane.document().total_rows();
+    assert!(
+        total_shrunk < total_before,
+        "group shrinks: {total_before} -> {total_shrunk}"
+    );
+    assert_eq!(total_shrunk, full_shrunk.len(), "shrunk geometry exact");
+    assert_eq!(
+        count_tool_cards(&full_shrunk),
+        2,
+        "the two remaining cards render"
+    );
+    assert_single_blank_framing(&full_shrunk, "before", "after");
+    let trailing_start_shrunk = pane.document().entry_layout(3).expect("trailing").start_row;
+    assert_eq!(
+        trailing_start_before.saturating_sub(trailing_start_shrunk),
+        total_before.saturating_sub(total_shrunk),
+        "trailing entry shifts up by exactly the removed rows"
+    );
+
+    // Stage 2 — remove the group's first member: the block ownership hands
+    // to the following member, which re-measures from zero to a solo card.
+    pane.transcript_mut().remove(1); // drop "tool-1"
+    let full_handed = pane.render_frame(80, 16).expect("handed-off frame");
+    let total_handed = pane.document().total_rows();
+    assert!(
+        total_handed < total_shrunk,
+        "handoff shrinks: {total_shrunk} -> {total_handed}"
+    );
+    assert_eq!(total_handed, full_handed.len(), "handoff geometry exact");
+    assert_eq!(
+        count_tool_cards(&full_handed),
+        1,
+        "the survivor renders its own card"
+    );
+    assert_single_blank_framing(&full_handed, "before", "after");
+    let trailing_start_handed = pane.document().entry_layout(2).expect("trailing").start_row;
+    assert_eq!(
+        trailing_start_shrunk.saturating_sub(trailing_start_handed),
+        total_shrunk.saturating_sub(total_handed),
+        "trailing entry shifts up by exactly the handed-off rows"
+    );
+
+    // The tail stays reachable through the bounded visible slice.
+    let tail = pane.render_visible_slice(80, 6);
+    assert_eq!(
+        tail.len(),
+        pane.document().total_rows().min(6),
+        "the physical slice stays bounded"
+    );
+    assert!(
+        tail.iter().any(|row| strip_ansi(row).contains("after")),
+        "tail-following slice reaches the last entry: {tail:?}"
+    );
+}
+
+#[test]
+fn removing_non_tool_between_tool_groups_merges_and_remesures() {
+    let mut pane = TranscriptPane::new(80, 16);
+    pane.push_status("before");
+    pane.transcript_mut().push_tool_run("tool-1", "Bash", None);
+    pane.transcript_mut().push_tool_run("tool-2", "Bash", None);
+    pane.push_status("after");
+
+    // Split the group with an approval between the two tools: two solo
+    // groups with an approval card between them.
+    pane.transcript_mut()
+        .insert_approval_after_tool_or_push(approval_for_tool("tool-1"));
+    let full_split = pane.render_frame(80, 16).expect("split frame");
+    let total_split = pane.document().total_rows();
+    assert_eq!(total_split, full_split.len(), "split geometry exact");
+    assert_eq!(count_tool_cards(&full_split), 2);
+    assert_single_blank_framing(&full_split, "before", "after");
+    let trailing_start_split = pane.document().entry_layout(4).expect("trailing").start_row;
+    let approval_index = pane
+        .transcript()
+        .entries()
+        .iter()
+        .position(|entry| matches!(entry, TranscriptEntry::ApprovalPrompt { .. }))
+        .expect("approval entry");
+
+    // Removing the approval merges the two groups into one: the first
+    // member re-measures the merged block and the trailing entry shifts up
+    // by exactly the removed rows.
+    pane.transcript_mut().remove(approval_index);
+    let full_merged = pane.render_frame(80, 16).expect("merged frame");
+    let total_merged = pane.document().total_rows();
+    assert!(
+        total_merged < total_split,
+        "merge shrinks: {total_split} -> {total_merged}"
+    );
+    assert_eq!(total_merged, full_merged.len(), "merged geometry exact");
+    assert_eq!(
+        count_tool_cards(&full_merged),
+        2,
+        "both cards render in the merged block"
+    );
+    assert_single_blank_framing(&full_merged, "before", "after");
+    let trailing_start_merged = pane.document().entry_layout(3).expect("trailing").start_row;
+    assert_eq!(
+        trailing_start_split.saturating_sub(trailing_start_merged),
+        total_split.saturating_sub(total_merged),
+        "trailing entry shifts up by exactly the removed rows"
+    );
+
+    // The tail stays reachable through the bounded visible slice.
+    let tail = pane.render_visible_slice(80, 6);
+    assert_eq!(tail.len(), 6, "the physical slice stays bounded");
+    assert!(
+        tail.iter().any(|row| strip_ansi(row).contains("after")),
+        "tail-following slice reaches the last entry: {tail:?}"
     );
 }
