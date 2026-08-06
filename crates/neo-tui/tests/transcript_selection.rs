@@ -8,6 +8,7 @@
 use crossterm::event::{KeyModifiers, MouseButton};
 use neo_tui::NeoTui;
 use neo_tui::primitive::{TuiTheme, strip_ansi, visible_width};
+use neo_tui::screen_output::TerminalFrame;
 use neo_tui::shell::NeoChromeState;
 use neo_tui::transcript::{MouseEvent, MouseKind, TranscriptPane};
 use std::time::Instant;
@@ -469,27 +470,26 @@ fn rendered_selection_highlights_exact_document_cells() {
 }
 
 #[test]
-fn active_selection_shows_hint_line_without_covering_body() {
+fn active_selection_does_not_reduce_visible_body_height() {
     let mut tui = NeoTui::new(
         NeoChromeState::new("neo", "s1", "m1", "/tmp/ws"),
         TranscriptPane::new(80, 20),
     );
-    tui.transcript_mut().push_status("alpha");
-    tui.transcript_mut().push_status("omega");
-
-    // Without a selection no hint line exists.
-    let frame = tui.render_terminal_frame_at(80, 12, Instant::now());
-    assert!(frame.lines.len() <= 12);
-    assert!(
-        frame
-            .lines
-            .iter()
-            .all(|line| !strip_ansi(line).contains("ctrl+c copy"))
+    // One status block of twenty short lines: a contiguous, deterministic
+    // document run whose last visible row measures the body height.
+    tui.transcript_mut().push_status(
+        (0..20)
+            .map(|index| format!("line-{index:02}"))
+            .collect::<Vec<_>>()
+            .join("\n"),
     );
 
-    // A drag over "alpha" activates the selection (movement past the
-    // threshold); the frame keeps the body and appends one hint line naming
-    // the copy/clear keybindings.
+    // Establish the visible body height while following the tail.
+    let baseline = tui.render_terminal_frame_at(80, 12, Instant::now());
+    assert!(baseline.lines.len() <= 12);
+
+    // A drag over the transcript activates the selection (movement past the
+    // threshold); the frame must keep the exact same visible body range.
     tui.handle_mouse_event(MouseEvent {
         kind: MouseKind::Press,
         button: MouseButton::Left,
@@ -511,31 +511,38 @@ fn active_selection_shows_hint_line_without_covering_body() {
         row: 0,
         modifiers: KeyModifiers::NONE,
     });
-    let frame = tui.render_terminal_frame_at(80, 12, Instant::now());
-    assert!(frame.lines.len() <= 12);
-    assert!(
-        frame
-            .lines
-            .iter()
-            .any(|line| strip_ansi(line).trim() == "alpha"),
-        "the body stays visible above the hint"
-    );
-    let hint = strip_ansi(frame.lines.last().expect("hint line"));
-    assert!(
-        hint.contains("selected")
-            && hint.contains("ctrl+c copy")
-            && hint.contains("ctrl+space clear"),
-        "the hint names the real copy/clear keybindings: {hint:?}"
+    let selected = tui.render_terminal_frame_at(80, 12, Instant::now());
+    assert!(selected.lines.len() <= 12);
+    assert_eq!(
+        last_visible_line_row(&baseline),
+        last_visible_line_row(&selected),
+        "selection must not displace transcript rows"
     );
 
-    // Clearing the selection removes the hint line again.
+    // Clearing the selection must keep the same visible body range.
     tui.transcript_mut().clear_transcript_selection();
-    let frame = tui.render_terminal_frame_at(80, 12, Instant::now());
-    assert!(frame.lines.len() <= 12);
-    assert!(
-        frame
-            .lines
-            .iter()
-            .all(|line| !strip_ansi(line).contains("ctrl+c copy"))
+    let cleared = tui.render_terminal_frame_at(80, 12, Instant::now());
+    assert!(cleared.lines.len() <= 12);
+    assert_eq!(
+        last_visible_line_row(&selected),
+        last_visible_line_row(&cleared),
+        "clearing the selection must not reduce the body height"
     );
+}
+
+/// The index of the last visible `line-NN` document row in a frame, used to
+/// prove a state change does not alter body height (the locked window shows a
+/// contiguous run of the same status block).
+fn last_visible_line_row(frame: &TerminalFrame) -> usize {
+    frame
+        .lines
+        .iter()
+        .rev()
+        .find_map(|line| {
+            strip_ansi(line)
+                .split_whitespace()
+                .rev()
+                .find_map(|word| word.strip_prefix("line-").and_then(|n| n.parse().ok()))
+        })
+        .expect("the locked status block is visible")
 }
