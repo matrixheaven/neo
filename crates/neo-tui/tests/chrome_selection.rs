@@ -106,6 +106,11 @@ fn prompt_right_click_copies_selection_or_whole_text() {
         Some("hello"),
         "right-click copies the prompt selection"
     );
+    assert_eq!(
+        tui.chrome().prompt().selection_range(),
+        None,
+        "right-click copy collapses the selection like the transcript"
+    );
 
     // Right-click without a selection copies the whole prompt text.
     tui.handle_mouse_event(mouse(MouseKind::Press, 12, cell(row)));
@@ -143,12 +148,18 @@ fn todo_drag_selects_and_right_click_copies() {
     assert!(selected.contains("first item"), "{selected}");
     assert!(selected.contains("second item"), "{selected}");
 
-    // Right-click over the Todo panel copies the materialized selection.
+    // Right-click over the Todo panel copies the materialized selection and
+    // collapses it.
     tui.handle_mouse_event(right_mouse(MouseKind::Press, cell(col), cell(row)));
     assert_eq!(
         tui.take_pending_copy().as_deref(),
         Some(selected.as_str()),
         "right-click over the Todo panel copies its selection"
+    );
+    assert_eq!(
+        tui.chrome().todo_selection(),
+        None,
+        "right-click copy collapses the todo selection"
     );
 }
 

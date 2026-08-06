@@ -650,14 +650,24 @@ async fn ctrl_c_prefers_prompt_selection_over_whole_text() {
             .expect("prompt drag handled");
     }
     controller
-        .handle_input_event(InputEvent::Action(KeybindingAction::InputCopy))
+        .handle_input_event(InputEvent::Key(KeyId::new("ctrl+c").expect("valid key")))
         .await
-        .expect("copy action handled");
+        .expect("ctrl+c handled");
     wait_for_clipboard_write(&mut controller).await;
     assert_eq!(
         recorded.lock().expect("clipboard writes").as_slice(),
         ["hello"],
         "ctrl+c copies the prompt selection, not the whole text"
+    );
+    assert_eq!(
+        controller.chrome().exit_confirmation_label(),
+        None,
+        "ctrl+c with a selection must not arm the exit confirmation"
+    );
+    assert_eq!(
+        controller.tui.chrome().prompt().text,
+        "hello world",
+        "ctrl+c with a selection must not clear the prompt"
     );
 }
 
@@ -726,9 +736,9 @@ async fn ctrl_c_copies_todo_selection() {
             .expect("todo drag handled");
     }
     controller
-        .handle_input_event(InputEvent::Action(KeybindingAction::InputCopy))
+        .handle_input_event(InputEvent::Key(KeyId::new("ctrl+c").expect("valid key")))
         .await
-        .expect("copy action handled");
+        .expect("ctrl+c handled");
     wait_for_clipboard_write(&mut controller).await;
     let copied = recorded.lock().expect("clipboard writes");
     assert_eq!(copied.len(), 1, "{copied:?}");
@@ -736,6 +746,11 @@ async fn ctrl_c_copies_todo_selection() {
         copied[0].contains("first item") && copied[0].contains("second item"),
         "ctrl+c copies the todo selection: {:?}",
         copied
+    );
+    assert_eq!(
+        controller.chrome().exit_confirmation_label(),
+        None,
+        "ctrl+c with a todo selection must not arm the exit confirmation"
     );
 }
 

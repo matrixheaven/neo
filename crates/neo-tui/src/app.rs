@@ -396,6 +396,9 @@ impl NeoTui {
                     .prompt()
                     .selection_text()
                     .or_else(|| self.chrome.prompt().copy_text());
+                // Mirror the transcript: right-click copy also collapses the
+                // selection.
+                self.chrome.prompt_mut().clear_selection();
             }
             crate::transcript::MouseKind::Drag
                 if event.button == crossterm::event::MouseButton::Left =>
@@ -471,6 +474,9 @@ impl NeoTui {
                 if event.button == crossterm::event::MouseButton::Right =>
             {
                 self.pending_copy = self.chrome.copy_todo_selection_text();
+                // Mirror the transcript: right-click copy also collapses the
+                // selection.
+                self.chrome.set_todo_selection(None);
             }
             crate::transcript::MouseKind::Drag
                 if event.button == crossterm::event::MouseButton::Left =>

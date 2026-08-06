@@ -1601,8 +1601,16 @@ impl InteractiveController {
     }
 
     pub(super) fn handle_app_clear(&mut self) -> bool {
-        if self.tui.transcript().has_transcript_selection() {
-            self.copy_transcript_selection_to_clipboard();
+        // Ctrl+C with any selection copies it instead of clearing the prompt
+        // or arming the exit confirmation: the transcript selection first,
+        // then the widget chain (Todo selection, prompt selection, whole
+        // prompt).
+        if self.tui.has_any_selection() {
+            if self.tui.transcript().has_transcript_selection() {
+                self.copy_transcript_selection_to_clipboard();
+            } else {
+                self.copy_input_selection_to_clipboard();
+            }
             self.clear_pending_exit_confirmation();
             return false;
         }
