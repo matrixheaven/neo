@@ -4,6 +4,7 @@ use crate::primitive::Style;
 use crate::primitive::paint;
 use crate::primitive::theme::TuiTheme;
 use crate::primitive::{truncate_width, visible_width, wrap_text};
+use crate::screen_output::CURSOR_MARKER;
 use crate::shell::{SelectItem, SelectListState};
 use crate::transcript::WHEEL_SCROLL_ROWS;
 use unicode_segmentation::UnicodeSegmentation;
@@ -172,7 +173,7 @@ impl WorkflowPickerState {
         let mut lines = vec![border_line("─ Run a workflow ", inner_width, border)];
         if !self.items.is_empty() {
             lines.push(box_line(
-                &format!("Search  {}█", self.query),
+                &format!("Search  {}{CURSOR_MARKER}", self.query),
                 inner_width,
                 muted,
                 border,
@@ -209,8 +210,11 @@ impl WorkflowPickerState {
             let filtered_items = self.filtered_items().collect::<Vec<_>>();
             let selected_position = self.list.selected_position().unwrap_or_default();
             let mut body = Vec::new();
+            let mut item_starts = Vec::with_capacity(filtered_items.len());
             let mut selected_line = 0;
+            let mut selected_end = 0;
             for (index, item) in filtered_items.into_iter().enumerate() {
+                item_starts.push(body.len());
                 if index == selected_position {
                     selected_line = body.len();
                 }
@@ -228,8 +232,15 @@ impl WorkflowPickerState {
                     },
                 ));
                 body.push(box_line("", inner_width, normal, border));
+                if index == selected_position {
+                    selected_end = body.len();
+                }
             }
-            let body_start = selected_line.min(body.len().saturating_sub(10));
+            let body_start = item_starts
+                .into_iter()
+                .take(selected_position + 1)
+                .find(|start| selected_end.saturating_sub(*start) <= 10)
+                .unwrap_or(selected_line);
             for line in body.into_iter().skip(body_start).take(10) {
                 lines.push(line);
             }
@@ -508,5 +519,53 @@ mod tests {
         picker.handle_input(&InputEvent::Paste("🇺🇸".to_owned()));
         picker.handle_input(&InputEvent::Backspace);
         assert_eq!(picker.query(), "");
+    }
+
+    #[test]
+    fn workflow_picker_keeps_the_first_item_visible_while_the_selection_fits() {
+        let mut picker = WorkflowPickerState::new(WorkflowPickerOptions {
+            items: vec![
+                item("first", "First", "First description"),
+                item("second", "Second", "Second description"),
+                item("third", "Third", "Third description"),
+                item("fourth", "Fourth", "Fourth description"),
+            ],
+            theme: TuiTheme::default(),
+        });
+
+        picker.handle_input(&InputEvent::Action(KeybindingAction::SelectDown));
+        let rendered = picker
+            .render_lines(120)
+            .into_iter()
+            .map(|line| crate::primitive::strip_ansi(&line))
+            .collect::<Vec<_>>()
+            .join("\n");
+
+        assert!(rendered.contains("First"), "{rendered}");
+        assert!(rendered.contains("> Second"), "{rendered}");
+
+        picker.handle_input(&InputEvent::Action(KeybindingAction::SelectDown));
+        let rendered = picker
+            .render_lines(120)
+            .into_iter()
+            .map(|line| crate::primitive::strip_ansi(&line))
+            .collect::<Vec<_>>()
+            .join("\n");
+
+        assert!(!rendered.contains("First"), "{rendered}");
+        assert!(rendered.contains("Second"), "{rendered}");
+        assert!(rendered.contains("> Third"), "{rendered}");
+
+        picker.handle_input(&InputEvent::Action(KeybindingAction::SelectDown));
+        let rendered = picker
+            .render_lines(120)
+            .into_iter()
+            .map(|line| crate::primitive::strip_ansi(&line))
+            .collect::<Vec<_>>()
+            .join("\n");
+
+        assert!(!rendered.contains("Second"), "{rendered}");
+        assert!(rendered.contains("Third"), "{rendered}");
+        assert!(rendered.contains("> Fourth"), "{rendered}");
     }
 }

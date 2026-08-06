@@ -558,14 +558,15 @@ fn render_chrome(app: &mut NeoChromeState, width: usize, height: usize) -> Chrom
         // below stays a defensive backstop instead of silently dropping the
         // dialog's title from the top.
         let footer = render_footer_only_lines(app, width);
-        let overlay = app
+        let mut overlay = app
             .render_focused_overlay(content_width, height.saturating_sub(footer.len()))
             .unwrap_or_default();
+        let cursor = extract_cursor(&mut overlay);
         let rows: Vec<String> = overlay.into_iter().chain(footer).collect();
         let row_count = rows.len();
         ChromeRender {
             lines: rows,
-            cursor: None,
+            cursor,
             prompt_start_row: 0,
             row_kinds: vec![ChromeRowKind::Other; row_count],
         }

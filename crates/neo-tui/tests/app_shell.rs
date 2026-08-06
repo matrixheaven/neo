@@ -965,6 +965,40 @@ fn blocking_question_dialog_hides_composer_prompt() {
 }
 
 #[test]
+fn workflow_picker_exposes_the_search_cursor_to_the_terminal() {
+    let mut app = NeoChromeState::new("neo", "session-a", "model", "/tmp/neo-ws");
+    app.open_workflow_picker(neo_tui::dialogs::WorkflowPickerOptions {
+        items: vec![neo_tui::dialogs::WorkflowPickerItem {
+            name: "review".to_owned(),
+            display_name: "Review".to_owned(),
+            description: "Review code".to_owned(),
+            source: "Built-in".to_owned(),
+            required_inputs: Vec::new(),
+        }],
+        theme: neo_tui::primitive::theme::TuiTheme::default(),
+    });
+
+    let mut tui = neo_tui::NeoTui::new(app, TranscriptPane::new(80, 20));
+    let (lines, cursor) = tui.render_frame(80, 20);
+    let plain = strip_lines(lines);
+    let search_row = plain
+        .iter()
+        .position(|line| line.contains("Search"))
+        .expect("workflow search row");
+    let search_byte = plain[search_row].find("Search").expect("search label");
+    let search_col = neo_tui::primitive::visible_width(&plain[search_row][..search_byte])
+        + neo_tui::primitive::visible_width("Search  ");
+
+    assert_eq!(
+        cursor,
+        Some(neo_tui::screen_output::CursorPos {
+            row: search_row,
+            col: search_col,
+        })
+    );
+}
+
+#[test]
 fn pending_approval_hides_composer_prompt() {
     let mut app = NeoChromeState::new("neo", "session-a", "openai/gpt-4.1", "/tmp/neo-ws");
     app.prompt_mut().apply_edit(PromptEdit::Insert("draft"));
