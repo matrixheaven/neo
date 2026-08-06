@@ -2,15 +2,100 @@ use super::*;
 use crate::error::AiError;
 use std::time::Duration;
 
+enum ExpectedStatusError {
+    Code(&'static str),
+    RetryableTransport {
+        message: &'static str,
+    },
+    Server {
+        status: u16,
+        retry_after: Option<Duration>,
+    },
+}
+
 #[test]
-fn http_status_429_maps_to_rate_limit() {
-    let err = ProviderError::HttpStatus {
-        status: 429,
-        body: Some("Too Many Requests".into()),
-        retry_after: Some(Duration::from_secs(30)),
-    };
-    let ai = err.into_ai_error();
-    assert_eq!(ai.code(), "provider.rate_limit");
+fn http_status_codes_classify_into_typed_ai_errors() {
+    // (case, status, body, retry_after, expected)
+    let cases = [
+        (
+            "401 maps to auth",
+            401,
+            "Unauthorized",
+            None,
+            ExpectedStatusError::Code("provider.auth_error"),
+        ),
+        (
+            "408 maps to retryable transport",
+            408,
+            "Request Timeout",
+            Some(Duration::from_secs(2)),
+            ExpectedStatusError::RetryableTransport {
+                message: "Request Timeout",
+            },
+        ),
+        (
+            "413 with context pattern maps to context overflow",
+            413,
+            "Request too large: context_length exceeded",
+            None,
+            ExpectedStatusError::Code("provider.context_overflow"),
+        ),
+        (
+            "413 without context pattern maps to protocol",
+            413,
+            "Payload Too Large",
+            None,
+            ExpectedStatusError::Code("provider.protocol_error"),
+        ),
+        (
+            "429 maps to rate limit",
+            429,
+            "Too Many Requests",
+            Some(Duration::from_secs(30)),
+            ExpectedStatusError::Code("provider.rate_limit"),
+        ),
+        (
+            "503 maps to server with retry_after",
+            503,
+            "Service Unavailable",
+            Some(Duration::from_secs(7)),
+            ExpectedStatusError::Server {
+                status: 503,
+                retry_after: Some(Duration::from_secs(7)),
+            },
+        ),
+    ];
+
+    for (name, status, body, retry_after, expected) in cases {
+        let err = ProviderError::HttpStatus {
+            status,
+            body: Some(body.into()),
+            retry_after,
+        }
+        .into_ai_error();
+        let ok = match &expected {
+            ExpectedStatusError::Code(code) => err.code() == *code,
+            ExpectedStatusError::RetryableTransport { message } => {
+                err.is_retryable()
+                    && matches!(
+                        &err,
+                        AiError::Transport { message: actual } if actual == message
+                    )
+            }
+            ExpectedStatusError::Server {
+                status,
+                retry_after,
+            } => matches!(
+                &err,
+                AiError::Server {
+                    status: actual_status,
+                    retry_after: actual_retry_after,
+                    ..
+                } if *actual_status == *status && *actual_retry_after == *retry_after
+            ),
+        };
+        assert!(ok, "case {name}: got {err:?}");
+    }
 }
 
 #[test]
@@ -79,49 +164,6 @@ fn permanent_quota_stream_codes_are_terminal() {
 }
 
 #[test]
-fn http_status_401_maps_to_auth() {
-    let err = ProviderError::HttpStatus {
-        status: 401,
-        body: Some("Unauthorized".into()),
-        retry_after: None,
-    };
-    assert_eq!(err.into_ai_error().code(), "provider.auth_error");
-}
-
-#[test]
-fn http_status_503_maps_to_server() {
-    let err = ProviderError::HttpStatus {
-        status: 503,
-        body: Some("Service Unavailable".into()),
-        retry_after: Some(Duration::from_secs(7)),
-    };
-    let ai = err.into_ai_error();
-    assert!(matches!(
-        ai,
-        AiError::Server {
-            status: 503,
-            retry_after: Some(delay),
-            ..
-        } if delay == Duration::from_secs(7)
-    ));
-}
-
-#[test]
-fn http_status_408_maps_to_retryable_transport() {
-    let err = ProviderError::HttpStatus {
-        status: 408,
-        body: Some("Request Timeout".into()),
-        retry_after: Some(Duration::from_secs(2)),
-    };
-    let ai = err.into_ai_error();
-    assert!(ai.is_retryable());
-    assert!(matches!(
-        ai,
-        AiError::Transport { message } if message == "Request Timeout"
-    ));
-}
-
-#[test]
 fn streamed_status_408_maps_to_retryable_transport() {
     let ai = stream_failure(Some("408"), "request timeout").into_ai_error();
     assert!(matches!(
@@ -149,27 +191,6 @@ fn transport_display_prefixes_underlying_message_once() {
     let ai = ProviderError::Transport(transport).into_ai_error();
 
     assert_eq!(ai.to_string(), format!("transport error: {underlying}"));
-}
-
-#[test]
-fn http_status_413_with_context_overflow_maps_to_context_overflow() {
-    let err = ProviderError::HttpStatus {
-        status: 413,
-        body: Some("Request too large: context_length exceeded".into()),
-        retry_after: None,
-    };
-    assert_eq!(err.into_ai_error().code(), "provider.context_overflow");
-}
-
-#[test]
-fn http_status_413_without_context_pattern_maps_to_protocol() {
-    let err = ProviderError::HttpStatus {
-        status: 413,
-        body: Some("Payload Too Large".into()),
-        retry_after: None,
-    };
-    let ai = err.into_ai_error();
-    assert_eq!(ai.code(), "provider.protocol_error");
 }
 
 #[test]

@@ -201,7 +201,7 @@ async fn google_stream_numeric_server_error_is_retryable() {
 #[tokio::test]
 async fn provider_error_body_stops_reading_at_limit() {
     let server = MockServer::start_unfinished_chunked_error(vec![b'x'; 64 * 1024]);
-    let client = GoogleGenerativeAiClient::new(server.url, "test-key");
+    let client = GoogleGenerativeAiClient::new(server.url.clone(), "test-key");
 
     let events = tokio::time::timeout(
         Duration::from_secs(1),
@@ -217,6 +217,7 @@ async fn provider_error_body_stops_reading_at_limit() {
         .unwrap_err();
 
     assert_eq!(err.code(), "provider.protocol_error");
+    server.release();
 }
 
 #[tokio::test]

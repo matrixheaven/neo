@@ -3,7 +3,6 @@ use std::fmt::Write as _;
 use std::io::{Read, Write};
 use std::net::{TcpListener, TcpStream};
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
 
 use neo_ai::{
     ApiKind, ChatMessage, ChatRequest, ContentPart, ImageData, ModelCapabilities, ModelSpec,
@@ -22,6 +21,7 @@ pub struct RecordedRequest {
 pub struct MockServer {
     pub url: String,
     pub requests: Arc<Mutex<Vec<RecordedRequest>>>,
+    release: Option<std::sync::mpsc::Sender<()>>,
 }
 
 impl MockServer {
@@ -40,11 +40,23 @@ impl MockServer {
             }
         });
 
-        Self { url, requests }
+        Self {
+            url,
+            requests,
+            release: None,
+        }
     }
 
     pub fn requests(&self) -> Vec<RecordedRequest> {
         self.requests.lock().unwrap().clone()
+    }
+
+    /// Close the connection of an unfinished-chunk server after the test's assertions
+    /// have run, releasing the server thread (readiness signal instead of a fixed wait).
+    pub fn release(&self) {
+        if let Some(release) = &self.release {
+            let _ = release.send(());
+        }
     }
 
     pub fn start_unfinished_chunked_error(body: Vec<u8>) -> Self {
@@ -52,6 +64,7 @@ impl MockServer {
         let url = format!("http://{}", listener.local_addr().unwrap());
         let requests = Arc::new(Mutex::new(Vec::new()));
         let captured_requests = Arc::clone(&requests);
+        let (release_tx, release_rx) = std::sync::mpsc::channel::<()>();
 
         std::thread::spawn(move || {
             let (mut socket, _) = listener.accept().unwrap();
@@ -66,10 +79,17 @@ impl MockServer {
             socket.write_all(&body).unwrap();
             socket.write_all(b"\r\n").unwrap();
             socket.flush().unwrap();
-            std::thread::sleep(Duration::from_secs(5));
+            // Keep the connection open with the chunk unfinished (no terminating
+            // `0\r\n\r\n`) until the test releases it, so a client that keeps reading
+            // would block instead of seeing EOF.
+            release_rx.recv().ok();
         });
 
-        Self { url, requests }
+        Self {
+            url,
+            requests,
+            release: Some(release_tx),
+        }
     }
 }
 

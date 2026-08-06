@@ -13,6 +13,10 @@ mod image_generation;
 mod openai_compatible;
 #[path = "provider_protocol_behavior/openai_responses.rs"]
 mod openai_responses;
+#[path = "provider_protocol_behavior/openai_responses_errors.rs"]
+mod openai_responses_errors;
+#[path = "provider_protocol_behavior/openai_responses_reasoning.rs"]
+mod openai_responses_reasoning;
 #[path = "provider_protocol_behavior/stream_events.rs"]
 mod stream_events;
 #[path = "provider_protocol_behavior/tool_schema.rs"]

@@ -539,45 +539,43 @@ mod tests {
     }
 
     #[test]
-    fn test_infer_api_type_anthropic() {
-        let entry = CatalogEntry {
-            id: "anthropic".to_owned(),
-            name: None,
-            api: None,
-            env: vec![],
-            npm: Some("@ai-sdk/anthropic".to_owned()),
-            explicit_type: None,
-            models: BTreeMap::new(),
-        };
-        assert_eq!(infer_api_type(&entry), Some(ApiType::Anthropic));
-    }
-
-    #[test]
-    fn test_infer_api_type_openai() {
-        let entry = CatalogEntry {
-            id: "openai".to_owned(),
-            name: None,
-            api: None,
-            env: vec![],
-            npm: Some("@ai-sdk/openai".to_owned()),
-            explicit_type: None,
-            models: BTreeMap::new(),
-        };
-        assert_eq!(infer_api_type(&entry), Some(ApiType::OpenAi));
-    }
-
-    #[test]
-    fn test_infer_api_type_explicit() {
-        let entry = CatalogEntry {
-            id: "custom".to_owned(),
-            name: None,
-            api: None,
-            env: vec![],
-            npm: None,
-            explicit_type: Some("openai_response".to_owned()),
-            models: BTreeMap::new(),
-        };
-        assert_eq!(infer_api_type(&entry), Some(ApiType::OpenAiResponse));
+    fn infer_api_type_maps_npm_package_and_explicit_type() {
+        // (case, id, npm package, explicit type, expected wire type)
+        let cases = [
+            (
+                "anthropic npm package",
+                "anthropic",
+                Some("@ai-sdk/anthropic"),
+                None,
+                ApiType::Anthropic,
+            ),
+            (
+                "openai npm package",
+                "openai",
+                Some("@ai-sdk/openai"),
+                None,
+                ApiType::OpenAi,
+            ),
+            (
+                "explicit type wins without npm",
+                "custom",
+                None,
+                Some("openai_response"),
+                ApiType::OpenAiResponse,
+            ),
+        ];
+        for (name, id, npm, explicit_type, expected) in cases {
+            let entry = CatalogEntry {
+                id: id.to_owned(),
+                name: None,
+                api: None,
+                env: vec![],
+                npm: npm.map(str::to_owned),
+                explicit_type: explicit_type.map(str::to_owned),
+                models: BTreeMap::new(),
+            };
+            assert_eq!(infer_api_type(&entry), Some(expected), "case {name}");
+        }
     }
 
     #[test]

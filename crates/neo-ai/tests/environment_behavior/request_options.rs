@@ -1,28 +1,47 @@
 use neo_ai::{ReasoningCapability, ReasoningEffort, ReasoningSelection};
 
 #[test]
-fn reasoning_effort_serializes_as_stable_snake_case_values() {
-    assert_eq!(
-        serde_json::to_value(ReasoningEffort::minimal()).expect("serialize effort"),
-        serde_json::json!("minimal")
-    );
-    assert_eq!(
-        serde_json::from_value::<ReasoningEffort>(serde_json::json!("xhigh"))
-            .expect("deserialize effort"),
-        ReasoningEffort::xhigh()
-    );
-}
-
-#[test]
-fn reasoning_effort_preserves_custom_provider_value() {
-    let effort: ReasoningEffort =
-        serde_json::from_str(r#""UltraMax""#).expect("deserialize custom effort");
-
-    assert_eq!(effort.as_str(), "UltraMax");
-    assert_eq!(
-        serde_json::to_string(&effort).expect("serialize custom effort"),
-        r#""UltraMax""#
-    );
+fn reasoning_effort_names_round_trip_through_serialization() {
+    // (case, effort value, wire representation)
+    let cases = [
+        (
+            "minimal known name",
+            ReasoningEffort::minimal(),
+            serde_json::json!("minimal"),
+        ),
+        (
+            "xhigh known name",
+            ReasoningEffort::xhigh(),
+            serde_json::json!("xhigh"),
+        ),
+        (
+            "max known name",
+            ReasoningEffort::max(),
+            serde_json::json!("max"),
+        ),
+        (
+            "uppercase custom name preserved",
+            ReasoningEffort::try_from("Max").expect("uppercase custom effort"),
+            serde_json::json!("Max"),
+        ),
+        (
+            "custom provider value preserved",
+            ReasoningEffort::try_from("UltraMax").expect("custom effort"),
+            serde_json::json!("UltraMax"),
+        ),
+    ];
+    for (name, effort, wire) in cases {
+        assert_eq!(
+            serde_json::to_value(&effort).expect("serialize effort"),
+            wire,
+            "case {name}: serialization"
+        );
+        assert_eq!(
+            serde_json::from_value::<ReasoningEffort>(wire).expect("deserialize effort"),
+            effort,
+            "case {name}: deserialization"
+        );
+    }
 }
 
 #[test]
@@ -38,24 +57,6 @@ fn reasoning_effort_schema_requires_non_whitespace_content() {
         .expect("serialize reasoning effort schema");
 
     assert_eq!(schema["pattern"], r"\S");
-}
-
-#[test]
-fn reasoning_effort_serializes_max_and_stable_names() {
-    assert_eq!(
-        serde_json::to_value(ReasoningEffort::max()).expect("serialize max"),
-        serde_json::json!("max")
-    );
-    assert_eq!(
-        serde_json::from_value::<ReasoningEffort>(serde_json::json!("max"))
-            .expect("deserialize lowercase max"),
-        ReasoningEffort::max()
-    );
-    assert_eq!(
-        serde_json::from_value::<ReasoningEffort>(serde_json::json!("Max"))
-            .expect("deserialize uppercase max"),
-        ReasoningEffort::try_from("Max").expect("uppercase custom effort")
-    );
 }
 
 #[test]

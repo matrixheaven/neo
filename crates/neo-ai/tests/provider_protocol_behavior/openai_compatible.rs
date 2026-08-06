@@ -387,44 +387,6 @@ async fn openai_tool_calls_finish_reason_without_structured_calls_is_error() {
 }
 
 #[tokio::test]
-async fn openai_tool_calls_finish_reason_with_structured_calls_remains_tool_use() {
-    let server = MockServer::start(vec![sse_response(&[json!({
-        "id": "chatcmpl-structured-tool",
-        "choices": [{
-            "delta": {
-                "tool_calls": [{
-                    "index": 0,
-                    "id": "call-1",
-                    "function": { "name": "read_file", "arguments": "{\"path\":\"Cargo.toml\"}" }
-                }]
-            },
-            "finish_reason": "tool_calls"
-        }]
-    })])]);
-    let client = OpenAiCompatibleClient::new(server.url.clone(), "test-key");
-
-    let events = client
-        .stream_chat(request(RequestOptions::default()))
-        .collect::<Vec<_>>()
-        .await
-        .into_iter()
-        .collect::<Result<Vec<_>, _>>()
-        .unwrap();
-
-    assert!(events.contains(&AiStreamEvent::ToolCallEnd {
-        id: "call-1".to_owned(),
-        raw_arguments: r#"{"path":"Cargo.toml"}"#.to_owned(),
-    }));
-    assert!(matches!(
-        events.last(),
-        Some(AiStreamEvent::MessageEnd {
-            stop_reason: StopReason::ToolUse,
-            ..
-        })
-    ));
-}
-
-#[tokio::test]
 async fn openai_http_status_error_includes_body_excerpt() {
     let server = MockServer::start(vec![status_response_with_body(
         400,
