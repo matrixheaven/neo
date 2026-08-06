@@ -236,12 +236,6 @@ impl ThemeDraftStore {
         self.drafts.len()
     }
 
-    #[must_use]
-    #[cfg(test)]
-    pub fn is_empty(&self) -> bool {
-        self.drafts.is_empty()
-    }
-
     /// Opaque and unguessable draft id: v4 entropy, so callers can never
     /// construct a valid id and can only receive one from `preview`.
     fn new_id() -> String {
@@ -1330,9 +1324,11 @@ mod tests {
 
     #[test]
     fn contrast_warnings_flag_low_contrast_pairs() {
-        let mut theme = TuiTheme::default();
-        theme.text_primary = Color::Rgb(20, 20, 20); // near-black on default surface
-        theme.selection_bg = Color::Rgb(31, 35, 43);
+        let theme = TuiTheme {
+            text_primary: Color::Rgb(20, 20, 20), // near-black on default surface
+            selection_bg: Color::Rgb(31, 35, 43),
+            ..Default::default()
+        };
         let warnings = contrast_warnings_for(&theme);
         assert!(
             warnings

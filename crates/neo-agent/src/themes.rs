@@ -315,7 +315,6 @@ pub struct ThemeCatalog {
 }
 
 impl ThemeCatalog {
-    #[must_use]
     pub fn valid_entries(&self) -> impl Iterator<Item = &ThemeEntry> {
         self.entries.iter().filter(|entry| entry.is_valid())
     }
@@ -1739,8 +1738,10 @@ mod tests {
         let repo = repository_in(&temp);
         let id = write_theme(&repo, "base.json", "Base", "blue");
 
-        let mut theme = TuiTheme::default();
-        theme.brand = Color::Rgb(1, 2, 3);
+        let theme = TuiTheme {
+            brand: Color::Rgb(1, 2, 3),
+            ..Default::default()
+        };
         let entry = repo
             .overwrite(&id, "Renamed", &theme)
             .expect("overwrite existing");
@@ -1817,10 +1818,12 @@ mod tests {
 
     #[test]
     fn materialize_complete_theme_round_trips_semantic_tokens() {
-        let mut theme = TuiTheme::default();
-        theme.brand = Color::Rgb(0x12, 0x34, 0x56);
-        theme.status_error = Color::Red;
-        theme.text_muted = Color::Reset;
+        let theme = TuiTheme {
+            brand: Color::Rgb(0x12, 0x34, 0x56),
+            status_error: Color::Red,
+            text_muted: Color::Reset,
+            ..Default::default()
+        };
         let json = materialize_complete_theme("Round Trip", &theme).expect("materialize");
         let parsed: ThemeFile = serde_json::from_str(&json).expect("parse back");
         let mut round = TuiTheme::default();
@@ -1834,9 +1837,11 @@ mod tests {
     #[test]
     fn materialize_theme_with_overrides_merges_base_and_overrides() {
         let id = ThemeId::new("draft.json").unwrap();
-        let mut base = TuiTheme::default();
-        base.brand = Color::Rgb(0xaa, 0xbb, 0xcc);
-        base.status_ok = Color::Green;
+        let base = TuiTheme {
+            brand: Color::Rgb(0xaa, 0xbb, 0xcc),
+            status_ok: Color::Green,
+            ..Default::default()
+        };
         let overrides = ThemeOverrides {
             status_ok: Some("#010203".to_owned()),
             ..ThemeOverrides::default()

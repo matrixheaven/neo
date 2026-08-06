@@ -713,7 +713,7 @@ mod tests {
 
     #[test]
     fn drag_motion_coalesces_but_press_and_release_are_never_dropped() {
-        let (tx, rx) = std::sync::mpsc::channel::<Vec<u8>>();
+        let (_tx, rx) = std::sync::mpsc::channel::<Vec<u8>>();
         let geometry = GeometryObservation::new(80, 24, 0, 0);
         let mut events = RawStdinEvents {
             parser: InputParser::with_keybindings(KeybindingsManager::default()),
@@ -761,7 +761,7 @@ mod tests {
 
     #[test]
     fn drag_release_preserves_last_motion_in_same_batch() {
-        let (tx, rx) = std::sync::mpsc::channel::<Vec<u8>>();
+        let (_tx, rx) = std::sync::mpsc::channel::<Vec<u8>>();
         let geometry = GeometryObservation::new(80, 24, 0, 0);
         let mut events = RawStdinEvents {
             parser: InputParser::with_keybindings(KeybindingsManager::default()),

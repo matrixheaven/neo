@@ -272,8 +272,7 @@ fn resume_restores_output_references_without_eager_full_reads() {
     assert!(
         entries
             .iter()
-            .filter(|entry| matches!(entry, TranscriptEntry::ToolRun { component } if component.id() == "wf-tool-1"))
-            .next()
+            .find(|entry| matches!(entry, TranscriptEntry::ToolRun { component } if component.id() == "wf-tool-1"))
             .is_none(),
         "workflow child must never appear as a top-level ToolRun card"
     );
