@@ -23,8 +23,16 @@ use unicode_segmentation::UnicodeSegmentation;
 pub const WHEEL_SCROLL_ROWS: usize = 3;
 
 /// Movement (in display cells or rows) that separates a click from a
-/// selection drag, so single clicks keep their control semantics.
-pub const MOVEMENT_THRESHOLD: u16 = 2;
+/// selection drag, so single clicks keep their control semantics. Generous
+/// enough that click jitter never confirms a drag; deliberate movement past
+/// it activates a pending press immediately.
+pub const MOVEMENT_THRESHOLD: u16 = 4;
+
+/// How long a held button must stay still before a pending press becomes a
+/// selection (long-press activation). Any-event terminals report motion the
+/// whole time, so the delay is the only signal that distinguishes a
+/// deliberate long-press from a click with jitter.
+pub const LONG_PRESS_DELAY: Duration = Duration::from_millis(300);
 
 /// Maximum time between two presses that still form a double-click.
 const DOUBLE_CLICK_WINDOW: Duration = Duration::from_millis(400);
@@ -143,6 +151,13 @@ pub struct DocumentSelection {
     /// the drag against the stale press position and keeps extending the
     /// selection after the button is up.
     gesture_active: bool,
+    /// Press point of a not-yet-activated mouse gesture. A press is tentative
+    /// until deliberate movement crosses [`MOVEMENT_THRESHOLD`] or the press
+    /// is held past [`LONG_PRESS_DELAY`] (frame-driven via [`Self::tick`]),
+    /// so plain clicks never flash or keep a selection.
+    pending_point: Option<DocumentPoint>,
+    /// Wall clock of the pending press, for long-press activation.
+    press_at: Instant,
     /// A double-click established a word selection on the current press;
     /// its release must keep the selection instead of clearing it.
     word_selected: bool,
@@ -173,6 +188,8 @@ impl DocumentSelection {
             keyboard_entries: None,
             dragging: false,
             gesture_active: false,
+            pending_point: None,
+            press_at: Instant::now(),
             word_selected: false,
             press_row: 0,
             press_col: 0,
@@ -199,8 +216,8 @@ impl DocumentSelection {
     }
 
     #[must_use]
-    pub const fn has_anchor(&self) -> bool {
-        self.anchor.is_some()
+    pub const fn is_gesture_open(&self) -> bool {
+        self.gesture_active
     }
 
     #[must_use]
@@ -218,21 +235,23 @@ impl DocumentSelection {
         self.materialized.as_deref()
     }
 
-    /// Whether the frame loop must keep rendering so drag auto-scroll can
-    /// advance the document at the existing animation cadence.
+    /// Whether the frame loop must keep rendering: a pending press needs
+    /// frames to drive long-press activation, and drag auto-scroll needs the
+    /// existing animation cadence to advance the document.
     #[must_use]
     pub const fn requests_animation(&self) -> bool {
-        self.dragging && self.auto_scroll.is_some()
+        self.pending_point.is_some() || (self.dragging && self.auto_scroll.is_some())
     }
 
-    /// Start (or restart) a selection at `point`. Returns `true` when this
-    /// press forms a double-click with the previous press, in which case the
-    /// caller should replace the endpoints with the word under the point.
+    /// Start (or restart) a tentative press at `point`. Returns `true` when
+    /// this press forms a double-click with the previous press, in which case
+    /// the caller should replace the endpoints with the word under the point.
     ///
-    /// A press starts a tentative mouse gesture and never destroys an active
-    /// keyboard entry selection: clicks keep it, and only a confirmed drag
-    /// ([`Self::drag`] crossing the movement threshold) or a double-click
-    /// word selection replaces it.
+    /// A press never destroys an active keyboard entry selection and never
+    /// materializes a selection by itself: the endpoints stay untouched
+    /// until deliberate movement ([`Self::drag`] crossing the movement
+    /// threshold) or the long-press delay ([`Self::tick`]) confirms the
+    /// gesture, so plain clicks stay inert.
     pub fn press(&mut self, point: DocumentPoint, row: u16, col: u16, now: Instant) -> bool {
         let double_click = self
             .last_press_at
@@ -244,8 +263,8 @@ impl DocumentSelection {
                     && previous.display_cell.abs_diff(point.display_cell)
                         <= usize::from(DOUBLE_CLICK_DISTANCE)
             });
-        self.anchor = Some(point);
-        self.active = Some(point);
+        self.pending_point = Some(point);
+        self.press_at = now;
         self.dragging = false;
         self.gesture_active = true;
         self.word_selected = false;
@@ -258,25 +277,48 @@ impl DocumentSelection {
         double_click
     }
 
+    /// Frame-driven long-press activation: a press held still past
+    /// [`LONG_PRESS_DELAY`] becomes a selection anchored at the press point.
+    /// Called once per rendered frame; the frame loop keeps running while a
+    /// press is pending ([`Self::requests_animation`]).
+    pub fn tick(&mut self, now: Instant) {
+        if self.pending_point.is_some()
+            && now.saturating_duration_since(self.press_at) >= LONG_PRESS_DELAY
+        {
+            self.activate(None);
+        }
+    }
+
+    /// Confirm the pending press as a drag selection. The anchor is the press
+    /// point; the active endpoint is `point` when the confirmation came from
+    /// movement, or the anchor itself for long-press activation.
+    fn activate(&mut self, point: Option<DocumentPoint>) {
+        let Some(anchor) = self.pending_point else {
+            return;
+        };
+        self.pending_point = None;
+        self.anchor = Some(anchor);
+        self.active = Some(point.unwrap_or(anchor));
+        self.dragging = true;
+        // The gesture is confirmed as a drag: it supersedes any active
+        // keyboard entry selection, which clicks never destroy.
+        self.keyboard_entries = None;
+    }
+
     /// Feed one drag-motion event. `point` is the resolved document point,
-    /// or `None` when the pointer is outside the body. The active endpoint
-    /// moves only while the press gesture is still open and after the
-    /// movement threshold distinguishes a drag; hover motion arriving after
-    /// the release is inert.
+    /// or `None` when the pointer is outside the body. While a press is
+    /// pending, movement past the threshold confirms the gesture as a drag
+    /// immediately; once confirmed, the active endpoint moves with the
+    /// pointer. Motion outside an open gesture is inert.
     pub fn drag(&mut self, point: Option<DocumentPoint>, row: u16, col: u16) -> DragUpdate {
         let was_dragging = self.dragging;
-        if self.gesture_active
-            && self.anchor.is_some()
-            && !self.dragging
-            && (row.abs_diff(self.press_row) > MOVEMENT_THRESHOLD
-                || col.abs_diff(self.press_col) > MOVEMENT_THRESHOLD)
-        {
-            self.dragging = true;
-            // The gesture is confirmed as a drag: it supersedes any active
-            // keyboard entry selection, which clicks never destroy.
-            self.keyboard_entries = None;
-        }
-        if self.gesture_active
+        if self.gesture_active && self.pending_point.is_some() {
+            if row.abs_diff(self.press_row) > MOVEMENT_THRESHOLD
+                || col.abs_diff(self.press_col) > MOVEMENT_THRESHOLD
+            {
+                self.activate(point);
+            }
+        } else if self.gesture_active
             && self.dragging
             && let Some(point) = point
         {
@@ -296,6 +338,7 @@ impl DocumentSelection {
         let keep = self.dragging || self.word_selected;
         self.dragging = false;
         self.gesture_active = false;
+        self.pending_point = None;
         self.word_selected = false;
         self.auto_scroll = None;
         if !keep && self.keyboard_entries.is_none() {
@@ -313,6 +356,7 @@ impl DocumentSelection {
         self.keyboard_entries = None;
         self.word_selected = true;
         self.dragging = false;
+        self.pending_point = None;
         self.auto_scroll = None;
     }
 
@@ -323,6 +367,7 @@ impl DocumentSelection {
         self.keyboard_entries = Some((start.entry_id, end.entry_id));
         self.dragging = false;
         self.gesture_active = false;
+        self.pending_point = None;
         self.word_selected = false;
         self.auto_scroll = None;
         self.materialized = None;
@@ -362,6 +407,7 @@ impl DocumentSelection {
         self.keyboard_entries = None;
         self.dragging = false;
         self.gesture_active = false;
+        self.pending_point = None;
         self.word_selected = false;
         self.auto_scroll = None;
         self.materialized = None;
@@ -662,14 +708,16 @@ mod tests {
         };
         let now = Instant::now();
         assert!(!selection.press(point, 2, 3, now));
-        // Small movement below the threshold stays a click.
+        // Small movement below the threshold stays a pending click.
         let update = selection.drag(Some(point), 3, 3);
         assert!(!update.started);
         assert!(!update.dragging);
-        // Crossing the threshold starts the drag.
-        let update = selection.drag(Some(point), 5, 5);
+        assert!(!selection.is_active());
+        // Crossing the threshold confirms the press as a drag.
+        let update = selection.drag(Some(point), 7, 7);
         assert!(update.started);
         assert!(update.dragging);
+        assert!(selection.is_active());
         assert!(selection.release());
     }
 
@@ -711,7 +759,7 @@ mod tests {
         // Crossing the movement threshold confirms the drag and replaces the
         // keyboard selection with the mouse gesture.
         assert!(!selection.press(point, 2, 3, now + Duration::from_millis(100)));
-        let update = selection.drag(Some(point), 5, 5);
+        let update = selection.drag(Some(point), 7, 7);
         assert!(update.started);
         assert!(selection.keyboard_entries().is_none());
         assert!(selection.release());
@@ -750,11 +798,75 @@ mod tests {
         assert!(!selection.is_active());
         // A drag keeps the endpoints for materialization.
         selection.press(point, 2, 3, now);
-        selection.drag(Some(point), 4, 6);
+        selection.drag(Some(point), 8, 9);
         assert!(selection.release());
         assert!(selection.is_active());
         // A double-click word selection survives its release.
         selection.set_word_selection(point, point);
+        assert!(selection.release());
+        assert!(selection.is_active());
+    }
+
+    #[test]
+    fn long_press_activates_after_delay_without_movement() {
+        let mut selection = DocumentSelection::new();
+        let point = DocumentPoint {
+            entry_id: TranscriptEntryId::new_for_test(1),
+            row_in_entry: 0,
+            display_cell: 0,
+        };
+        let now = Instant::now();
+        assert!(!selection.press(point, 2, 3, now));
+        // A press requests frames while pending, so the delay is driven by
+        // the render cadence even with the pointer held still.
+        assert!(selection.requests_animation());
+        // Still pending shortly before the delay elapses.
+        selection.tick(now + LONG_PRESS_DELAY - Duration::from_millis(10));
+        assert!(!selection.is_active());
+        // The next frame past the delay activates the press at the anchor.
+        selection.tick(now + LONG_PRESS_DELAY + Duration::from_millis(10));
+        assert!(selection.is_active());
+        assert!(selection.is_dragging());
+        assert_eq!(selection.anchor(), Some(point));
+        assert_eq!(selection.active(), Some(point));
+        assert!(!selection.requests_animation());
+        assert!(selection.release());
+    }
+
+    #[test]
+    fn released_pending_press_stays_inert_under_hover_and_time() {
+        let mut selection = DocumentSelection::new();
+        let point = DocumentPoint {
+            entry_id: TranscriptEntryId::new_for_test(1),
+            row_in_entry: 0,
+            display_cell: 0,
+        };
+        let now = Instant::now();
+        selection.press(point, 2, 3, now);
+        assert!(!selection.release());
+        // Hover motion and elapsed time after the release never re-arm the
+        // gesture, even far past the press point and the long-press delay.
+        selection.drag(Some(point), 12, 12);
+        selection.tick(now + LONG_PRESS_DELAY * 2);
+        assert!(!selection.is_active());
+        assert!(!selection.is_dragging());
+        assert!(!selection.requests_animation());
+    }
+
+    #[test]
+    fn double_click_word_selection_bypasses_the_pending_delay() {
+        let mut selection = DocumentSelection::new();
+        let point = DocumentPoint {
+            entry_id: TranscriptEntryId::new_for_test(1),
+            row_in_entry: 0,
+            display_cell: 0,
+        };
+        let now = Instant::now();
+        assert!(!selection.press(point, 2, 3, now));
+        assert!(!selection.release());
+        assert!(selection.press(point, 2, 3, now + Duration::from_millis(200)));
+        selection.set_word_selection(point, point);
+        assert!(selection.is_active());
         assert!(selection.release());
         assert!(selection.is_active());
     }

@@ -54,7 +54,8 @@ pub use pane::{BlockingEntryKind, TranscriptPane};
 pub use plan_box::PlanBoxComponent;
 pub use progressive::{ProgressiveFact, ProgressiveFactId};
 pub use selection::{
-    AutoScroll, DocumentPoint, DocumentSelection, MouseEvent, MouseKind, WHEEL_SCROLL_ROWS,
+    AutoScroll, DocumentPoint, DocumentSelection, LONG_PRESS_DELAY, MOVEMENT_THRESHOLD, MouseEvent,
+    MouseKind, WHEEL_SCROLL_ROWS,
 };
 pub use shell_run::{ShellRunComponent, ShellRunState};
 pub use store::{ExpandedOutputCache, TranscriptEntryId, TranscriptStore};

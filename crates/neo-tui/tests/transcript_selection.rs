@@ -152,13 +152,14 @@ fn mouse_click_preserves_keyboard_selection_but_confirmed_drag_replaces() {
     );
 
     // A confirmed drag (movement past the threshold) replaces the keyboard
-    // selection with the mouse gesture.
+    // selection with the mouse gesture. The drag crosses the threshold in
+    // the column axis so the covered rows stay the same.
     pane.handle_mouse_event(mouse(MouseKind::Press, 3, 5), 5, 2);
-    pane.handle_mouse_event(mouse(MouseKind::Drag, 4, 1), 1, 3);
-    pane.handle_mouse_event(mouse(MouseKind::Release, 4, 1), 1, 3);
+    pane.handle_mouse_event(mouse(MouseKind::Drag, 11, 1), 1, 10);
+    pane.handle_mouse_event(mouse(MouseKind::Release, 11, 1), 1, 10);
     assert_eq!(
         pane.copy_selected_transcript_text().as_deref(),
-        Some("row-\n\nrow-6\n\nw-7"),
+        Some("row-5\n\nrow-6\n\nw-7"),
         "a confirmed drag must supersede the keyboard selection"
     );
 
@@ -211,6 +212,52 @@ fn release_ends_drag_and_hover_motion_never_extends() {
 }
 
 #[test]
+fn click_never_selects_but_long_press_activates_after_delay() {
+    let mut pane = pane_with_status_rows(8);
+    let _ = pane.render_visible_slice(80, 6);
+
+    // A plain click (press + release, no movement) never creates a selection.
+    // It sits 9 cells from the later press so the double-click window cannot
+    // misclassify it.
+    pane.handle_mouse_event(mouse(MouseKind::Press, 10, 5), 5, 9);
+    pane.handle_mouse_event(mouse(MouseKind::Release, 10, 5), 5, 9);
+    assert!(
+        pane.copy_selected_transcript_text().is_none(),
+        "a quick click must not select"
+    );
+
+    // A press held still is tentative: no highlight appears before the
+    // long-press delay elapses, even across rendered frames.
+    pane.handle_mouse_event(mouse(MouseKind::Press, 1, 1), 1, 0);
+    let before_delay = pane.render_visible_slice(80, 6);
+    assert!(
+        before_delay
+            .iter()
+            .all(|line| selection_bg_ranges(line).is_empty()),
+        "a held press must not highlight before the long-press delay"
+    );
+
+    // Once the delay elapses, the next frame activates the selection
+    // anchored at the press point (cell 0 of "row-5").
+    std::thread::sleep(
+        neo_tui::transcript::LONG_PRESS_DELAY + std::time::Duration::from_millis(50),
+    );
+    let after_delay = pane.render_visible_slice(80, 6);
+    assert!(
+        after_delay
+            .iter()
+            .any(|line| !selection_bg_ranges(line).is_empty()),
+        "a held press activates the selection after the long-press delay"
+    );
+    pane.handle_mouse_event(mouse(MouseKind::Release, 1, 1), 1, 0);
+    assert_eq!(
+        pane.copy_selected_transcript_text().as_deref(),
+        Some("r"),
+        "the long-press selection materializes the pressed cell"
+    );
+}
+
+#[test]
 fn selection_crosses_entries_autoscrolls_and_materializes_text() {
     let mut pane = pane_with_status_rows(8);
     // Establish the body height (6 rows) and the tail-following layout.
@@ -254,8 +301,8 @@ fn selection_crosses_entries_autoscrolls_and_materializes_text() {
     pane.handle_mouse_event(mouse(MouseKind::Release, 1, 0), 0, 0);
     assert!(pane.copy_selected_transcript_text().is_none());
     pane.handle_mouse_event(mouse(MouseKind::Press, 5, 0), 0, 4);
-    pane.handle_mouse_event(mouse(MouseKind::Drag, 6, 4), 4, 5);
-    pane.handle_mouse_event(mouse(MouseKind::Release, 6, 4), 4, 5);
+    pane.handle_mouse_event(mouse(MouseKind::Drag, 6, 5), 5, 5);
+    pane.handle_mouse_event(mouse(MouseKind::Release, 6, 5), 5, 5);
     let selected = pane.copy_selected_transcript_text();
     assert!(selected.is_some());
     let shift_press = MouseEvent {
@@ -281,16 +328,17 @@ fn upward_drag_materialization_respects_endpoint_cells() {
     let mut pane = pane_with_status_rows(8);
     pane.render_visible_slice(80, 6);
 
-    // Press inside "row-7" at cell 2 and drag upward to "row-5" at cell 3:
+    // Press inside "row-7" at cell 2 and drag upward to "row-5" at cell 10:
     // the materialized range must start at the active cell on the min row
     // and start at the anchor cell on the max row, mirroring the downward
-    // case instead of copying both rows whole.
+    // case instead of copying both rows whole. The drag crosses the movement
+    // threshold in the column axis so the covered rows stay unchanged.
     pane.handle_mouse_event(mouse(MouseKind::Press, 3, 5), 5, 2);
-    pane.handle_mouse_event(mouse(MouseKind::Drag, 4, 1), 1, 3);
-    pane.handle_mouse_event(mouse(MouseKind::Release, 4, 1), 1, 3);
+    pane.handle_mouse_event(mouse(MouseKind::Drag, 11, 1), 1, 10);
+    pane.handle_mouse_event(mouse(MouseKind::Release, 11, 1), 1, 10);
     assert_eq!(
         pane.copy_selected_transcript_text().as_deref(),
-        Some("row-\n\nrow-6\n\nw-7")
+        Some("row-5\n\nrow-6\n\nw-7")
     );
 }
 
@@ -349,12 +397,13 @@ fn rendered_selection_highlights_exact_document_cells() {
     let selection_bg = neo_tui::primitive::bg_to_ansi(TuiTheme::default().selection_bg);
     assert_eq!(selection_bg, "\x1b[100m");
 
-    // Same-row drag across cells [1, 5) of "alpha": exactly those cells are
-    // painted, with the original style and text preserved, and every other
-    // row stays unpainted.
+    // Same-row drag across cells [1, 7) of "alpha": the line is only five
+    // cells wide, so exactly those cells are painted, with the original
+    // style and text preserved, and every other row stays unpainted. The
+    // drag crosses the movement threshold in the column axis.
     pane.handle_mouse_event(mouse(MouseKind::Press, 1, 0), 0, 1);
-    pane.handle_mouse_event(mouse(MouseKind::Drag, 4, 0), 0, 4);
-    pane.handle_mouse_event(mouse(MouseKind::Release, 4, 0), 0, 4);
+    pane.handle_mouse_event(mouse(MouseKind::Drag, 6, 0), 0, 6);
+    pane.handle_mouse_event(mouse(MouseKind::Release, 6, 0), 0, 6);
     let lines = pane.render_visible_slice(80, 6);
     assert_eq!(selection_bg_ranges(&lines[0]), vec![(1, 5)]);
     assert_eq!(strip_ansi(&lines[0]), "alpha");
@@ -376,12 +425,12 @@ fn rendered_selection_highlights_exact_document_cells() {
     // of the line, the blank separator row between cards selected as a
     // newline but not painted, and "omega" cut on the left of the active cell.
     pane.handle_mouse_event(mouse(MouseKind::Press, 1, 2), 2, 0);
-    pane.handle_mouse_event(mouse(MouseKind::Drag, 4, 4), 4, 3);
-    pane.handle_mouse_event(mouse(MouseKind::Release, 4, 4), 4, 3);
+    pane.handle_mouse_event(mouse(MouseKind::Drag, 7, 4), 4, 6);
+    pane.handle_mouse_event(mouse(MouseKind::Release, 7, 4), 4, 6);
     let lines = pane.render_visible_slice(80, 6);
     assert_eq!(selection_bg_ranges(&lines[2]), vec![(0, 17)]);
     assert_eq!(selection_bg_ranges(&lines[3]), Vec::<(usize, usize)>::new());
-    assert_eq!(selection_bg_ranges(&lines[4]), vec![(0, 4)]);
+    assert_eq!(selection_bg_ranges(&lines[4]), vec![(0, 5)]);
     assert_eq!(strip_ansi(&lines[2]), "select 你好 world");
     assert_eq!(strip_ansi(&lines[4]), "omega");
     assert!(selection_bg_ranges(&lines[0]).is_empty());
@@ -438,8 +487,9 @@ fn active_selection_shows_hint_line_without_covering_body() {
             .all(|line| !strip_ansi(line).contains("ctrl+c copy"))
     );
 
-    // A drag over "alpha" activates the selection; the frame keeps the body
-    // and appends one hint line naming the copy/clear keybindings.
+    // A drag over "alpha" activates the selection (movement past the
+    // threshold); the frame keeps the body and appends one hint line naming
+    // the copy/clear keybindings.
     tui.handle_mouse_event(MouseEvent {
         kind: MouseKind::Press,
         button: MouseButton::Left,
@@ -450,14 +500,14 @@ fn active_selection_shows_hint_line_without_covering_body() {
     tui.handle_mouse_event(MouseEvent {
         kind: MouseKind::Drag,
         button: MouseButton::Left,
-        column: 4,
+        column: 6,
         row: 0,
         modifiers: KeyModifiers::NONE,
     });
     tui.handle_mouse_event(MouseEvent {
         kind: MouseKind::Release,
         button: MouseButton::Left,
-        column: 4,
+        column: 6,
         row: 0,
         modifiers: KeyModifiers::NONE,
     });
@@ -474,7 +524,7 @@ fn active_selection_shows_hint_line_without_covering_body() {
     assert!(
         hint.contains("selected")
             && hint.contains("ctrl+c copy")
-            && hint.contains("ctrl+shift+space clear"),
+            && hint.contains("ctrl+space clear"),
         "the hint names the real copy/clear keybindings: {hint:?}"
     );
 

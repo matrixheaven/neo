@@ -455,7 +455,7 @@ fn transcript_keybinding_definitions() -> Vec<KeybindingDefinition> {
         definition(
             Action::TranscriptSelectionStart,
             &["ctrl+space"],
-            "Select transcript item",
+            "Toggle transcript selection",
         ),
         definition(
             Action::TranscriptSelectionClear,

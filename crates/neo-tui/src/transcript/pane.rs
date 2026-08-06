@@ -831,7 +831,7 @@ impl TranscriptPane {
     }
 
     fn mouse_drag(&mut self, body_row: usize, body_col: usize) {
-        if !self.selection.has_anchor() {
+        if !self.selection.is_gesture_open() {
             return;
         }
         self.ensure_layout_current();
@@ -2035,7 +2035,8 @@ impl TranscriptPane {
     ///
     /// While a drag crosses the viewport edge, each frame-driven call also
     /// advances the document one row (the existing frame cadence) and extends
-    /// the active endpoint into the revealed row.
+    /// the active endpoint into the revealed row. A pending press is checked
+    /// against the long-press delay on the same cadence.
     ///
     /// Every frame re-derives the earliest unresolved blocking entry from
     /// the canonical entries and feeds it to the document, which confines
@@ -2045,6 +2046,7 @@ impl TranscriptPane {
         self.body_height = height;
         let content_width = super::chrome_render::frame_content_width(width);
         self.refresh_layout(content_width);
+        self.selection.tick(Instant::now());
         self.apply_drag_autoscroll(height);
         self.document
             .set_blocking_focus(self.blocking_entry_index());

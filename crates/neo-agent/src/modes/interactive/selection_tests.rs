@@ -456,6 +456,56 @@ async fn right_click_without_selection_writes_nothing() {
     );
 }
 
+#[tokio::test]
+async fn ctrl_space_toggles_transcript_selection() {
+    let mut controller = selection_controller();
+
+    // Without a selection, ctrl+space selects the visible entry.
+    controller
+        .handle_input_event(InputEvent::Action(
+            KeybindingAction::TranscriptSelectionStart,
+        ))
+        .await
+        .expect("selection start handled");
+    assert!(controller.transcript().has_transcript_selection());
+
+    // With a selection, the same key clears it — this is the path the
+    // advertised clear key (ctrl+shift+space) lands on when the terminal
+    // cannot send the distinct kitty sequence.
+    controller
+        .handle_input_event(InputEvent::Action(
+            KeybindingAction::TranscriptSelectionStart,
+        ))
+        .await
+        .expect("selection toggle handled");
+    assert!(!controller.transcript().has_transcript_selection());
+
+    // A mouse drag selection is toggled off the same way.
+    for event in [
+        mouse_event(MouseKind::Press, 1, 1, crossterm::event::KeyModifiers::NONE),
+        mouse_event(MouseKind::Drag, 7, 3, crossterm::event::KeyModifiers::NONE),
+        mouse_event(
+            MouseKind::Release,
+            7,
+            3,
+            crossterm::event::KeyModifiers::NONE,
+        ),
+    ] {
+        controller
+            .handle_input_event(event)
+            .await
+            .expect("mouse drag handled");
+    }
+    assert!(controller.transcript().has_transcript_selection());
+    controller
+        .handle_input_event(InputEvent::Action(
+            KeybindingAction::TranscriptSelectionStart,
+        ))
+        .await
+        .expect("selection toggle handled");
+    assert!(!controller.transcript().has_transcript_selection());
+}
+
 /// Drain the controller-owned clipboard helper task. The helper runs on the
 /// test runtime, so the poll loop must yield for it to make progress.
 async fn wait_for_clipboard_write(controller: &mut InteractiveController) {
