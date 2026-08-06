@@ -2,7 +2,7 @@ use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
 use crate::input::MouseEvent;
-use crate::primitive::{Style, TuiTheme, pad_to_width, paint};
+use crate::primitive::{Style, TuiTheme, pad_to_width, paint, truncate_to_width};
 use crate::screen_output::{CursorPos, TerminalFrame};
 use crate::shell::{NeoChromeState, OverlayKind};
 use crate::transcript::chrome_render::extract_cursor;
@@ -130,25 +130,29 @@ impl NeoTui {
         self.transcript
             .set_workspace_root(self.chrome.workspace_root());
         self.transcript.resize(width, height);
+        // Reconcile the document with the store before reading its view: a
+        // revision that arrived since the last frame must turn on the
+        // locked-view activity notice in the very frame that renders it.
+        self.transcript.ensure_layout_current();
 
-        // Compose the visible document slice and the fitted chrome once. A
-        // live selection appends one hint line to the chrome (the body shrinks
-        // by that row), so the hint can never cover transcript text or the
-        // approval/question chrome.
-        let hint = self
-            .transcript
-            .has_transcript_selection()
-            .then(|| selection_hint_line(width, &self.chrome.theme()));
-        let available = height.saturating_sub(usize::from(hint.is_some()));
-        let chrome_render =
+        // Compose the visible document slice and the fitted chrome once. Each
+        // live hint (selection keybindings, locked-view new activity) appends
+        // one line to the chrome — the body shrinks by that many rows — so
+        // hints can never cover transcript text, Todo, the input box, or the
+        // approval/question chrome. The selection hint sits directly below
+        // the chrome; the activity notice is the bottom-most status line.
+        let mut hints: Vec<String> = Vec::new();
+        if self.transcript.has_transcript_selection() {
+            hints.push(selection_hint_line(width, &self.chrome.theme()));
+        }
+        let view = self.transcript.document().view();
+        if !view.following_tail && view.new_activity {
+            hints.push(activity_hint_line(width, &self.chrome.theme()));
+        }
+        let available = height.saturating_sub(hints.len());
+        let mut chrome_render =
             fit_chrome_to_height(render_chrome(&mut self.chrome, width, available), available);
-        let chrome_render = if let Some(hint) = hint {
-            let mut render = chrome_render;
-            render.lines.push(hint);
-            render
-        } else {
-            chrome_render
-        };
+        chrome_render.lines.extend(hints);
         let chrome_height = chrome_render.lines.len();
         let mut lines = self
             .transcript
@@ -215,6 +219,26 @@ fn selection_hint_line(width: usize, theme: &TuiTheme) -> String {
         &padded,
         Style::default().fg(theme.text_muted).bg(theme.selection_bg),
     )
+}
+
+/// One muted status line naming the locked-view new-activity indicator.
+/// Rendered as the last chrome row while the viewport is locked and later
+/// revisions arrived, with the body shrunk by one row so it never covers
+/// transcript text. Narrow terminals get a shorter label instead of a
+/// horizontally truncated sentence; below that label's width the short label
+/// itself is clipped so the line never overflows the terminal.
+fn activity_hint_line(width: usize, theme: &TuiTheme) -> String {
+    let content_width = frame_content_width(width);
+    let text = if content_width >= 30 {
+        "new activity · end to follow"
+    } else if content_width >= 14 {
+        "new activity"
+    } else {
+        let clipped = truncate_to_width(" new activity ", content_width);
+        return paint(&clipped, Style::default().fg(theme.text_muted));
+    };
+    let padded = pad_to_width(&format!(" {text} "), content_width);
+    paint(&padded, Style::default().fg(theme.text_muted))
 }
 
 fn current_time_ms() -> u64 {

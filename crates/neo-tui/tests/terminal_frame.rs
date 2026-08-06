@@ -3,6 +3,7 @@ use std::time::Instant;
 
 use neo_tui::NeoTui;
 use neo_tui::primitive::{strip_ansi, visible_width};
+use neo_tui::screen_output::TerminalFrame;
 use neo_tui::shell::{NeoChromeState, PromptEdit};
 use neo_tui::tasks_browser::TaskBrowserState;
 use neo_tui::transcript::TranscriptEntry;
@@ -300,6 +301,161 @@ fn blocking_overlays_render_inside_the_active_fullscreen_frame() {
     let dialog = tui.render_terminal_frame_at(40, 8, Instant::now());
     assert!(dialog.lines.len() <= 8);
     assert!(!dialog.lines.is_empty());
+}
+
+#[test]
+fn locked_transcript_shows_new_activity_until_following_tail() {
+    let chrome = NeoChromeState::new("neo", "session", "model", PathBuf::from("."));
+    let mut transcript = neo_tui::transcript::TranscriptPane::new(80, 12);
+    // One status block of twenty short lines: a contiguous, deterministic
+    // document run whose last visible row measures the body height.
+    transcript.push_status(
+        (0..20)
+            .map(|index| format!("line-{index:02}"))
+            .collect::<Vec<_>>()
+            .join("\n"),
+    );
+    let mut tui = NeoTui::new(chrome, transcript);
+
+    // Tail following needs no notice.
+    let tail = tui.render_terminal_frame_at(80, 12, Instant::now());
+    assert!(tail.lines.len() <= 12);
+    assert!(
+        tail.lines
+            .iter()
+            .all(|line| !strip_ansi(line).contains("new activity")),
+        "tail frame: {:?}",
+        tail.lines
+    );
+
+    // Locked without later revisions: still no notice.
+    tui.transcript_mut().scroll_transcript_up(usize::MAX);
+    let locked = tui.render_terminal_frame_at(80, 12, Instant::now());
+    assert!(locked.lines.len() <= 12);
+    assert!(
+        locked
+            .lines
+            .iter()
+            .all(|line| !strip_ansi(line).contains("new activity")),
+        "locked frame: {:?}",
+        locked.lines
+    );
+
+    // A revision lands while locked: the frame shows one notice line and the
+    // body loses exactly one row to it.
+    tui.transcript_mut().push_status("new-1");
+    let noticed = tui.render_terminal_frame_at(80, 12, Instant::now());
+    assert!(noticed.lines.len() <= 12);
+    let hint = strip_ansi(noticed.lines.last().expect("notice line"));
+    assert!(
+        hint.contains("new activity") && hint.contains("end to follow"),
+        "notice line: {hint:?}"
+    );
+    assert_eq!(
+        last_visible_line_row(&locked),
+        last_visible_line_row(&noticed) + 1,
+        "the notice takes exactly one body row"
+    );
+    assert!(
+        noticed.lines.iter().all(|line| visible_width(line) <= 80),
+        "frame lines must fit the terminal width"
+    );
+
+    // Continued updates keep the single notice; the locked window stays put.
+    tui.transcript_mut().push_status("new-2");
+    let still = tui.render_terminal_frame_at(80, 12, Instant::now());
+    assert!(still.lines.len() <= 12);
+    assert!(
+        strip_ansi(still.lines.last().expect("notice line")).contains("new activity"),
+        "notice persists across further updates"
+    );
+    assert_eq!(
+        last_visible_line_row(&noticed),
+        last_visible_line_row(&still),
+        "the locked window does not move while the notice is up"
+    );
+
+    // An active selection adds its own hint row above the notice: the body
+    // shrinks one more row and both hints stay visible in order.
+    tui.transcript_mut().select_visible_transcript_entry();
+    let both = tui.render_terminal_frame_at(80, 12, Instant::now());
+    assert!(both.lines.len() <= 12);
+    let selection_hint = strip_ansi(&both.lines[both.lines.len() - 2]);
+    let activity_hint = strip_ansi(&both.lines[both.lines.len() - 1]);
+    assert!(
+        selection_hint.contains("selected") && selection_hint.contains("ctrl+c copy"),
+        "selection hint above the notice: {selection_hint:?}"
+    );
+    assert!(
+        activity_hint.contains("new activity") && activity_hint.contains("end to follow"),
+        "notice stays the bottom-most line: {activity_hint:?}"
+    );
+    assert_eq!(
+        last_visible_line_row(&still),
+        last_visible_line_row(&both) + 1,
+        "two hints take two body rows"
+    );
+    tui.transcript_mut().clear_transcript_selection();
+
+    // Returning to the tail clears the notice and reveals the newest rows.
+    tui.transcript_mut().scroll_transcript_down(usize::MAX);
+    let back = tui.render_terminal_frame_at(80, 12, Instant::now());
+    assert!(back.lines.len() <= 12);
+    assert!(
+        back.lines
+            .iter()
+            .all(|line| !strip_ansi(line).contains("new activity")),
+        "the notice must disappear at the tail: {:?}",
+        back.lines
+    );
+    assert!(
+        back.lines
+            .iter()
+            .map(|line| strip_ansi(line))
+            .any(|text| text.contains("new-2")),
+        "tail frame reaches the newest rows"
+    );
+
+    // Narrow terminals get the short label instead of a truncated sentence.
+    let mut narrow = NeoTui::new(
+        NeoChromeState::new("neo", "session", "model", PathBuf::from(".")),
+        neo_tui::transcript::TranscriptPane::new(24, 10),
+    );
+    narrow.transcript_mut().push_status("seed");
+    let _ = narrow.render_terminal_frame_at(24, 10, Instant::now());
+    narrow.transcript_mut().scroll_transcript_up(usize::MAX);
+    narrow.transcript_mut().push_status("new-1");
+    let narrow_frame = narrow.render_terminal_frame_at(24, 10, Instant::now());
+    assert!(narrow_frame.lines.len() <= 10);
+    let narrow_hint = strip_ansi(narrow_frame.lines.last().expect("notice line"));
+    assert!(
+        narrow_hint.contains("new activity") && !narrow_hint.contains("end to follow"),
+        "short label on narrow terminals: {narrow_hint:?}"
+    );
+    assert!(
+        narrow_frame
+            .lines
+            .iter()
+            .all(|line| visible_width(line) <= 24),
+        "narrow frame lines must fit the terminal width"
+    );
+}
+
+/// The index of the last visible `line-NN` document row in a frame, used to
+/// prove a hint takes exactly one body row (the locked window shows a
+/// contiguous run of the same status block).
+fn last_visible_line_row(frame: &TerminalFrame) -> usize {
+    frame
+        .lines
+        .iter()
+        .rev()
+        .find_map(|line| {
+            strip_ansi(line)
+                .split_whitespace()
+                .rev()
+                .find_map(|word| word.strip_prefix("line-").and_then(|n| n.parse().ok()))
+        })
+        .expect("the locked status block is visible")
 }
 
 #[test]

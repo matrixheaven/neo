@@ -1095,7 +1095,9 @@ impl TranscriptPane {
 
     /// Reconcile the document layout with the store and feed fresh heights,
     /// so row resolution reflects the current document at event time.
-    fn ensure_layout_current(&mut self) {
+    /// `pub(crate)` so the outer frame composition can read a current
+    /// document view before rendering the body slice.
+    pub(crate) fn ensure_layout_current(&mut self) {
         let content_width = super::chrome_render::frame_content_width(self.width);
         self.refresh_layout(content_width);
     }
@@ -2064,12 +2066,6 @@ impl TranscriptPane {
     #[must_use]
     pub const fn document(&self) -> &DocumentLayout {
         &self.document
-    }
-
-    /// Read and clear the document's one Boolean new-activity indicator.
-    #[must_use]
-    pub fn consume_new_activity(&mut self) -> bool {
-        self.document.consume_new_activity()
     }
 
     /// Reconcile the document with the store and feed fresh block heights for

@@ -291,9 +291,16 @@ fn tail_follow_and_locked_scroll_have_one_activity_indicator() {
         "later revisions never move the locked anchor"
     );
 
-    // The indicator is consumed once after output and stays off.
-    assert!(pane.consume_new_activity());
-    assert!(!pane.document().view().new_activity);
+    // Rendering never consumes the indicator: it stays on while the view is
+    // locked so the outer frame can keep showing the notice. Only returning
+    // to the tail clears it.
+    let _ = pane.render_visible_slice(40, 6);
+    assert!(pane.document().view().new_activity);
+    assert_eq!(
+        pane.document().view().anchor,
+        locked_anchor,
+        "rendering must not move the locked anchor"
+    );
 
     // Returning to the tail (or any follow-bottom) clears the indicator and
     // later growth stays invisible-to-indicator again.
@@ -309,6 +316,79 @@ fn tail_follow_and_locked_scroll_have_one_activity_indicator() {
         pane.document().total_rows() > 0,
         "the document retains every appended row"
     );
+}
+
+#[test]
+fn locked_view_keeps_anchor_and_exposes_activity_notice() {
+    let mut pane = TranscriptPane::new(40, 10);
+    for index in 0..20 {
+        pane.push_status(format!("row-{index}"));
+    }
+    let _ = pane.render_visible_slice(40, 6);
+    pane.scroll_transcript_up(usize::MAX);
+    let locked = pane.render_visible_slice(40, 6);
+    let anchor = pane
+        .document()
+        .view()
+        .anchor
+        .expect("upward scroll locks an anchor");
+    assert!(!pane.document().is_following_tail());
+    assert!(
+        !pane.document().view().new_activity,
+        "locking alone must not set the notice"
+    );
+    let locked_content = non_blank_lines(&locked);
+    assert_eq!(
+        locked_content[0], "row-0",
+        "locked slice starts at the document top: {locked_content:?}"
+    );
+
+    // Later revisions while locked keep the anchor and expose the notice
+    // through the read-only view state.
+    pane.push_status("new-1");
+    let noticed = pane.render_visible_slice(40, 6);
+    assert_eq!(
+        pane.document().view().anchor,
+        Some(anchor),
+        "appended content must not move the locked anchor"
+    );
+    assert!(!pane.document().is_following_tail());
+    assert!(
+        pane.document().view().new_activity,
+        "the notice state is exposed while locked"
+    );
+    let noticed_content = non_blank_lines(&noticed);
+    assert_eq!(
+        noticed_content[0], "row-0",
+        "the locked window stays put: {noticed_content:?}"
+    );
+
+    // Another update keeps exactly the same anchor and one Boolean notice.
+    pane.push_status("new-2");
+    let _ = pane.render_visible_slice(40, 6);
+    assert_eq!(pane.document().view().anchor, Some(anchor));
+    assert!(
+        pane.document().view().new_activity,
+        "still one Boolean notice, not a counter"
+    );
+
+    // Returning to the tail clears the notice and reaches the newest rows.
+    pane.scroll_transcript_down(usize::MAX);
+    assert!(pane.document().is_following_tail());
+    assert!(!pane.document().view().new_activity);
+    assert_eq!(pane.document().view().anchor, None);
+    let tail = pane.render_visible_slice(40, 6);
+    let tail_content = non_blank_lines(&tail);
+    assert_eq!(
+        tail_content.last().map(String::as_str),
+        Some("new-2"),
+        "tail slice reaches the newest row: {tail_content:?}"
+    );
+
+    // Tail-following growth needs no notice.
+    pane.push_status("new-3");
+    let _ = pane.render_visible_slice(40, 6);
+    assert!(!pane.document().view().new_activity);
 }
 
 #[test]

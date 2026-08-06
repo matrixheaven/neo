@@ -347,14 +347,6 @@ impl DocumentLayout {
         self.view.new_activity = false;
     }
 
-    /// Read and clear the one Boolean new-activity indicator.
-    #[must_use]
-    pub fn consume_new_activity(&mut self) -> bool {
-        let had = self.view.new_activity;
-        self.view.new_activity = false;
-        had
-    }
-
     /// Feed the earliest unresolved blocking entry (pending approval or
     /// question) derived by the pane from the canonical entries, as a
     /// layout index.
