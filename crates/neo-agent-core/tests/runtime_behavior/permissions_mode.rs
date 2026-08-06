@@ -892,8 +892,7 @@ async fn theme_draft_permission_matrix_covers_ask_auto_and_plan_paths() {
         );
         if case.executes {
             assert_eq!(
-                executed[0]["action"],
-                case.action,
+                executed[0]["action"], case.action,
                 "case {} must run the requested action",
                 case.name
             );
