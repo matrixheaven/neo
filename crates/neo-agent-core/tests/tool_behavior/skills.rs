@@ -804,7 +804,7 @@ fn available_skills_prompt_prioritizes_task_specific_skills_over_generic_methods
 fn custom_theme_builtin_is_explicit_only_with_theme_draft_flow() {
     use std::collections::BTreeSet;
 
-    let raw = include_str!("../src/skills/builtin/custom-theme.md");
+    let raw = include_str!("../../src/skills/builtin/custom-theme.md");
     let (frontmatter, body) =
         neo_agent_core::skills::split_frontmatter(raw).expect("custom-theme frontmatter");
     let frontmatter: serde_yaml::Mapping =
