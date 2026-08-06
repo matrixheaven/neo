@@ -1,9 +1,464 @@
+use super::fake_harness::final_done_turn;
+use super::permissions::select_action;
+use super::plan_and_goal::set_config_permission_mode;
+use futures::StreamExt;
+use neo_agent_core::goal::{Goal, GoalManager, GoalStatus, load_goal_store};
+use neo_agent_core::{
+    AgentConfig, AgentContext, AgentEvent, AgentMessage, AgentRuntime, ApprovalAction,
+    ApprovalOption, ApprovalPresentation, ApprovalRequest, ApprovalResponse, PermissionMode,
+    PermissionOperation, ToolRegistry,
+    harness::{FakeHarness, fake_model},
+};
+use neo_ai::{AiStreamEvent, MessagePhase};
+use serde_json::json;
 use std::sync::Arc;
 
-use neo_agent_core::{
-    AgentContext, AgentMessage,
-    goal::{Goal, GoalManager, GoalStatus, load_goal_store},
-};
+fn start_goal(request: &ApprovalRequest) -> ApprovalResponse {
+    select_action(request, ApprovalAction::StartGoal)
+}
+
+fn reject_goal(request: &ApprovalRequest) -> ApprovalResponse {
+    select_action(request, ApprovalAction::RejectGoal)
+}
+
+fn revise_goal_with_feedback(request: &ApprovalRequest, feedback: &str) -> ApprovalResponse {
+    assert!(
+        request.options.iter().any(|option| {
+            matches!(
+                option.action,
+                ApprovalAction::ReviseGoal {
+                    preset_feedback: None
+                }
+            )
+        }),
+        "ReviseGoal manual feedback option not offered"
+    );
+    ApprovalResponse::Selected {
+        request_id: request.id.clone(),
+        action: ApprovalAction::ReviseGoal {
+            preset_feedback: None,
+        },
+        feedback: Some(feedback.to_owned()),
+    }
+}
+
+#[tokio::test]
+async fn goal_mode_authoring_injects_exit_goal_mode_guidance() {
+    let harness = FakeHarness::from_events([
+        AiStreamEvent::MessageStart {
+            phase: MessagePhase::Unknown,
+            id: "msg_1".to_owned(),
+        },
+        AiStreamEvent::MessageEnd {
+            phase: MessagePhase::Unknown,
+            stop_reason: neo_ai::StopReason::EndTurn,
+            usage: None,
+        },
+    ]);
+    let runtime = AgentRuntime::new(
+        AgentConfig::for_model(harness.model()).with_goal_mode_authoring(true),
+        harness.client(),
+    );
+    let mut context = AgentContext::new();
+
+    runtime
+        .run_turn(&mut context, AgentMessage::user_text("draft goal"))
+        .collect::<Vec<_>>()
+        .await
+        .into_iter()
+        .collect::<Result<Vec<_>, _>>()
+        .expect("turn should succeed");
+
+    let request = harness.requests().pop().expect("model request");
+    assert!(request.messages.iter().any(|message| matches!(
+        message,
+        neo_ai::ChatMessage::User { content }
+            if content.iter().any(|part| matches!(
+                part,
+                neo_ai::ContentPart::Text { text }
+                    if text.contains("<system-reminder>")
+                        && text.contains("Goal mode is active")
+                        && text.contains("ExitGoalMode")
+                        && text.contains("Do not start a durable goal directly")
+            ))
+    )));
+}
+
+#[tokio::test]
+async fn exit_goal_mode_starts_goal_and_ends_run_without_spinning() {
+    let home = tempfile::tempdir().expect("home");
+    let workspace = tempfile::tempdir().expect("workspace");
+    let workspace_root = workspace
+        .path()
+        .canonicalize()
+        .expect("canonical workspace");
+    let mut config = AgentConfig::for_model(fake_model());
+    config.home_dir = Some(home.path().to_path_buf());
+    config.workspace_root = Some(workspace_root);
+    set_config_permission_mode(&mut config, PermissionMode::Ask);
+
+    let harness = FakeHarness::from_turns([
+        vec![
+            AiStreamEvent::MessageStart {
+                phase: MessagePhase::Unknown,
+                id: "msg_1".to_owned(),
+            },
+            AiStreamEvent::ToolCallStart {
+                id: "tool_1".to_owned(),
+                name: "ExitGoalMode".to_owned(),
+            },
+            AiStreamEvent::ToolCallEnd {
+                id: "tool_1".to_owned(),
+                raw_arguments: json!({
+                    "objective": "Ship goal mode",
+                    "completion_criterion": "Goal tests pass",
+                    "phases": ["Draft", "Implement", "Audit"],
+                })
+                .to_string(),
+            },
+            AiStreamEvent::MessageEnd {
+                phase: MessagePhase::Unknown,
+                stop_reason: neo_ai::StopReason::ToolUse,
+                usage: None,
+            },
+        ],
+        final_done_turn(),
+    ]);
+    let config = config.with_approval_handler(|request| {
+        assert_eq!(request.operation, PermissionOperation::GoalTransition);
+        start_goal(request)
+    });
+    let goal_manager = Arc::new(
+        neo_agent_core::goal::GoalManager::load(home.path().to_path_buf())
+            .await
+            .expect("goal manager"),
+    );
+    let mut registry = ToolRegistry::with_builtin_tools();
+    registry.register_goal_tools(Arc::clone(&goal_manager));
+    let runtime = AgentRuntime::with_tools(config, harness.client(), registry)
+        .with_goal_manager(&goal_manager);
+    let mut context = AgentContext::new();
+
+    let events = runtime
+        .run_turn(&mut context, AgentMessage::user_text("approve goal"))
+        .collect::<Vec<_>>()
+        .await
+        .into_iter()
+        .collect::<Result<Vec<_>, _>>()
+        .expect("turn should succeed");
+
+    assert!(
+        events.contains(&AgentEvent::GoalStarted {
+            turn: 1,
+            objective: "Ship goal mode".to_owned(),
+        }),
+        "ExitGoalMode should start the durable goal"
+    );
+    // The terminating batch must not continue inline: the goal is durable and
+    // is resumed on the next run_agent_turn entry. Exactly one model request
+    // means we did not spin on goal-continuation.
+    assert_eq!(
+        harness.requests().len(),
+        1,
+        "ExitGoalMode must end the run without spinning on goal continuation"
+    );
+    let active = goal_manager.active().expect("active goal");
+    assert_eq!(active.phases, ["Draft", "Implement", "Audit"]);
+}
+
+#[tokio::test]
+async fn exit_goal_mode_reject_and_revise_create_no_goal() {
+    let home = tempfile::tempdir().expect("home");
+    let workspace = tempfile::tempdir().expect("workspace");
+    let workspace_root = workspace
+        .path()
+        .canonicalize()
+        .expect("canonical workspace");
+
+    let goal_payload = json!({
+        "objective": "Ship goal mode",
+        "completion_criterion": "Goal tests pass",
+        "phases": ["Draft", "Implement"],
+    });
+
+    // --- RejectGoal ---
+    {
+        let mut config = AgentConfig::for_model(fake_model());
+        config.home_dir = Some(home.path().to_path_buf());
+        config.workspace_root = Some(workspace_root.clone());
+        set_config_permission_mode(&mut config, PermissionMode::Ask);
+        let harness = FakeHarness::from_turns([
+            vec![
+                AiStreamEvent::MessageStart {
+                    phase: MessagePhase::Unknown,
+                    id: "msg_1".to_owned(),
+                },
+                AiStreamEvent::ToolCallStart {
+                    id: "tool_1".to_owned(),
+                    name: "ExitGoalMode".to_owned(),
+                },
+                AiStreamEvent::ToolCallEnd {
+                    id: "tool_1".to_owned(),
+                    raw_arguments: goal_payload.to_string(),
+                },
+                AiStreamEvent::MessageEnd {
+                    phase: MessagePhase::Unknown,
+                    stop_reason: neo_ai::StopReason::ToolUse,
+                    usage: None,
+                },
+            ],
+            final_done_turn(),
+        ]);
+        let config = config.with_approval_handler(|request| {
+            assert!(matches!(
+                request.options.as_slice(),
+                [
+                    ApprovalOption {
+                        action: ApprovalAction::StartGoal,
+                        ..
+                    },
+                    ApprovalOption {
+                        action: ApprovalAction::RejectGoal,
+                        ..
+                    },
+                    ApprovalOption {
+                        action: ApprovalAction::ReviseGoal { .. },
+                        ..
+                    },
+                ]
+            ));
+            reject_goal(request)
+        });
+        let goal_manager = Arc::new(
+            neo_agent_core::goal::GoalManager::load(home.path().join("reject"))
+                .await
+                .expect("goal manager"),
+        );
+        let mut registry = ToolRegistry::with_builtin_tools();
+        registry.register_goal_tools(Arc::clone(&goal_manager));
+        let runtime = AgentRuntime::with_tools(config, harness.client(), registry)
+            .with_goal_manager(&goal_manager);
+        let mut context = AgentContext::new();
+
+        let events = runtime
+            .run_turn(&mut context, AgentMessage::user_text("reject goal"))
+            .collect::<Vec<_>>()
+            .await
+            .into_iter()
+            .collect::<Result<Vec<_>, _>>()
+            .expect("turn should succeed");
+
+        let goal_request = events
+            .iter()
+            .find_map(|event| match event {
+                AgentEvent::ApprovalRequested { request }
+                    if request.operation == PermissionOperation::GoalTransition =>
+                {
+                    Some(request)
+                }
+                _ => None,
+            })
+            .expect("goal approval request");
+        assert!(matches!(
+            goal_request.options.as_slice(),
+            [
+                ApprovalOption {
+                    action: ApprovalAction::StartGoal,
+                    ..
+                },
+                ApprovalOption {
+                    action: ApprovalAction::RejectGoal,
+                    ..
+                },
+                ApprovalOption {
+                    action: ApprovalAction::ReviseGoal { .. },
+                    ..
+                },
+            ]
+        ));
+        assert!(
+            !events
+                .iter()
+                .any(|event| matches!(event, AgentEvent::GoalStarted { .. })),
+            "RejectGoal must not start a goal"
+        );
+        assert!(
+            goal_manager.active().is_none(),
+            "no active goal after reject"
+        );
+        assert!(events.iter().any(|event| matches!(
+            event,
+            AgentEvent::ToolExecutionFinished {
+                name,
+                result,
+                ..
+            } if name == "ExitGoalMode" && result.content.contains("approval denied")
+        )));
+    }
+
+    // --- ReviseGoal ---
+    {
+        let mut config = AgentConfig::for_model(fake_model());
+        config.home_dir = Some(home.path().to_path_buf());
+        config.workspace_root = Some(workspace_root);
+        set_config_permission_mode(&mut config, PermissionMode::Ask);
+        let harness = FakeHarness::from_turns([
+            vec![
+                AiStreamEvent::MessageStart {
+                    phase: MessagePhase::Unknown,
+                    id: "msg_1".to_owned(),
+                },
+                AiStreamEvent::ToolCallStart {
+                    id: "tool_1".to_owned(),
+                    name: "ExitGoalMode".to_owned(),
+                },
+                AiStreamEvent::ToolCallEnd {
+                    id: "tool_1".to_owned(),
+                    raw_arguments: goal_payload.to_string(),
+                },
+                AiStreamEvent::MessageEnd {
+                    phase: MessagePhase::Unknown,
+                    stop_reason: neo_ai::StopReason::ToolUse,
+                    usage: None,
+                },
+            ],
+            final_done_turn(),
+        ]);
+        let config = config.with_approval_handler(|request| {
+            revise_goal_with_feedback(request, "add a validation phase")
+        });
+        let goal_manager = Arc::new(
+            neo_agent_core::goal::GoalManager::load(home.path().join("revise"))
+                .await
+                .expect("goal manager"),
+        );
+        let mut registry = ToolRegistry::with_builtin_tools();
+        registry.register_goal_tools(Arc::clone(&goal_manager));
+        let runtime = AgentRuntime::with_tools(config, harness.client(), registry)
+            .with_goal_manager(&goal_manager);
+        let mut context = AgentContext::new();
+
+        let events = runtime
+            .run_turn(&mut context, AgentMessage::user_text("revise goal"))
+            .collect::<Vec<_>>()
+            .await
+            .into_iter()
+            .collect::<Result<Vec<_>, _>>()
+            .expect("turn should succeed");
+
+        assert!(
+            !events
+                .iter()
+                .any(|event| matches!(event, AgentEvent::GoalStarted { .. })),
+            "ReviseGoal must not start a goal"
+        );
+        assert!(
+            goal_manager.active().is_none(),
+            "no active goal after revise"
+        );
+        assert!(events.iter().any(|event| matches!(
+            event,
+            AgentEvent::ToolExecutionFinished {
+                name,
+                result,
+                ..
+            } if name == "ExitGoalMode"
+                && !result.is_error
+                && result.content.contains("User requested revisions")
+                && result.content.contains("add a validation phase")
+        )));
+    }
+}
+
+#[tokio::test]
+async fn runtime_ask_mode_reviews_exit_goal_mode_and_emits_goal_started() {
+    let home = tempfile::tempdir().expect("home");
+    let workspace = tempfile::tempdir().expect("workspace");
+    let mut config = AgentConfig::for_model(fake_model());
+    config.home_dir = Some(home.path().to_path_buf());
+    config.workspace_root = Some(
+        workspace
+            .path()
+            .canonicalize()
+            .expect("canonical workspace"),
+    );
+    set_config_permission_mode(&mut config, PermissionMode::Ask);
+
+    let harness = FakeHarness::from_turns([
+        vec![
+            AiStreamEvent::MessageStart {
+                phase: MessagePhase::Unknown,
+                id: "msg_1".to_owned(),
+            },
+            AiStreamEvent::ToolCallStart {
+                id: "tool_1".to_owned(),
+                name: "ExitGoalMode".to_owned(),
+            },
+            AiStreamEvent::ToolCallEnd {
+                id: "tool_1".to_owned(),
+                raw_arguments: json!({
+                    "objective": "Ship goal mode",
+                    "completion_criterion": "Goal tests pass",
+                    "phases": ["Draft", "Implement", "Audit"],
+                })
+                .to_string(),
+            },
+            AiStreamEvent::MessageEnd {
+                phase: MessagePhase::Unknown,
+                stop_reason: neo_ai::StopReason::ToolUse,
+                usage: None,
+            },
+        ],
+        final_done_turn(),
+    ]);
+    let config = config.with_approval_handler(|request| {
+        assert_eq!(request.operation, PermissionOperation::GoalTransition);
+        start_goal(request)
+    });
+    let goal_manager = Arc::new(
+        neo_agent_core::goal::GoalManager::load(home.path().to_path_buf())
+            .await
+            .expect("goal manager"),
+    );
+    let mut registry = ToolRegistry::with_builtin_tools();
+    registry.register_goal_tools(Arc::clone(&goal_manager));
+    let runtime = AgentRuntime::with_tools(config, harness.client(), registry)
+        .with_goal_manager(&goal_manager);
+    let mut context = AgentContext::new();
+
+    let events = runtime
+        .run_turn(&mut context, AgentMessage::user_text("approve goal"))
+        .collect::<Vec<_>>()
+        .await
+        .into_iter()
+        .collect::<Result<Vec<_>, _>>()
+        .expect("turn should succeed");
+
+    assert!(events.iter().any(|event| matches!(
+        event,
+        AgentEvent::ApprovalRequested { request }
+            if request.id == "tool_1"
+                && request.operation == PermissionOperation::GoalTransition
+                && matches!(
+                    request.presentation,
+                    ApprovalPresentation::Goal { .. }
+                )
+                && matches!(
+                    request.options.as_slice(),
+                    [
+                        ApprovalOption { action: ApprovalAction::StartGoal, .. },
+                        ApprovalOption { action: ApprovalAction::RejectGoal, .. },
+                        ApprovalOption { action: ApprovalAction::ReviseGoal { .. }, .. },
+                    ]
+                )
+    )));
+    assert!(events.contains(&AgentEvent::GoalStarted {
+        turn: 1,
+        objective: "Ship goal mode".to_owned(),
+    }));
+    let active = goal_manager.active().expect("active goal");
+    assert_eq!(active.phases, ["Draft", "Implement", "Audit"]);
+}
 
 #[tokio::test]
 async fn goal_manager_lifecycle() {
@@ -488,20 +943,4 @@ async fn completing_goal_starts_next_queued_goal() {
 
     assert_eq!(manager.active().unwrap().objective, "second");
     assert!(manager.queue().is_empty());
-}
-
-#[test]
-fn skill_context_is_injected_before_user_message() {
-    let mut context = AgentContext::new();
-    context.set_skill_context(AgentMessage::system_text("skill body".to_owned()));
-
-    let skill_context = context.take_skill_context();
-    assert!(skill_context.is_some());
-    context.append_message(skill_context.unwrap());
-    context.append_message(AgentMessage::user_text("user prompt".to_owned()));
-
-    let messages: Vec<_> = context.messages().iter().collect();
-    assert_eq!(messages.len(), 2);
-    assert!(matches!(messages[0], AgentMessage::System { .. }));
-    assert!(matches!(messages[1], AgentMessage::User { .. }));
 }
