@@ -816,79 +816,96 @@ async fn theme_draft_save_requires_typed_theme_save_approval_with_no_session_gra
 }
 
 #[tokio::test]
-async fn theme_draft_preview_runs_without_any_approval_in_ask_mode() {
-    let harness = FakeHarness::from_turns([
-        tool_call_turn(&[(
-            "call_td",
-            "ThemeDraft",
-            json!({"action": "preview", "name": "Aurora Night"}),
-        )]),
-        end_turn_events("done"),
-    ]);
-    let (runtime, probe) = theme_draft_probe_runtime(&harness, PermissionMode::Ask);
-    let events = run_theme_draft_turn(runtime, json!({"action": "preview"})).await;
-
-    assert!(
-        theme_draft_approval_events(&events).is_empty(),
-        "preview must not require approval: {events:?}"
-    );
-    let executed = probe.executed.lock().unwrap();
-    assert_eq!(executed.len(), 1, "preview must reach execution");
-    assert_eq!(executed[0]["action"], "preview");
-}
-
-#[tokio::test]
-async fn theme_draft_save_executes_directly_in_auto_mode() {
-    let harness = FakeHarness::from_turns([
-        tool_call_turn(&[(
-            "call_td",
-            "ThemeDraft",
-            json!({"action": "save", "draft_id": "draft-0001"}),
-        )]),
-        end_turn_events("done"),
-    ]);
-    let (runtime, probe) = theme_draft_probe_runtime(&harness, PermissionMode::Auto);
-    let events = run_theme_draft_turn(runtime, json!({"action": "save"})).await;
-
-    assert!(
-        theme_draft_approval_events(&events).is_empty(),
-        "auto mode must not prompt for ThemeDraft save: {events:?}"
-    );
-    assert_eq!(probe.executed.lock().unwrap().len(), 1);
-}
-
-#[tokio::test]
-async fn theme_draft_save_is_denied_in_plan_mode_while_preview_runs() {
-    for (action, should_run) in [("save", false), ("preview", true)] {
+async fn theme_draft_permission_matrix_covers_ask_auto_and_plan_paths() {
+    // One table-driven matrix for every ThemeDraft permission path except the
+    // Ask-mode save approval, which the full-run chain test above guards.
+    // Each case drives the same probe turn; only (mode, action) varies.
+    struct Case {
+        name: &'static str,
+        mode: PermissionMode,
+        plan_mode: bool,
+        action: &'static str,
+        executes: bool,
+        denied: Option<&'static str>,
+    }
+    let cases = [
+        Case {
+            name: "ask_preview_runs_without_approval",
+            mode: PermissionMode::Ask,
+            plan_mode: false,
+            action: "preview",
+            executes: true,
+            denied: None,
+        },
+        Case {
+            name: "auto_save_runs_without_approval",
+            mode: PermissionMode::Auto,
+            plan_mode: false,
+            action: "save",
+            executes: true,
+            denied: None,
+        },
+        Case {
+            name: "plan_save_is_denied",
+            mode: PermissionMode::Ask,
+            plan_mode: true,
+            action: "save",
+            executes: false,
+            denied: Some("blocked by plan mode"),
+        },
+        Case {
+            name: "plan_preview_runs_without_approval",
+            mode: PermissionMode::Ask,
+            plan_mode: true,
+            action: "preview",
+            executes: true,
+            denied: None,
+        },
+    ];
+    for case in &cases {
         let harness = FakeHarness::from_turns([
-            tool_call_turn(&[("call_td", "ThemeDraft", json!({"action": action}))]),
+            tool_call_turn(&[("call_td", "ThemeDraft", json!({"action": case.action}))]),
             end_turn_events("done"),
         ]);
-        let (runtime, probe) = theme_draft_probe_runtime(&harness, PermissionMode::Ask);
-        runtime
-            .config()
-            .plan_mode
-            .write()
-            .expect("plan mode lock")
-            .enter_in_memory();
-        let events = run_theme_draft_turn(runtime, json!({"action": action})).await;
+        let (runtime, probe) = theme_draft_probe_runtime(&harness, case.mode);
+        if case.plan_mode {
+            runtime
+                .config()
+                .plan_mode
+                .write()
+                .expect("plan mode lock")
+                .enter_in_memory();
+        }
+        let events = run_theme_draft_turn(runtime, json!({"action": case.action})).await;
 
-        assert_eq!(
-            probe.executed.lock().unwrap().len(),
-            usize::from(should_run),
-            "action {action} execution mismatch: {events:?}"
+        assert!(
+            theme_draft_approval_events(&events).is_empty(),
+            "case {} must not prompt: {events:?}",
+            case.name
         );
-        if should_run {
-            assert!(
-                theme_draft_approval_events(&events).is_empty(),
-                "preview must not prompt in plan mode: {events:?}"
+        let executed = probe.executed.lock().unwrap();
+        assert_eq!(
+            executed.len(),
+            usize::from(case.executes),
+            "case {} execution mismatch: {events:?}",
+            case.name
+        );
+        if case.executes {
+            assert_eq!(
+                executed[0]["action"],
+                case.action,
+                "case {} must run the requested action",
+                case.name
             );
-        } else {
+        }
+        drop(executed);
+        if let Some(expected) = case.denied {
             let finished = finished_tool_results(&events, "call_td");
-            assert_eq!(finished.len(), 1, "{events:?}");
+            assert_eq!(finished.len(), 1, "case {}: {events:?}", case.name);
             assert!(
-                finished[0].content.contains("blocked by plan mode"),
-                "save must be denied in plan mode: {}",
+                finished[0].content.contains(expected),
+                "case {} must be denied with {expected}: {}",
+                case.name,
                 finished[0].content
             );
         }

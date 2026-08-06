@@ -66,3 +66,11 @@
 | 重写：`start_unfinished_chunked_error` 固定 5 秒 `thread::sleep` | `provider_error_body_stops_reading_at_limit`（google.rs，断言不变） | 客户端在错误体达到读取上限时停止读取；未完成 chunk 连接在测试释放前保持打开（守旧行为：休眠保活 5 秒） | 重写为 release 通道就绪信号：服务器写完未完成 chunk 后阻塞在 `recv()`，测试断言完成后 `server.release()` 关闭连接，无固定等待 | `cargo test --package neo-ai --test provider_protocol_behavior -- google::provider_error_body_stops_reading_at_limit --exact --nocapture` | 1 |
 
 结构拆分（非退役）：`openai_responses.rs` 1479 行超 1200 硬上限，按行为前缀拆为 `openai_responses.rs`（核心请求/图像）、`openai_responses_reasoning.rs`（推理选择与摘要流）、`openai_responses_errors.rs`（流错误分类），测试发现集合不变（29 个，`cargo nextest list` 核对）。
+
+## Task 4 语义精简轨 §5.10 退役记录（neo-agent-core，runtime/session 批次）
+
+| 删除或合并的测试 | 保留的主要守护 | 两者共同捕获的生产故障 | 证明方式 | 精确命令 | 实际运行数 |
+|---|---|---|---|---|---:|
+| `permissions_mode::theme_draft_preview_runs_without_any_approval_in_ask_mode`、`permissions_mode::theme_draft_save_executes_directly_in_auto_mode`、`permissions_mode::theme_draft_save_is_denied_in_plan_mode_while_preview_runs` | `permissions_mode::theme_draft_permission_matrix_covers_ask_auto_and_plan_paths`（表驱动合并，4 个具名案例）+ `permissions_mode::theme_draft_save_requires_typed_theme_save_approval_with_no_session_grant`（完整运行链路） | `theme_draft_permission_preparation`（src/runtime/permission.rs）的 action 分支：preview 全模式直跑、save 在 plan 模式 Deny（"blocked by plan mode"）、save 在 Auto 模式直跑；三测试同走 `run_theme_draft_turn` 探针机制与同一断言形状，仅 (mode, action) 输入变体 | 合并（案例逐个命名断言同一分支）+ 临时故障注入：把 plan-active save 的 `Deny` 改为 `Run` 后矩阵 plan 案例失败，随后撤销注入 | `cargo test --package neo-agent-core --test runtime_behavior -- permissions_mode::theme_draft_permission_matrix_covers_ask_auto_and_plan_paths --exact --nocapture` | 1（4 案例） |
+
+本批次其余检查结论（无删除）：主题保存权限的注册表边界测试 `tool_permissions::theme_draft_never_accepts_file_write_in_place_of_tool_access`（file_write/shell/file_read 授予不得替代 `tool` 授予，ToolRegistry 边界分支）与运行时审批链路（Ask 审批请求、session 级授权禁止）分支不同，保留；session_behavior 全部持久化往返测试（state.rs 三个 store 读写、jsonl_append.rs 全部 append/read/replay/legacy 用例、tree.rs 全部 metadata/fork/rename 用例）均经真实文件读写，无纯派生类型往返，保留；未发现仅断言文本非空的弱断言测试（全部文本断言为精确内容 `contains`/`assert_eq!`）；`JsonlSessionWriter` 锁为 sidecar 文件锁，`cancelled_session_lock_wait_leaves_no_waiter` 通过显式 `drop(writer)` 释放 seed 锁后重开，无持锁自等待。
