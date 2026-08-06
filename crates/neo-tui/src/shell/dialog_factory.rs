@@ -69,11 +69,12 @@ impl NeoChromeState {
         Some(selected)
     }
 
-    /// Render the focused overlay as ANSI lines, if any.
+    /// Render the focused overlay as ANSI lines sized to the available height,
+    /// if any.
     #[must_use]
-    pub fn render_focused_overlay(&self, width: usize) -> Option<Vec<String>> {
+    pub fn render_focused_overlay(&self, width: usize, height: usize) -> Option<Vec<String>> {
         self.focused_overlay()?
-            .render_standalone_lines(width, &self.theme)
+            .render_standalone_lines(width, height, &self.theme)
     }
 
     pub fn open_model_picker(&mut self, items: impl IntoIterator<Item = PickerItem>) -> OverlayId {
@@ -334,7 +335,8 @@ impl NeoChromeState {
         state.take_result()
     }
 
-    /// Render the focused overlay (if any) into ANSI lines at the given width.
+    /// Render the focused overlay (if any) into ANSI lines at the given width,
+    /// without a height constraint (dropdown-style previews).
     #[must_use]
     pub fn focused_overlay_lines(&self, width: usize) -> Vec<String> {
         self.focused_overlay()

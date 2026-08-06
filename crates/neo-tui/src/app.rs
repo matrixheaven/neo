@@ -269,10 +269,14 @@ fn render_chrome(app: &mut NeoChromeState, width: usize, height: usize) -> Chrom
             .focused_overlay()
             .is_some_and(|overlay| !matches!(overlay.kind, OverlayKind::QuestionDialog(_)))
     {
-        let overlay = app
-            .render_focused_overlay(content_width)
-            .unwrap_or_default();
+        // The overlay renders into the height left over by the footer: rich
+        // dialogs slice themselves to this budget, so `fit_chrome_to_height`
+        // below stays a defensive backstop instead of silently dropping the
+        // dialog's title from the top.
         let footer = render_footer_only_lines(app, width);
+        let overlay = app
+            .render_focused_overlay(content_width, height.saturating_sub(footer.len()))
+            .unwrap_or_default();
         ChromeRender {
             lines: overlay.into_iter().chain(footer).collect(),
             cursor: None,

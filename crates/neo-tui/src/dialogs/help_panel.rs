@@ -1,5 +1,6 @@
 //! Help panel dialog for keyboard shortcuts and slash commands.
 
+use std::cell::Cell;
 use std::cmp::Ordering;
 
 use crate::input::{InputEvent, KeybindingAction, MouseEvent, MouseKind};
@@ -12,7 +13,6 @@ use crate::transcript::WHEEL_SCROLL_ROWS;
 use super::choice_picker::dialog_rgb;
 
 const DEFAULT_VIEWPORT_HEIGHT: usize = 14;
-const MIN_VIEWPORT_HEIGHT: usize = 6;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct HelpPanelCommand {
@@ -41,7 +41,11 @@ pub struct HelpPanelState {
     commands: Vec<HelpPanelCommand>,
     theme: TuiTheme,
     scroll_offset: usize,
-    viewport_height: usize,
+    /// Effective viewport height as recorded by the last frame. `Cell` keeps
+    /// rendering a shared (`&self`) operation: the terminal height is only
+    /// known at render time, and input-time scroll bounds must match what the
+    /// last frame showed.
+    viewport_height: Cell<usize>,
 }
 
 impl HelpPanelState {
@@ -53,16 +57,23 @@ impl HelpPanelState {
             commands,
             theme: opts.theme,
             scroll_offset: 0,
-            viewport_height: DEFAULT_VIEWPORT_HEIGHT,
+            viewport_height: Cell::new(DEFAULT_VIEWPORT_HEIGHT),
         }
     }
 
     #[must_use]
-    pub fn render_lines(&self, width: usize) -> Vec<String> {
+    pub fn render_lines(&self, width: usize, height: usize) -> Vec<String> {
+        // Record the height the current frame can afford so the input-time
+        // scroll bounds match what the renderer shows (the terminal height is
+        // only known at render time). The stored default caps how tall the
+        // panel grows on large terminals; two borders plus a potential
+        // scroll-hint row reserve three lines.
+        self.viewport_height
+            .set(height.saturating_sub(3).clamp(1, DEFAULT_VIEWPORT_HEIGHT));
         let inner_w = width.saturating_sub(2).max(1);
         let mut lines = Vec::new();
         let content = self.content_lines();
-        let viewport_height = self.viewport_height.max(MIN_VIEWPORT_HEIGHT);
+        let viewport_height = self.viewport_height.get();
         let max_scroll = content.len().saturating_sub(viewport_height);
         let scroll_offset = self.scroll_offset.min(max_scroll);
         let visible_end = (scroll_offset + viewport_height).min(content.len());
@@ -146,11 +157,11 @@ impl HelpPanelState {
 
     #[must_use]
     pub fn viewport_height(&self) -> usize {
-        self.viewport_height
+        self.viewport_height.get()
     }
 
     fn page_size(&self) -> usize {
-        self.viewport_height.max(MIN_VIEWPORT_HEIGHT)
+        self.viewport_height.get().max(1)
     }
 
     fn scroll_up(&mut self, rows: usize) {
@@ -334,7 +345,7 @@ mod tests {
             theme: theme(),
         });
 
-        let rendered = strip_ansi(&state.render_lines(72).join("\n"));
+        let rendered = strip_ansi(&state.render_lines(72, 40).join("\n"));
 
         assert!(rendered.contains("help · Esc / Enter / q close · ↑↓ scroll"));
         assert!(rendered.contains("Keyboard"));
@@ -362,7 +373,7 @@ mod tests {
             theme: theme(),
         });
 
-        let rendered = strip_ansi(&state.render_lines(72).join("\n"));
+        let rendered = strip_ansi(&state.render_lines(72, 40).join("\n"));
         let ask = rendered.find("/ask").expect("/ask should render");
         let yolo = rendered.find("/yolo").expect("/yolo should render");
         let skill_a = rendered.find("/skill:a").expect("/skill:a should render");
@@ -383,7 +394,7 @@ mod tests {
             theme: theme(),
         });
 
-        let rendered = state.render_lines(52);
+        let rendered = state.render_lines(52, 40);
         let widths = rendered
             .iter()
             .map(|line| visible_width(&strip_ansi(line)))
@@ -410,7 +421,7 @@ mod tests {
         });
 
         let rendered = state
-            .render_lines(80)
+            .render_lines(80, 40)
             .into_iter()
             .map(|line| strip_ansi(&line))
             .collect::<Vec<_>>();
@@ -440,7 +451,7 @@ mod tests {
             theme: theme(),
         });
 
-        let first = strip_ansi(&state.render_lines(52).join("\n"));
+        let first = strip_ansi(&state.render_lines(52, 40).join("\n"));
         assert!(first.contains("/cmd00"));
         assert!(!first.contains("/cmd15"));
 
@@ -451,7 +462,7 @@ mod tests {
             );
         }
         assert_eq!(state.scroll_offset(), 10);
-        let scrolled = strip_ansi(&state.render_lines(52).join("\n"));
+        let scrolled = strip_ansi(&state.render_lines(52, 40).join("\n"));
         assert!(scrolled.contains("scroll"));
         assert!(!scrolled.contains("/cmd00"));
 
@@ -482,7 +493,7 @@ mod tests {
             state.handle_input(&InputEvent::Action(KeybindingAction::SelectPageDown)),
             InputResult::Handled
         );
-        let paged = strip_ansi(&state.render_lines(52).join("\n"));
+        let paged = strip_ansi(&state.render_lines(52, 40).join("\n"));
         assert!(paged.contains("/cmd15"));
 
         assert_eq!(

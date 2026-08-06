@@ -2,7 +2,9 @@ use std::path::PathBuf;
 use std::time::Instant;
 
 use neo_tui::NeoTui;
-use neo_tui::primitive::{strip_ansi, visible_width};
+use neo_tui::dialogs::{ChoiceItem, ChoicePickerOptions, ConfirmDialogOptions, HelpPanelCommand};
+use neo_tui::input::{InputEvent, KeybindingAction};
+use neo_tui::primitive::{TuiTheme, strip_ansi, visible_width};
 use neo_tui::screen_output::TerminalFrame;
 use neo_tui::shell::{NeoChromeState, PromptEdit};
 use neo_tui::tasks_browser::TaskBrowserState;
@@ -82,6 +84,13 @@ fn frame_is_bounded_when_chrome_exhausts_terminal_height() {
             frame.lines.len() <= height,
             "height {height} produced {} rows",
             frame.lines.len()
+        );
+        // The defensive fit trims above the footer, never the actionable
+        // status line at the bottom of the chrome.
+        let last = strip_ansi(frame.lines.last().expect("bounded frame has a footer"));
+        assert!(
+            last.contains("[ask]"),
+            "footer status must survive the fit at height {height}: {last:?}"
         );
     }
 }
@@ -297,10 +306,185 @@ fn blocking_overlays_render_inside_the_active_fullscreen_frame() {
     let restored = tui.render_terminal_frame_at(40, 8, Instant::now());
     assert!(restored.lines.len() <= 8);
 
-    tui.chrome_mut().open_help_panel(Vec::new());
+    tui.chrome_mut().open_help_panel(vec![HelpPanelCommand::new(
+        "/help",
+        Some("Show help information"),
+    )]);
     let dialog = tui.render_terminal_frame_at(40, 8, Instant::now());
+    let dialog_text = dialog
+        .lines
+        .iter()
+        .map(|line| strip_ansi(line))
+        .collect::<Vec<_>>()
+        .join("\n");
     assert!(dialog.lines.len() <= 8);
-    assert!(!dialog.lines.is_empty());
+    assert!(
+        dialog_text.contains(" help "),
+        "help title must stay visible inside the fullscreen frame: {dialog_text}"
+    );
+    assert!(
+        dialog_text.contains("help · Esc / Enter / q close"),
+        "help action hint must stay visible inside the fullscreen frame: {dialog_text}"
+    );
+}
+
+#[test]
+fn short_terminal_preserves_dialog_title_selection_and_actions() {
+    // Blocking rich dialogs must slice themselves to the actual available
+    // height: the title, the current selection, and the action hints stay
+    // visible (or scroll-reachable) instead of being drained from the top by
+    // `fit_chrome_to_height`.
+    for height in [5usize, 8usize] {
+        // Help panel: title and action hint are visible up front; the command
+        // list is reachable by scrolling and the title survives scrolling.
+        let mut tui = NeoTui::new(
+            NeoChromeState::new("neo", "session", "model", PathBuf::from(".")),
+            neo_tui::transcript::TranscriptPane::new(40, height),
+        );
+        tui.chrome_mut().open_help_panel(vec![
+            HelpPanelCommand::new("/model", Some("Choose model")),
+            HelpPanelCommand::new("/skill:rust", Some("Use Rust skill")),
+        ]);
+        let frame = tui.render_terminal_frame_at(40, height, Instant::now());
+        let text = frame_text(&frame);
+        assert!(
+            frame.lines.len() <= height,
+            "help panel frame rows at height {height}: {}",
+            frame.lines.len()
+        );
+        assert!(
+            text.contains(" help "),
+            "help title missing at height {height}: {text}"
+        );
+        assert!(
+            text.contains("help · Esc / Enter / q close"),
+            "help action hint missing at height {height}: {text}"
+        );
+        // Eight scroll steps reach the slash-commands section at both heights
+        // (5-row viewport: one content line, offset 8; 8-row viewport: four
+        // content lines, offset clamped to the tail window).
+        for _ in 0..8 {
+            let _ = tui
+                .chrome_mut()
+                .handle_focused_dialog_input(InputEvent::Action(KeybindingAction::SelectDown));
+        }
+        let scrolled = tui.render_terminal_frame_at(40, height, Instant::now());
+        let scrolled_text = frame_text(&scrolled);
+        assert!(
+            scrolled.lines.len() <= height,
+            "scrolled help panel frame rows at height {height}: {}",
+            scrolled.lines.len()
+        );
+        assert!(
+            scrolled_text.contains("Slash Commands"),
+            "help body must be scroll-reachable at height {height}: {scrolled_text}"
+        );
+        assert!(
+            scrolled_text.contains(" help "),
+            "help title must survive scrolling at height {height}: {scrolled_text}"
+        );
+
+        // Confirm dialog: title and action hint always visible; the body
+        // lines stay visible when the terminal has room for them.
+        let mut tui = NeoTui::new(
+            NeoChromeState::new("neo", "session", "model", PathBuf::from(".")),
+            neo_tui::transcript::TranscriptPane::new(40, height),
+        );
+        tui.chrome_mut().open_confirm_dialog(ConfirmDialogOptions {
+            id: "toggle-write:/tmp/shared".to_owned(),
+            title: "Confirm Write Access".to_owned(),
+            hint: "Y approve · N cancel · Esc cancel".to_owned(),
+            lines: vec![
+                " Enable write access for this directory?".to_owned(),
+                " /tmp/shared".to_owned(),
+            ],
+            theme: TuiTheme::default(),
+        });
+        let frame = tui.render_terminal_frame_at(40, height, Instant::now());
+        let text = frame_text(&frame);
+        assert!(
+            frame.lines.len() <= height,
+            "confirm dialog frame rows at height {height}: {}",
+            frame.lines.len()
+        );
+        assert!(
+            text.contains("Confirm Write Access"),
+            "confirm title missing at height {height}: {text}"
+        );
+        assert!(
+            text.contains("Y approve"),
+            "confirm action hint missing at height {height}: {text}"
+        );
+        if height == 8 {
+            assert!(
+                text.contains("/tmp/shared"),
+                "confirm body must stay visible at height {height}: {text}"
+            );
+        }
+
+        // Choice picker: title, current selection, and action hint stay
+        // visible, and navigation keeps the selection on screen.
+        let mut tui = NeoTui::new(
+            NeoChromeState::new("neo", "session", "model", PathBuf::from(".")),
+            neo_tui::transcript::TranscriptPane::new(40, height),
+        );
+        tui.chrome_mut().open_choice_picker(ChoicePickerOptions {
+            title: "Choose an option".to_owned(),
+            items: vec![
+                ChoiceItem::new("a", "Option A"),
+                ChoiceItem::new("b", "Option B"),
+                ChoiceItem::new("c", "Option C"),
+                ChoiceItem::new("d", "Option D"),
+            ],
+            initial_id: Some("b".to_owned()),
+            page_size: 0,
+            current_id: Some("b".to_owned()),
+            theme: TuiTheme::default(),
+        });
+        let frame = tui.render_terminal_frame_at(40, height, Instant::now());
+        let text = frame_text(&frame);
+        assert!(
+            frame.lines.len() <= height,
+            "choice picker frame rows at height {height}: {}",
+            frame.lines.len()
+        );
+        assert!(
+            text.contains("Choose an option"),
+            "picker title missing at height {height}: {text}"
+        );
+        assert!(
+            text.contains("B ← current"),
+            "current selection missing at height {height}: {text}"
+        );
+        assert!(
+            text.contains("↑↓ navigate · Enter select"),
+            "picker action hint missing at height {height}: {text}"
+        );
+        let _ = tui
+            .chrome_mut()
+            .handle_focused_dialog_input(InputEvent::Action(KeybindingAction::SelectDown));
+        let moved = tui.render_terminal_frame_at(40, height, Instant::now());
+        assert!(
+            moved.lines.len() <= height,
+            "moved picker frame rows at height {height}: {}",
+            moved.lines.len()
+        );
+        assert!(
+            frame_text(&moved).contains("▸ Option C"),
+            "selection must stay visible after navigation at height {height}: {}",
+            frame_text(&moved)
+        );
+    }
+}
+
+/// The frame's visible text with ANSI escapes stripped, for content asserts.
+fn frame_text(frame: &TerminalFrame) -> String {
+    frame
+        .lines
+        .iter()
+        .map(|line| strip_ansi(line))
+        .collect::<Vec<_>>()
+        .join("\n")
 }
 
 #[test]

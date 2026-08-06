@@ -50,7 +50,7 @@ impl ConfirmDialogState {
     }
 
     #[must_use]
-    pub fn render_lines(&self, width: usize) -> Vec<String> {
+    pub fn render_lines(&self, width: usize, height: usize) -> Vec<String> {
         let mut lines = Vec::new();
         if width < 4 {
             return lines;
@@ -75,9 +75,20 @@ impl ConfirmDialogState {
             inner_width,
             border_style,
         ));
-        lines.push(box_line("", inner_width, Style::default(), border_style));
 
-        for line in &self.lines {
+        // Controlled slice: when the full layout does not fit the terminal
+        // height, drop the two empty separators first, then trim the body
+        // tail — the title and the action hint always stay visible.
+        let structural = lines.len() + 1; // top border, title, hint, bottom border
+        let full_layout = structural + self.lines.len() + 2;
+        let keep_separators = full_layout <= height;
+        let body_visible = self.lines.len().min(height.saturating_sub(structural));
+
+        if keep_separators {
+            lines.push(box_line("", inner_width, Style::default(), border_style));
+        }
+
+        for line in self.lines.iter().take(body_visible) {
             lines.push(box_line_raw(
                 &render_body_line(line, self.theme),
                 inner_width,
@@ -85,7 +96,9 @@ impl ConfirmDialogState {
             ));
         }
 
-        lines.push(box_line("", inner_width, Style::default(), border_style));
+        if keep_separators {
+            lines.push(box_line("", inner_width, Style::default(), border_style));
+        }
         lines.push(paint(
             &format!("└{}┘", "─".repeat(inner_width)),
             border_style,
@@ -217,7 +230,7 @@ mod tests {
 
     fn visible_lines(state: &ConfirmDialogState, width: usize) -> Vec<String> {
         state
-            .render_lines(width)
+            .render_lines(width, 40)
             .iter()
             .map(|line| crate::primitive::strip_ansi(line))
             .collect()
@@ -237,7 +250,7 @@ mod tests {
 
     #[test]
     fn renders_colored_action_hint_and_body_accents() {
-        let rendered = state().render_lines(80).join("\n");
+        let rendered = state().render_lines(80, 40).join("\n");
         let theme = TuiTheme::default();
 
         assert!(rendered.contains(&crate::primitive::bg_to_ansi(theme.selection_bg)));

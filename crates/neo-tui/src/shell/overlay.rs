@@ -84,11 +84,12 @@ impl Overlay {
     pub(super) fn render_standalone_lines(
         &self,
         width: usize,
+        height: usize,
         theme: &TuiTheme,
     ) -> Option<Vec<String>> {
         self.kind
             .session_picker_lines(width, theme)
-            .or_else(|| self.kind.rich_dialog_lines(width))
+            .or_else(|| self.kind.rich_dialog_lines(width, height))
     }
 
     #[must_use]
@@ -105,7 +106,7 @@ impl Overlay {
     pub(super) fn render_lines(&self, width: usize, theme: &TuiTheme) -> Vec<String> {
         self.kind
             .picker_lines(width, theme)
-            .or_else(|| self.kind.rich_dialog_lines(width))
+            .or_else(|| self.kind.rich_dialog_lines(width, usize::MAX))
             .or_else(|| self.kind.message_lines())
             .unwrap_or_default()
     }
@@ -187,7 +188,7 @@ impl OverlayKind {
     }
 
     #[must_use]
-    fn rich_dialog_lines(&self, width: usize) -> Option<Vec<String>> {
+    fn rich_dialog_lines(&self, width: usize, height: usize) -> Option<Vec<String>> {
         match self {
             Self::ModelSelector(state) => Some(state.render_lines(width)),
             Self::TabbedModelSelector(state) => Some(state.render_lines(width)),
@@ -195,18 +196,18 @@ impl OverlayKind {
             Self::McpManager(state) => Some(state.render_lines(width)),
             Self::WorkspaceManager(state) => Some(state.render_lines(width)),
             Self::CustomEndpointWizard(state) => Some(state.render_lines(width)),
-            Self::HelpPanel(state) => Some(state.render_lines(width)),
-            _ => self.input_dialog_lines(width),
+            Self::HelpPanel(state) => Some(state.render_lines(width, height)),
+            _ => self.input_dialog_lines(width, height),
         }
     }
 
     #[must_use]
-    fn input_dialog_lines(&self, width: usize) -> Option<Vec<String>> {
+    fn input_dialog_lines(&self, width: usize, height: usize) -> Option<Vec<String>> {
         match self {
-            Self::ChoicePicker(state) => Some(state.render_lines(width)),
+            Self::ChoicePicker(state) => Some(state.render_lines(width, height)),
             Self::WorkflowPicker(state) => Some(state.render_lines(width)),
             Self::ApiKeyInput(state) => Some(state.render_lines(width)),
-            Self::ConfirmDialog(state) => Some(state.render_lines(width)),
+            Self::ConfirmDialog(state) => Some(state.render_lines(width, height)),
             Self::TextInput(state) => Some(state.render_lines(width)),
             Self::CustomRegistryImport(state) => Some(state.render_lines(width)),
             Self::McpAddForm(state) => Some(state.render_lines(width)),

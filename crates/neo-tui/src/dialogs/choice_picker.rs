@@ -113,7 +113,7 @@ impl ChoicePickerState {
     }
 
     #[must_use]
-    pub fn render_lines(&self, width: usize) -> Vec<String> {
+    pub fn render_lines(&self, width: usize, height: usize) -> Vec<String> {
         let inner_w = width.saturating_sub(2);
         let mut lines = Vec::new();
 
@@ -127,9 +127,20 @@ impl ChoicePickerState {
             "─".repeat(remaining),
         ));
 
-        // Items (paginated)
-        let end = (self.scroll_offset + self.page_size).min(self.items.len());
-        for i in self.scroll_offset..end {
+        // Items: a window of at most `page` rows that always contains the
+        // selected item. The title, the hint and the bottom border take three
+        // rows, so the window shrinks with the terminal instead of letting the
+        // frame slice the dialog from the top.
+        let page = height.saturating_sub(3).max(1).min(self.page_size.max(1));
+        let max_start = self.items.len().saturating_sub(page);
+        let mut start = self.scroll_offset.min(max_start);
+        if self.selected < start {
+            start = self.selected;
+        } else if self.selected >= start + page {
+            start = self.selected.saturating_sub(page - 1).min(max_start);
+        }
+        let end = (start + page).min(self.items.len());
+        for i in start..end {
             let item = &self.items[i];
             let is_selected = i == self.selected;
             let marker = if is_selected { "▸" } else { " " };
@@ -374,7 +385,7 @@ mod tests {
             current_id: None,
             theme: theme(),
         });
-        let lines = state.render_lines(40);
+        let lines = state.render_lines(40, 24);
         let combined: String = lines.join("\n");
         assert!(combined.contains("Choose"));
         assert!(combined.contains("Option A"));
@@ -395,7 +406,7 @@ mod tests {
             theme: theme(),
         });
 
-        for line in state.render_lines(width) {
+        for line in state.render_lines(width, 24) {
             assert!(
                 visible_width(&line) <= width,
                 "rendered line width {} exceeds terminal width {width}",
