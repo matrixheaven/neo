@@ -1,108 +1,17 @@
 use std::collections::BTreeMap;
 use std::fmt::Write as _;
-use std::io::{Read, Write};
-use std::net::{TcpListener, TcpStream};
-use std::sync::{Arc, Mutex};
-use std::thread;
 use std::time::Duration;
 
 use futures::StreamExt;
 use neo_ai::{
-    AiStreamEvent, ApiKind, CacheRetention, ChatMessage, ChatRequest, ContentPart, ImageData,
-    MessagePhase, ModelCapabilities, ModelClient, ModelSpec, ProviderId, ReasoningEffort,
-    ReasoningSelection, RequestMetadata, RequestOptions, StopReason, ThinkingKind, ToolSpec,
-    providers::openai::compatible::OpenAiCompatibleClient,
+    AiError, AiStreamEvent, ApiKind, CacheRetention, ChatMessage, ChatRequest, ContentPart,
+    ImageData, MessagePhase, ModelCapabilities, ModelClient, ModelSpec, ProviderId,
+    ReasoningEffort, ReasoningSelection, RequestMetadata, RequestOptions, StopReason, ThinkingKind,
+    ToolSpec, providers::openai::compatible::OpenAiCompatibleClient,
 };
 use serde_json::{Value, json};
 
-#[derive(Debug, Clone)]
-struct RecordedRequest {
-    method: String,
-    path: String,
-    headers: BTreeMap<String, String>,
-    body: Value,
-}
-
-struct MockServer {
-    url: String,
-    requests: Arc<Mutex<Vec<RecordedRequest>>>,
-}
-
-impl MockServer {
-    fn start(responses: Vec<String>) -> Self {
-        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
-        let url = format!("http://{}", listener.local_addr().unwrap());
-        let requests = Arc::new(Mutex::new(Vec::new()));
-        let captured_requests = Arc::clone(&requests);
-
-        thread::spawn(move || {
-            for response in responses {
-                let (mut socket, _) = listener.accept().unwrap();
-                let request = read_http_request(&mut socket);
-                captured_requests.lock().unwrap().push(request);
-                socket.write_all(response.as_bytes()).unwrap();
-            }
-        });
-
-        Self { url, requests }
-    }
-
-    fn requests(&self) -> Vec<RecordedRequest> {
-        self.requests.lock().unwrap().clone()
-    }
-}
-
-fn read_http_request(socket: &mut TcpStream) -> RecordedRequest {
-    let mut buffer = Vec::new();
-    let mut temp = [0_u8; 1024];
-    let header_end;
-
-    loop {
-        let read = socket.read(&mut temp).unwrap();
-        assert_ne!(read, 0, "client closed before sending headers");
-        buffer.extend_from_slice(&temp[..read]);
-        if let Some(index) = find_header_end(&buffer) {
-            header_end = index;
-            break;
-        }
-    }
-
-    let headers_raw = String::from_utf8(buffer[..header_end].to_vec()).unwrap();
-    let mut lines = headers_raw.split("\r\n");
-    let request_line = lines.next().unwrap();
-    let mut request_parts = request_line.split_whitespace();
-    let method = request_parts.next().unwrap().to_owned();
-    let path = request_parts.next().unwrap().to_owned();
-    let headers = lines
-        .filter_map(|line| line.split_once(':'))
-        .map(|(key, value)| (key.to_ascii_lowercase(), value.trim().to_owned()))
-        .collect::<BTreeMap<_, _>>();
-    let content_length = headers
-        .get("content-length")
-        .and_then(|value| value.parse::<usize>().ok())
-        .unwrap_or(0);
-    let body_start = header_end + 4;
-    while buffer.len() < body_start + content_length {
-        let read = socket.read(&mut temp).unwrap();
-        if read == 0 {
-            break;
-        }
-        buffer.extend_from_slice(&temp[..read]);
-    }
-    let body_bytes = &buffer[body_start..body_start + content_length];
-    let body = serde_json::from_slice(body_bytes).unwrap();
-
-    RecordedRequest {
-        method,
-        path,
-        headers,
-        body,
-    }
-}
-
-fn find_header_end(buffer: &[u8]) -> Option<usize> {
-    buffer.windows(4).position(|window| window == b"\r\n\r\n")
-}
+use super::http_server::{MockServer, RecordedRequest, status_response, truncated_sse_response};
 
 fn sse_response(events: &[Value]) -> String {
     let mut body = String::new();
@@ -115,10 +24,6 @@ fn sse_response(events: &[Value]) -> String {
         body.len(),
         body
     )
-}
-
-fn status_response(status: u16) -> String {
-    format!("HTTP/1.1 {status} Test\r\ncontent-length: 0\r\nconnection: close\r\n\r\n")
 }
 
 fn status_response_with_body(status: u16, body: &str) -> String {
@@ -985,4 +890,139 @@ async fn openai_compatible_ignores_empty_tool_argument_deltas() {
         id: "call-1".to_owned(),
         raw_arguments: r#"{"path":"Cargo.toml"}"#.to_owned(),
     }));
+}
+
+#[tokio::test]
+async fn openai_compatible_client_finishes_tool_call_on_tool_calls_finish_reason_without_done() {
+    let body = [
+        "data: {\"id\":\"chatcmpl-tool\",\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,\"id\":\"call-1\",\"function\":{\"name\":\"read_file\",\"arguments\":\"{\\\"path\\\":\"}}]}}]}\n\n",
+        "data: {\"id\":\"chatcmpl-tool\",\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,\"function\":{\"arguments\":\"\\\"Cargo.toml\\\"}\"}}]}}]}\n\n",
+        "data: {\"id\":\"chatcmpl-tool\",\"choices\":[{\"delta\":{},\"finish_reason\":\"tool_calls\"}],\"usage\":{\"prompt_tokens\":9,\"completion_tokens\":4}}\n\n",
+    ]
+    .concat();
+    let response = format!(
+        "HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{}",
+        body.len(),
+        body
+    );
+    let server = MockServer::start(vec![response]);
+    let client = OpenAiCompatibleClient::new(server.url.clone(), "test-key");
+
+    let events = client
+        .stream_chat(super::http_server::request(ApiKind::OpenAi))
+        .collect::<Vec<_>>()
+        .await
+        .into_iter()
+        .collect::<Result<Vec<_>, _>>()
+        .unwrap();
+
+    assert_eq!(
+        events,
+        vec![
+            AiStreamEvent::MessageStart {
+                id: "chatcmpl-tool".to_owned(),
+                phase: MessagePhase::Unknown,
+            },
+            AiStreamEvent::ToolCallStart {
+                id: "call-1".to_owned(),
+                name: "read_file".to_owned(),
+            },
+            AiStreamEvent::ToolCallArgsDelta {
+                id: "call-1".to_owned(),
+                json_fragment: "{\"path\":".to_owned(),
+            },
+            AiStreamEvent::ToolCallArgsDelta {
+                id: "call-1".to_owned(),
+                json_fragment: "\"Cargo.toml\"}".to_owned(),
+            },
+            AiStreamEvent::ToolCallEnd {
+                id: "call-1".to_owned(),
+                raw_arguments: r#"{"path":"Cargo.toml"}"#.to_owned(),
+            },
+            AiStreamEvent::MessageEnd {
+                stop_reason: StopReason::ToolUse,
+                usage: Some(neo_ai::TokenUsage {
+                    input_tokens: 9,
+                    output_tokens: 4,
+                    input_cache_read_tokens: 0,
+                    input_cache_write_tokens: 0,
+                }),
+                phase: MessagePhase::Unknown,
+            },
+        ]
+    );
+}
+
+#[tokio::test]
+async fn openai_compatible_stream_rate_limit_error_is_retryable() {
+    let server = MockServer::start(vec![sse_response(&[json!({
+        "error": { "code": "rate_limit_exceeded", "message": "slow down" }
+    })])]);
+    let client = OpenAiCompatibleClient::new(server.url.clone(), "test-key");
+
+    let error = client
+        .stream_chat(super::http_server::request(ApiKind::OpenAi))
+        .collect::<Vec<_>>()
+        .await
+        .into_iter()
+        .collect::<Result<Vec<_>, _>>()
+        .unwrap_err();
+
+    assert!(matches!(
+        error,
+        AiError::RateLimit {
+            retry_after: None,
+            message
+        } if message == "slow down"
+    ));
+}
+
+#[tokio::test]
+async fn openai_compatible_body_error_respects_terminal_state() {
+    let terminal = concat!(
+        "data: {\"id\":\"chatcmpl-terminal\",\"choices\":[{\"delta\":{\"content\":\"done\"},",
+        "\"finish_reason\":\"stop\"}]}\n\n"
+    );
+    let incomplete = concat!(
+        "data: {\"id\":\"chatcmpl-incomplete\",\"choices\":[{\"delta\":{",
+        "\"content\":\"partial\"}}]}\n\n"
+    );
+    let server = MockServer::start(vec![
+        truncated_sse_response(terminal),
+        truncated_sse_response(incomplete),
+    ]);
+    let client = OpenAiCompatibleClient::new(server.url.clone(), "test-key");
+
+    let completed = client
+        .stream_chat(super::http_server::request(ApiKind::OpenAi))
+        .collect::<Vec<_>>()
+        .await
+        .into_iter()
+        .collect::<Result<Vec<_>, _>>()
+        .expect("terminal marker must survive the body error");
+    assert!(matches!(
+        completed.last(),
+        Some(AiStreamEvent::MessageEnd { .. })
+    ));
+
+    let incomplete_events = client
+        .stream_chat(super::http_server::request(ApiKind::OpenAi))
+        .collect::<Vec<_>>()
+        .await;
+    assert_eq!(
+        incomplete_events
+            .iter()
+            .filter(|event| event.is_err())
+            .count(),
+        1,
+        "incomplete stream must emit exactly one error: {incomplete_events:?}"
+    );
+    let error = incomplete_events
+        .into_iter()
+        .find_map(Result::err)
+        .expect("incomplete body must remain an error");
+    assert!(matches!(
+        error,
+        AiError::Transport { message } if !message.starts_with("transport error:")
+    ));
 }
