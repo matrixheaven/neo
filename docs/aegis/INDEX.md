@@ -404,3 +404,5 @@ Entries are workspace records, not authoritative runtime decisions.
 | 2026-08-04 | artifact | docs/aegis/work/2026-08-04-fullscreen-transcript-document/gate-input-pack.json | 2026-08-04-fullscreen-transcript-document gate input pack |
 | 2026-08-04 | work | docs/aegis/work/2026-08-04-fullscreen-transcript-document/proof-bundle.md | 2026-08-04-fullscreen-transcript-document proof bundle |
 | 2026-08-04 | artifact | docs/aegis/work/2026-08-04-fullscreen-transcript-document/evidence-bundle-draft-workspace-structure-boundary.json | 2026-08-04-fullscreen-transcript-document evidence workspace-structure-boundary |
+| 2026-08-06 | plan | docs/aegis/plans/2026-08-06-fullscreen-transcript-follow-up-repair.md | 全屏转录文档后续修复实施计划 |
+| 2026-08-06 | handoff | docs/aegis/handoffs/2026-08-06-fullscreen-transcript-follow-up-repair.md | 全屏转录文档后续修复交接 |
