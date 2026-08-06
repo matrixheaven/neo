@@ -2,6 +2,7 @@ use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
 use crate::input::MouseEvent;
+use crate::primitive::{Style, pad_to_width, paint, truncate_to_width};
 use crate::screen_output::{CursorPos, TerminalFrame};
 use crate::shell::{NeoChromeState, OverlayKind, TodoSelection};
 use crate::transcript::chrome_render::extract_cursor;
@@ -19,6 +20,7 @@ pub struct NeoTui {
     /// Plain text a right-click asked to copy (by region), drained by the
     /// controller after the mouse event is routed.
     pending_copy: Option<String>,
+    clipboard_notice_until: Option<Instant>,
     /// Press anchor of an in-progress prompt/todo mouse gesture.
     widget_gesture: Option<WidgetGesture>,
 }
@@ -70,6 +72,7 @@ struct WidgetGesture {
 }
 
 const ANIMATION_INTERVAL: Duration = Duration::from_millis(100);
+const CLIPBOARD_NOTICE_DURATION: Duration = Duration::from_millis(1_500);
 
 impl NeoTui {
     #[must_use]
@@ -79,6 +82,7 @@ impl NeoTui {
             transcript,
             last_layout: None,
             pending_copy: None,
+            clipboard_notice_until: None,
             widget_gesture: None,
         }
     }
@@ -107,6 +111,7 @@ impl NeoTui {
             transcript,
             last_layout: None,
             pending_copy: None,
+            clipboard_notice_until: None,
             widget_gesture: None,
         }
     }
@@ -146,8 +151,9 @@ impl NeoTui {
             return (lines, None);
         }
 
-        let chrome_render =
+        let mut chrome_render =
             fit_chrome_to_height(render_chrome(&mut self.chrome, width, height), height);
+        self.apply_clipboard_notice(&mut chrome_render, width, Instant::now());
         let chrome_height = chrome_render.lines.len();
         self.transcript.set_theme(self.chrome.theme());
         self.transcript
@@ -207,8 +213,9 @@ impl NeoTui {
         // locked-view activity notice in the very frame that renders it.
         self.transcript.ensure_layout_current();
 
-        let chrome_render =
+        let mut chrome_render =
             fit_chrome_to_height(render_chrome(&mut self.chrome, width, height), height);
+        self.apply_clipboard_notice(&mut chrome_render, width, now);
         let chrome_height = chrome_render.lines.len();
         let mut lines = self
             .transcript
@@ -222,11 +229,15 @@ impl NeoTui {
             row_kinds,
         });
 
-        let next_animation_deadline = (self.chrome.working_label().is_some()
+        let animation_deadline = (self.chrome.working_label().is_some()
             || self.transcript.has_visible_animation()
             || self.transcript.has_live_entries()
             || self.transcript.selection_requests_animation())
         .then(|| now.checked_add(ANIMATION_INTERVAL).unwrap_or(now));
+        let next_animation_deadline = match (animation_deadline, self.clipboard_notice_until) {
+            (Some(animation), Some(clipboard)) => Some(animation.min(clipboard)),
+            (animation, clipboard) => animation.or(clipboard),
+        };
 
         TerminalFrame::with_animation_deadline(lines, cursor, next_animation_deadline)
     }
@@ -234,6 +245,48 @@ impl NeoTui {
     pub fn advance_animation_at(&mut self, _now: Instant) {
         self.chrome.advance_activity_frame();
         self.transcript.advance_animation_at_ms(current_time_ms());
+    }
+
+    pub fn show_clipboard_copied_at(&mut self, now: Instant) {
+        self.clipboard_notice_until = now.checked_add(CLIPBOARD_NOTICE_DURATION);
+    }
+
+    fn apply_clipboard_notice(
+        &mut self,
+        chrome_render: &mut ChromeRender,
+        width: usize,
+        now: Instant,
+    ) {
+        if self
+            .clipboard_notice_until
+            .is_some_and(|deadline| deadline <= now)
+        {
+            self.clipboard_notice_until = None;
+        }
+        let content_width = frame_content_width(width);
+        let notice = if self.clipboard_notice_until.is_some() {
+            Some("copied")
+        } else if self.has_any_selection() {
+            Some(if content_width >= 48 {
+                "selected · right-click or ctrl+c to copy"
+            } else if content_width >= 24 {
+                "selected · ctrl+c to copy"
+            } else {
+                "ctrl+c to copy"
+            })
+        } else {
+            None
+        };
+        if let (Some(notice), Some(footer)) = (notice, chrome_render.lines.last_mut()) {
+            let label = truncate_to_width(&format!(" {notice} "), content_width);
+            *footer = paint(
+                &pad_to_width(&label, content_width),
+                Style::default()
+                    .fg(self.chrome.theme().selected_fg)
+                    .bg(self.chrome.theme().selected_bg)
+                    .bold(),
+            );
+        }
     }
 
     /// Route one screen-space mouse event by region: the transcript body

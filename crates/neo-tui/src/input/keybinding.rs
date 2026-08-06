@@ -34,7 +34,6 @@ pub enum KeybindingAction {
     /// Dequeue the next queued follow-up back into the composer for editing.
     /// Default: Alt+Up.
     EditNextQueuedMessage,
-    TranscriptSelectionStart,
     TranscriptSelectionClear,
     TranscriptSelectionExtendUp,
     TranscriptSelectionExtendDown,
@@ -123,10 +122,6 @@ const KEYBINDING_ACTION_IDS: &[(KeybindingAction, &str)] = &[
     (
         KeybindingAction::EditNextQueuedMessage,
         "tui.input.editNextQueuedMessage",
-    ),
-    (
-        KeybindingAction::TranscriptSelectionStart,
-        "tui.transcript.selection.start",
     ),
     (
         KeybindingAction::TranscriptSelectionClear,
@@ -452,11 +447,6 @@ fn transcript_keybinding_definitions() -> Vec<KeybindingDefinition> {
     use KeybindingAction as Action;
 
     vec![
-        definition(
-            Action::TranscriptSelectionStart,
-            &["ctrl+space"],
-            "Toggle transcript selection",
-        ),
         definition(
             Action::TranscriptSelectionClear,
             &["ctrl+shift+space"],

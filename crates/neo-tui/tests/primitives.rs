@@ -41,10 +41,6 @@ fn keybinding_manager_matches_defaults_overrides_and_conflicts() {
         KeybindingAction::SessionFork
     ));
     assert!(manager.matches(
-        &KeyId::new("ctrl+space").expect("valid key"),
-        KeybindingAction::TranscriptSelectionStart
-    ));
-    assert!(manager.matches(
         &KeyId::new("shift+up").expect("valid key"),
         KeybindingAction::TranscriptSelectionExtendUp
     ));

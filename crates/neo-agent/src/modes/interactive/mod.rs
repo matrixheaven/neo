@@ -2497,7 +2497,7 @@ impl InteractiveController {
             return false;
         }
         match pending.await {
-            Ok(Ok(())) => {}
+            Ok(Ok(())) => self.tui.show_clipboard_copied_at(Instant::now()),
             Ok(Err(error)) => {
                 self.push_status(format!("Clipboard copy failed: {error}"));
             }

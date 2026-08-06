@@ -276,7 +276,6 @@ mod tests {
             KeybindingAction::InputSubmit,
             KeybindingAction::InputTab,
             KeybindingAction::InputCopy,
-            KeybindingAction::TranscriptSelectionStart,
             KeybindingAction::TranscriptSelectionClear,
             KeybindingAction::TranscriptSelectionExtendUp,
             KeybindingAction::TranscriptSelectionExtendDown,

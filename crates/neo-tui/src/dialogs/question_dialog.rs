@@ -829,7 +829,6 @@ fn question_key_for_action(action: KeybindingAction) -> Option<KeyEvent> {
         | KeybindingAction::EditorPageDown
         | KeybindingAction::EditorYank
         | KeybindingAction::EditorUndo
-        | KeybindingAction::TranscriptSelectionStart
         | KeybindingAction::TranscriptSelectionClear
         | KeybindingAction::TranscriptSelectionExtendUp
         | KeybindingAction::TranscriptSelectionExtendDown

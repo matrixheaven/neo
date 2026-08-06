@@ -1565,18 +1565,6 @@ impl InteractiveController {
 
     pub(super) fn handle_transcript_keybinding_action(&mut self, action: KeybindingAction) -> bool {
         match action {
-            KeybindingAction::TranscriptSelectionStart => {
-                // Most terminals send the same byte for ctrl+shift+space as
-                // for ctrl+space, so the advertised clear key arrives here on
-                // non-kitty terminals. Toggle: any active selection (mouse,
-                // keyboard, prompt, Todo) clears, otherwise the visible entry
-                // is selected.
-                if self.tui.has_any_selection() {
-                    self.tui.clear_all_selections();
-                } else {
-                    self.transcript_mut().select_visible_transcript_entry();
-                }
-            }
             KeybindingAction::TranscriptSelectionClear => {
                 self.transcript_mut().clear_transcript_selection();
             }

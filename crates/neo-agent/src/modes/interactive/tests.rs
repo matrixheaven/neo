@@ -2894,6 +2894,14 @@ async fn event_loop_copy_action_writes_prompt_to_injected_clipboard() {
         controller.chrome().copy_buffer(),
         Some("copy to system clipboard")
     );
+    let frame = controller.tui.render_terminal_frame(80, 24);
+    assert!(
+        frame
+            .lines
+            .last()
+            .is_some_and(|line| neo_tui::primitive::strip_ansi(line).contains("copied")),
+        "successful system clipboard write shows footer confirmation"
+    );
 }
 
 #[tokio::test]
@@ -2923,11 +2931,8 @@ async fn event_loop_ctrl_c_prefers_selected_transcript_region() {
     controller.type_text("prompt text stays out of clipboard");
 
     controller
-        .handle_input_event(InputEvent::Action(
-            KeybindingAction::TranscriptSelectionStart,
-        ))
-        .await
-        .expect("selection starts");
+        .transcript_mut()
+        .select_visible_transcript_entry();
     controller
         .handle_input_event(InputEvent::Action(
             KeybindingAction::TranscriptSelectionExtendUp,

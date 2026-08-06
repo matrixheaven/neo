@@ -10,7 +10,6 @@ pub(super) const EDITING_ACTION_PRIORITY: &[KeybindingAction] = &[
     KeybindingAction::AppClear,
     KeybindingAction::AppExit,
     KeybindingAction::AppSuspend,
-    KeybindingAction::TranscriptSelectionStart,
     KeybindingAction::TranscriptSelectionClear,
     KeybindingAction::TranscriptSelectionExtendUp,
     KeybindingAction::TranscriptSelectionExtendDown,

@@ -519,19 +519,35 @@ fn transcript_selection_does_not_reduce_visible_body_height() {
 
     // Selecting transcript text must keep the exact same visible body range.
     tui.transcript_mut().select_visible_transcript_entry();
-    let selected = tui.render_terminal_frame_at(80, 12, Instant::now());
+    let selected_at = Instant::now();
+    let selected = tui.render_terminal_frame_at(80, 12, selected_at);
     assert_eq!(
         last_visible_line_row(&updated),
         last_visible_line_row(&selected),
         "selection must not displace transcript rows"
     );
+    let selected_footer = strip_ansi(selected.lines.last().expect("footer"));
     assert!(
-        selected
-            .lines
-            .iter()
-            .map(|line| strip_ansi(line))
-            .all(|line| !line.contains("selected ·") && !line.contains("new activity")),
-        "selection and activity help must not consume frame rows"
+        selected_footer.contains("selected · right-click or ctrl+c to copy"),
+        "selection help replaces the existing footer: {selected_footer:?}"
+    );
+
+    tui.show_clipboard_copied_at(selected_at);
+    let copied = tui.render_terminal_frame_at(80, 12, selected_at);
+    assert!(
+        strip_ansi(copied.lines.last().expect("footer")).contains("copied"),
+        "confirmed copy replaces the existing footer"
+    );
+    assert_eq!(
+        last_visible_line_row(&updated),
+        last_visible_line_row(&copied),
+        "copy feedback must not displace transcript rows"
+    );
+    let restored =
+        tui.render_terminal_frame_at(80, 12, selected_at + std::time::Duration::from_secs(2));
+    assert!(
+        strip_ansi(restored.lines.last().expect("footer")).contains("selected ·"),
+        "copy feedback expires back to selection help"
     );
 }
 

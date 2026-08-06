@@ -505,7 +505,6 @@ const TUI_EDITING_ACTIONS: &[KeybindingAction] = &[
     KeybindingAction::AppExit,
     KeybindingAction::AppSuspend,
     KeybindingAction::InputCopy,
-    KeybindingAction::TranscriptSelectionStart,
     KeybindingAction::TranscriptSelectionClear,
     KeybindingAction::TranscriptSelectionExtendUp,
     KeybindingAction::TranscriptSelectionExtendDown,
