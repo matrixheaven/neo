@@ -1,8 +1,9 @@
-use super::compaction_rehydration::instruction_fixture;
-use super::compaction_rehydration::reconcile_defer_epoch;
+use super::context::instruction_fixture;
+use super::context::reconcile_defer_epoch;
 use super::fake_harness::DelayedHarness;
 use super::fake_harness::DelayedStep;
 use super::fake_harness::collect_turn_events;
+use super::fake_harness::text_turn_events;
 use futures::StreamExt;
 use neo_agent_core::{
     AgentConfig, AgentContext, AgentEvent, AgentMessage, AgentRuntime, AgentToolCall,
@@ -132,23 +133,6 @@ async fn runtime_can_compact_again_after_context_grows_past_threshold() {
         Some(AgentMessage::System { .. })
     ));
     assert_eq!(context.compaction_summary(), compactions.last());
-}
-
-pub(crate) fn text_turn_events(id: &str, text: &str) -> Vec<AiStreamEvent> {
-    vec![
-        AiStreamEvent::MessageStart {
-            phase: MessagePhase::Unknown,
-            id: id.to_owned(),
-        },
-        AiStreamEvent::TextDelta {
-            text: text.to_owned(),
-        },
-        AiStreamEvent::MessageEnd {
-            phase: MessagePhase::Unknown,
-            stop_reason: neo_ai::StopReason::EndTurn,
-            usage: None,
-        },
-    ]
 }
 
 fn compaction_lifecycle(events: &[AgentEvent]) -> Vec<String> {
@@ -816,19 +800,6 @@ impl Tool for LargeTool {
     fn execute<'a>(&'a self, _ctx: &'a ToolContext, _input: serde_json::Value) -> ToolFuture<'a> {
         Box::pin(async { Ok(ToolResult::ok("tool output ".repeat(20_000))) })
     }
-}
-
-pub(crate) fn end_turn_events(text: &str) -> Vec<AiStreamEvent> {
-    vec![
-        AiStreamEvent::TextDelta {
-            text: text.to_owned(),
-        },
-        AiStreamEvent::MessageEnd {
-            phase: MessagePhase::Unknown,
-            stop_reason: neo_ai::StopReason::EndTurn,
-            usage: None,
-        },
-    ]
 }
 
 #[tokio::test]

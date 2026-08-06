@@ -1,6 +1,6 @@
 use super::fake_harness::DelayedHarness;
 use super::fake_harness::DelayedStep;
-use super::tool_dispatch::assert_runtime_rejects_unsupported_capability;
+use super::fake_harness::assert_runtime_rejects_unsupported_capability;
 use futures::StreamExt;
 use neo_agent_core::{
     AgentConfig, AgentContext, AgentEvent, AgentMessage, AgentRuntime, Content, QueueMode,

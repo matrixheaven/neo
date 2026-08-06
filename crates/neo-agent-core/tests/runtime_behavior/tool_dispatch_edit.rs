@@ -1,11 +1,9 @@
-use super::compaction::end_turn_events;
 use super::fake_harness::EchoTool;
 use super::fake_harness::final_done_turn;
 use super::fake_harness::tool_call_turn;
 use super::permissions::permit_once;
 use super::permissions_scope::permit_for_session;
 use super::plan_and_goal::set_config_permission_mode;
-use super::tool_dispatch::edit_arguments;
 use futures::StreamExt;
 use neo_agent_core::{
     AgentConfig, AgentContext, AgentEvent, AgentMessage, AgentRuntime, ApprovalAction,
@@ -19,11 +17,9 @@ use neo_agent_core::{
 use neo_ai::{AiStreamEvent, MessagePhase};
 use serde_json::json;
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
-use tokio::time::timeout;
 
-struct StoreWorkflowDispatchHandleTool {
-    slot: Arc<Mutex<Option<WorkflowDispatchHandle>>>,
+pub(crate) struct StoreWorkflowDispatchHandleTool {
+    pub(crate) slot: Arc<Mutex<Option<WorkflowDispatchHandle>>>,
 }
 
 impl Tool for StoreWorkflowDispatchHandleTool {
@@ -54,8 +50,8 @@ impl Tool for StoreWorkflowDispatchHandleTool {
     }
 }
 
-struct InvokeStoredWorkflowDispatchHandleTool {
-    slot: Arc<Mutex<Option<WorkflowDispatchHandle>>>,
+pub(crate) struct InvokeStoredWorkflowDispatchHandleTool {
+    pub(crate) slot: Arc<Mutex<Option<WorkflowDispatchHandle>>>,
 }
 
 impl Tool for InvokeStoredWorkflowDispatchHandleTool {
@@ -98,7 +94,7 @@ impl Tool for InvokeStoredWorkflowDispatchHandleTool {
     }
 }
 
-struct NestedWorkflowEchoTool;
+pub(crate) struct NestedWorkflowEchoTool;
 
 impl Tool for NestedWorkflowEchoTool {
     fn name(&self) -> &'static str {
@@ -214,6 +210,10 @@ async fn runtime_invalid_tool_arguments_return_model_visible_error() {
         ),
         "second request should end with an error ToolResult"
     );
+}
+
+pub(crate) fn edit_arguments(path: &str, old: &str, new: &str) -> serde_json::Value {
+    json!({ "path": path, "old": old, "new": new })
 }
 
 #[tokio::test]
@@ -806,88 +806,4 @@ async fn runtime_write_session_scope_is_bound_to_one_prepared_target() {
         std::fs::read_to_string(workspace.path().join("c.txt")).expect("c"),
         "c3\n"
     );
-}
-
-#[tokio::test]
-async fn stored_workflow_handle_routes_nested_events_only_to_the_active_turn() {
-    let workspace = tempfile::tempdir().expect("workspace");
-    let harness = FakeHarness::from_turns([
-        tool_call_turn(&[("store_dispatch", "StoreWorkflowDispatchHandle", json!({}))]),
-        end_turn_events("stored"),
-        tool_call_turn(&[(
-            "invoke_dispatch",
-            "InvokeStoredWorkflowDispatchHandle",
-            json!({}),
-        )]),
-        end_turn_events("invoked"),
-    ]);
-    let slot = Arc::new(Mutex::new(None));
-    let mut registry = ToolRegistry::new();
-    registry.register(StoreWorkflowDispatchHandleTool {
-        slot: Arc::clone(&slot),
-    });
-    registry.register(InvokeStoredWorkflowDispatchHandleTool {
-        slot: Arc::clone(&slot),
-    });
-    registry.register(NestedWorkflowEchoTool);
-    let config = AgentConfig::for_model(harness.model())
-        .with_workspace_root(workspace.path())
-        .expect("workspace root")
-        .with_permission_mode(PermissionMode::Yolo);
-    let runtime = AgentRuntime::with_tools(config, harness.client(), registry);
-    let mut context = AgentContext::new();
-
-    let turn_one = timeout(
-        Duration::from_secs(5),
-        runtime
-            .run_turn(&mut context, AgentMessage::user_text("store handle"))
-            .collect::<Vec<_>>(),
-    )
-    .await
-    .expect("turn one stream closes while handle remains stored")
-    .into_iter()
-    .collect::<Result<Vec<_>, _>>()
-    .expect("turn one succeeds");
-    assert!(slot.lock().expect("dispatch slot").is_some());
-    assert!(!turn_one.iter().any(|event| matches!(
-        event,
-        AgentEvent::ToolExecutionStarted { id, .. }
-            | AgentEvent::ToolExecutionFinished { id, .. }
-            if id == "nested_turn_two"
-    )));
-
-    let turn_two = timeout(
-        Duration::from_secs(5),
-        runtime
-            .run_turn(&mut context, AgentMessage::user_text("invoke handle"))
-            .collect::<Vec<_>>(),
-    )
-    .await
-    .expect("turn two stream closes after nested completion")
-    .into_iter()
-    .collect::<Result<Vec<_>, _>>()
-    .expect("turn two succeeds");
-    let active_turn = turn_two
-        .iter()
-        .find_map(|event| match event {
-            AgentEvent::ToolExecutionStarted { turn, id, .. } if id == "invoke_dispatch" => {
-                Some(*turn)
-            }
-            _ => None,
-        })
-        .expect("turn two outer tool start");
-    assert!(turn_two.iter().any(|event| matches!(
-        event,
-        AgentEvent::ToolExecutionStarted { turn, id, name, .. }
-            if *turn == active_turn
-                && id == "nested_turn_two"
-                && name == "NestedWorkflowEcho"
-    )));
-    assert!(turn_two.iter().any(|event| matches!(
-        event,
-        AgentEvent::ToolExecutionFinished { turn, id, name, .. }
-            if *turn == active_turn
-                && id == "nested_turn_two"
-                && name == "NestedWorkflowEcho"
-    )));
 }

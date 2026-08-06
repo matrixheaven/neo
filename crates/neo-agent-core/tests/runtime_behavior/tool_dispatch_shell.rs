@@ -1,4 +1,4 @@
-use super::compaction::end_turn_events;
+use super::fake_harness::end_turn_events;
 use super::fake_harness::tool_call_turn;
 use futures::StreamExt;
 use neo_agent_core::{

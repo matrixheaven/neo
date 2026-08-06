@@ -1,12 +1,13 @@
-use super::tool_dispatch::assert_runtime_rejects_unsupported_capability;
+use super::fake_harness::assert_runtime_rejects_unsupported_capability;
+use super::fake_harness::model_with_capabilities;
 use futures::StreamExt;
 use neo_agent_core::{
     AgentConfig, AgentContext, AgentEvent, AgentMessage, AgentRuntime, AgentRuntimeError,
     CompactionSettings, Content, StopReason, harness::FakeHarness,
 };
 use neo_ai::{
-    AiError, AiStreamEvent, ApiKind, MessagePhase, ModelCapabilities, ModelSpec, ProviderId,
-    ReasoningCapability, ReasoningEffort, ReasoningSelection, ThinkingKind,
+    AiError, AiStreamEvent, MessagePhase, ModelCapabilities, ReasoningCapability, ReasoningEffort,
+    ReasoningSelection, ThinkingKind,
 };
 
 #[tokio::test]
@@ -486,13 +487,4 @@ async fn runtime_compaction_estimate_ignores_unsent_thinking_content() {
             .any(|event| matches!(event, AgentEvent::CompactionApplied { .. })),
         "thinking content is not sent back to the provider and should not trigger compaction"
     );
-}
-
-pub(crate) fn model_with_capabilities(capabilities: ModelCapabilities) -> ModelSpec {
-    ModelSpec {
-        provider: ProviderId("capability-test".to_owned()),
-        model: "capability-test-model".to_owned(),
-        api: ApiKind::Local,
-        capabilities,
-    }
 }

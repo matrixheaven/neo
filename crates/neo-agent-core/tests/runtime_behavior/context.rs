@@ -1,7 +1,5 @@
-use super::compaction::end_turn_events;
-use super::compaction_rehydration::instruction_fixture;
-use super::compaction_rehydration::reconcile_defer_epoch;
 use super::fake_harness::collect_turn_events;
+use super::fake_harness::end_turn_events;
 use super::fake_harness::final_done_turn;
 use super::fake_harness::run_turn_collect;
 use super::fake_harness::tool_call_turn;
@@ -10,11 +8,16 @@ use neo_agent_core::{
     AgentConfig, AgentContext, AgentEvent, AgentMessage, AgentRuntime, InstructionContextBridge,
     PermissionMode, ToolRegistry, ToolResult,
     harness::FakeHarness,
-    instructions::{InstructionEpochData, InstructionEpochOutcome},
+    instructions::{
+        InstructionEpochData, InstructionEpochOutcome, InstructionFingerprint,
+        InstructionPreflightDecision, InstructionReconcileKind, InstructionReconcileRequest,
+        InstructionRegistry, InstructionRegistryConfig,
+    },
     skills::{SkillStore, SkillStoreHandle},
 };
 use neo_ai::{AiStreamEvent, ChatMessage, ChatRequest, ContentPart, MessagePhase, ToolSpec};
 use serde_json::json;
+use std::path::PathBuf;
 
 #[tokio::test]
 async fn unchanged_session_keeps_cache_prefix_and_new_context_appends() {
@@ -435,6 +438,65 @@ async fn runtime_appends_available_skills_snapshot_only_when_changed() {
     assert!(snapshots[1].contains("- alpha: Updated alpha skill"));
     assert!(snapshots[1].contains("- beta: Beta skill"));
     assert!(!snapshots[1].contains("- zeta:"));
+}
+
+pub(crate) struct InstructionFixture {
+    pub(crate) _temp: tempfile::TempDir,
+    pub(crate) workspace: PathBuf,
+    pub(crate) registry: InstructionRegistry,
+}
+
+pub(crate) fn instruction_fixture(nested: &[(&str, &str)], root_rules: &str) -> InstructionFixture {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let workspace = temp.path().join("workspace");
+    std::fs::create_dir_all(&workspace).expect("workspace dir");
+    std::fs::write(workspace.join("AGENTS.md"), root_rules).expect("root AGENTS.md");
+    for (dir, rules) in nested {
+        let nested_dir = workspace.join(dir);
+        std::fs::create_dir_all(&nested_dir).expect("nested dir");
+        std::fs::write(nested_dir.join("AGENTS.md"), rules).expect("nested AGENTS.md");
+    }
+    let workspace = workspace.canonicalize().expect("canonical workspace");
+    let registry = InstructionRegistry::new(InstructionRegistryConfig {
+        primary_workspace: workspace.clone(),
+        neo_home: None,
+        project_trusted: true,
+    })
+    .expect("registry");
+    InstructionFixture {
+        _temp: temp,
+        workspace,
+        registry,
+    }
+}
+
+pub(crate) async fn reconcile_defer_epoch(
+    fixture: &InstructionFixture,
+    config: &AgentConfig,
+    context: &AgentContext,
+    targets: Vec<PathBuf>,
+) -> (InstructionEpochData, InstructionFingerprint) {
+    let budget = InstructionContextBridge::budget(config, context);
+    let decision = fixture
+        .registry
+        .reconcile(
+            InstructionReconcileRequest {
+                agent_id: "main".to_owned(),
+                kind: InstructionReconcileKind::ToolPreflight,
+                target_directories: targets,
+                budget,
+                deferred_tool_ids: vec!["call-1".to_owned()],
+            },
+            context.instruction_state(),
+        )
+        .await;
+    match decision {
+        InstructionPreflightDecision::Defer { epoch, fingerprint } => (epoch, fingerprint),
+        InstructionPreflightDecision::Proceed { .. } => panic!("expected Defer, got Proceed"),
+        InstructionPreflightDecision::Block { epoch, .. } => {
+            panic!("expected Defer, got Block: {:?}", epoch.failure)
+        }
+    }
 }
 
 #[tokio::test]

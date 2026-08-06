@@ -1,4 +1,3 @@
-use super::compaction::end_turn_events;
 use super::compaction_rehydration::PreflightFixture;
 use super::compaction_rehydration::preflight_config;
 use super::compaction_rehydration::preflight_context;
@@ -6,6 +5,7 @@ use super::compaction_rehydration::preflight_fixture;
 use super::context::event_index;
 use super::context::finished_tool_results;
 use super::context::instruction_epochs;
+use super::fake_harness::end_turn_events;
 use super::fake_harness::run_turn_collect;
 use super::fake_harness::tool_call_turn;
 use super::permissions::permit_once;

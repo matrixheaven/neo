@@ -1,7 +1,9 @@
-use super::compaction::end_turn_events;
 use super::context::event_index;
 use super::context::finished_tool_results;
 use super::context::instruction_epochs;
+use super::context::instruction_fixture;
+use super::context::reconcile_defer_epoch;
+use super::fake_harness::end_turn_events;
 use super::fake_harness::run_turn_collect;
 use super::fake_harness::tool_call_turn;
 use futures::StreamExt;
@@ -10,74 +12,14 @@ use neo_agent_core::{
     CompactionSummary, Content, InstructionContextBridge, PermissionMode, StopReason, ToolRegistry,
     harness::FakeHarness,
     instructions::{
-        InstructionEpochData, InstructionEpochOutcome, InstructionFingerprint,
-        InstructionPreflightDecision, InstructionReconcileKind, InstructionReconcileRequest,
-        InstructionRegistry, InstructionRegistryConfig,
+        InstructionEpochOutcome, InstructionPreflightDecision, InstructionReconcileKind,
+        InstructionReconcileRequest, InstructionRegistry, InstructionRegistryConfig,
     },
 };
 use neo_ai::{AiError, ChatRequest};
 use serde_json::json;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
-
-pub(crate) struct InstructionFixture {
-    pub(crate) _temp: tempfile::TempDir,
-    pub(crate) workspace: PathBuf,
-    pub(crate) registry: InstructionRegistry,
-}
-
-pub(crate) fn instruction_fixture(nested: &[(&str, &str)], root_rules: &str) -> InstructionFixture {
-    let temp = tempfile::tempdir().expect("tempdir");
-    let workspace = temp.path().join("workspace");
-    std::fs::create_dir_all(&workspace).expect("workspace dir");
-    std::fs::write(workspace.join("AGENTS.md"), root_rules).expect("root AGENTS.md");
-    for (dir, rules) in nested {
-        let nested_dir = workspace.join(dir);
-        std::fs::create_dir_all(&nested_dir).expect("nested dir");
-        std::fs::write(nested_dir.join("AGENTS.md"), rules).expect("nested AGENTS.md");
-    }
-    let workspace = workspace.canonicalize().expect("canonical workspace");
-    let registry = InstructionRegistry::new(InstructionRegistryConfig {
-        primary_workspace: workspace.clone(),
-        neo_home: None,
-        project_trusted: true,
-    })
-    .expect("registry");
-    InstructionFixture {
-        _temp: temp,
-        workspace,
-        registry,
-    }
-}
-
-pub(crate) async fn reconcile_defer_epoch(
-    fixture: &InstructionFixture,
-    config: &AgentConfig,
-    context: &AgentContext,
-    targets: Vec<PathBuf>,
-) -> (InstructionEpochData, InstructionFingerprint) {
-    let budget = InstructionContextBridge::budget(config, context);
-    let decision = fixture
-        .registry
-        .reconcile(
-            InstructionReconcileRequest {
-                agent_id: "main".to_owned(),
-                kind: InstructionReconcileKind::ToolPreflight,
-                target_directories: targets,
-                budget,
-                deferred_tool_ids: vec!["call-1".to_owned()],
-            },
-            context.instruction_state(),
-        )
-        .await;
-    match decision {
-        InstructionPreflightDecision::Defer { epoch, fingerprint } => (epoch, fingerprint),
-        InstructionPreflightDecision::Proceed { .. } => panic!("expected Defer, got Proceed"),
-        InstructionPreflightDecision::Block { epoch, .. } => {
-            panic!("expected Defer, got Block: {:?}", epoch.failure)
-        }
-    }
-}
 
 pub(crate) fn chat_request_text(request: &ChatRequest) -> String {
     request

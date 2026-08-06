@@ -1,10 +1,10 @@
-use super::compaction::end_turn_events;
-use super::compaction::text_turn_events;
 use super::context::finished_tool_results;
 use super::fake_harness::EchoTool;
 use super::fake_harness::RecordingEchoTool;
 use super::fake_harness::echo_tool_harness;
+use super::fake_harness::end_turn_events;
 use super::fake_harness::final_done_turn;
+use super::fake_harness::text_turn_events;
 use super::fake_harness::tool_call_turn;
 use super::permissions::echo_tool_approval_request;
 use super::permissions::permit_once;

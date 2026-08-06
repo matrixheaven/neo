@@ -1,7 +1,7 @@
 use futures::StreamExt;
 use neo_agent_core::{
-    AgentConfig, AgentContext, AgentEvent, AgentMessage, AgentRuntime, Tool, ToolContext,
-    ToolFuture, ToolResult, harness::FakeHarness,
+    AgentConfig, AgentContext, AgentEvent, AgentMessage, AgentRuntime, AgentRuntimeError, Tool,
+    ToolContext, ToolFuture, ToolResult, harness::FakeHarness,
 };
 use neo_ai::{
     AiError, AiStreamEvent, ApiKind, ChatRequest, MessagePhase, ModelCapabilities, ModelClient,
@@ -27,6 +27,54 @@ pub(crate) async fn collect_turn_events(
         .into_iter()
         .collect::<Result<Vec<_>, _>>()
         .expect("turn should succeed")
+}
+
+pub(crate) async fn assert_runtime_rejects_unsupported_capability(
+    config: AgentConfig,
+    harness: &FakeHarness,
+    message: AgentMessage,
+    expected_substring: &str,
+    expectation: &str,
+) {
+    let runtime = AgentRuntime::new(config, harness.client());
+    let mut context = AgentContext::new();
+    let error = runtime
+        .run_turn(&mut context, message)
+        .collect::<Vec<_>>()
+        .await
+        .into_iter()
+        .collect::<Result<Vec<_>, _>>()
+        .expect_err(expectation);
+
+    assert!(matches!(
+        error,
+        AgentRuntimeError::Model(AiError::Configuration { message: _ })
+    ));
+    assert!(
+        error.to_string().contains(expected_substring),
+        "expected {expected_substring:?}, got {error}"
+    );
+    assert!(
+        harness.requests().is_empty(),
+        "request should not reach provider"
+    );
+}
+
+pub(crate) fn text_turn_events(id: &str, text: &str) -> Vec<AiStreamEvent> {
+    vec![
+        AiStreamEvent::MessageStart {
+            phase: MessagePhase::Unknown,
+            id: id.to_owned(),
+        },
+        AiStreamEvent::TextDelta {
+            text: text.to_owned(),
+        },
+        AiStreamEvent::MessageEnd {
+            phase: MessagePhase::Unknown,
+            stop_reason: neo_ai::StopReason::EndTurn,
+            usage: None,
+        },
+    ]
 }
 
 pub(crate) fn echo_tool_harness(text: &str) -> FakeHarness {
@@ -149,6 +197,15 @@ pub(crate) struct DelayedHarness {
     pub(crate) client: Arc<DelayedModelClient>,
 }
 
+pub(crate) fn model_with_capabilities(capabilities: ModelCapabilities) -> ModelSpec {
+    ModelSpec {
+        provider: ProviderId("capability-test".to_owned()),
+        model: "capability-test-model".to_owned(),
+        api: ApiKind::Local,
+        capabilities,
+    }
+}
+
 impl DelayedHarness {
     pub(crate) fn new(steps: Vec<DelayedStep>) -> Self {
         Self::from_turns([steps])
@@ -230,6 +287,19 @@ impl ModelClient for DelayedModelClient {
         })
         .boxed()
     }
+}
+
+pub(crate) fn end_turn_events(text: &str) -> Vec<AiStreamEvent> {
+    vec![
+        AiStreamEvent::TextDelta {
+            text: text.to_owned(),
+        },
+        AiStreamEvent::MessageEnd {
+            phase: MessagePhase::Unknown,
+            stop_reason: neo_ai::StopReason::EndTurn,
+            usage: None,
+        },
+    ]
 }
 
 pub(crate) async fn run_turn_collect(
