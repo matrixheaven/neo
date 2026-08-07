@@ -1,57 +1,13 @@
-use std::{
-    collections::BTreeMap,
-    fmt::Write as _,
-    io::{Read, Write},
-    net::{TcpListener, TcpStream},
-    process::{Command, Stdio},
-    sync::{Arc, Mutex},
+use super::http_server::{
+    MockSseServer, RecordedRequest, mock_responses_config, openai_response_sse, sse_response,
 };
-
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
+use std::{
+    io::Write,
+    process::{Command, Stdio},
+};
 use tempfile::TempDir;
-
-#[derive(Debug, Clone)]
-struct RecordedRequest {
-    method: String,
-    path: String,
-    headers: BTreeMap<String, String>,
-    body: Value,
-}
-
-struct MockSseServer {
-    url: String,
-    requests: Arc<Mutex<Vec<RecordedRequest>>>,
-}
-
-impl MockSseServer {
-    fn start(responses: Vec<String>) -> Self {
-        let listener = TcpListener::bind("127.0.0.1:0").expect("bind mock provider");
-        let url = format!("http://{}", listener.local_addr().expect("local addr"));
-        let requests = Arc::new(Mutex::new(Vec::new()));
-        let captured_requests = Arc::clone(&requests);
-
-        std::thread::spawn(move || {
-            for response in responses {
-                let (mut socket, _) = listener.accept().expect("accept provider request");
-                let request = read_http_request(&mut socket);
-                captured_requests
-                    .lock()
-                    .expect("lock requests")
-                    .push(request);
-                socket
-                    .write_all(response.as_bytes())
-                    .expect("write provider response");
-            }
-        });
-
-        Self { url, requests }
-    }
-
-    fn requests(&self) -> Vec<RecordedRequest> {
-        self.requests.lock().expect("lock requests").clone()
-    }
-}
 
 fn neo() -> Command {
     let mut command = Command::new(env!("CARGO_BIN_EXE_neo"));
@@ -119,25 +75,6 @@ fn write_config(_temp: &TempDir, content: &str) {
     let config_dir = isolated_home_path();
     std::fs::create_dir_all(&config_dir).expect("create neo home");
     std::fs::write(config_dir.join("config.toml"), content).expect("write config");
-}
-
-fn mock_responses_config(base_url: &str) -> String {
-    format!(
-        r#"
-default_provider = "mock"
-default_model = "gpt-4.1"
-
-[providers.mock]
-type = "openai_response"
-base_url = "{base_url}"
-api_key_env = "OPENAI_API_KEY"
-
-[models."mock/gpt-4.1"]
-provider = "mock"
-model = "gpt-4.1"
-capabilities = ["streaming", "tools"]
-"#
-    )
 }
 
 fn mock_responses_config_with_context(base_url: &str) -> String {
@@ -260,10 +197,15 @@ fn input_contents(request: &RecordedRequest) -> Vec<&str> {
         .collect()
 }
 
-fn openai_response_sse(id: &str, text: &str) -> String {
+fn openai_reasoning_response_sse(id: &str) -> String {
     sse_response(&[
         json!({ "type": "response.created", "response": { "id": id } }),
-        json!({ "type": "response.output_text.delta", "delta": text }),
+        json!({
+            "type": "response.reasoning_summary_text.added",
+            "item_id": "think-1",
+            "summary": [{"type": "summary_text", "text": "thinking"}]
+        }),
+        json!({ "type": "response.output_text.delta", "delta": "done thinking" }),
         json!({
             "type": "response.completed",
             "response": {
@@ -272,74 +214,6 @@ fn openai_response_sse(id: &str, text: &str) -> String {
             }
         }),
     ])
-}
-
-fn sse_response(events: &[Value]) -> String {
-    let mut body = String::new();
-    for event in events {
-        write!(&mut body, "data: {event}\n\n").expect("write SSE event");
-    }
-    format!(
-        "HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{}",
-        body.len(),
-        body
-    )
-}
-
-fn read_http_request(socket: &mut TcpStream) -> RecordedRequest {
-    let mut buffer = Vec::new();
-    let mut temp = [0_u8; 1024];
-    let header_end;
-
-    loop {
-        let read = socket.read(&mut temp).expect("read request");
-        assert_ne!(read, 0, "client closed before sending headers");
-        buffer.extend_from_slice(&temp[..read]);
-        if let Some(index) = find_header_end(&buffer) {
-            header_end = index;
-            break;
-        }
-    }
-
-    let headers_raw = String::from_utf8(buffer[..header_end].to_vec()).expect("utf8 headers");
-    let mut lines = headers_raw.split("\r\n");
-    let request_line = lines.next().expect("request line");
-    let mut request_parts = request_line.split_whitespace();
-    let method = request_parts.next().expect("method").to_owned();
-    let path = request_parts.next().expect("path").to_owned();
-    let headers = lines
-        .filter_map(|line| line.split_once(':'))
-        .map(|(key, value)| (key.to_ascii_lowercase(), value.trim().to_owned()))
-        .collect::<BTreeMap<_, _>>();
-    let content_length = headers
-        .get("content-length")
-        .and_then(|value| value.parse::<usize>().ok())
-        .unwrap_or(0);
-    let body_start = header_end + 4;
-    while buffer.len() < body_start + content_length {
-        let read = socket.read(&mut temp).expect("read body");
-        if read == 0 {
-            break;
-        }
-        buffer.extend_from_slice(&temp[..read]);
-    }
-    let body_bytes = &buffer[body_start..body_start + content_length];
-    let body = if body_bytes.is_empty() {
-        Value::Null
-    } else {
-        serde_json::from_slice(body_bytes).expect("json body")
-    };
-
-    RecordedRequest {
-        method,
-        path,
-        headers,
-        body,
-    }
-}
-
-fn find_header_end(buffer: &[u8]) -> Option<usize> {
-    buffer.windows(4).position(|window| window == b"\r\n\r\n")
 }
 
 #[test]
@@ -463,25 +337,6 @@ mode = "json"
 
     assert!(stdout.contains("thinking"));
     assert!(stdout.contains("done thinking"));
-}
-
-fn openai_reasoning_response_sse(id: &str) -> String {
-    sse_response(&[
-        json!({ "type": "response.created", "response": { "id": id } }),
-        json!({
-            "type": "response.reasoning_summary_text.added",
-            "item_id": "think-1",
-            "summary": [{"type": "summary_text", "text": "thinking"}]
-        }),
-        json!({ "type": "response.output_text.delta", "delta": "done thinking" }),
-        json!({
-            "type": "response.completed",
-            "response": {
-                "status": "completed",
-                "usage": { "input_tokens": 7, "output_tokens": 3 }
-            }
-        }),
-    ])
 }
 
 #[test]

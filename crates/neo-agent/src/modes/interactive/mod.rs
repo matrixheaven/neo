@@ -3169,7 +3169,1946 @@ async fn fork_session_transcript(
 }
 
 #[cfg(test)]
-mod tests;
+mod test_cases {
+    use super::*;
+
+    use crate::config::{Defaults, McpConfig, ModelConfig, RuntimeConfig, TuiConfig};
+    use crossterm::event::{KeyModifiers, MouseButton};
+    use neo_agent_core::{
+        AgentEvent, AgentMessage, ApprovalAction, ApprovalOption, ApprovalPresentation,
+        ApprovalRequest, ApprovalResponse, Content, FileWriteApprovalOperation, PendingQuestion,
+        PermissionMode, PermissionOperation, PrefixApprovalRule, SessionApprovalKey,
+        SessionApprovalScope, StopReason,
+        skills::{
+            LoadedSkill, SkillHostMetadata, SkillManifest, SkillSource, SkillStore,
+            SkillToolDependency,
+        },
+    };
+    use neo_tui::{
+        input::{InputEvent, KeyId},
+        transcript::{MouseEvent, MouseKind, TranscriptEntry},
+    };
+    use std::{
+        collections::{BTreeMap, VecDeque},
+        fs,
+        path::{Path, PathBuf},
+    };
+    use tokio::sync::oneshot;
+
+    const SESSION_A: &str = "session_00000000-0000-4000-8000-000000000601";
+    const SESSION_B: &str = "session_00000000-0000-4000-8000-000000000602";
+    const SESSION_CHILD: &str = "session_00000000-0000-4000-8000-000000000603";
+    const SESSION_NEW: &str = "session_00000000-0000-4000-8000-000000000604";
+
+    struct OptionalScriptedEvents {
+        events: VecDeque<Option<InputEvent>>,
+    }
+
+    impl TerminalEvents for OptionalScriptedEvents {
+        fn next_input_event(&mut self) -> Result<InputEvent> {
+            self.poll_input_event(Duration::from_millis(0))?
+                .ok_or_else(|| anyhow::anyhow!("expected scripted input"))
+        }
+
+        fn poll_input_event(&mut self, _timeout: Duration) -> Result<Option<InputEvent>> {
+            Ok(self
+                .events
+                .pop_front()
+                .unwrap_or(Some(InputEvent::Interrupt)))
+        }
+    }
+
+    fn test_workspace_root() -> PathBuf {
+        let dir = std::env::temp_dir().join("neo-test-workspace");
+        let _ = std::fs::create_dir_all(&dir);
+        dir
+    }
+
+    fn main_wire_path_for_session(session_dir: impl AsRef<Path>) -> PathBuf {
+        let path = neo_agent_core::session::main_agent_wire_path(session_dir.as_ref());
+        fs::create_dir_all(path.parent().expect("wire parent")).expect("create wire dir");
+        path
+    }
+
+    fn write_main_wire(bucket_dir: &Path, session_id: &str, content: &str) {
+        let path = main_wire_path_for_session(bucket_dir.join(session_id));
+        fs::write(path, content).expect("write main wire");
+    }
+
+    fn skill_store_with_refactor_skill() -> SkillStore {
+        SkillStore::load(
+            &[],
+            &[],
+            vec![LoadedSkill {
+                name: "refactor".to_owned(),
+                root: PathBuf::from("builtin/refactor"),
+                manifest: SkillManifest {
+                    name: "refactor".to_owned(),
+                    description: "Refactor with project conventions".to_owned(),
+                    when_to_use: None,
+                    disable_model_invocation: false,
+                    arguments: Vec::new(),
+                },
+                body: "Refactor safely.".to_owned(),
+                source: SkillSource::Builtin,
+                host_metadata: SkillHostMetadata::default(),
+            }],
+        )
+    }
+
+    fn skill_store_with_two_prompt_skills() -> SkillStore {
+        SkillStore::load(
+            &[],
+            &[],
+            vec![
+                LoadedSkill {
+                    name: "skill_one".to_owned(),
+                    root: test_workspace_root().join("builtin/skill_one"),
+                    manifest: SkillManifest {
+                        name: "skill_one".to_owned(),
+                        description: "First skill".to_owned(),
+                        when_to_use: None,
+                        disable_model_invocation: false,
+                        arguments: Vec::new(),
+                    },
+                    body: "ONE: $ARGUMENTS".to_owned(),
+                    source: SkillSource::Builtin,
+                    host_metadata: SkillHostMetadata {
+                        interface: None,
+                        dependencies: vec![SkillToolDependency {
+                            value: "reviewServer".to_owned(),
+                            description: Some("Review MCP server".to_owned()),
+                        }],
+                    },
+                },
+                LoadedSkill {
+                    name: "skill_two".to_owned(),
+                    root: test_workspace_root().join("builtin/skill_two"),
+                    manifest: SkillManifest {
+                        name: "skill_two".to_owned(),
+                        description: "Second skill".to_owned(),
+                        when_to_use: None,
+                        disable_model_invocation: false,
+                        arguments: Vec::new(),
+                    },
+                    body: "TWO: $ARGUMENTS".to_owned(),
+                    source: SkillSource::Builtin,
+                    host_metadata: SkillHostMetadata::default(),
+                },
+            ],
+        )
+    }
+
+    fn skill_store_with_interactive_preflight_skills() -> SkillStore {
+        SkillStore::load(
+            &[],
+            &[],
+            vec![
+                LoadedSkill {
+                    name: "self-evo".to_owned(),
+                    root: PathBuf::from("builtin/self-evo"),
+                    manifest: SkillManifest {
+                        name: "self-evo".to_owned(),
+                        description: "Distill session learning into reusable skills".to_owned(),
+                        when_to_use: None,
+                        disable_model_invocation: true,
+                        arguments: Vec::new(),
+                    },
+                    body: "SELF EVO: $ARGUMENTS".to_owned(),
+                    source: SkillSource::Builtin,
+                    host_metadata: SkillHostMetadata::default(),
+                },
+                LoadedSkill {
+                    name: "create-skill".to_owned(),
+                    root: PathBuf::from("builtin/create-skill"),
+                    manifest: SkillManifest {
+                        name: "create-skill".to_owned(),
+                        description: "Create a reusable skill from instructions".to_owned(),
+                        when_to_use: None,
+                        disable_model_invocation: true,
+                        arguments: Vec::new(),
+                    },
+                    body: "CREATE SKILL: $ARGUMENTS".to_owned(),
+                    source: SkillSource::Builtin,
+                    host_metadata: SkillHostMetadata::default(),
+                },
+            ],
+        )
+    }
+
+    fn ordinary_approval_options(
+        session_scope: Option<SessionApprovalScope>,
+        prefix_rule: Option<PrefixApprovalRule>,
+    ) -> Vec<ApprovalOption> {
+        let mut options = vec![ApprovalOption {
+            label: "Approve once".to_owned(),
+            description: None,
+            action: ApprovalAction::PermitOnce,
+        }];
+        if let Some(scope) = session_scope.filter(|scope| !scope.is_empty()) {
+            options.push(ApprovalOption {
+                label: scope.label.clone(),
+                description: Some(scope.detail.clone()),
+                action: ApprovalAction::PermitForSession { scope },
+            });
+        }
+        if let Some(rule) = prefix_rule {
+            options.push(ApprovalOption {
+                label: format!("Approve commands starting with {}", rule.label),
+                description: None,
+                action: ApprovalAction::PermitForPrefix { rule },
+            });
+        }
+        options.push(ApprovalOption {
+            label: "Reject".to_owned(),
+            description: None,
+            action: ApprovalAction::Reject,
+        });
+        options
+    }
+
+    fn ordinary_tool_request(
+        id: &str,
+        subject: &str,
+        path: &str,
+        session_scope: Option<SessionApprovalScope>,
+    ) -> ApprovalRequest {
+        ApprovalRequest {
+            turn: 1,
+            id: id.to_owned(),
+            operation: PermissionOperation::Tool,
+            presentation: ApprovalPresentation::Tool {
+                title: "Run tool?".to_owned(),
+                details: vec![format!("tool: {subject}"), format!("path: {path}")],
+            },
+            options: ordinary_approval_options(session_scope, None),
+            workflow_origin: None,
+        }
+    }
+
+    fn ordinary_shell_request(
+        id: &str,
+        command: &str,
+        session_scope: Option<SessionApprovalScope>,
+        prefix_rule: Option<PrefixApprovalRule>,
+    ) -> ApprovalRequest {
+        ApprovalRequest {
+            turn: 1,
+            id: id.to_owned(),
+            operation: PermissionOperation::Shell,
+            presentation: ApprovalPresentation::Command {
+                title: "Run this command?".to_owned(),
+                command: command.to_owned(),
+                cwd: None,
+            },
+            options: ordinary_approval_options(session_scope, prefix_rule),
+            workflow_origin: None,
+        }
+    }
+
+    fn background_bash_request() -> ApprovalRequest {
+        ApprovalRequest {
+            turn: 1,
+            id: "background-bash".to_owned(),
+            operation: PermissionOperation::Shell,
+            presentation: ApprovalPresentation::Command {
+                title: "Run this command?".to_owned(),
+                command: "sleep 5".to_owned(),
+                cwd: None,
+            },
+            options: vec![
+                ApprovalOption {
+                    label: "Approve once".to_owned(),
+                    description: None,
+                    action: ApprovalAction::PermitOnce,
+                },
+                ApprovalOption {
+                    label: "Reject".to_owned(),
+                    description: None,
+                    action: ApprovalAction::Reject,
+                },
+            ],
+            workflow_origin: None,
+        }
+    }
+
+    fn plan_review_request(id: &str) -> ApprovalRequest {
+        ApprovalRequest {
+            turn: 1,
+            id: id.to_owned(),
+            operation: PermissionOperation::PlanTransition,
+            presentation: ApprovalPresentation::Plan {
+                title: "Plan Review".to_owned(),
+                path: None,
+                markdown: "Ready to build with this plan?".to_owned(),
+                summary: Some("Ready to build with this plan?".to_owned()),
+            },
+            options: vec![
+                ApprovalOption {
+                    label: "Approve".to_owned(),
+                    description: None,
+                    action: ApprovalAction::ApprovePlan { selection: None },
+                },
+                ApprovalOption {
+                    label: "Reject with feedback".to_owned(),
+                    description: None,
+                    action: ApprovalAction::RevisePlan {
+                        preset_feedback: None,
+                    },
+                },
+                ApprovalOption {
+                    label: "Reject".to_owned(),
+                    description: None,
+                    action: ApprovalAction::RejectPlan,
+                },
+            ],
+            workflow_origin: None,
+        }
+    }
+
+    fn make_pending_approval(
+        request: ApprovalRequest,
+    ) -> (
+        crate::modes::run::PendingApproval,
+        oneshot::Receiver<ApprovalResponse>,
+    ) {
+        let (response_tx, response_rx) = oneshot::channel();
+        (
+            crate::modes::run::PendingApproval {
+                request,
+                response_tx,
+            },
+            response_rx,
+        )
+    }
+
+    fn file_write_session_scope(path: &str) -> SessionApprovalScope {
+        SessionApprovalScope {
+            keys: vec![SessionApprovalKey::FileWrite {
+                workspace: test_workspace_root().display().to_string(),
+                path: test_workspace_root().join(path).display().to_string(),
+                operation: FileWriteApprovalOperation::Write,
+            }],
+            label: "Approve writes to this file for this session".to_owned(),
+            detail: path.to_owned(),
+        }
+    }
+
+    fn shell_session_scope(command: &[&str]) -> SessionApprovalScope {
+        SessionApprovalScope {
+            keys: vec![SessionApprovalKey::Shell {
+                workspace: test_workspace_root().display().to_string(),
+                cwd: test_workspace_root().display().to_string(),
+                command: command.iter().map(|part| (*part).to_owned()).collect(),
+            }],
+            label: "Approve this exact command for this session".to_owned(),
+            detail: test_workspace_root().display().to_string(),
+        }
+    }
+
+    fn test_session_summary(
+        id: impl Into<String>,
+        title: impl Into<String>,
+        work_dir: impl Into<PathBuf>,
+        last_prompt: impl Into<String>,
+    ) -> SessionSummary {
+        SessionSummary {
+            id: id.into(),
+            title: Some(title.into()),
+            last_prompt: Some(last_prompt.into()),
+            work_dir: work_dir.into(),
+            updated_at: String::new(),
+            metadata: None,
+        }
+    }
+
+    fn transcript_entries(controller: &InteractiveController) -> &[TranscriptEntry] {
+        controller.transcript().transcript().entries()
+    }
+
+    async fn wait_for_file_completion(controller: &mut InteractiveController) {
+        let deadline = Instant::now() + Duration::from_secs(2);
+        while Instant::now() < deadline {
+            if controller.poll_pending_file_completion().await {
+                return;
+            }
+            tokio::task::yield_now().await;
+        }
+        panic!("file completion did not finish");
+    }
+
+    async fn wait_for_clipboard_idle(controller: &mut InteractiveController) {
+        let deadline = Instant::now() + Duration::from_secs(2);
+        while controller.pending_clipboard.is_some() {
+            assert!(Instant::now() < deadline, "clipboard helper did not finish");
+            let _ = controller.poll_pending_clipboard().await;
+            tokio::task::yield_now().await;
+        }
+    }
+
+    fn transcript_has_status(controller: &InteractiveController, expected: &str) -> bool {
+        transcript_entries(controller).iter().any(
+        |entry| matches!(entry, TranscriptEntry::Status { text, .. } if text.contains(expected)),
+    )
+    }
+
+    fn transcript_view_locked(controller: &InteractiveController) -> bool {
+        !controller.transcript().document().view().following_tail
+    }
+
+    /// Replay the active session's JSONL to recover `AgentMessage` values for
+    /// assertions in tests that use a real session-backed driver.
+    async fn replay_session_messages(controller: &InteractiveController) -> Vec<AgentMessage> {
+        let config = controller.local_config.as_ref().expect("config");
+        let session_id = controller.active_session_id.as_ref().expect("session id");
+        let path = crate::modes::sessions::session_path(session_id, config).expect("session path");
+        neo_agent_core::session::JsonlSessionReader::replay_context(&path)
+            .await
+            .map(|context| context.messages().to_vec())
+            .unwrap_or_default()
+    }
+
+    fn render_tui_snapshot(tui: &neo_tui::NeoTui) -> String {
+        let mut transcript = tui.transcript().clone();
+        render_transcript_snapshot(tui.chrome(), &mut transcript, 80, 24)
+    }
+
+    fn slash_test_catalog() -> CompletionCatalog {
+        CompletionCatalog {
+            slash_prompts: vec![PickerItem::new(
+                "/review",
+                "/review",
+                Some("Review project changes"),
+            )],
+            prompt_packages: vec![PickerItem::new(
+                "/review-package",
+                "/review-package",
+                Some("Packaged review prompt"),
+            )],
+            session_commands: vec![
+                PickerItem::new("/resume", "/resume", Some("Resume a local session")),
+                PickerItem::new("/new", "/new", Some("Start a fresh local session")),
+                PickerItem::new("/clear", "/clear", Some("Alias for /new")),
+                PickerItem::new("/fork", "/fork", Some("Fork the current session")),
+                PickerItem::new("/help", "/help", Some("Show help information")),
+                PickerItem::new("/model", "/model", Some("Switch active model")),
+                PickerItem::new("/provider", "/provider", Some("View configured providers")),
+                PickerItem::new("/mcp", "/mcp", Some("View and manage MCP servers")),
+                PickerItem::new("/tasks", "/tasks", Some("View active background tasks")),
+                PickerItem::new("/plan", "/plan", Some("Toggle plan mode")),
+                PickerItem::new(
+                    "/compact",
+                    "/compact",
+                    Some("Request manual context compaction"),
+                ),
+                PickerItem::new(
+                    "/permissions",
+                    "/permissions",
+                    Some("select permission mode"),
+                ),
+                PickerItem::new("/ask", "/ask", Some("ask permission mode")),
+                PickerItem::new("/auto", "/auto", Some("auto permission mode")),
+                PickerItem::new("/yolo", "/yolo", Some("yolo permission mode")),
+                PickerItem::new("/btw", "/btw", Some("Open a temporary side-question panel")),
+                PickerItem::new(
+                    "/skill:code-simplifier",
+                    "/skill:code-simplifier",
+                    Some("Simplify and refine code"),
+                ),
+            ],
+            theme_items: Vec::new(),
+        }
+    }
+
+    fn slash_values_for(prefix: &str, catalog: &CompletionCatalog) -> Vec<String> {
+        completion_source_candidates(&test_workspace_root(), prefix, catalog)
+            .expect("slash completions")
+            .into_iter()
+            .map(|candidate| candidate.value)
+            .collect()
+    }
+
+    fn wheel_event(kind: MouseKind) -> InputEvent {
+        InputEvent::Mouse(MouseEvent {
+            kind,
+            button: MouseButton::Left,
+            column: 10,
+            row: 3,
+            modifiers: KeyModifiers::NONE,
+        })
+    }
+
+    fn controller_with_pending_math_question() -> (
+        InteractiveController,
+        std::sync::Arc<std::sync::Mutex<Vec<String>>>,
+    ) {
+        let answers = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let captured_answers = std::sync::Arc::clone(&answers);
+        let run_turn: TurnDriver = Arc::new(move |_request, channels| {
+            let captured_answers = std::sync::Arc::clone(&captured_answers);
+            Box::pin(async move {
+                let (response_tx, response_rx) = oneshot::channel();
+                channels
+                    .questions
+                    .send(PendingQuestion {
+                        id: "question-1".to_owned(),
+                        questions: vec![neo_agent_core::QuestionEventData {
+                            question: "1 + 1 = ?".to_owned(),
+                            header: Some("Math".into()),
+                            body: None,
+                            options: vec![
+                                neo_agent_core::QuestionOptionData {
+                                    label: "2".to_owned(),
+                                    description: Some("Correct".into()),
+                                },
+                                neo_agent_core::QuestionOptionData {
+                                    label: "3".to_owned(),
+                                    description: Some("Too high".into()),
+                                },
+                            ],
+                            multi_select: false,
+                        }],
+                        response_tx,
+                        workflow_origin: None,
+                    })
+                    .expect("question sent");
+                let response = response_rx.await.expect("question response");
+                captured_answers
+                    .lock()
+                    .expect("answers lock")
+                    .extend(response.answers);
+                channels.send_event(AgentEvent::TextDelta {
+                    turn: 1,
+                    text: "answered".to_owned(),
+                });
+                channels.send_event(AgentEvent::TurnFinished {
+                    turn: 1,
+                    stop_reason: StopReason::EndTurn,
+                });
+                Ok(TurnOutcome::default())
+            })
+        });
+        let controller = InteractiveController::new(
+            "neo",
+            "test-session",
+            "openai/gpt-4.1",
+            test_workspace_root(),
+            PickerCatalogs::default(),
+            ControllerCallbacks {
+                run_turn,
+                load_session: Arc::new(|session_id| Box::pin(empty_session_loader(session_id))),
+                fork_session: Arc::new(|session_id| Box::pin(empty_session_forker(session_id))),
+            },
+        );
+        (controller, answers)
+    }
+
+    fn controller_with_keyboard_routing_question() -> InteractiveController {
+        let mut controller = InteractiveController::new_for_test(
+            "neo",
+            "test-session",
+            "openai/gpt-4.1",
+            test_workspace_root(),
+            |_request| async move { Ok(Vec::<AgentEvent>::new()) },
+        );
+        controller.type_text("draft");
+        let (response_tx, _response_rx) = oneshot::channel();
+        controller.register_pending_question(PendingQuestion {
+            id: "question-1".to_owned(),
+            questions: vec![
+                neo_agent_core::QuestionEventData {
+                    question: "2 + 2 = ?".to_owned(),
+                    header: Some("Single".into()),
+                    body: None,
+                    options: vec![
+                        neo_agent_core::QuestionOptionData {
+                            label: "3".to_owned(),
+                            description: None,
+                        },
+                        neo_agent_core::QuestionOptionData {
+                            label: "4".to_owned(),
+                            description: None,
+                        },
+                    ],
+                    multi_select: false,
+                },
+                neo_agent_core::QuestionEventData {
+                    question: "Pick primes".to_owned(),
+                    header: Some("Multi".into()),
+                    body: None,
+                    options: vec![
+                        neo_agent_core::QuestionOptionData {
+                            label: "2".to_owned(),
+                            description: None,
+                        },
+                        neo_agent_core::QuestionOptionData {
+                            label: "4".to_owned(),
+                            description: None,
+                        },
+                    ],
+                    multi_select: true,
+                },
+            ],
+            response_tx,
+            workflow_origin: None,
+        });
+        controller
+    }
+
+    fn replay_background_bash_request() -> ApprovalRequest {
+        ApprovalRequest {
+            turn: 1,
+            id: "background-bash".to_owned(),
+            operation: PermissionOperation::Shell,
+            presentation: ApprovalPresentation::Command {
+                title: "Run this command?".to_owned(),
+                command: "sleep 5".to_owned(),
+                cwd: None,
+            },
+            options: vec![
+                ApprovalOption {
+                    label: "Approve once".to_owned(),
+                    description: None,
+                    action: ApprovalAction::PermitOnce,
+                },
+                ApprovalOption {
+                    label: "Reject".to_owned(),
+                    description: None,
+                    action: ApprovalAction::Reject,
+                },
+            ],
+            workflow_origin: None,
+        }
+    }
+
+    fn replay_workflow_request() -> ApprovalRequest {
+        ApprovalRequest {
+            turn: 1,
+            id: "workflow-replay".to_owned(),
+            operation: PermissionOperation::WorkflowLaunch,
+            presentation: ApprovalPresentation::Workflow {
+                title: "Launch workflow?".to_owned(),
+                workflow: neo_agent_core::WorkflowApprovalPresentation {
+                    name: "reviewed".to_owned(),
+                    description: "A reviewed workflow".to_owned(),
+                    phases: vec!["work: Do the work".to_owned()],
+                    args: "{}".to_owned(),
+                    line_count: 2,
+                    byte_count: 27,
+                    source: "neo.phase('work')\nreturn {}".to_owned(),
+                    warning: "Launch approval authorizes orchestration only.".to_owned(),
+                },
+            },
+            options: vec![ApprovalOption {
+                label: "Launch".to_owned(),
+                description: None,
+                action: ApprovalAction::LaunchWorkflow,
+            }],
+            workflow_origin: None,
+        }
+    }
+
+    fn interleaved_replay_tool_calls() -> Vec<neo_agent_core::AgentToolCall> {
+        vec![
+            neo_agent_core::AgentToolCall {
+                id: "first-tool".into(),
+                name: "Read".into(),
+                raw_arguments: r#"{"path":"first-order.txt"}"#.into(),
+            },
+            neo_agent_core::AgentToolCall {
+                id: "failed-delegate".into(),
+                name: "Delegate".into(),
+                raw_arguments: r#"{"task":"failed delegate marker"}"#.into(),
+            },
+            neo_agent_core::AgentToolCall {
+                id: "later-tool".into(),
+                name: "Bash".into(),
+                raw_arguments: r#"{"command":"later-order-command"}"#.into(),
+            },
+        ]
+    }
+
+    fn interleaved_replay_prelude_events() -> Vec<AgentEvent> {
+        let runtime = neo_agent_core::multi_agent::MultiAgentRuntime::new();
+        let running = runtime.start_foreground_delegate_for_test("restored delegate card");
+        let delegate_id = running.id.clone();
+        let completed = runtime.complete_delegate_for_test(&delegate_id, "done");
+
+        vec![
+            AgentEvent::MessageAppended {
+                message: AgentMessage::user_text("resume-user"),
+            },
+            AgentEvent::MessageStarted {
+                phase: neo_ai::MessagePhase::Unknown,
+                turn: 1,
+                id: "assistant-one".to_owned(),
+            },
+            AgentEvent::ThinkingStarted {
+                turn: 1,
+                id: "thinking-one".to_owned(),
+                kind: neo_ai::ThinkingKind::Unknown,
+            },
+            AgentEvent::ThinkingDelta {
+                turn: 1,
+                text: "resume-thinking".to_owned(),
+            },
+            AgentEvent::ThinkingFinished {
+                turn: 1,
+                signature: None,
+                redacted: false,
+            },
+            AgentEvent::TextDelta {
+                turn: 1,
+                text: "resume-output".to_owned(),
+            },
+            AgentEvent::MessageFinished {
+                phase: neo_ai::MessagePhase::Unknown,
+                turn: 1,
+                id: "assistant-one".to_owned(),
+                stop_reason: StopReason::EndTurn,
+            },
+            AgentEvent::DelegateStarted {
+                turn: 1,
+                agent: running,
+                workflow_origin: None,
+            },
+            AgentEvent::DelegateFinished {
+                turn: 1,
+                agent: completed,
+                workflow_origin: None,
+            },
+        ]
+    }
+
+    fn interleaved_replay_execution_events() -> Vec<AgentEvent> {
+        vec![
+            AgentEvent::ToolExecutionStarted {
+                turn: 2,
+                id: "first-tool".to_owned(),
+                name: "Read".to_owned(),
+                arguments: serde_json::json!({ "path": "first-order.txt" }),
+                workflow_origin: None,
+                output_ref: None,
+            },
+            AgentEvent::ToolExecutionFinished {
+                turn: 2,
+                id: "first-tool".to_owned(),
+                name: "Read".to_owned(),
+                result: neo_agent_core::ToolResult::ok("first result"),
+                workflow_origin: None,
+                output_ref: None,
+            },
+            AgentEvent::ToolExecutionStarted {
+                turn: 2,
+                id: "failed-delegate".to_owned(),
+                name: "Delegate".to_owned(),
+                arguments: serde_json::json!({ "task": "failed delegate marker" }),
+                workflow_origin: None,
+                output_ref: None,
+            },
+            AgentEvent::ToolExecutionFinished {
+                turn: 2,
+                id: "failed-delegate".to_owned(),
+                name: "Delegate".to_owned(),
+                result: neo_agent_core::ToolResult::error("failed delegate marker"),
+                workflow_origin: None,
+                output_ref: None,
+            },
+            AgentEvent::ToolExecutionStarted {
+                turn: 2,
+                id: "later-tool".to_owned(),
+                name: "Bash".to_owned(),
+                arguments: serde_json::json!({ "command": "later-order-command" }),
+                workflow_origin: None,
+                output_ref: None,
+            },
+            AgentEvent::ToolExecutionFinished {
+                turn: 2,
+                id: "later-tool".to_owned(),
+                name: "Bash".to_owned(),
+                result: neo_agent_core::ToolResult::ok("later result"),
+                workflow_origin: None,
+                output_ref: None,
+            },
+        ]
+    }
+
+    fn interleaved_replay_message_events(
+        tool_calls: Vec<neo_agent_core::AgentToolCall>,
+    ) -> Vec<AgentEvent> {
+        let assistant_message = AgentMessage::assistant(
+            [
+                Content::thinking("resume-thinking", None, false),
+                Content::text("resume-output"),
+                Content::text("resume-summary"),
+            ],
+            tool_calls,
+            StopReason::ToolUse,
+        );
+
+        vec![
+            AgentEvent::TextDelta {
+                turn: 2,
+                text: "resume-summary".to_owned(),
+            },
+            AgentEvent::TurnFinished {
+                turn: 2,
+                stop_reason: StopReason::EndTurn,
+            },
+            AgentEvent::MessageAppended {
+                message: assistant_message,
+            },
+            AgentEvent::MessageAppended {
+                message: AgentMessage::tool_result(
+                    "first-tool",
+                    "Read",
+                    [Content::text("first result")],
+                    false,
+                ),
+            },
+            AgentEvent::MessageAppended {
+                message: AgentMessage::tool_result(
+                    "failed-delegate",
+                    "Delegate",
+                    [Content::text("failed delegate marker")],
+                    true,
+                ),
+            },
+            AgentEvent::MessageAppended {
+                message: AgentMessage::tool_result(
+                    "later-tool",
+                    "Bash",
+                    [Content::text("later result")],
+                    false,
+                ),
+            },
+        ]
+    }
+
+    async fn write_interleaved_replay_session(config: &AppConfig) {
+        let bucket_dir = workspace_sessions_dir(config);
+        fs::create_dir_all(&bucket_dir).expect("create sessions bucket dir");
+        let session_path = main_wire_path_for_session(bucket_dir.join(SESSION_A));
+        let mut writer = neo_agent_core::session::JsonlSessionWriter::create(&session_path)
+            .await
+            .expect("create session");
+        let mut events = interleaved_replay_prelude_events();
+        events.extend(interleaved_replay_execution_events());
+        events.extend(interleaved_replay_message_events(
+            interleaved_replay_tool_calls(),
+        ));
+        for event in &events {
+            writer.append(event).await.expect("append replay event");
+        }
+        writer.flush().await.expect("flush session");
+    }
+
+    fn session_picker_continuation_controller() -> (
+        InteractiveController,
+        std::sync::Arc<std::sync::Mutex<Vec<TurnRequest>>>,
+    ) {
+        let requests = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let captured_requests = std::sync::Arc::clone(&requests);
+        let controller = InteractiveController::new_with_event_driver(
+            "neo",
+            "new",
+            "openai/gpt-4.1",
+            test_workspace_root(),
+            move |request| {
+                let captured_requests = std::sync::Arc::clone(&captured_requests);
+                async move {
+                    captured_requests
+                        .lock()
+                        .expect("record request")
+                        .push(request);
+                    Ok(vec![
+                        AgentEvent::MessageStarted {
+                            phase: neo_ai::MessagePhase::Unknown,
+                            turn: 2,
+                            id: "assistant-2".to_owned(),
+                        },
+                        AgentEvent::TextDelta {
+                            turn: 2,
+                            text: "continued".to_owned(),
+                        },
+                        AgentEvent::TurnFinished {
+                            turn: 2,
+                            stop_reason: StopReason::EndTurn,
+                        },
+                    ])
+                }
+            },
+            PickerCatalogs {
+                session_items: vec![test_session_summary(
+                    SESSION_A,
+                    "Alpha session",
+                    test_workspace_root(),
+                    "branch summary",
+                )],
+                session_error: None,
+                model_items: Vec::new(),
+            },
+            |session_id| async move {
+                assert_eq!(session_id, SESSION_A);
+                Ok(LoadedSessionTranscript::new(
+                    SESSION_A,
+                    ["branch summary: Local branch summary".to_owned()],
+                    [
+                        AgentMessage::user_text("hello"),
+                        AgentMessage::assistant(
+                            [Content::text("hi back")],
+                            Vec::new(),
+                            StopReason::EndTurn,
+                        ),
+                    ],
+                ))
+            },
+        );
+        (controller, requests)
+    }
+
+    fn selected_model_local_config() -> AppConfig {
+        test_config_with_models(
+            &test_workspace_root(),
+            test_workspace_root().join(".neo/sessions"),
+            BTreeMap::from([
+                (
+                    "openai/gpt-4.1".to_owned(),
+                    ModelConfig {
+                        provider: "openai".to_owned(),
+                        model: "gpt-4.1".to_owned(),
+                        display_name: Some("Responses".into()),
+                        ..ModelConfig::default()
+                    },
+                ),
+                (
+                    "anthropic/claude-sonnet-4-5".to_owned(),
+                    ModelConfig {
+                        provider: "anthropic".to_owned(),
+                        model: "claude-sonnet-4-5".to_owned(),
+                        display_name: Some("Messages · ctx 200000".into()),
+                        max_context_tokens: Some(200_000),
+                        ..ModelConfig::default()
+                    },
+                ),
+            ]),
+        )
+    }
+
+    fn model_picker_submission_controller() -> (
+        InteractiveController,
+        std::sync::Arc<std::sync::Mutex<Vec<TurnRequest>>>,
+    ) {
+        let requests = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let captured_requests = std::sync::Arc::clone(&requests);
+        let mut controller = InteractiveController::new_with_event_driver(
+            "neo",
+            "new",
+            "anthropic/claude-sonnet-4-5",
+            test_workspace_root(),
+            move |request| {
+                let captured_requests = std::sync::Arc::clone(&captured_requests);
+                async move {
+                    captured_requests
+                        .lock()
+                        .expect("record request")
+                        .push(request);
+                    Ok(vec![
+                        AgentEvent::MessageStarted {
+                            phase: neo_ai::MessagePhase::Unknown,
+                            turn: 1,
+                            id: "assistant-1".to_owned(),
+                        },
+                        AgentEvent::TextDelta {
+                            turn: 1,
+                            text: "model switched".to_owned(),
+                        },
+                        AgentEvent::TurnFinished {
+                            turn: 1,
+                            stop_reason: StopReason::EndTurn,
+                        },
+                    ])
+                }
+            },
+            PickerCatalogs {
+                session_items: Vec::new(),
+                session_error: None,
+                model_items: vec![
+                    PickerItem::new("openai/gpt-4.1", "openai/gpt-4.1", Some("Responses")),
+                    PickerItem::new(
+                        "anthropic/claude-sonnet-4-5",
+                        "anthropic/claude-sonnet-4-5",
+                        Some("Messages · ctx 200000"),
+                    ),
+                ],
+            },
+            |session_id| async move {
+                Ok(LoadedSessionTranscript::new(
+                    session_id,
+                    Vec::new(),
+                    Vec::new(),
+                ))
+            },
+        );
+
+        controller.local_config = Some(selected_model_local_config());
+        (controller, requests)
+    }
+
+    async fn capture_configured_interactive_turn_reasoning(
+        reasoning: neo_ai::ReasoningSelection,
+    ) -> neo_ai::ReasoningSelection {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let mut config = test_config(temp.path(), temp.path().join(".neo/sessions"));
+        config.runtime.reasoning = reasoning;
+        let captured = std::sync::Arc::new(std::sync::Mutex::new(None));
+        let captured_request = std::sync::Arc::clone(&captured);
+        let mut controller = controller_for_config(&config);
+        controller.run_turn = Arc::new(move |request, _channels| {
+            let captured_request = std::sync::Arc::clone(&captured_request);
+            Box::pin(async move {
+                *captured_request.lock().expect("capture request") = Some(request);
+                Ok(TurnOutcome::default())
+            })
+        });
+
+        controller.type_text("hello");
+        controller
+            .handle_input_event(InputEvent::Submit)
+            .await
+            .expect("submit");
+        controller
+            .wait_for_active_turn()
+            .await
+            .expect("turn completes");
+
+        captured
+            .lock()
+            .expect("captured request")
+            .take()
+            .expect("turn request captured")
+            .reasoning
+    }
+
+    fn add_indexed_session_fixture(
+        sessions_dir: &Path,
+        project: &Path,
+        session_id: &str,
+        prompt: &str,
+        timestamp: &str,
+    ) -> AppConfig {
+        fs::create_dir_all(project).expect("create project");
+        let config = test_config(project, sessions_dir.to_path_buf());
+        let bucket = workspace_sessions_dir(&config);
+        fs::create_dir_all(&bucket).expect("create session bucket");
+        write_main_wire(
+            &bucket,
+            session_id,
+            r#"{"MessageAppended":{"message":{"User":{"content":[{"Text":{"text":"hello"}}]}}}}"#,
+        );
+        SessionMetadataStore::new(&bucket)
+            .record_activity(
+                session_id,
+                Some(project.display().to_string()),
+                Some(prompt.to_owned()),
+                timestamp.to_owned(),
+            )
+            .expect("record session metadata");
+        neo_agent_core::session::SessionIndex::new(sessions_dir.parent().expect("neo home"))
+            .append(&neo_agent_core::session::SessionIndexEntry {
+                session_id: session_id.to_owned(),
+                session_dir: bucket,
+                workdir: project.to_path_buf(),
+            })
+            .expect("index session");
+        config
+    }
+
+    fn test_config(project_dir: &Path, sessions_dir: PathBuf) -> AppConfig {
+        AppConfig {
+            default_model: "gpt-4.1".to_owned(),
+            default_provider: "openai".to_owned(),
+            providers: BTreeMap::new(),
+            models: BTreeMap::new(),
+            model_scope: Vec::new(),
+            sessions_dir,
+            permission_mode: PermissionMode::default(),
+            live_permission_mode: Arc::new(RwLock::new(PermissionMode::default())),
+            workspace_policy: Arc::new(RwLock::new(None)),
+            defaults: Defaults {
+                mode: "interactive".to_owned(),
+            },
+            runtime: RuntimeConfig::default(),
+            background_tasks: neo_agent_core::BackgroundTaskManager::new(),
+            workflow_runtime: neo_agent_core::workflow::WorkflowRuntime::new(
+                neo_agent_core::workflow::WorkflowLimits::default(),
+            ),
+            workflow_definitions: neo_agent_core::workflow::WorkflowDefinitionRegistry::empty(),
+            workflow_dispatch_resolver: neo_agent_core::runtime::WorkflowDispatchResolver::default(
+            ),
+            multi_agent: neo_agent_core::multi_agent::MultiAgentRuntime::new(),
+            tui: TuiConfig::default(),
+            theme: crate::themes::ResolvedTheme::default(),
+            theme_resolution: crate::themes::ThemeResolution::Default,
+            mcp: McpConfig::default(),
+            prompt_templates: Vec::new(),
+            system_prompt_file: None,
+            extra_skill_dirs: Vec::new(),
+            skill_path: Vec::new(),
+            project_trusted: true,
+            project_trust: crate::trust::ProjectTrustState::NotRequired,
+            project_dir: project_dir.to_path_buf(),
+            config_path: project_dir.join(".neo/config.toml"),
+            config_file_exists: true,
+        }
+    }
+
+    fn test_config_with_models(
+        project_dir: &Path,
+        sessions_dir: PathBuf,
+        models: BTreeMap<String, ModelConfig>,
+    ) -> AppConfig {
+        let mut config = test_config(project_dir, sessions_dir);
+        config.models = models;
+        config
+    }
+
+    async fn spawn_workflow_approval_invocation(
+        config: &AppConfig,
+        session_id: &str,
+    ) -> (
+        neo_agent_core::workflow::WorkflowHandle,
+        tokio::task::JoinHandle<
+            Result<
+                neo_agent_core::workflow::WorkflowInvocationOutcome,
+                neo_agent_core::workflow::WorkflowError,
+            >,
+        >,
+        PathBuf,
+    ) {
+        let session_directory = workspace_sessions_dir(config).join(session_id);
+        let runtime = neo_agent_core::workflow::WorkflowRuntime::new(
+            neo_agent_core::workflow::WorkflowLimits::default(),
+        );
+        let handle = runtime
+            .create_run(
+                &session_directory,
+                neo_agent_core::workflow::WorkflowLaunchRequest {
+                    name: "approval-stop".to_owned(),
+                    description: "approval stop cleanup".to_owned(),
+                    phases: vec![neo_agent_core::workflow::WorkflowPhase {
+                        id: "verify".to_owned(),
+                        description: "verify".to_owned(),
+                    }],
+                    script: "neo.phase('verify')".to_owned(),
+                    args: serde_json::json!({}),
+                    launch_source: "test".to_owned(),
+                    output_schema: None,
+                    display_name: None,
+                    input_schema: None,
+                    definition_origin: None,
+                    inline_unsaved: false,
+                },
+            )
+            .await
+            .expect("create workflow");
+        handle
+            .enter_running_for_direct_execution()
+            .await
+            .expect("workflow must be running before approval-backed invoke");
+        let harness = neo_agent_core::harness::FakeHarness::from_turns([]);
+        let agent_config = neo_agent_core::AgentConfig::for_model(harness.model())
+            .with_workspace_root(&config.project_dir)
+            .expect("workspace root")
+            .with_session_directory(&session_directory)
+            .with_permission_mode(PermissionMode::Ask)
+            .with_workflow_dispatch_resolver(config.workflow_dispatch_resolver.clone());
+        let dispatch = neo_agent_core::runtime::WorkflowDispatchHandle {
+            config: agent_config,
+            model_client: harness.client(),
+            registry: Arc::new(neo_agent_core::ToolRegistry::with_builtin_tools()),
+            process_supervisor: neo_agent_core::ProcessSupervisor::default(),
+            context: neo_agent_core::AgentContext::new(),
+        };
+        let invocation_handle = handle.clone();
+        let invocation = tokio::spawn(async move {
+            invocation_handle
+                .invoke(
+                    0,
+                    neo_agent_core::workflow::WorkflowInvocationKind::VerifyCommand,
+                    serde_json::json!({"command": "sudo --version"}),
+                    false,
+                    move |context| async move {
+                        dispatch
+                            .run_one(
+                                context,
+                                "Bash",
+                                serde_json::json!({"command": "sudo --version"}),
+                            )
+                            .await
+                    },
+                )
+                .await
+        });
+        let journal_path = session_directory
+            .join("workflows")
+            .join(&handle.run_id.0)
+            .join("journal.jsonl");
+        (handle, invocation, journal_path)
+    }
+
+    fn assert_cancelled_workflow_invocation_journal(journal_path: &Path) {
+        let envelopes = neo_agent_core::workflow::collect_journal(
+            journal_path,
+            None,
+            neo_agent_core::workflow::WorkflowLimits::default().journal_record_bytes,
+            neo_agent_core::workflow::WorkflowLimits::default().journal_total_bytes,
+        )
+        .expect("read journal");
+        assert!(envelopes.iter().any(|envelope| {
+            matches!(
+                &envelope.payload,
+                neo_agent_core::workflow::JournalPayload::InvocationFinished { outcome, .. }
+                    if outcome.status == neo_agent_core::workflow::WorkflowOutcomeStatus::Cancelled
+            )
+        }));
+    }
+
+    fn controller_with_session_for_new_tests() -> (
+        InteractiveController,
+        std::sync::Arc<std::sync::Mutex<Vec<TurnRequest>>>,
+    ) {
+        let requests = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let captured_requests = std::sync::Arc::clone(&requests);
+        let mut controller = InteractiveController::new_for_test(
+            "neo",
+            SESSION_A,
+            "openai/gpt-4.1",
+            test_workspace_root(),
+            move |request| {
+                let captured_requests = std::sync::Arc::clone(&captured_requests);
+                async move {
+                    captured_requests
+                        .lock()
+                        .expect("record request")
+                        .push(request);
+                    Ok(vec![
+                        AgentEvent::MessageStarted {
+                            phase: neo_ai::MessagePhase::Unknown,
+                            turn: 1,
+                            id: "assistant-1".to_owned(),
+                        },
+                        AgentEvent::TextDelta {
+                            turn: 1,
+                            text: "hi back".to_owned(),
+                        },
+                        AgentEvent::MessageFinished {
+                            phase: neo_ai::MessagePhase::Unknown,
+                            turn: 1,
+                            id: "assistant-1".to_owned(),
+                            stop_reason: StopReason::EndTurn,
+                        },
+                        AgentEvent::TurnFinished {
+                            turn: 1,
+                            stop_reason: StopReason::EndTurn,
+                        },
+                    ])
+                }
+            },
+        );
+        // Seed an active session id, transcript content, prompt text, and todos
+        // so the reset tests can prove all of them are cleared.
+        controller.active_session_id = Some(SESSION_A.to_owned());
+        controller
+            .tui
+            .chrome_mut()
+            .set_session_label(SESSION_A.to_owned());
+        controller
+            .transcript_mut()
+            .push_user_message("continue the permission refactor");
+        controller
+            .transcript_mut()
+            .push_assistant_message("I found the old policy conversion path...");
+        controller
+            .tui
+            .chrome_mut()
+            .set_todo_items(vec![neo_tui::widgets::TodoDisplayItem::new(
+                "Step 1",
+                neo_tui::widgets::TodoDisplayStatus::Pending,
+            )]);
+        (controller, requests)
+    }
+
+    fn demo_named_workflow_config(temp: &tempfile::TempDir, mode: PermissionMode) -> AppConfig {
+        use neo_agent_core::workflow::{
+            BuiltinWorkflowDefinition, WorkflowDefinitionRegistry,
+            WorkflowDefinitionRegistryConfig, WorkflowLimits, source_sha256_hex,
+        };
+
+        let project_dir = temp.path().join("workspace");
+        let neo_home = temp.path().join("neo_home");
+        std::fs::create_dir_all(&project_dir).expect("workspace");
+        std::fs::create_dir_all(&neo_home).expect("neo home");
+
+        let script = "return { ok = true }\n";
+        let source_sha = source_sha256_hex(script.as_bytes());
+        let manifest = format!(
+            r#"
+name = "demo"
+display_name = "Demo"
+description = "named slash fixture"
+source_sha256 = "{source_sha}"
+
+[[phases]]
+id = "run"
+description = "execute"
+
+[output_schema]
+type = "object"
+additionalProperties = false
+required = ["ok"]
+
+[output_schema.properties.ok]
+type = "boolean"
+
+[input_schema]
+type = "object"
+required = ["topic"]
+
+[input_schema.properties.topic]
+type = "string"
+"#
+        );
+        let mut config = test_config(&project_dir, temp.path().join("sessions"));
+        config.permission_mode = mode;
+        config.live_permission_mode = std::sync::Arc::new(std::sync::RwLock::new(mode));
+        config.workflow_definitions =
+            WorkflowDefinitionRegistry::new(WorkflowDefinitionRegistryConfig {
+                neo_home,
+                workspace: project_dir.clone(),
+                project_trusted: true,
+                limits: WorkflowLimits::default(),
+                builtins: vec![BuiltinWorkflowDefinition {
+                    name: "demo".to_owned(),
+                    manifest_bytes: manifest.into_bytes(),
+                    source_bytes: script.as_bytes().to_vec(),
+                }],
+            });
+        config
+            .workflow_runtime
+            .bind_runner(|_handle, _metadata, _session_dir| async move { Ok(()) })
+            .expect("bind runner");
+        config
+    }
+
+    async fn running_turn_controller() -> InteractiveController {
+        let run_turn: TurnDriver = Arc::new(move |_request, _channels| {
+            Box::pin(async move {
+                // Never complete: holds the turn open for live-slash tests.
+                std::future::pending::<Result<TurnOutcome>>().await
+            })
+        });
+        let mut controller = InteractiveController::new(
+            "neo",
+            SESSION_A,
+            "openai/gpt-4.1",
+            test_workspace_root(),
+            PickerCatalogs::default(),
+            ControllerCallbacks {
+                run_turn,
+                load_session: Arc::new(|session_id| Box::pin(empty_session_loader(session_id))),
+                fork_session: Arc::new(|session_id| Box::pin(empty_session_forker(session_id))),
+            },
+        );
+        controller.active_session_id = Some(SESSION_A.to_owned());
+        controller.type_text("long running");
+        controller
+            .handle_input_event(InputEvent::Submit)
+            .await
+            .expect("first prompt submits");
+        tokio::time::sleep(Duration::from_millis(20)).await;
+        assert!(controller.active_turn.is_some(), "turn is running");
+        controller
+    }
+
+    // --- NEO-23: cross-session prompt history -----------------------------
+
+    /// Build a test controller with a temp-backed prompt history store so tests
+    /// exercise the real load/append path without touching the user's home.
+    fn controller_with_history_store(
+        store: crate::prompt::history::PromptHistoryStore,
+    ) -> InteractiveController {
+        let mut controller = InteractiveController::new_for_test(
+            "neo",
+            "test-session",
+            "openai/gpt-4.1",
+            test_workspace_root(),
+            |_request| async move { Ok(Vec::<AgentEvent>::new()) },
+        );
+        controller.set_prompt_history_store(store);
+        controller.load_prompt_history();
+        controller
+    }
+
+    async fn controller_with_closed_active_input() -> InteractiveController {
+        let captured_steer = Arc::new(std::sync::Mutex::new(
+            neo_agent_core::SteerInputHandle::new(),
+        ));
+        let observed_steer = Arc::clone(&captured_steer);
+        let run_turn: TurnDriver = Arc::new(move |_request, channels| {
+            *observed_steer.lock().expect("steer lock") = channels.steer_input.clone();
+            Box::pin(async move {
+                channels.cancel_token.cancelled().await;
+                Ok(TurnOutcome::default())
+            })
+        });
+        let mut controller = InteractiveController::new(
+            "neo",
+            "test-session",
+            "openai/gpt-4.1",
+            test_workspace_root(),
+            PickerCatalogs::default(),
+            ControllerCallbacks {
+                run_turn,
+                load_session: Arc::new(|session_id| Box::pin(empty_session_loader(session_id))),
+                fork_session: Arc::new(|session_id| Box::pin(empty_session_forker(session_id))),
+            },
+        );
+        controller.type_text("first prompt");
+        controller
+            .handle_input_event(InputEvent::Submit)
+            .await
+            .expect("first prompt starts turn");
+        assert!(
+            captured_steer.lock().expect("steer lock").close_if_empty(),
+            "test turn should close with no pending input"
+        );
+        controller
+    }
+
+    async fn controller_with_queued_follow_ups()
+    -> (InteractiveController, neo_agent_core::SteerInputHandle) {
+        let captured_steer = Arc::new(std::sync::Mutex::new(
+            neo_agent_core::SteerInputHandle::new(),
+        ));
+        let observed_steer = Arc::clone(&captured_steer);
+        let run_turn: TurnDriver = Arc::new(move |_request, channels| {
+            let observed_steer = Arc::clone(&observed_steer);
+            *observed_steer.lock().expect("steer lock") = channels.steer_input.clone();
+            Box::pin(async move {
+                channels.cancel_token.cancelled().await;
+                Ok(TurnOutcome::default())
+            })
+        });
+        let mut controller = InteractiveController::new(
+            "neo",
+            "test-session",
+            "openai/gpt-4.1",
+            test_workspace_root(),
+            PickerCatalogs::default(),
+            ControllerCallbacks {
+                run_turn,
+                load_session: Arc::new(|session_id| Box::pin(empty_session_loader(session_id))),
+                fork_session: Arc::new(|session_id| Box::pin(empty_session_forker(session_id))),
+            },
+        );
+        controller.type_text("first prompt");
+        controller
+            .handle_input_event(InputEvent::Submit)
+            .await
+            .expect("first prompt starts turn");
+        controller.apply_turn_event(AgentEvent::FollowUpQueued {
+            message: AgentMessage::user_text("queued one"),
+        });
+        controller.apply_turn_event(AgentEvent::FollowUpQueued {
+            message: AgentMessage::user_text("queued two"),
+        });
+        let steer_handle = captured_steer.lock().expect("steer lock").clone();
+        (controller, steer_handle)
+    }
+
+    async fn assert_oldest_follow_up_promoted_before_composer(
+        controller: &mut InteractiveController,
+        steer_handle: &neo_agent_core::SteerInputHandle,
+    ) {
+        controller
+            .handle_input_event(InputEvent::Key(KeyId::new("ctrl+s").expect("valid key")))
+            .await
+            .expect("first ctrl+s promotes oldest queued follow-up");
+
+        assert_eq!(steer_handle.pending(), 1);
+        assert_eq!(
+            controller
+                .chrome()
+                .pending_input()
+                .queued_follow_ups()
+                .iter()
+                .map(String::as_str)
+                .collect::<Vec<_>>(),
+            vec!["queued two"],
+            "one Ctrl+S should promote only the oldest queued follow-up"
+        );
+        assert_eq!(
+            controller
+                .chrome()
+                .pending_input()
+                .pending_steers()
+                .iter()
+                .map(String::as_str)
+                .collect::<Vec<_>>(),
+            vec!["queued one"]
+        );
+        assert_eq!(
+            controller.chrome().prompt().text,
+            "current steer",
+            "composer text should wait until queued follow-ups have been promoted"
+        );
+    }
+
+    async fn assert_remaining_follow_ups_promoted_before_composer(
+        controller: &mut InteractiveController,
+        steer_handle: &neo_agent_core::SteerInputHandle,
+    ) {
+        controller
+            .handle_input_event(InputEvent::Key(KeyId::new("ctrl+s").expect("valid key")))
+            .await
+            .expect("second ctrl+s promotes second queued follow-up");
+        assert_eq!(steer_handle.pending(), 2);
+        assert!(
+            controller
+                .chrome()
+                .pending_input()
+                .queued_follow_ups()
+                .is_empty()
+        );
+        assert_eq!(
+            controller
+                .chrome()
+                .pending_input()
+                .pending_steers()
+                .iter()
+                .map(String::as_str)
+                .collect::<Vec<_>>(),
+            vec!["queued one", "queued two"]
+        );
+        assert_eq!(controller.chrome().prompt().text, "current steer");
+
+        controller.apply_turn_event(AgentEvent::FollowUpQueued {
+            message: AgentMessage::user_text("queued D"),
+        });
+        controller
+            .handle_input_event(InputEvent::Key(KeyId::new("ctrl+s").expect("valid key")))
+            .await
+            .expect("third ctrl+s promotes newly queued follow-up before composer");
+        assert_eq!(steer_handle.pending(), 3);
+        assert!(
+            controller
+                .chrome()
+                .pending_input()
+                .queued_follow_ups()
+                .is_empty()
+        );
+        assert_eq!(
+            controller
+                .chrome()
+                .pending_input()
+                .pending_steers()
+                .iter()
+                .map(String::as_str)
+                .collect::<Vec<_>>(),
+            vec!["queued one", "queued two", "queued D"]
+        );
+        assert_eq!(controller.chrome().prompt().text, "current steer");
+    }
+
+    async fn assert_composer_promoted_after_follow_ups(
+        controller: &mut InteractiveController,
+        steer_handle: &neo_agent_core::SteerInputHandle,
+    ) {
+        controller
+            .handle_input_event(InputEvent::Key(KeyId::new("ctrl+s").expect("valid key")))
+            .await
+            .expect("fourth ctrl+s steers current composer text");
+        assert_eq!(steer_handle.pending(), 4);
+        assert_eq!(
+            controller
+                .chrome()
+                .pending_input()
+                .pending_steers()
+                .iter()
+                .map(String::as_str)
+                .collect::<Vec<_>>(),
+            vec!["queued one", "queued two", "queued D", "current steer"]
+        );
+        assert_eq!(controller.chrome().prompt().text, "");
+    }
+
+    fn assert_steers_render_after_runtime_append(controller: &mut InteractiveController) {
+        let steered_user_messages = transcript_entries(controller)
+            .iter()
+            .filter_map(|entry| match entry {
+                TranscriptEntry::UserMessage { content, .. }
+                    if matches!(
+                        content.as_str(),
+                        "queued one" | "queued two" | "queued D" | "current steer"
+                    ) =>
+                {
+                    Some(content.as_str())
+                }
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            steered_user_messages,
+            Vec::<&str>::new(),
+            "promoted steers should not render in the transcript before MessageAppended"
+        );
+
+        for text in ["queued one", "queued two", "queued D", "current steer"] {
+            controller.apply_turn_event(AgentEvent::MessageAppended {
+                message: AgentMessage::user_text(text),
+            });
+        }
+        let steered_user_messages = transcript_entries(controller)
+            .iter()
+            .filter_map(|entry| match entry {
+                TranscriptEntry::UserMessage { content, .. }
+                    if matches!(
+                        content.as_str(),
+                        "queued one" | "queued two" | "queued D" | "current steer"
+                    ) =>
+                {
+                    Some(content.as_str())
+                }
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            steered_user_messages,
+            vec!["queued one", "queued two", "queued D", "current steer"],
+            "promoted steers should render in runtime append order"
+        );
+    }
+
+    async fn assert_first_empty_follow_up_promotion(
+        controller: &mut InteractiveController,
+        steer_handle: &neo_agent_core::SteerInputHandle,
+    ) {
+        controller
+            .handle_input_event(InputEvent::Key(KeyId::new("ctrl+s").expect("valid key")))
+            .await
+            .expect("empty ctrl+s promotes oldest queued follow-up");
+
+        assert_eq!(
+            steer_handle.pending(),
+            1,
+            "one Ctrl+S should enqueue one promotion request"
+        );
+        assert_eq!(
+            controller
+                .chrome()
+                .pending_input()
+                .queued_follow_ups()
+                .iter()
+                .map(String::as_str)
+                .collect::<Vec<_>>(),
+            vec!["queued two"],
+            "only the oldest follow-up should leave the visible follow-up queue"
+        );
+        assert_eq!(
+            controller
+                .chrome()
+                .pending_input()
+                .pending_steers()
+                .iter()
+                .map(String::as_str)
+                .collect::<Vec<_>>(),
+            vec!["queued one"],
+            "promoted follow-up should appear as a pending steer immediately"
+        );
+
+        controller.apply_turn_event(AgentEvent::QueueDrained {
+            kind: neo_agent_core::QueueKind::FollowUp,
+            count: 1,
+        });
+        assert_eq!(
+            controller
+                .chrome()
+                .pending_input()
+                .queued_follow_ups()
+                .iter()
+                .map(String::as_str)
+                .collect::<Vec<_>>(),
+            vec!["queued two"],
+            "runtime follow-up drain ack must not affect the next visible queued follow-up"
+        );
+        controller.apply_turn_event(AgentEvent::SteeringQueued {
+            message: AgentMessage::user_text("queued one"),
+        });
+        assert_eq!(
+            controller
+                .chrome()
+                .pending_input()
+                .pending_steers()
+                .iter()
+                .map(String::as_str)
+                .collect::<Vec<_>>(),
+            vec!["queued one"],
+            "runtime steer ack must not duplicate the promoted preview"
+        );
+    }
+
+    async fn assert_second_empty_follow_up_promotion(
+        controller: &mut InteractiveController,
+        steer_handle: &neo_agent_core::SteerInputHandle,
+    ) {
+        controller
+            .handle_input_event(InputEvent::Key(KeyId::new("ctrl+s").expect("valid key")))
+            .await
+            .expect("second empty ctrl+s promotes next queued follow-up");
+        assert_eq!(steer_handle.pending(), 2);
+        assert!(
+            controller
+                .chrome()
+                .pending_input()
+                .queued_follow_ups()
+                .is_empty()
+        );
+        assert_eq!(
+            controller
+                .chrome()
+                .pending_input()
+                .pending_steers()
+                .iter()
+                .map(String::as_str)
+                .collect::<Vec<_>>(),
+            vec!["queued one", "queued two"]
+        );
+
+        controller.apply_turn_event(AgentEvent::QueueDrained {
+            kind: neo_agent_core::QueueKind::FollowUp,
+            count: 1,
+        });
+        controller.apply_turn_event(AgentEvent::SteeringQueued {
+            message: AgentMessage::user_text("queued two"),
+        });
+        assert_eq!(
+            controller
+                .chrome()
+                .pending_input()
+                .pending_steers()
+                .iter()
+                .map(String::as_str)
+                .collect::<Vec<_>>(),
+            vec!["queued one", "queued two"],
+            "runtime steer acks must not duplicate the promoted previews"
+        );
+        controller.apply_turn_event(AgentEvent::QueueDrained {
+            kind: neo_agent_core::QueueKind::Steering,
+            count: 2,
+        });
+        assert!(
+            controller
+                .chrome()
+                .pending_input()
+                .pending_steers()
+                .is_empty(),
+            "one runtime steer drain should clear the promoted preview"
+        );
+    }
+
+    fn completed_shell_result(
+        stdout: impl Into<String>,
+    ) -> neo_agent_core::tools::ShellExecutionResult {
+        neo_agent_core::tools::ShellExecutionResult {
+            stdout: stdout.into(),
+            stderr: String::new(),
+            exit_code: Some(0),
+            signal: None,
+            stdout_truncated: false,
+            stderr_truncated: false,
+            truncated: false,
+            outcome: neo_agent_core::ShellCommandOutcome::Completed,
+            foreground_task_id: None,
+            resource_limit: None,
+            capture_error: None,
+            output_ref: None,
+        }
+    }
+
+    fn btw_test_config(project_dir: &std::path::Path) -> crate::config::AppConfig {
+        test_config(project_dir, project_dir.join(".neo/sessions"))
+    }
+
+    fn btw_fake_client(answer: &str) -> Arc<dyn neo_ai::ModelClient> {
+        use neo_ai::{AiStreamEvent, StopReason};
+        Arc::new(neo_ai::providers::fake::FakeModelClient::new(vec![
+            AiStreamEvent::MessageStart {
+                phase: neo_ai::MessagePhase::Unknown,
+                id: "msg-1".to_owned(),
+            },
+            AiStreamEvent::TextDelta {
+                text: answer.to_owned(),
+            },
+            AiStreamEvent::MessageEnd {
+                phase: neo_ai::MessagePhase::Unknown,
+                stop_reason: StopReason::EndTurn,
+                usage: None,
+            },
+        ]))
+    }
+
+    fn chat_message_text(message: &neo_ai::ChatMessage) -> String {
+        let content = match message {
+            neo_ai::ChatMessage::System { content }
+            | neo_ai::ChatMessage::User { content }
+            | neo_ai::ChatMessage::Assistant { content, .. }
+            | neo_ai::ChatMessage::ToolResult { content, .. } => content,
+        };
+        content
+            .iter()
+            .filter_map(|part| match part {
+                neo_ai::ContentPart::Text { text } => Some(text.as_str()),
+                neo_ai::ContentPart::Thinking { .. } | neo_ai::ContentPart::Image { .. } => None,
+            })
+            .collect::<Vec<_>>()
+            .join("")
+    }
+
+    // ---------------------------------------------------------------------------
+    // Theme manager controller adapter (`/theme`, palette, runtime overrides)
+    // ---------------------------------------------------------------------------
+
+    fn theme_controller_with_project(project_dir: &Path) -> InteractiveController {
+        let mut controller = InteractiveController::new_for_test(
+            "neo",
+            "test-session",
+            "openai/gpt-4.1",
+            project_dir,
+            |_request| async move { Ok(Vec::<AgentEvent>::new()) },
+        );
+        controller.local_config = Some(test_config(project_dir, project_dir.join(".neo/sessions")));
+        controller
+    }
+
+    fn write_test_theme(project_dir: &Path, id: &str, name: &str, color: &str) {
+        let path = project_dir.join(".neo/themes").join(id);
+        fs::create_dir_all(path.parent().expect("theme parent")).expect("create theme dirs");
+        fs::write(
+            &path,
+            format!(r#"{{"name": "{name}", "colors": {{"brand": "{color}"}}}}"#),
+        )
+        .expect("write theme");
+    }
+
+    fn busy_turn_controller(project_dir: &Path) -> InteractiveController {
+        let run_turn: TurnDriver = Arc::new(|_request, channels| {
+            Box::pin(async move {
+                channels.cancel_token.cancelled().await;
+                Ok(TurnOutcome::default())
+            })
+        });
+        let mut controller = InteractiveController::new(
+            "neo",
+            "test-session",
+            "openai/gpt-4.1",
+            project_dir.to_path_buf(),
+            PickerCatalogs::default(),
+            ControllerCallbacks {
+                run_turn,
+                load_session: Arc::new(|session_id| Box::pin(empty_session_loader(session_id))),
+                fork_session: Arc::new(|session_id| Box::pin(empty_session_forker(session_id))),
+            },
+        );
+        controller.local_config = Some(test_config(project_dir, project_dir.join(".neo/sessions")));
+        controller
+    }
+
+    fn theme_manager_overlay_text(controller: &InteractiveController) -> String {
+        controller
+            .chrome()
+            .render_focused_full_screen_overlay(80, 24)
+            .unwrap_or_default()
+            .into_iter()
+            .map(|line| neo_tui::primitive::strip_ansi(&line))
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    fn theme_manager_selected_id(controller: &InteractiveController) -> Option<String> {
+        controller
+            .chrome()
+            .theme_manager_state()
+            .and_then(|state| state.selected_id().map(ToOwned::to_owned))
+    }
+
+    #[path = "approvals.rs"]
+    mod approvals;
+    #[path = "clipboard.rs"]
+    mod clipboard;
+    #[path = "input.rs"]
+    mod input;
+    #[path = "input_btw.rs"]
+    mod input_btw;
+    #[path = "input_completion.rs"]
+    mod input_completion;
+    #[path = "input_events.rs"]
+    mod input_events;
+    #[path = "input_file_reference.rs"]
+    mod input_file_reference;
+    #[path = "input_history.rs"]
+    mod input_history;
+    #[path = "input_keybinding.rs"]
+    mod input_keybinding;
+    #[path = "input_palette.rs"]
+    mod input_palette;
+    #[path = "input_permissions.rs"]
+    mod input_permissions;
+    #[path = "input_shell.rs"]
+    mod input_shell;
+    #[path = "input_skills.rs"]
+    mod input_skills;
+    #[path = "input_steer.rs"]
+    mod input_steer;
+    #[path = "sessions.rs"]
+    mod sessions;
+    #[path = "sessions_config.rs"]
+    mod sessions_config;
+    #[path = "sessions_lifecycle.rs"]
+    mod sessions_lifecycle;
+    #[path = "sessions_mcp.rs"]
+    mod sessions_mcp;
+    #[path = "sessions_replay.rs"]
+    mod sessions_replay;
+    #[path = "sessions_startup.rs"]
+    mod sessions_startup;
+    #[path = "tasks.rs"]
+    mod tasks;
+    #[path = "terminal.rs"]
+    mod terminal;
+    #[path = "themes.rs"]
+    mod themes;
+    #[path = "transcript.rs"]
+    mod transcript;
+    #[path = "transcript_btw.rs"]
+    mod transcript_btw;
+    #[path = "transcript_git.rs"]
+    mod transcript_git;
+    #[path = "transcript_log.rs"]
+    mod transcript_log;
+    #[path = "transcript_render.rs"]
+    mod transcript_render;
+    #[path = "transcript_skill.rs"]
+    mod transcript_skill;
+    #[path = "workflow.rs"]
+    mod workflow;
+    #[path = "workflow_goal.rs"]
+    mod workflow_goal;
+    #[path = "workflow_init.rs"]
+    mod workflow_init;
+    #[path = "workflow_skills.rs"]
+    mod workflow_skills;
+}
 
 #[cfg(test)]
 mod selection_tests;

@@ -1,64 +1,20 @@
+use super::http_server::RecordedRequest;
 use std::{
-    collections::BTreeMap,
-    fmt::Write as _,
-    io::{BufRead, BufReader, Read, Write},
-    net::{TcpListener, TcpStream},
+    io::{BufRead, BufReader, Write},
     path::{Path, PathBuf},
     process::{Command, Stdio},
-    sync::{Arc, Mutex},
 };
 
 use serde_json::{Value, json};
 use tempfile::TempDir;
 
-const SESSION_A: &str = "session_00000000-0000-4000-8000-000000000301";
-const SESSION_CHILD: &str = "session_00000000-0000-4000-8000-000000000303";
-const SESSION_EMPTY: &str = "session_00000000-0000-4000-8000-000000000304";
+pub(crate) const SESSION_A: &str = "session_00000000-0000-4000-8000-000000000301";
 
-#[derive(Debug, Clone)]
-struct RecordedRequest {
-    method: String,
-    path: String,
-    body: Value,
-}
+pub(crate) const SESSION_CHILD: &str = "session_00000000-0000-4000-8000-000000000303";
 
-struct MockSseServer {
-    url: String,
-    requests: Arc<Mutex<Vec<RecordedRequest>>>,
-}
+pub(crate) const SESSION_EMPTY: &str = "session_00000000-0000-4000-8000-000000000304";
 
-// (ISOLATED_HOMES removed — isolation is now per-thread via thread_local)
-
-impl MockSseServer {
-    fn start(responses: Vec<String>) -> Self {
-        let listener = TcpListener::bind("127.0.0.1:0").expect("bind mock provider");
-        let url = format!("http://{}", listener.local_addr().expect("local addr"));
-        let requests = Arc::new(Mutex::new(Vec::new()));
-        let captured_requests = Arc::clone(&requests);
-
-        std::thread::spawn(move || {
-            for response in responses {
-                let (mut socket, _) = listener.accept().expect("accept provider request");
-                let request = read_http_request(&mut socket);
-                captured_requests
-                    .lock()
-                    .expect("lock requests")
-                    .push(request);
-                socket
-                    .write_all(response.as_bytes())
-                    .expect("write provider response");
-            }
-        });
-
-        Self { url, requests }
-    }
-
-    fn requests(&self) -> Vec<RecordedRequest> {
-        self.requests.lock().expect("lock requests").clone()
-    }
-}
-
-fn neo() -> Command {
+pub(crate) fn neo() -> Command {
     let mut command = Command::new(env!("CARGO_BIN_EXE_neo"));
     let home = isolated_home();
     command.env("NEO_HOME", &home);
@@ -66,7 +22,7 @@ fn neo() -> Command {
     command
 }
 
-fn isolated_home() -> std::path::PathBuf {
+pub(crate) fn isolated_home() -> std::path::PathBuf {
     thread_local! {
         static HOME: std::cell::OnceCell<(TempDir, std::path::PathBuf)> = const { std::cell::OnceCell::new() };
     }
@@ -80,7 +36,7 @@ fn isolated_home() -> std::path::PathBuf {
     })
 }
 
-fn sessions_metadata_json(entries: &[(&str, Value)]) -> String {
+pub(crate) fn sessions_metadata_json(entries: &[(&str, Value)]) -> String {
     let mut sessions = serde_json::Map::new();
     for (id, value) in entries {
         sessions.insert((*id).to_owned(), value.clone());
@@ -88,18 +44,22 @@ fn sessions_metadata_json(entries: &[(&str, Value)]) -> String {
     json!({ "sessions": sessions }).to_string()
 }
 
-fn write_home_config(content: &str) {
+pub(crate) fn write_home_config(content: &str) {
     let config_dir = isolated_home();
     std::fs::create_dir_all(&config_dir).expect("create .neo");
     std::fs::write(config_dir.join("config.toml"), content).expect("write config");
 }
 
-fn session_bucket(project_dir: &Path) -> PathBuf {
+pub(crate) fn session_bucket(project_dir: &Path) -> PathBuf {
     let sessions_root = isolated_home().join("sessions");
     neo_agent_core::session::workspace_sessions_dir(&sessions_root, project_dir)
 }
 
-fn write_session_transcript(sessions: &Path, session_id: &str, content: &str) -> PathBuf {
+pub(crate) fn write_session_transcript(
+    sessions: &Path,
+    session_id: &str,
+    content: &str,
+) -> PathBuf {
     let session_dir = sessions.join(session_id);
     let wire = neo_agent_core::session::main_agent_wire_path(&session_dir);
     std::fs::create_dir_all(wire.parent().expect("wire parent")).expect("create wire dir");
@@ -112,7 +72,7 @@ fn write_session_transcript(sessions: &Path, session_id: &str, content: &str) ->
     wire
 }
 
-fn run_with_stdin(mut command: Command, stdin: &str) -> String {
+pub(crate) fn run_with_stdin(mut command: Command, stdin: &str) -> String {
     let mut child = command
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
@@ -135,74 +95,58 @@ fn run_with_stdin(mut command: Command, stdin: &str) -> String {
     String::from_utf8(output.stdout).expect("stdout should be utf8")
 }
 
-#[test]
-fn rpc_get_state_reports_project_runtime_state() {
-    let temp = TempDir::new().expect("tempdir");
-    std::fs::create_dir_all(temp.path().join(".neo")).expect("create .neo");
-    let sessions = session_bucket(temp.path());
-    std::fs::create_dir_all(&sessions).expect("create sessions");
-    write_session_transcript(&sessions, SESSION_A, "{}\n");
-    std::fs::write(
-        isolated_home().join("config.toml"),
-        r#"
-default_provider = "anthropic"
-default_model = "claude-sonnet-4-5"
-"#,
-    )
-    .expect("write config");
-
-    let mut command = neo();
-    command.current_dir(temp.path()).arg("rpc");
-    let stdout = run_with_stdin(
-        command,
-        r#"{"type":"request","id":"state-1","method":"get_state","params":{}}"#,
-    );
-
-    let messages = parse_jsonl(&stdout);
-    assert_eq!(messages.len(), 1);
-    assert_eq!(messages[0]["type"], "response");
-    assert_eq!(messages[0]["id"], "state-1");
-    assert_eq!(messages[0]["result"]["provider"], "anthropic");
-    assert_eq!(messages[0]["result"]["model"], "claude-sonnet-4-5");
-    assert!(messages[0]["result"]["is_streaming"].is_null());
-    assert!(
-        messages[0]["result"]["sessions_dir"]
-            .as_str()
-            .expect("sessions dir")
-            .ends_with("sessions")
-    );
-    assert_eq!(messages[0]["result"]["session_count"], 1);
+pub(crate) fn input_messages(request: &RecordedRequest) -> &[Value] {
+    request.body["input"].as_array().expect("input messages")
 }
 
-#[test]
-fn config_mode_rpc_uses_the_real_rpc_loop_without_subcommand() {
-    let temp = TempDir::new().expect("tempdir");
-    let sessions = session_bucket(temp.path());
-    std::fs::create_dir_all(&sessions).expect("create sessions");
-    write_session_transcript(&sessions, SESSION_A, "{}\n");
-    std::fs::create_dir_all(temp.path().join(".neo")).expect("create .neo");
-    std::fs::write(
-        isolated_home().join("config.toml"),
-        r#"
-[defaults]
-mode = "rpc"
-"#,
-    )
-    .expect("write config");
+pub(crate) fn user_input_contents(request: &RecordedRequest) -> Vec<&str> {
+    input_messages(request)
+        .iter()
+        .filter(|message| {
+            message["role"] == "user"
+                && !message["content"]
+                    .as_str()
+                    .is_some_and(|content| content.contains("<available_skills>"))
+        })
+        .map(|message| message["content"].as_str().expect("user content"))
+        .collect()
+}
 
-    let mut command = neo();
-    command.current_dir(temp.path());
-    let stdout = run_with_stdin(
-        command,
-        r#"{"type":"request","id":"state-mode-rpc","method":"get_state","params":{}}"#,
+pub(crate) fn parse_jsonl(stdout: &str) -> Vec<Value> {
+    stdout
+        .lines()
+        .filter(|line| !line.trim().is_empty())
+        .map(|line| serde_json::from_str(line).expect("valid JSONL response"))
+        .collect()
+}
+
+pub(crate) fn run_interactive_requests(mut command: Command, requests: &[&str]) -> Vec<Value> {
+    let mut child = command
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("neo command should spawn");
+    let mut stdin = child.stdin.take().expect("stdin pipe");
+    let stdout = child.stdout.take().expect("stdout pipe");
+    let mut reader = BufReader::new(stdout);
+    let mut responses = Vec::new();
+    for request in requests {
+        writeln!(stdin, "{request}").expect("write request");
+        stdin.flush().expect("flush request");
+        let mut line = String::new();
+        reader.read_line(&mut line).expect("read response line");
+        responses.push(serde_json::from_str::<Value>(&line).expect("valid JSONL response"));
+    }
+    drop(stdin);
+    let output = child.wait_with_output().expect("neo command should run");
+    assert!(
+        output.status.success(),
+        "command failed\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
     );
-
-    let messages = parse_jsonl(&stdout);
-    assert_eq!(messages.len(), 1);
-    assert_eq!(messages[0]["type"], "response");
-    assert_eq!(messages[0]["id"], "state-mode-rpc");
-    assert_eq!(messages[0]["result"]["session_count"], 1);
-    assert_eq!(messages[0]["result"]["mode"], "rpc");
+    responses
 }
 
 #[test]
@@ -684,349 +628,4 @@ fn rpc_set_session_name_updates_local_session_metadata() {
         messages[0]["result"]["sessions"][0]["name"],
         "Feature branch"
     );
-}
-
-#[test]
-fn rpc_get_commands_returns_local_prompt_template_commands() {
-    // Prompt templates now live only under the single neo home (~/.neo/prompts).
-    // There is no project tier, so configured selectors + user prompts are the
-    // only sources.
-    let project = TempDir::new().expect("project tempdir");
-    write_home_config(
-        r#"
-prompt_templates = ["prompts"]
-"#,
-    );
-    // Configured prompt template (relative selector resolved against home).
-    let configured = isolated_home().join("prompts");
-    std::fs::create_dir_all(&configured).expect("create configured prompts");
-    std::fs::write(
-        configured.join("review.md"),
-        r#"---
-description: Review a target
-argument-hint: "<path>"
----
-Review $1
-"#,
-    )
-    .expect("write configured prompt template");
-    // User prompt templates (auto-discovered from ~/.neo/prompts).
-    let user_prompts = isolated_home().join("prompts");
-    std::fs::write(user_prompts.join("explain.md"), "Explain the target\n")
-        .expect("write user prompt template");
-
-    let mut command = neo();
-    command.current_dir(project.path()).arg("rpc");
-    let stdout = run_with_stdin(
-        command,
-        r#"{"type":"request","id":"commands-1","method":"get_commands","params":{}}"#,
-    );
-
-    let messages = parse_jsonl(&stdout);
-    assert_eq!(messages.len(), 1);
-    assert_eq!(messages[0]["type"], "response");
-    assert_eq!(messages[0]["id"], "commands-1");
-    let commands = messages[0]["result"]["commands"]
-        .as_array()
-        .expect("commands array");
-    let names = commands
-        .iter()
-        .map(|command| command["name"].as_str().expect("name"))
-        .collect::<Vec<_>>();
-    assert!(names.contains(&"/explain"));
-    assert!(names.contains(&"/review"));
-
-    let review = commands
-        .iter()
-        .find(|command| command["name"] == "/review")
-        .expect("review command");
-    assert_eq!(review["kind"], "prompt_template");
-    assert_eq!(review["template"], "review");
-    assert_eq!(review["description"], "Review a target");
-    assert_eq!(review["argument_hint"], "<path>");
-}
-
-#[test]
-fn rpc_get_commands_omits_excluded_auto_discovered_prompt_template() {
-    let project = TempDir::new().expect("project tempdir");
-    let prompts_dir = isolated_home().join("prompts");
-    std::fs::create_dir_all(&prompts_dir).expect("create prompts");
-    std::fs::write(prompts_dir.join("review.md"), "Review should be excluded\n")
-        .expect("write excluded prompt template");
-    std::fs::write(prompts_dir.join("fix.md"), "Fix remains\n")
-        .expect("write kept prompt template");
-    write_home_config(
-        r#"
-prompt_templates = ["-prompts/review.md"]
-"#,
-    );
-
-    let mut command = neo();
-    command.current_dir(project.path()).arg("rpc");
-    let stdout = run_with_stdin(
-        command,
-        r#"{"type":"request","id":"commands-1","method":"get_commands","params":{}}"#,
-    );
-
-    let messages = parse_jsonl(&stdout);
-    let commands = messages[0]["result"]["commands"]
-        .as_array()
-        .expect("commands array");
-    let names = commands
-        .iter()
-        .map(|command| command["name"].as_str().expect("name"))
-        .collect::<Vec<_>>();
-    assert_eq!(names, vec!["/fix"]);
-}
-
-#[test]
-fn rpc_prompt_streams_agent_events_and_returns_assistant_text() {
-    let temp = TempDir::new().expect("tempdir");
-    let server = MockSseServer::start(vec![openai_response_sse("resp-rpc", "rpc answer")]);
-    write_home_config(&mock_responses_config(&server.url));
-
-    let mut command = neo();
-    command
-        .current_dir(temp.path())
-        .env("OPENAI_API_KEY", "test-key")
-        .arg("rpc");
-
-    let stdout = run_with_stdin(
-        command,
-        r#"{"type":"request","id":"prompt-1","method":"prompt","params":{"message":"hello rpc"}}"#,
-    );
-
-    let messages = parse_jsonl(&stdout);
-    assert!(
-        messages.iter().any(|message| {
-            message["type"] == "notification"
-                && message["method"] == "agent.event"
-                && message["params"].to_string().contains("TextDelta")
-        }),
-        "RPC prompt should stream agent events: {messages:?}"
-    );
-    let response = messages.last().expect("response should be last");
-    assert_eq!(response["type"], "response");
-    assert_eq!(response["id"], "prompt-1");
-    assert_eq!(response["result"]["assistant_text"], "rpc answer");
-
-    let requests = server.requests();
-    assert_eq!(requests.len(), 1);
-    assert_eq!(requests[0].method, "POST");
-    assert_eq!(requests[0].path, "/responses");
-    assert_eq!(user_input_contents(&requests[0]), vec!["hello rpc"]);
-}
-
-fn input_messages(request: &RecordedRequest) -> &[Value] {
-    request.body["input"].as_array().expect("input messages")
-}
-
-fn user_input_contents(request: &RecordedRequest) -> Vec<&str> {
-    input_messages(request)
-        .iter()
-        .filter(|message| {
-            message["role"] == "user"
-                && !message["content"]
-                    .as_str()
-                    .is_some_and(|content| content.contains("<available_skills>"))
-        })
-        .map(|message| message["content"].as_str().expect("user content"))
-        .collect()
-}
-
-fn parse_jsonl(stdout: &str) -> Vec<Value> {
-    stdout
-        .lines()
-        .filter(|line| !line.trim().is_empty())
-        .map(|line| serde_json::from_str(line).expect("valid JSONL response"))
-        .collect()
-}
-
-fn openai_response_sse(id: &str, text: &str) -> String {
-    sse_response(&[
-        json!({ "type": "response.created", "response": { "id": id } }),
-        json!({ "type": "response.output_text.delta", "delta": text }),
-        json!({
-            "type": "response.completed",
-            "response": {
-                "status": "completed",
-                "usage": { "input_tokens": 7, "output_tokens": 3 }
-            }
-        }),
-    ])
-}
-
-fn mock_responses_config(base_url: &str) -> String {
-    format!(
-        r#"
-default_provider = "mock"
-default_model = "gpt-4.1"
-
-[providers.mock]
-type = "openai_response"
-base_url = "{base_url}"
-api_key_env = "OPENAI_API_KEY"
-
-[models."mock/gpt-4.1"]
-provider = "mock"
-model = "gpt-4.1"
-capabilities = ["streaming", "tools"]
-"#
-    )
-}
-
-fn sse_response(events: &[Value]) -> String {
-    let mut body = String::new();
-    for event in events {
-        write!(&mut body, "data: {event}\n\n").expect("write SSE event");
-    }
-    format!(
-        "HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\ncontent-length: {}\r\n\r\n{}",
-        body.len(),
-        body
-    )
-}
-
-fn read_http_request(socket: &mut TcpStream) -> RecordedRequest {
-    let mut buffer = Vec::new();
-    let mut temp = [0_u8; 1024];
-    let header_end;
-
-    loop {
-        let read = socket.read(&mut temp).expect("read request");
-        assert_ne!(read, 0, "client closed before sending headers");
-        buffer.extend_from_slice(&temp[..read]);
-        if let Some(index) = find_header_end(&buffer) {
-            header_end = index;
-            break;
-        }
-    }
-
-    let headers_raw = String::from_utf8(buffer[..header_end].to_vec()).expect("utf8 headers");
-    let mut lines = headers_raw.split("\r\n");
-    let request_line = lines.next().expect("request line");
-    let mut request_parts = request_line.split_whitespace();
-    let method = request_parts.next().expect("method").to_owned();
-    let path = request_parts.next().expect("path").to_owned();
-    let headers = lines
-        .filter_map(|line| line.split_once(':'))
-        .map(|(key, value)| (key.to_ascii_lowercase(), value.trim().to_owned()))
-        .collect::<BTreeMap<_, _>>();
-    let content_length = headers
-        .get("content-length")
-        .and_then(|value| value.parse::<usize>().ok())
-        .unwrap_or(0);
-    let body_start = header_end + 4;
-    while buffer.len() < body_start + content_length {
-        let read = socket.read(&mut temp).expect("read body");
-        if read == 0 {
-            break;
-        }
-        buffer.extend_from_slice(&temp[..read]);
-    }
-    let body_bytes = &buffer[body_start..body_start + content_length];
-    let body = serde_json::from_slice(body_bytes).expect("json body");
-
-    RecordedRequest { method, path, body }
-}
-
-fn run_interactive_requests(mut command: Command, requests: &[&str]) -> Vec<Value> {
-    let mut child = command
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .expect("neo command should spawn");
-    let mut stdin = child.stdin.take().expect("stdin pipe");
-    let stdout = child.stdout.take().expect("stdout pipe");
-    let mut reader = BufReader::new(stdout);
-    let mut responses = Vec::new();
-    for request in requests {
-        writeln!(stdin, "{request}").expect("write request");
-        stdin.flush().expect("flush request");
-        let mut line = String::new();
-        reader.read_line(&mut line).expect("read response line");
-        responses.push(serde_json::from_str::<Value>(&line).expect("valid JSONL response"));
-    }
-    drop(stdin);
-    let output = child.wait_with_output().expect("neo command should run");
-    assert!(
-        output.status.success(),
-        "command failed\nstdout:\n{}\nstderr:\n{}",
-        String::from_utf8_lossy(&output.stdout),
-        String::from_utf8_lossy(&output.stderr)
-    );
-    responses
-}
-
-#[test]
-fn rpc_responds_before_stdin_eof_and_accepts_next_request() {
-    let temp = TempDir::new().expect("tempdir");
-    let sessions = session_bucket(temp.path());
-    std::fs::create_dir_all(&sessions).expect("create sessions");
-    write_session_transcript(&sessions, SESSION_A, "{}\n");
-    std::fs::write(
-        isolated_home().join("config.toml"),
-        r#"
-default_provider = "anthropic"
-default_model = "claude-sonnet-4-5"
-"#,
-    )
-    .expect("write config");
-
-    let mut command = neo();
-    command.current_dir(temp.path()).arg("rpc");
-    let responses = run_interactive_requests(
-        command,
-        &[
-            r#"{"type":"request","id":"req-1","method":"get_state","params":{}}"#,
-            r#"{"type":"request","id":"req-2","method":"get_state","params":{}}"#,
-        ],
-    );
-
-    assert_eq!(responses.len(), 2);
-    assert_eq!(responses[0]["type"], "response");
-    assert_eq!(responses[0]["id"], "req-1");
-    assert_eq!(responses[0]["result"]["session_count"], 1);
-    assert_eq!(responses[1]["type"], "response");
-    assert_eq!(responses[1]["id"], "req-2");
-    assert!(responses[1]["result"]["session_count"].is_number());
-}
-
-#[test]
-fn rpc_prompt_failure_is_correlated_and_server_continues() {
-    let temp = TempDir::new().expect("tempdir");
-    let sessions = session_bucket(temp.path());
-    std::fs::create_dir_all(&sessions).expect("create sessions");
-    write_session_transcript(&sessions, SESSION_A, "{}\n");
-    std::fs::write(
-        isolated_home().join("config.toml"),
-        r#"
-default_provider = "missing"
-default_model = "no-such-model"
-"#,
-    )
-    .expect("write config");
-
-    let mut command = neo();
-    command.current_dir(temp.path()).arg("rpc");
-    let responses = run_interactive_requests(
-        command,
-        &[
-            r#"{"type":"request","id":"prompt-fail","method":"prompt","params":{"message":"hi"}}"#,
-            r#"{"type":"request","id":"after-fail","method":"get_state","params":{}}"#,
-        ],
-    );
-
-    assert_eq!(responses.len(), 2);
-    assert_eq!(responses[0]["type"], "response");
-    assert_eq!(responses[0]["id"], "prompt-fail");
-    assert_eq!(responses[0]["error"]["code"], "internal_error");
-    assert_eq!(responses[1]["type"], "response");
-    assert_eq!(responses[1]["id"], "after-fail");
-    assert!(responses[1]["result"]["session_count"].as_u64().is_some());
-}
-
-fn find_header_end(buffer: &[u8]) -> Option<usize> {
-    buffer.windows(4).position(|window| window == b"\r\n\r\n")
 }
