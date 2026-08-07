@@ -118,6 +118,18 @@ impl TaskBrowserWorkflowRowState {
             Self::Recovering => "↻",
         }
     }
+
+    #[must_use]
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::Pending => "pending",
+            Self::Working => "working",
+            Self::Completed => "done",
+            Self::Failed => "failed",
+            Self::Paused => "paused",
+            Self::Recovering => "recovering",
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -149,6 +161,7 @@ pub struct TaskBrowserWorkflowChild {
     pub actual_usage: Option<serde_json::Value>,
     pub latest_activity: Option<String>,
     pub terminal_summary: Option<String>,
+    pub generated_files: Vec<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

@@ -256,6 +256,7 @@ fn workflow_child_row(
             .error_summary
             .clone()
             .or_else(|| child.terminal_summary.clone()),
+        generated_files: child.generated_files.clone(),
     }
 }
 
@@ -1003,7 +1004,7 @@ mod tests {
             error_summary: None,
             actual_usage: Some(serde_json::json!({"total_tokens": 15})),
             latest_activity: Some("Read: src/lib.rs".to_owned()),
-            generated_files: Vec::new(),
+            generated_files: vec!["notes.md".to_owned(), "summary.md".to_owned()],
         };
 
         let row = workflow_child_row(&child);
@@ -1013,6 +1014,10 @@ mod tests {
             Some(serde_json::json!({"total_tokens": 15}))
         );
         assert_eq!(row.latest_activity.as_deref(), Some("Read: src/lib.rs"));
+        assert_eq!(
+            row.generated_files,
+            vec!["notes.md".to_owned(), "summary.md".to_owned()]
+        );
 
         child.state = WorkflowChildState::Completed;
         child.terminal_at_ms = Some(3_000);

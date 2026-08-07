@@ -7,7 +7,10 @@ use crate::primitive::{
 
 use super::{
     state::{TaskBrowserFilter, TaskBrowserFocus, TaskBrowserState},
-    view::{TaskBrowserItem, TaskBrowserStatus},
+    view::{
+        TaskBrowserItem, TaskBrowserStatus, TaskBrowserWorkflowChild, TaskBrowserWorkflowRowState,
+        TaskBrowserWorkflowStep,
+    },
 };
 
 /// Below this content width the browser must render at most two lines per task
@@ -18,7 +21,7 @@ const WIDE_MIN_COLUMNS: usize = 100;
 const MIN_TASK_LIST_COLUMNS: usize = 30;
 const MAX_TASK_LIST_COLUMNS: usize = 42;
 
-/// Which full-page or split-page surface the general browser shows.
+/// Which full-page or split-page surface the browser shows.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum BrowserPage {
     /// List and inspector side by side (width >= 100, always).
@@ -29,12 +32,22 @@ enum BrowserPage {
     Details,
     /// Single full-width latest-output page (details open, Output focus).
     Output,
+    /// Workflow: Steps and Agents side by side with a lower selected-agent
+    /// preview (width >= 100).
+    WorkflowWide,
+    /// Workflow: stacked summary, Steps, Agents, and compact preview
+    /// (width 70-99).
+    WorkflowStacked,
+    /// Workflow: stable header plus a `[STEPS] [AGENTS]` tab selector and one
+    /// active navigation page (width < 70).
+    WorkflowTabs,
 }
 
 /// Single-source geometry for the general task browser frame.
 ///
-/// Every breakpoint decision and rectangle in `render_browser` comes from this
-/// one value so pointer hit testing can reuse the exact same arithmetic.
+/// Every breakpoint decision and rectangle in `render_browser` and
+/// `render_workflow` comes from this one value so pointer hit testing can
+/// reuse the exact same arithmetic.
 struct BrowserLayout {
     width: usize,
     content_top: usize,
@@ -46,13 +59,29 @@ struct BrowserLayout {
     /// Screen rows occupied by one task row (2 below `MEDIUM_MIN_COLUMNS`,
     /// 1 at or above). Hit testing maps screen rows to task indices with it.
     list_row_height: usize,
+    /// Workflow: first content row of the Steps section (absolute screen row).
+    steps_top: usize,
+    /// Workflow: first content row of the Agents section (stacked only).
+    agents_top: usize,
+    /// Workflow: first content row of the lower selected-agent preview.
+    preview_top: usize,
 }
 
 impl BrowserLayout {
     fn new(width: usize, height: usize, state: &TaskBrowserState) -> Self {
-        let content_height = height.saturating_sub(2).max(1);
+        let workflow = state.workflow_item().is_some();
+        let content_top = if workflow { 3 } else { 1 };
+        let content_height = height.saturating_sub(content_top + 1).max(1);
         let list_width = (width / 3).clamp(MIN_TASK_LIST_COLUMNS, MAX_TASK_LIST_COLUMNS);
-        let page = if width >= WIDE_MIN_COLUMNS {
+        let page = if workflow {
+            if width >= WIDE_MIN_COLUMNS {
+                BrowserPage::WorkflowWide
+            } else if width >= MEDIUM_MIN_COLUMNS {
+                BrowserPage::WorkflowStacked
+            } else {
+                BrowserPage::WorkflowTabs
+            }
+        } else if width >= WIDE_MIN_COLUMNS {
             BrowserPage::Split
         } else if !state.task_details_open() {
             BrowserPage::List
@@ -61,15 +90,42 @@ impl BrowserLayout {
         } else {
             BrowserPage::Details
         };
+        let (steps_top, agents_top, preview_top) = match page {
+            BrowserPage::WorkflowWide => {
+                // The lower preview keeps at most ~1/3 of the content so the
+                // Steps/Agents split keeps at least ~2/3; on very short
+                // terminals it shrinks to fit.
+                let preview_height = content_height / 3;
+                let preview_top = content_top + content_height - preview_height;
+                (content_top, content_top, preview_top)
+            }
+            BrowserPage::WorkflowStacked => {
+                // Fixed header/footer and the navigation sections outrank the
+                // preview: it receives only the remainder and may be empty on
+                // short terminals.
+                let steps_height = (content_height / 3).max(3).min(content_height);
+                let agents_height = (content_height / 3)
+                    .max(3)
+                    .min(content_height.saturating_sub(steps_height));
+                let steps_top = content_top;
+                let agents_top = steps_top + steps_height;
+                let preview_top = agents_top + agents_height;
+                (steps_top, agents_top, preview_top)
+            }
+            _ => (content_top, content_top, content_top),
+        };
         Self {
             width,
-            content_top: 1,
+            content_top,
             content_height,
             footer_top: height.saturating_sub(1),
             page,
             list_width,
             right_left: list_width + 1,
             list_row_height: if width < MEDIUM_MIN_COLUMNS { 2 } else { 1 },
+            steps_top,
+            agents_top,
+            preview_top,
         }
     }
 }
@@ -98,82 +154,111 @@ impl<'a> TaskBrowserRenderer<'a> {
     }
 
     fn render_workflow(&self, width: usize, height: usize) -> Vec<String> {
+        let layout = BrowserLayout::new(width, height, self.state);
         if height < 4 {
-            return pad_height(
-                vec![self.workflow_header(width), self.workflow_footer(width)],
-                height,
-            );
+            let mut lines = self.workflow_header(width);
+            lines.push(self.workflow_footer(&layout));
+            return pad_height(lines, height);
         }
-        let content_height = height.saturating_sub(2);
-        let item = self
-            .state
-            .workflow_item()
-            .expect("workflow view requires item");
-        let mut lines = vec![self.workflow_header(width)];
-        if width >= 100 {
-            let top = content_height.saturating_sub(5).max(3);
-            let steps_width = (width / 3).clamp(24, 42);
-            let agents_width = width.saturating_sub(steps_width + 1);
-            lines.extend(join_columns(
-                &[
-                    self.steps_pane(steps_width, top),
-                    self.children_pane(agents_width, top),
-                ],
-                &[steps_width, agents_width],
-                top,
-            ));
-            lines.extend(self.details_pane(width, content_height.saturating_sub(top), item));
-        } else if width >= 70 {
-            let steps_height = (content_height / 3).max(3);
-            let agents_height = (content_height / 3).max(3);
-            lines.extend(self.steps_pane(width, steps_height));
-            lines.extend(self.children_pane(width, agents_height));
-            lines.extend(self.details_pane(
-                width,
-                content_height.saturating_sub(steps_height + agents_height),
-                item,
-            ));
+        // Drafts and Agent Details replace the whole workspace with one
+        // full-width page; everything else renders the responsive layout.
+        let body = if self.state.save_draft().is_some() || self.state.answer_draft().is_some() {
+            self.draft_page(width, height - 1)
+        } else if self.state.child_details_open() {
+            self.agent_details_page(width, height - 1)
         } else {
-            let navigation_height = content_height.saturating_sub(4).max(2);
-            if self.state.focus() == TaskBrowserFocus::Steps {
-                lines.extend(self.steps_pane(width, navigation_height));
-            } else {
-                lines.extend(self.children_pane(width, navigation_height));
+            match layout.page {
+                BrowserPage::WorkflowWide => self.workflow_wide(&layout),
+                BrowserPage::WorkflowStacked => self.workflow_stacked(&layout),
+                BrowserPage::WorkflowTabs => self.workflow_tabs(&layout),
+                _ => Vec::new(),
             }
-            lines.extend(self.details_pane(
-                width,
-                content_height.saturating_sub(navigation_height),
-                item,
-            ));
+        };
+        let mut lines = vec![String::new(); height];
+        for (index, line) in body.into_iter().take(height - 1).enumerate() {
+            lines[index] = line;
         }
-        lines.push(self.workflow_footer(width));
-        pad_height(lines, height)
+        lines[height - 1] = self.workflow_footer(&layout);
+        lines
     }
 
-    fn workflow_header(&self, width: usize) -> String {
+    /// Stable Workflow identity rows: display name with right-aligned status
+    /// and elapsed, the purpose, and observed child counts with a
+    /// right-aligned `NEEDS INPUT` marker when a request is pending.
+    fn workflow_header(&self, width: usize) -> Vec<String> {
         let item = self
             .state
             .workflow_item()
             .expect("workflow view requires item");
         let workflow = item.workflow.as_ref().expect("workflow item carries meta");
-        let mut header = format!(
-            " {}  {}  {}  {}",
-            workflow.display_name,
-            item.status.label(),
-            format_elapsed(workflow.elapsed_ms),
-            workflow.purpose
+        let right = format!(
+            "{} · {}",
+            item.status.label().to_uppercase(),
+            format_elapsed(workflow.elapsed_ms)
+        );
+        let mut identity = format!(" WORKFLOW / {} ", workflow.display_name);
+        if visible_width(&identity) + 1 + visible_width(&right) <= width {
+            identity = format!(
+                "{}{}",
+                pad_to_width(&identity, width - visible_width(&right)),
+                right
+            );
+        } else {
+            // Keep the right status; truncate only the left identity.
+            let left_width = width.saturating_sub(visible_width(&right) + 1);
+            identity = format!(
+                "{}{}",
+                truncate_width(&identity, left_width, "...", false),
+                right
+            );
+        }
+        let mut counts = format!(
+            " {} done · {} working · {} queued",
+            workflow
+                .steps
+                .iter()
+                .map(|step| step.done_count)
+                .sum::<u64>(),
+            workflow
+                .steps
+                .iter()
+                .map(|step| step.working_count)
+                .sum::<u64>(),
+            workflow
+                .steps
+                .iter()
+                .map(|step| step.queued_count)
+                .sum::<u64>(),
         );
         if workflow.pending_user.is_some() {
-            header.push_str("  Needs input");
+            let needs = paint("NEEDS INPUT", Style::default().fg(self.theme.status_warn));
+            if visible_width(&counts) + 1 + visible_width(&needs) <= width {
+                counts = format!(
+                    "{}{}",
+                    pad_to_width(&counts, width - visible_width(&needs)),
+                    needs
+                );
+            } else {
+                let left_width = width.saturating_sub(visible_width(&needs) + 1);
+                counts = format!(
+                    "{}{}",
+                    truncate_width(&counts, left_width, "...", false),
+                    needs
+                );
+            }
         }
-        truncate_width(&header, width, "...", false)
+        vec![
+            truncate_width(&identity, width, "...", false),
+            truncate_width(&format!(" {}", workflow.purpose), width, "...", false),
+            truncate_width(&counts, width, "...", false),
+        ]
     }
 
-    fn workflow_footer(&self, width: usize) -> String {
+    fn workflow_footer(&self, layout: &BrowserLayout) -> String {
         if let Some(task_id) = self.state.stop_confirmation_task_id() {
             return truncate_width(
                 &format!(" Stop {task_id}?  Enter confirm  Esc back"),
-                width,
+                layout.width,
                 "...",
                 false,
             );
@@ -185,7 +270,7 @@ impl<'a> TaskBrowserRenderer<'a> {
                 } else {
                     " Tab destination  Enter save  Esc back"
                 },
-                width,
+                layout.width,
                 "...",
                 false,
             );
@@ -200,21 +285,27 @@ impl<'a> TaskBrowserRenderer<'a> {
             } else {
                 " Up/Down fields  Left/Right choose  Space toggle  Enter submit  Esc later"
             };
-            return truncate_width(help, width, "...", false);
+            return truncate_width(help, layout.width, "...", false);
         }
         let workflow = self
             .state
             .workflow_item()
             .and_then(|item| item.workflow.as_ref());
-        let mut footer = " Tab switch  Enter details  P pause/resume  X stop  Esc back".to_owned();
+        let mut footer = match layout.page {
+            BrowserPage::WorkflowTabs => " Tab switch  Enter open  Esc back",
+            _ if self.state.child_details_open() => " PgUp/PgDn scroll  Esc back",
+            _ => " Tab switch  Enter details  P pause/resume  X stop  Esc back",
+        }
+        .to_owned();
         if workflow.is_some_and(|value| value.inline_unsaved) {
             footer.push_str("  S save");
         }
-        truncate_width(&footer, width, "...", false)
+        truncate_width(&footer, layout.width, "...", false)
     }
 
     fn steps_pane(&self, width: usize, height: usize) -> Vec<String> {
         let selected = self.state.selected_workflow_step();
+        let body_width = width.saturating_sub(4);
         let body = self
             .state
             .workflow_item()
@@ -223,25 +314,31 @@ impl<'a> TaskBrowserRenderer<'a> {
                 workflow
                     .steps
                     .iter()
-                    .map(|step| {
-                        let pointer = if selected == Some(step) { ">" } else { " " };
-                        format!(
-                            "{pointer} {} {}  {}/{}/{}",
+                    .enumerate()
+                    .map(|(index, step)| {
+                        let row = Self::step_row(step, index, body_width);
+                        self.paint_task_row(
+                            &row,
+                            body_width,
                             step.state.marker(),
-                            step.title,
-                            step.done_count,
-                            step.working_count,
-                            step.queued_count,
+                            self.row_state_color(step.state),
+                            selected == Some(step),
                         )
                     })
                     .collect()
             })
             .unwrap_or_else(|| vec!["No steps yet.".to_owned()]);
-        pane(" Steps ", width, height, &body, self.theme.overlay_border)
+        let color = if self.state.focus() == TaskBrowserFocus::Steps {
+            self.theme.brand
+        } else {
+            self.theme.overlay_border
+        };
+        pane(" Steps ", width, height, &body, color)
     }
 
     fn children_pane(&self, width: usize, height: usize) -> Vec<String> {
         let selected = self.state.selected_workflow_child();
+        let body_width = width.saturating_sub(4);
         let mut body = self
             .state
             .workflow_item()
@@ -252,22 +349,13 @@ impl<'a> TaskBrowserRenderer<'a> {
                     .items
                     .iter()
                     .map(|child| {
-                        let pointer = if selected == Some(child) { ">" } else { " " };
-                        let role = child
-                            .role
-                            .as_deref()
-                            .map_or(String::new(), |role| format!(" [{role}]"));
-                        let activity = child
-                            .latest_activity
-                            .as_deref()
-                            .map_or(String::new(), |value| format!("  {value}"));
-                        format!(
-                            "{pointer} {} {}{}  {}{}",
+                        let row = Self::agent_row(child, body_width);
+                        self.paint_task_row(
+                            &row,
+                            body_width,
                             child.state.marker(),
-                            child.title,
-                            role,
-                            child.elapsed,
-                            activity
+                            self.row_state_color(child.state),
+                            selected == Some(child),
                         )
                     })
                     .collect::<Vec<_>>()
@@ -276,10 +364,263 @@ impl<'a> TaskBrowserRenderer<'a> {
         if body.is_empty() {
             body.push("No agents in this step.".to_owned());
         }
-        pane(" Agents ", width, height, &body, self.theme.overlay_border)
+        let color = if self.state.focus() == TaskBrowserFocus::Agents {
+            self.theme.brand
+        } else {
+            self.theme.overlay_border
+        };
+        pane(" Agents ", width, height, &body, color)
     }
 
-    fn details_pane(&self, width: usize, height: usize, item: &TaskBrowserItem) -> Vec<String> {
+    /// `{marker} {ordinal} {title}` with the observed child counts
+    /// right-aligned; counts are dropped first, then the row truncates.
+    fn step_row(step: &TaskBrowserWorkflowStep, ordinal: usize, width: usize) -> String {
+        let mut text = format!("{} {} {}", step.state.marker(), ordinal + 1, step.title);
+        let counts = format!(
+            "{} · {} · {}",
+            step.done_count, step.working_count, step.queued_count
+        );
+        if visible_width(&text) + 1 + visible_width(&counts) <= width {
+            text = format!(
+                "{}{}",
+                pad_to_width(&text, width - visible_width(&counts)),
+                counts
+            );
+        }
+        truncate_width(&text, width, "...", false)
+    }
+
+    /// `{marker} {title}[ {role}]  {latest_activity}` with the elapsed time
+    /// right-aligned; elapsed is dropped first, then the row truncates.
+    fn agent_row(child: &TaskBrowserWorkflowChild, width: usize) -> String {
+        let role = child
+            .role
+            .as_deref()
+            .map_or(String::new(), |role| format!(" [{role}]"));
+        let activity = child
+            .latest_activity
+            .as_deref()
+            .map_or(String::new(), |value| format!("  {value}"));
+        let mut text = format!(
+            "{} {}{}{}",
+            child.state.marker(),
+            child.title,
+            role,
+            activity
+        );
+        if visible_width(&text) + 1 + visible_width(&child.elapsed) <= width {
+            text = format!(
+                "{}{}",
+                pad_to_width(&text, width - visible_width(&child.elapsed)),
+                child.elapsed
+            );
+        }
+        truncate_width(&text, width, "...", false)
+    }
+
+    fn row_state_color(&self, state: TaskBrowserWorkflowRowState) -> Color {
+        match state {
+            TaskBrowserWorkflowRowState::Pending => self.theme.status_pending,
+            TaskBrowserWorkflowRowState::Working | TaskBrowserWorkflowRowState::Recovering => {
+                self.theme.status_warn
+            }
+            TaskBrowserWorkflowRowState::Completed => self.theme.status_ok,
+            TaskBrowserWorkflowRowState::Failed => self.theme.status_error,
+            TaskBrowserWorkflowRowState::Paused => self.theme.status_cancelled,
+        }
+    }
+
+    /// Wide split: Steps and Agents side by side, lower selected-agent
+    /// preview across the full width.
+    fn workflow_wide(&self, layout: &BrowserLayout) -> Vec<String> {
+        let mut lines = self.workflow_header(layout.width);
+        let top_height = layout.preview_top.saturating_sub(layout.content_top);
+        let agents_width = layout.width.saturating_sub(layout.list_width + 1);
+        lines.extend(join_columns(
+            &[
+                self.steps_pane(layout.list_width, top_height),
+                self.children_pane(agents_width, top_height),
+            ],
+            &[layout.list_width, agents_width],
+            top_height,
+        ));
+        lines.extend(self.agent_preview(
+            layout.width,
+            layout.content_top + layout.content_height - layout.preview_top,
+        ));
+        lines
+    }
+
+    /// Medium stack: summary, Steps, Agents, and a compact selected-agent
+    /// preview above the fixed footer.
+    fn workflow_stacked(&self, layout: &BrowserLayout) -> Vec<String> {
+        let mut lines = self.workflow_header(layout.width);
+        let steps_height = layout.agents_top.saturating_sub(layout.steps_top);
+        let agents_height = layout.preview_top.saturating_sub(layout.agents_top);
+        let preview_height = layout.content_top + layout.content_height - layout.preview_top;
+        lines.extend(self.steps_pane(layout.width, steps_height));
+        lines.extend(self.children_pane(layout.width, agents_height));
+        lines.extend(self.agent_preview(layout.width, preview_height));
+        lines
+    }
+
+    /// Small tabs: stable header, `[STEPS] [AGENTS]` selector, and the single
+    /// active navigation page above the footer.
+    fn workflow_tabs(&self, layout: &BrowserLayout) -> Vec<String> {
+        let mut lines = self.workflow_header(layout.width);
+        lines.push(self.tab_selector());
+        let pane_height = layout.content_height.saturating_sub(1);
+        if self.state.focus() == TaskBrowserFocus::Steps {
+            lines.extend(self.steps_pane(layout.width, pane_height));
+        } else {
+            lines.extend(self.children_pane(layout.width, pane_height));
+        }
+        lines
+    }
+
+    fn tab_selector(&self) -> String {
+        if self.state.focus() == TaskBrowserFocus::Steps {
+            format!(
+                "{}  AGENTS",
+                paint("[STEPS]", Style::default().fg(self.theme.brand))
+            )
+        } else {
+            format!(
+                "STEPS  {}",
+                paint("[AGENTS]", Style::default().fg(self.theme.brand))
+            )
+        }
+    }
+
+    /// Lower selected-agent preview shared by the wide and stacked layouts:
+    /// an identity divider, a `CURRENT ACTIVITY` divider, and wrapped
+    /// activity (falling back to the terminal summary, then the state label).
+    fn agent_preview(&self, width: usize, height: usize) -> Vec<String> {
+        if height == 0 {
+            return Vec::new();
+        }
+        let Some(child) = self.state.selected_workflow_child() else {
+            let mut lines = vec![Self::divider(
+                " SELECTED AGENT ",
+                width,
+                self.theme.overlay_border,
+            )];
+            lines.push(pad_to_width("No agent selected.", width));
+            lines.resize(height, String::new());
+            return lines;
+        };
+        let mut lines = vec![
+            Self::divider(
+                &format!(" SELECTED AGENT / {} ", child.title),
+                width,
+                self.theme.overlay_border,
+            ),
+            Self::divider(" CURRENT ACTIVITY ", width, self.theme.overlay_border),
+        ];
+        let activity = child
+            .latest_activity
+            .clone()
+            .or_else(|| child.terminal_summary.clone())
+            .unwrap_or_else(|| child.state.label().to_owned());
+        for line in wrap_text(&activity, width.saturating_sub(2))
+            .into_iter()
+            .take(height.saturating_sub(2))
+        {
+            lines.push(format!(" {line}"));
+        }
+        lines.truncate(height);
+        lines.resize(height, String::new());
+        lines
+    }
+
+    /// Full-width Agent Details page: identity divider, meta line, wrapped
+    /// scrollable current activity, then the terminal result, generated
+    /// files, and actual usage sections when present.
+    fn agent_details_page(&self, width: usize, height: usize) -> Vec<String> {
+        let Some(child) = self.state.selected_workflow_child() else {
+            return vec![pad_to_width("No agent selected.", width); height];
+        };
+        let mut lines = vec![Self::divider(
+            &format!(" AGENT DETAILS / {} ", child.title),
+            width,
+            self.theme.overlay_border,
+        )];
+        let mut meta = format!(" {} {}", child.state.marker(), child.state.label());
+        if let Some(role) = &child.role {
+            let _ = write!(meta, " · {role}");
+        }
+        let _ = write!(meta, " · {}", child.elapsed);
+        lines.push(truncate_width(&meta, width, "...", false));
+        lines.push(Self::divider(
+            " CURRENT ACTIVITY ",
+            width,
+            self.theme.overlay_border,
+        ));
+
+        let activity = child
+            .latest_activity
+            .clone()
+            .or_else(|| child.terminal_summary.clone())
+            .unwrap_or_else(|| child.state.label().to_owned());
+        let wrapped = wrap_text(&activity, width.saturating_sub(2));
+
+        let mut tail = Vec::new();
+        if let Some(summary) = &child.terminal_summary {
+            tail.push(Self::divider(
+                " TERMINAL RESULT ",
+                width,
+                self.theme.overlay_border,
+            ));
+            tail.extend(
+                wrap_text(summary, width.saturating_sub(2))
+                    .into_iter()
+                    .map(|line| format!(" {line}")),
+            );
+        }
+        if !child.generated_files.is_empty() {
+            tail.push(Self::divider(" FILES ", width, self.theme.overlay_border));
+            tail.extend(child.generated_files.iter().map(|file| format!(" {file}")));
+        }
+        if let Some(usage) = &child.actual_usage {
+            tail.push(Self::divider(
+                " ACTUAL USAGE ",
+                width,
+                self.theme.overlay_border,
+            ));
+            tail.push(format!(" {usage}"));
+        }
+
+        // Slice the wrapped activity after wrapping; reserve one row for a
+        // visible continuation indicator when rows remain below.
+        let fixed = 3 + tail.len();
+        let available = height.saturating_sub(fixed);
+        let total = wrapped.len();
+        let start = self.state.output_scroll().min(total.saturating_sub(1));
+        let remaining = total.saturating_sub(start);
+        let show = if remaining > available {
+            available.saturating_sub(1)
+        } else {
+            available
+        };
+        for line in wrapped.iter().skip(start).take(show) {
+            lines.push(format!(" {line}"));
+        }
+        if remaining > available {
+            lines.push(paint(
+                &pad_to_width(" more below (PgDn) ", width),
+                Style::default().fg(self.theme.overlay_border),
+            ));
+        }
+        lines.extend(tail);
+        lines.truncate(height);
+        lines.resize(height, String::new());
+        lines
+    }
+
+    /// Full-width save/replacement or answer draft page. The exact draft
+    /// strings are kept verbatim; only their placement (full-width inside the
+    /// workflow frame) changed.
+    fn draft_page(&self, width: usize, height: usize) -> Vec<String> {
         if let Some(draft) = self.state.save_draft() {
             if let Some(replacement) = &draft.replacement {
                 return pane(
@@ -321,35 +662,7 @@ impl<'a> TaskBrowserRenderer<'a> {
             };
             return pane(" Answer ", width, height, &body, self.theme.overlay_border);
         }
-        if self.state.child_details_open()
-            && let Some(child) = self.state.selected_workflow_child()
-        {
-            let mut body = vec![
-                format!("Agent: {}", child.title),
-                format!("State: {}", child.state.marker()),
-            ];
-            if let Some(usage) = &child.actual_usage {
-                body.push(format!("Usage: {usage}"));
-            }
-            body.push(format!("Elapsed: {}", child.elapsed));
-            if let Some(role) = &child.role {
-                body.push(format!("Role: {role}"));
-            }
-            if let Some(activity) = &child.latest_activity {
-                body.push(format!("Activity: {activity}"));
-            }
-            if let Some(summary) = &child.terminal_summary {
-                body.push(format!("Result: {summary}"));
-            }
-            return pane(" Details ", width, height, &body, self.theme.overlay_border);
-        }
-        pane(
-            " Details ",
-            width,
-            height,
-            &item.detail_lines,
-            self.theme.overlay_border,
-        )
+        Vec::new()
     }
 
     fn render_browser(&self, width: usize, height: usize) -> Vec<String> {
@@ -383,6 +696,10 @@ impl<'a> TaskBrowserRenderer<'a> {
             }
             BrowserPage::Details => self.details_page(&layout),
             BrowserPage::Output => self.output_page(&layout),
+            // The workflow pages are only reachable through `render_workflow`.
+            BrowserPage::WorkflowWide
+            | BrowserPage::WorkflowStacked
+            | BrowserPage::WorkflowTabs => Vec::new(),
         };
         for (index, line) in body.into_iter().take(layout.content_height).enumerate() {
             lines[layout.content_top + index] = line;

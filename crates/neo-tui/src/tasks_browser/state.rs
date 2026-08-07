@@ -783,9 +783,10 @@ impl TaskBrowserState {
                 }
             }
             TaskBrowserAction::SelectPageUp => {
-                if self.workflow_task_id.is_none()
+                if (self.workflow_task_id.is_none()
                     && self.task_details_open
-                    && self.focus == TaskBrowserFocus::Output
+                    && self.focus == TaskBrowserFocus::Output)
+                    || (self.workflow_task_id.is_some() && self.child_details_open)
                 {
                     self.move_output_scroll(-(PAGE_SIZE as isize));
                 } else {
@@ -793,9 +794,10 @@ impl TaskBrowserState {
                 }
             }
             TaskBrowserAction::SelectPageDown => {
-                if self.workflow_task_id.is_none()
+                if (self.workflow_task_id.is_none()
                     && self.task_details_open
-                    && self.focus == TaskBrowserFocus::Output
+                    && self.focus == TaskBrowserFocus::Output)
+                    || (self.workflow_task_id.is_some() && self.child_details_open)
                 {
                     self.move_output_scroll(PAGE_SIZE as isize);
                 } else {
@@ -841,6 +843,7 @@ impl TaskBrowserState {
                     && self.selected_workflow_child().is_some()
                 {
                     self.child_details_open = true;
+                    self.output_scroll = 0;
                 }
             }
             TaskBrowserAction::TogglePauseResume => {
@@ -892,6 +895,7 @@ impl TaskBrowserState {
                     self.dismiss_answer();
                 } else if self.child_details_open {
                     self.child_details_open = false;
+                    self.output_scroll = 0;
                 } else if self.workflow_task_id.take().is_some() {
                     self.focus = TaskBrowserFocus::Tasks;
                     self.selected_step_key = None;
@@ -1139,6 +1143,12 @@ impl TaskBrowserState {
     }
 
     fn move_output_scroll(&mut self, delta: isize) {
+        if self.workflow_task_id.is_some() && self.child_details_open {
+            // Workflow Agent Details has no preview lines to clamp against;
+            // the renderer clamps the scroll to the wrapped activity rows.
+            self.output_scroll = self.output_scroll.saturating_add_signed(delta);
+            return;
+        }
         let preview_len = self
             .selected_item()
             .map_or(0, |item| item.preview_lines.len());

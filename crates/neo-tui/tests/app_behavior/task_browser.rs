@@ -39,6 +39,7 @@ fn child(id: &str, title: &str, usage: Option<Value>) -> TaskBrowserWorkflowChil
         actual_usage: usage,
         latest_activity: Some("Working".to_owned()),
         terminal_summary: None,
+        generated_files: Vec::new(),
     }
 }
 fn workflow_item(
@@ -945,8 +946,19 @@ fn workflow_answer_edits_object_branches_and_object_array_rows_without_losing_dr
 
 #[test]
 fn workflow_renderer_fits_supported_widths_and_places_usage_in_details() {
-    let mut state = open_workflow(workflow_item(None, true, initial_child_page()));
-    for width in [32, 70, 99, 100, 120, 180] {
+    // A long Bash activity command whose wrapped segments exceed one screen,
+    // plus durable files and usage that must stay out of the roster rows.
+    // The tail marker is unique so a visible tail is distinguishable from
+    // the repetitive command body.
+    let long_command = format!(
+        "Bash: cargo nextest run --bin neo -- {} --unique-tail-marker",
+        "very-long-argument-".repeat(280)
+    );
+    let mut page = initial_child_page();
+    page.items[0].latest_activity = Some(long_command.clone());
+    page.items[0].generated_files = vec!["notes.md".to_owned(), "summary.md".to_owned()];
+    let mut state = open_workflow(workflow_item(None, true, page));
+    for width in [32, 69, 70, 99, 100, 120, 180] {
         for height in [12, 20, 40] {
             let lines = render_plain(&state, width, height);
             assert_eq!(lines.len(), height, "width={width}, height={height}");
@@ -958,16 +970,107 @@ fn workflow_renderer_fits_supported_widths_and_places_usage_in_details() {
         }
     }
 
-    let agents = render_plain(&state, 120, 40).join("\n");
-    let agent_row = agents
+    // Header: stable identity, purpose, and observed counts; no run IDs.
+    let wide = render_plain(&state, 120, 40);
+    assert!(wide[0].contains("WORKFLOW / deep-research"));
+    assert!(wide[0].contains("RUNNING · 00:12"));
+    assert!(wide[1].contains("Research and summarize"));
+    assert!(wide[2].contains("2 done · 2 working · 0 queued"));
+
+    // Usage and generated files never leak into the roster; only the
+    // full-width Agent Details page shows them.
+    let roster = wide.join("\n");
+    let agent_row = roster
         .lines()
         .find(|line| line.contains("Source worker"))
         .expect("agent row");
     assert!(!agent_row.contains("120"));
+    assert!(!roster.contains("{\"tokens\":120}"));
+    assert!(!roster.contains("notes.md"));
+    assert!(!roster.contains("summary.md"));
 
+    // 69: tabs — header, selector, one navigation page, contextual footer.
+    let tabs = render_plain(&state, 69, 20);
+    assert!(tabs[3].contains("[STEPS]  AGENTS"), "row: {}", tabs[3]);
+    assert!(tabs[4].starts_with("┌ Steps"), "row: {}", tabs[4]);
+    assert!(!tabs.join("\n").contains("┌ Agents"));
+    assert!(!tabs.join("\n").contains(" SELECTED AGENT / "));
+    assert!(tabs[19].contains(" Tab switch  Enter open  Esc back"));
+
+    // 70 and 99: stacked — Steps, Agents, then the compact preview.
+    for (index, width) in [(3usize, 70usize), (3, 99)] {
+        let stacked = render_plain(&state, width, 20);
+        assert!(
+            stacked[index].starts_with("┌ Steps"),
+            "width={width}, row: {}",
+            stacked[index]
+        );
+        assert!(
+            stacked[index + 5].starts_with("┌ Agents"),
+            "width={width}, row: {}",
+            stacked[index + 5]
+        );
+        assert!(
+            stacked[index + 10].contains(" SELECTED AGENT / Source worker "),
+            "width={width}, row: {}",
+            stacked[index + 10]
+        );
+        assert!(stacked[19].contains(" Enter details"));
+        assert!(!stacked.join("\n").contains(" Tab switch  Enter open "));
+    }
+
+    // 100: wide split — Steps and Agents side by side with the preview below.
+    let wide100 = render_plain(&state, 100, 20);
+    assert!(wide100[3].starts_with("┌ Steps"), "row: {}", wide100[3]);
+    assert!(
+        wide100.iter().any(|line| line.matches('│').count() >= 4),
+        "expected a joined Steps/Agents row:\n{}",
+        wide100.join("\n")
+    );
+    assert!(
+        wide100[14].contains(" SELECTED AGENT / Source worker "),
+        "row: {}",
+        wide100[14]
+    );
+    assert!(wide100[19].contains(" Enter details"));
+
+    // Enter on the selected agent opens the full-height Agent Details page;
+    // usage and files render only there.
     state.handle_action(TaskBrowserAction::ToggleWorkflowFocus);
+    assert_eq!(state.focus(), TaskBrowserFocus::Agents);
     state.handle_action(TaskBrowserAction::OpenWorkflowChildDetails);
-    let details = render_plain(&state, 120, 40).join("\n");
-    assert!(details.contains("Usage: {\"tokens\":120}"));
-    assert!(details.contains("S save"));
+    assert!(state.child_details_open());
+    assert_eq!(state.output_scroll(), 0);
+    let details_lines = render_plain(&state, 120, 40);
+    assert!(details_lines[0].contains(" AGENT DETAILS / Source worker "));
+    assert!(details_lines[1].contains(" working · worker · 00:04"));
+    assert!(details_lines[39].contains("S save"));
+    let details = details_lines.join("\n");
+    assert!(details.contains(" ACTUAL USAGE "));
+    assert!(details.contains("{\"tokens\":120}"));
+    assert!(details.contains(" FILES "));
+    assert!(details.contains("notes.md"));
+    assert!(details.contains("summary.md"));
+
+    // The wrapped command never ellipsizes: PageDown reveals every segment
+    // and the continuation line disappears only when the tail is visible.
+    assert!(details.contains(" more below (PgDn) "));
+    assert!(!details.contains("--unique-tail-marker"));
+    state.handle_action(TaskBrowserAction::SelectPageDown);
+    assert_eq!(state.output_scroll(), 10);
+    let scrolled = render_plain(&state, 120, 40).join("\n");
+    assert!(scrolled.contains(" more below (PgDn) "));
+    state.handle_action(TaskBrowserAction::SelectPageDown);
+    assert_eq!(state.output_scroll(), 20);
+    let scrolled = render_plain(&state, 120, 40).join("\n");
+    assert!(scrolled.contains("--unique-tail-marker"));
+    assert!(!scrolled.contains(" more below (PgDn) "));
+
+    // Esc returns to the responsive Workflow workspace and resets the scroll.
+    state.handle_action(TaskBrowserAction::Cancel);
+    assert!(!state.child_details_open());
+    assert_eq!(state.output_scroll(), 0);
+    let back = render_plain(&state, 120, 40).join("\n");
+    assert!(back.contains(" SELECTED AGENT / Source worker "));
+    assert!(!back.contains(" AGENT DETAILS / "));
 }
