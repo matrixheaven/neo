@@ -58,31 +58,24 @@ fn config_loads_builtin_workflow_definitions() {
 }
 
 #[test]
-fn cli_yolo_overrides_config_permission_mode() {
-    let (_temp, config_path, project_dir) = temp_project_config("permission_mode = \"ask\"\n");
-    let config = AppConfig::load(ConfigOverrides {
-        config_path: Some(config_path),
-        yolo: true,
-        auto: false,
-        trust_store: None,
-        project_dir: Some(project_dir),
-    })
-    .expect("load config");
-    assert_eq!(config.permission_mode, PermissionMode::Yolo);
-}
+fn cli_permission_flags_override_config_permission_mode() {
+    let cases = [
+        ("yolo", true, false, PermissionMode::Yolo),
+        ("auto", false, true, PermissionMode::Auto),
+    ];
 
-#[test]
-fn cli_auto_overrides_config_permission_mode() {
-    let (_temp, config_path, project_dir) = temp_project_config("permission_mode = \"ask\"\n");
-    let config = AppConfig::load(ConfigOverrides {
-        config_path: Some(config_path),
-        yolo: false,
-        auto: true,
-        trust_store: None,
-        project_dir: Some(project_dir),
-    })
-    .expect("load config");
-    assert_eq!(config.permission_mode, PermissionMode::Auto);
+    for (name, yolo, auto, expected) in cases {
+        let (_temp, config_path, project_dir) = temp_project_config("permission_mode = \"ask\"\n");
+        let config = AppConfig::load(ConfigOverrides {
+            config_path: Some(config_path),
+            yolo,
+            auto,
+            trust_store: None,
+            project_dir: Some(project_dir),
+        })
+        .expect("load config");
+        assert_eq!(config.permission_mode, expected, "case {name}");
+    }
 }
 
 #[test]

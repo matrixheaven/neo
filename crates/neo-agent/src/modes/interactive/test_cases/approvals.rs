@@ -316,7 +316,7 @@ async fn approval_requests_are_handled_one_at_a_time() {
 }
 
 #[tokio::test]
-async fn approval_transcript_holds_every_request_and_focuses_earliest() {
+async fn approval_focus_owns_visible_window_until_resolved() {
     let mut controller = InteractiveController::new_for_test(
         "neo",
         "test-session",
@@ -335,13 +335,19 @@ async fn approval_transcript_holds_every_request_and_focuses_earliest() {
     controller.register_pending_approval(first);
     controller.register_pending_approval(second);
 
-    // Every request has its transcript position on arrival; complete state
-    // stays available while the earliest unresolved request owns the focus.
+    // The full document snapshot keeps every approval card in arrival order.
     let snapshot = controller.render_snapshot();
     assert!(snapshot.contains("printf one"));
     assert!(snapshot.contains("printf two"));
     assert!(!snapshot.contains("queued:"));
+    assert!(
+        snapshot.find("printf one").unwrap() < snapshot.find("printf two").unwrap(),
+        "approval cards keep arrival order in the document:\n{snapshot}"
+    );
 
+    // The visible slice is confined to the earliest unresolved card's
+    // window; the later card stays in the document but outside the slice
+    // until the blocking entry resolves.
     let slice = controller.tui.transcript_mut().render_visible_slice(80, 24);
     let text = slice
         .iter()
@@ -349,15 +355,42 @@ async fn approval_transcript_holds_every_request_and_focuses_earliest() {
         .collect::<Vec<_>>()
         .join("\n");
     assert!(text.contains("printf one"), "slice:\n{text}");
-    assert!(text.contains("printf two"), "slice:\n{text}");
     assert!(
-        text.find("printf one").unwrap() < text.find("printf two").unwrap(),
-        "approval cards keep arrival order:\n{text}"
+        !text.contains("printf two"),
+        "later approval must stay outside the visible window:\n{text}"
+    );
+    assert!(
+        controller.tui.transcript().document().total_rows() > slice.len(),
+        "later approval card remains in the document"
     );
     assert_eq!(
         controller.tui.transcript().earliest_blocking_entry(),
         Some(neo_tui::transcript::BlockingEntryKind::Approval(
             "tool-1".to_owned()
+        ))
+    );
+
+    // Resolving the earliest approval advances the blocking focus to the
+    // next card, which then owns the visible window.
+    controller
+        .handle_input_event(InputEvent::Action(KeybindingAction::SelectConfirm))
+        .await
+        .expect("first approval confirms");
+    let advanced = controller.tui.transcript_mut().render_visible_slice(80, 24);
+    let text = advanced
+        .iter()
+        .map(|line| neo_tui::primitive::strip_ansi(line))
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(text.contains("printf two"), "slice:\n{text}");
+    assert!(
+        !text.contains("printf one"),
+        "resolved card leaves the visible window:\n{text}"
+    );
+    assert_eq!(
+        controller.tui.transcript().earliest_blocking_entry(),
+        Some(neo_tui::transcript::BlockingEntryKind::Approval(
+            "tool-2".to_owned()
         ))
     );
 }

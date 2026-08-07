@@ -10,60 +10,40 @@ use super::super::*;
 use super::*;
 
 #[tokio::test]
-async fn slash_ask_sets_ask_permission_mode() {
-    let mut controller = InteractiveController::new_for_test(
-        "neo",
-        "test-session",
-        "openai/gpt-4.1",
-        test_workspace_root(),
-        |_request| async move { Ok(Vec::<AgentEvent>::new()) },
-    );
-    controller.type_text("/ask");
-    controller
-        .handle_input_event(InputEvent::Submit)
-        .await
-        .expect("slash command handled");
-    assert_eq!(controller.chrome().permission_mode(), PermissionMode::Ask);
-    assert!(transcript_has_status(&controller, "Permission Mode: ask"));
-    assert!(controller.render_snapshot().contains("[ask]"));
-}
+async fn slash_permission_commands_set_mode_status_and_footer() {
+    let cases = [
+        ("/ask", PermissionMode::Ask, "ask"),
+        ("/auto", PermissionMode::Auto, "auto"),
+        ("/yolo", PermissionMode::Yolo, "yolo"),
+    ];
 
-#[tokio::test]
-async fn slash_auto_sets_auto_permission_mode() {
-    let mut controller = InteractiveController::new_for_test(
-        "neo",
-        "test-session",
-        "openai/gpt-4.1",
-        test_workspace_root(),
-        |_request| async move { Ok(Vec::<AgentEvent>::new()) },
-    );
-    controller.type_text("/auto");
-    controller
-        .handle_input_event(InputEvent::Submit)
-        .await
-        .expect("slash command handled");
-    assert_eq!(controller.chrome().permission_mode(), PermissionMode::Auto);
-    assert!(transcript_has_status(&controller, "Permission Mode: auto"));
-    assert!(controller.render_snapshot().contains("[auto]"));
-}
-
-#[tokio::test]
-async fn slash_yolo_sets_yolo_permission_mode() {
-    let mut controller = InteractiveController::new_for_test(
-        "neo",
-        "test-session",
-        "openai/gpt-4.1",
-        test_workspace_root(),
-        |_request| async move { Ok(Vec::<AgentEvent>::new()) },
-    );
-    controller.type_text("/yolo");
-    controller
-        .handle_input_event(InputEvent::Submit)
-        .await
-        .expect("slash command handled");
-    assert_eq!(controller.chrome().permission_mode(), PermissionMode::Yolo);
-    assert!(transcript_has_status(&controller, "Permission Mode: yolo"));
-    assert!(controller.render_snapshot().contains("[yolo]"));
+    for (command, mode, label) in cases {
+        let mut controller = InteractiveController::new_for_test(
+            "neo",
+            "test-session",
+            "openai/gpt-4.1",
+            test_workspace_root(),
+            |_request| async move { Ok(Vec::<AgentEvent>::new()) },
+        );
+        controller.type_text(command);
+        controller
+            .handle_input_event(InputEvent::Submit)
+            .await
+            .expect("slash command handled");
+        assert_eq!(
+            controller.chrome().permission_mode(),
+            mode,
+            "case {command}"
+        );
+        assert!(
+            transcript_has_status(&controller, &format!("Permission Mode: {label}")),
+            "case {command}"
+        );
+        assert!(
+            controller.render_snapshot().contains(&format!("[{label}]")),
+            "case {command}"
+        );
+    }
 }
 
 #[tokio::test]

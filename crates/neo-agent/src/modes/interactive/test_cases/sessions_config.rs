@@ -357,36 +357,32 @@ fn controller_for_config_exposes_default_model_context_window() {
 }
 
 #[tokio::test]
-async fn configured_low_reasoning_reaches_interactive_turn_unchanged() {
-    let expected = neo_ai::ReasoningSelection::Effort {
-        effort: neo_ai::ReasoningEffort::low(),
-    };
+async fn configured_reasoning_selections_reach_interactive_turn_unchanged() {
+    let cases = [
+        (
+            "low",
+            neo_ai::ReasoningSelection::Effort {
+                effort: neo_ai::ReasoningEffort::low(),
+            },
+        ),
+        (
+            "max",
+            neo_ai::ReasoningSelection::Effort {
+                effort: neo_ai::ReasoningEffort::max(),
+            },
+        ),
+        (
+            "budget",
+            neo_ai::ReasoningSelection::BudgetTokens {
+                budget_tokens: 12_000,
+            },
+        ),
+    ];
 
-    let actual = capture_configured_interactive_turn_reasoning(expected.clone()).await;
-
-    assert_eq!(actual, expected);
-}
-
-#[tokio::test]
-async fn configured_max_reasoning_reaches_interactive_turn_unchanged() {
-    let expected = neo_ai::ReasoningSelection::Effort {
-        effort: neo_ai::ReasoningEffort::max(),
-    };
-
-    let actual = capture_configured_interactive_turn_reasoning(expected.clone()).await;
-
-    assert_eq!(actual, expected);
-}
-
-#[tokio::test]
-async fn configured_budget_reasoning_reaches_interactive_turn_unchanged() {
-    let expected = neo_ai::ReasoningSelection::BudgetTokens {
-        budget_tokens: 12_000,
-    };
-
-    let actual = capture_configured_interactive_turn_reasoning(expected.clone()).await;
-
-    assert_eq!(actual, expected);
+    for (name, expected) in cases {
+        let actual = capture_configured_interactive_turn_reasoning(expected.clone()).await;
+        assert_eq!(actual, expected, "case {name}");
+    }
 }
 
 #[test]

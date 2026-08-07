@@ -26,10 +26,8 @@ use crate::config::{
     RuntimeConfig, RuntimeRetryConfig, TuiConfig,
 };
 
-#[test]
-fn agent_config_for_app_applies_runtime_config() {
-    let temp = tempfile::tempdir().expect("tempdir");
-    let config = AppConfig {
+fn app_config_with_runtime(temp: &tempfile::TempDir, runtime: RuntimeConfig) -> AppConfig {
+    AppConfig {
         default_model: "test-model".to_owned(),
         default_provider: "openai".to_owned(),
         providers: BTreeMap::new(),
@@ -44,7 +42,36 @@ fn agent_config_for_app_applies_runtime_config() {
         defaults: Defaults {
             mode: "events".to_owned(),
         },
-        runtime: RuntimeConfig {
+        runtime,
+        background_tasks: neo_agent_core::BackgroundTaskManager::new(),
+        workflow_runtime: neo_agent_core::workflow::WorkflowRuntime::new(
+            neo_agent_core::workflow::WorkflowLimits::default(),
+        ),
+        workflow_definitions: neo_agent_core::workflow::WorkflowDefinitionRegistry::empty(),
+        workflow_dispatch_resolver: neo_agent_core::runtime::WorkflowDispatchResolver::default(),
+        multi_agent: neo_agent_core::multi_agent::MultiAgentRuntime::new(),
+        tui: TuiConfig::default(),
+        theme: crate::themes::ResolvedTheme::default(),
+        theme_resolution: crate::themes::ThemeResolution::Default,
+        mcp: McpConfig::default(),
+        prompt_templates: Vec::new(),
+        system_prompt_file: None,
+        extra_skill_dirs: Vec::new(),
+        skill_path: Vec::new(),
+        project_trusted: true,
+        project_trust: crate::trust::ProjectTrustState::NotRequired,
+        project_dir: temp.path().to_path_buf(),
+        config_path: temp.path().join(".neo/config.toml"),
+        config_file_exists: true,
+    }
+}
+
+#[test]
+fn agent_config_for_app_applies_runtime_config() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let config = app_config_with_runtime(
+        &temp,
+        RuntimeConfig {
             temperature: Some(0.35),
             max_tokens: Some(512),
             reasoning: neo_ai::ReasoningSelection::Effort {
@@ -77,27 +104,7 @@ fn agent_config_for_app_applies_runtime_config() {
             }),
             ..RuntimeConfig::default()
         },
-        background_tasks: neo_agent_core::BackgroundTaskManager::new(),
-        workflow_runtime: neo_agent_core::workflow::WorkflowRuntime::new(
-            neo_agent_core::workflow::WorkflowLimits::default(),
-        ),
-        workflow_definitions: neo_agent_core::workflow::WorkflowDefinitionRegistry::empty(),
-        workflow_dispatch_resolver: neo_agent_core::runtime::WorkflowDispatchResolver::default(),
-        multi_agent: neo_agent_core::multi_agent::MultiAgentRuntime::new(),
-        tui: TuiConfig::default(),
-        theme: crate::themes::ResolvedTheme::default(),
-        theme_resolution: crate::themes::ThemeResolution::Default,
-        mcp: McpConfig::default(),
-        prompt_templates: Vec::new(),
-        system_prompt_file: None,
-        extra_skill_dirs: Vec::new(),
-        skill_path: Vec::new(),
-        project_trusted: true,
-        project_trust: crate::trust::ProjectTrustState::NotRequired,
-        project_dir: temp.path().to_path_buf(),
-        config_path: temp.path().join(".neo/config.toml"),
-        config_file_exists: true,
-    };
+    );
     let model = ModelSpec {
         provider: ProviderId("openai".to_owned()),
         model: "test-model".to_owned(),
@@ -108,7 +115,6 @@ fn agent_config_for_app_applies_runtime_config() {
     let agent_config = agent_config_for_app(model, &config, None, None).expect("agent config");
 
     assert_eq!(agent_config.temperature, Some(0.35));
-    assert_eq!(agent_config.max_tokens, Some(512));
     assert_eq!(agent_config.max_retries, 100);
     assert_eq!(agent_config.first_event_timeout_secs, 7);
     assert_eq!(agent_config.stream_idle_timeout_secs, 11);
@@ -241,66 +247,48 @@ fn agent_config_for_app_shares_session_workflow_registry() {
 }
 
 #[test]
-fn agent_config_for_app_falls_back_to_model_max_output_tokens() {
+fn agent_config_max_tokens_uses_runtime_value_then_model_capability() {
     let temp = tempfile::tempdir().expect("tempdir");
-    let config = AppConfig {
-        default_model: "test-model".to_owned(),
-        default_provider: "openai".to_owned(),
-        providers: BTreeMap::new(),
-        models: BTreeMap::new(),
-        model_scope: Vec::new(),
-        sessions_dir: temp.path().join(".neo/sessions"),
-        permission_mode: PermissionMode::default(),
-        live_permission_mode: std::sync::Arc::new(
-            std::sync::RwLock::new(PermissionMode::default()),
-        ),
-        workspace_policy: std::sync::Arc::new(std::sync::RwLock::new(None)),
-        defaults: Defaults {
-            mode: "events".to_owned(),
-        },
-        runtime: RuntimeConfig {
-            temperature: None,
-            max_tokens: None,
-            reasoning: neo_ai::ReasoningSelection::Off,
-            replay_reasoning: true,
-            steering_queue_mode: QueueMode::OneAtATime,
-            follow_up_queue_mode: QueueMode::OneAtATime,
-            tool_execution_mode: ToolExecutionMode::Sequential,
-            compaction: None,
-            ..RuntimeConfig::default()
-        },
-        background_tasks: neo_agent_core::BackgroundTaskManager::new(),
-        workflow_runtime: neo_agent_core::workflow::WorkflowRuntime::new(
-            neo_agent_core::workflow::WorkflowLimits::default(),
-        ),
-        workflow_definitions: neo_agent_core::workflow::WorkflowDefinitionRegistry::empty(),
-        workflow_dispatch_resolver: neo_agent_core::runtime::WorkflowDispatchResolver::default(),
-        multi_agent: neo_agent_core::multi_agent::MultiAgentRuntime::new(),
-        tui: TuiConfig::default(),
-        theme: crate::themes::ResolvedTheme::default(),
-        theme_resolution: crate::themes::ThemeResolution::Default,
-        mcp: McpConfig::default(),
-        prompt_templates: Vec::new(),
-        system_prompt_file: None,
-        extra_skill_dirs: Vec::new(),
-        skill_path: Vec::new(),
-        project_trusted: true,
-        project_trust: crate::trust::ProjectTrustState::NotRequired,
-        project_dir: temp.path().to_path_buf(),
-        config_path: temp.path().join(".neo/config.toml"),
-        config_file_exists: true,
-    };
-    // Model declares max_output_tokens; runtime does not override.
-    let model = ModelSpec {
+    let model = |capabilities: ModelCapabilities| ModelSpec {
         provider: ProviderId("openai".to_owned()),
         model: "test-model".to_owned(),
         api: ApiKind::OpenAiResponse,
-        capabilities: ModelCapabilities::tool_chat().with_max_output_tokens(64_000),
+        capabilities,
     };
 
-    let agent_config = agent_config_for_app(model, &config, None, None).expect("agent config");
+    // Output token cap precedence: explicit `[runtime].max_tokens` wins;
+    // otherwise fall back to the model's declared `max_output_tokens`;
+    // otherwise leave unset and let the provider decide.
+    let cases = [
+        (
+            "runtime_wins_over_model_capability",
+            RuntimeConfig {
+                max_tokens: Some(512),
+                ..RuntimeConfig::default()
+            },
+            ModelCapabilities::tool_chat().with_max_output_tokens(64_000),
+            Some(512),
+        ),
+        (
+            "model_capability_fills_unset_runtime",
+            RuntimeConfig::default(),
+            ModelCapabilities::tool_chat().with_max_output_tokens(64_000),
+            Some(64_000),
+        ),
+        (
+            "leaves_unset_when_neither_declares",
+            RuntimeConfig::default(),
+            ModelCapabilities::tool_chat(),
+            None,
+        ),
+    ];
 
-    assert_eq!(agent_config.max_tokens, Some(64_000));
+    for (name, runtime, capabilities, expected) in cases {
+        let config = app_config_with_runtime(&temp, runtime);
+        let agent_config =
+            agent_config_for_app(model(capabilities), &config, None, None).expect("agent config");
+        assert_eq!(agent_config.max_tokens, expected, "case {name}");
+    }
 }
 
 #[test]

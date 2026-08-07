@@ -156,3 +156,42 @@ cargo test --package neo-agent-core --test multi_agent_behavior -- lifecycle::re
 - **主题无效条目分层**（精简轨第 3 项）：内联层 `src/shell/test_cases/manager.rs::invalid_entry_cannot_be_applied_or_defaulted` 保留状态转换（Submit/D 均不产生 action 且状态为 error），集成层 `app_behavior/theme_manager.rs::invalid_entry_cannot_be_applied_or_defaulted` 只保留焦点路由（j 选择 broken.json）与可见错误（overlay 渲染 "invalid"），两层已按 §7 分层，无重复案例集，全部保留。
 - **精确快照**（精简轨第 6 项）：审查全部 `assert_eq!(..., vec![...])` 展示断言，仅终端转义/图片协议占位（`terminal_behavior/images.rs`）与冻结 Delegate 卡片行断言、selection 高亮区间等语义级行断言，无整帧快照；`store_thinking.rs` 的行级精确断言为小型语义检查（前缀+内容+换行顺序），保留。
 - **真实等待**：`src/input/test_cases/raw.rs::raw_esc_alone_flushed_after_timeout` 的 50ms 等待是 `ESC_ENTER_NEWLINE_WINDOW`（30ms）真实超时窗口的固有语义，生产 `flush_timeout` 无时间注入点且不属于"输入选择"（计划第 4 项范围为输入选择），保留并注明。
+
+## Task 9 语义精简轨 §5.10 退役记录（neo-agent，结构轨提交 9fcf8734 之后）
+
+### 陈旧断言重写（§6 重写，生产行为已提交，仅同步测试断言）
+
+| 删除或合并的测试 | 保留的主要守护 | 两者共同捕获的生产故障 | 证明方式 | 精确命令 | 实际运行数 |
+|---|---|---|---|---|---:|
+| 重写：`modes::interactive::test_cases::approvals::approval_transcript_holds_every_request_and_focuses_earliest` → `approval_focus_owns_visible_window_until_resolved` | 同一测试重写（断言对齐 `706d9021` 阻塞焦点契约） | `706d9021 fix(tui): keep blocking transcript entries visible`：`render_visible_slice`→`DocumentLayout::visible_row_range` 把可视窗口约束到最早未决阻塞条目的卡片；全文档（`render_frame`/`render_snapshot`）仍按到达顺序保留全部审批卡片（`total_rows` 计入），解析后阻塞焦点前进到下一张 | 旧断言在 HEAD 确定性失败（approvals.rs:352 切片断言 `text.contains("printf two")`，切片已只含第一张卡片），重写后精确通过 | `cargo test --package neo-agent --bin neo -- modes::interactive::test_cases::approvals::approval_focus_owns_visible_window_until_resolved --exact --nocapture` | 1 |
+
+### 表驱动合并（精简轨第 1 项：推理配置 / 权限模式 / 令牌上限）
+
+| 删除或合并的测试 | 保留的主要守护 | 两者共同捕获的生产故障 | 证明方式 | 精确命令 | 实际运行数 |
+|---|---|---|---|---|---:|
+| `configured_low_reasoning_reaches_interactive_turn_unchanged`、`configured_max_reasoning_reaches_interactive_turn_unchanged`、`configured_budget_reasoning_reaches_interactive_turn_unchanged` | `sessions_config::configured_reasoning_selections_reach_interactive_turn_unchanged`（表驱动合并，3 个具名案例：low / max / budget） | 交互 turn 把 `config.runtime.reasoning`（`ReasoningSelection`：Effort low/max、BudgetTokens）原样送入 `TurnRequest.reasoning`（`capture_configured_interactive_turn_reasoning` 探针捕获）；三测试同走 controller 提交→run_turn 捕获链路，同一断言形状（`actual == expected`），仅推理选择输入变体 | 合并；案例逐个命名断言 | `cargo test --package neo-agent --bin neo -- modes::interactive::test_cases::sessions_config::configured_reasoning_selections_reach_interactive_turn_unchanged --exact --nocapture` | 1（3 案例） |
+| `slash_ask_sets_ask_permission_mode`、`slash_auto_sets_auto_permission_mode`、`slash_yolo_sets_yolo_permission_mode` | `input_permissions::slash_permission_commands_set_mode_status_and_footer`（表驱动合并，3 个具名案例：ask / auto / yolo） | 交互 `/ask`、`/auto`、`/yolo` 斜杠命令提交后设置 `chrome().permission_mode()` 并写入 "Permission Mode: x" 状态行与 "[x]" footer 标记；三测试同走 type_text→Submit→三断言形状，仅（命令、模式、标签）输入变体 | 合并；案例逐个命名断言 | `cargo test --package neo-agent --bin neo -- modes::interactive::test_cases::input_permissions::slash_permission_commands_set_mode_status_and_footer --exact --nocapture` | 1（3 案例） |
+| `cli_yolo_overrides_config_permission_mode`、`cli_auto_overrides_config_permission_mode` | `config::test_cases::loader::cli_permission_flags_override_config_permission_mode`（表驱动合并，2 个具名案例：yolo / auto） | `AppConfig::load`（src/config/loader.rs）权限模式解析中 CLI 标志优先分支：`if overrides.yolo { Yolo } else if overrides.auto { Auto }`；两测试同一断言形状（load 后 `permission_mode` 等于期望值），仅（yolo, auto）标志输入变体 | 合并；案例逐个命名断言 | `cargo test --package neo-agent --bin neo -- config::test_cases::loader::cli_permission_flags_override_config_permission_mode --exact --nocapture` | 1（2 案例） |
+| `agent_config_for_app_falls_back_to_model_max_output_tokens`（连同 `agent_config_for_app_applies_runtime_config` 中 max_tokens 断言行） | `modes::run::test_cases::context::agent_config_max_tokens_uses_runtime_value_then_model_capability`（表驱动合并，3 个具名案例：runtime_wins / model_fallback / neither_unset） | `agent_config_for_app`（src/modes/run/runtime/agent.rs）的 max_tokens 优先级表达式 `config.runtime.max_tokens.or(model.capabilities.max_output_tokens)`：显式 runtime 值优先、否则回退模型 `max_output_tokens`、两者皆无时留空由 provider 决定；两测试重复同一完整 AppConfig 夹具，同一断言形状（`agent_config.max_tokens` 等于期望值），仅（runtime、模型能力）输入变体 | 合并；案例逐个命名断言；公共夹具收敛为 `app_config_with_runtime` 助手（两原测试与表测试共用） | `cargo test --package neo-agent --bin neo -- modes::run::test_cases::context::agent_config_max_tokens_uses_runtime_value_then_model_capability --exact --nocapture` | 1（3 案例） |
+
+### 工作流命令合并（精简轨第 2 项）
+
+| 删除或合并的测试 | 保留的主要守护 | 两者共同捕获的生产故障 | 证明方式 | 精确命令 | 实际运行数 |
+|---|---|---|---|---|---:|
+| `workflow_run_jsonl_streams_before_terminal` | `workflow_behavior::cli::workflow_run_jsonl_streams_in_order_and_returns_exact_exit_codes`（合并，吸收 `workflow_run_non_tty_streams_events_and_returns_exact_exit_codes` 全部断言并改名：事件顺序 + 精确退出码） | `neo workflow run --output jsonl` 非 TTY 流的事件顺序（首行 started、末行 terminal）与退出码契约（completed 退出 0、已删除命令非零退出）；两测试同走同一生产命令与同一断言形状（首行/末行 JSON `type` 字段），仅工作流名与脚本输入变体 | 合并；保留测试吸收全部断言（事件顺序、`lines.len() >= 2`、末行 state=completed、已删除命令拒绝），删除测试无独立断言 | `cargo test --package neo-agent --test workflow_behavior -- cli::workflow_run_jsonl_streams_in_order_and_returns_exact_exit_codes --exact --nocapture` | 1 |
+
+### RPC 派生类型回原结构断言删除（精简轨第 3 项）
+
+| 删除或合并的测试 | 保留的主要守护 | 两者共同捕获的生产故障 | 证明方式 | 精确命令 | 实际运行数 |
+|---|---|---|---|---|---:|
+| `rpc_sessions_get_returns_local_session_metadata_and_messages`（删除 `messages` 逐条内容回原结构断言） | 重命名保留：`rpc_sessions_get_returns_local_session_metadata_and_wire_path`；消息回放内容由 `rpc_get_messages_replays_session_jsonl_messages` 独立守护 | `handle_sessions_get` 与 `get_messages` 共用 `JsonlSessionReader::replay_messages`，消息经 `serde_json::to_value` 再序列化回原 JSONL 结构（`{"User":{"content":[{"Text":...}]}}`）；逐条内容断言为派生类型往返、无 sessions.get 自定义逻辑；字段名边界（`id`/`name`/`summary`/`parent_id`/`children`/`path` 与 `messages` 数组长度）保留 | 调用路径：handle_sessions_get → `JsonlSessionReader::replay_messages`（与 get_messages 同一生产函数）；断言删除后字段名边界断言不变 | `cargo test --package neo-agent --test rpc_behavior -- sessions::rpc_sessions_get_returns_local_session_metadata_and_wire_path --exact --nocapture` | 1 |
+| `rpc_sessions_export_json_returns_sanitized_replayed_session_artifact`（删除 `messages` 逐条内容回原结构断言） | 重命名保留：`rpc_sessions_export_json_exposes_artifact_metadata_and_sanitizes_paths`；消息回放内容由 `rpc_get_messages_replays_session_jsonl_messages` 独立守护 | `export_json_artifact` 与 `get_messages` 共用 `JsonlSessionReader::replay_messages`，artifact 的逐条消息内容断言为派生类型往返、无 export 自定义逻辑；字段名与净化边界（`format`/`schema_version`/metadata `id`/`name`/`summary`/`parent_id`/`children`/`message_count`、绝对路径不泄漏、`share_url` 缺失）保留 | 调用路径：handle_sessions_export_json → `export_json_artifact` → `JsonlSessionReader::replay_messages`（与 get_messages 同一生产函数）；断言删除后字段名/净化边界断言不变 | `cargo test --package neo-agent --test rpc_behavior -- sessions::rpc_sessions_export_json_exposes_artifact_metadata_and_sanitizes_paths --exact --nocapture` | 1 |
+
+### 本批次其余检查结论（无删除）
+
+- **旧配置名测试**（精简轨第 4 项）：本计划无生产兼容路径退役权限；逐一检查 `config/test_cases/runtime.rs` 的 `runtime_shell_rejects_removed_limit_names`、`runtime_shell_rejects_removed_timeout_keys`——它们断言的是"已移除的键名被拒绝"（当前生产行为），不是旧配置名兼容测试，保留；未发现任何断言旧配置名仍被接受的测试，无删除。
+- **保留域**（精简轨第 5 项）：真实进程（process_behavior 全部目标）、session 恢复（`rpc_behavior/recovery.rs`、`sessions_replay.rs`）、RPC 流（`rpc_behavior/streaming.rs`）、Unix 进程树与 Windows 作业对象（process_guard_unix.rs / process_guard_windows.rs，本批未触碰）、`rpc_get_messages_replays_session_jsonl_messages`（消息回放唯一主守护）原样保留。
+- `config_defaults_to_ask_permission_mode`（无配置时 `unwrap_or_default` 默认分支）与 `config_loads_permission_mode_auto`（TOML 反序列化映射分支）是权限模式解析的两个不同生产层分支，非同一分支输入变体，保留；`permissions_picker_selects_auto_mode` 走 `/permissions` 选择器交互（不同于斜杠命令直设分支），保留。
+- `model_selection_with_thinking_preserves_current_structured_reasoning`（选模型保留推理）与 `model_selection_without_thinking_sets_reasoning_off`（关推理）是模型选择器的两个相反分支，保留；`runtime_reasoning_uses_structured_config_and_migrates_legacy_effort`（遗留字段迁移）分支不同，保留。
+- `agent_config_for_app_applies_runtime_config` 在删除 max_tokens 断言行后仍是运行时配置应用（temperature/retry/reasoning/队列/compaction/指令注册表）的主守护；`agent_config_for_app_scales_default_compaction_to_model_context_window`、`agent_config_for_app_keeps_explicit_custom_compaction_threshold` 分支不同，保留。
+- `rpc_sessions_list_returns_local_session_metadata`（sessions.list 处理器字段名边界）与 `rpc_sessions_get_*`（sessions.get 处理器）是两个不同 RPC 方法、两个不同生产函数，保留；`rpc_get_messages_replays_session_jsonl_messages` 与 `rpc_get_messages_returns_empty_replay_for_empty_session` 是回放的两种状态（有内容/空），保留。

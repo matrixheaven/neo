@@ -136,9 +136,10 @@ fn workflow_run_executes_real_lua_and_returns_actual_result() {
     assert!(value.get("final_result").is_some());
 }
 
-/// `neo workflow run` in non-TTY mode streams JSONL events.
+/// `neo workflow run` in non-TTY mode streams JSONL events in order
+/// (started before terminal) and returns exact exit codes.
 #[test]
-fn workflow_run_non_tty_streams_events_and_returns_exact_exit_codes() {
+fn workflow_run_jsonl_streams_in_order_and_returns_exact_exit_codes() {
     write_user_workflow_basic("stream-run", "return { ok = true }\n");
 
     let output = neo()
@@ -149,8 +150,11 @@ fn workflow_run_non_tty_streams_events_and_returns_exact_exit_codes() {
 
     assert!(output.status.success(), "exit 0 for completed");
     let stdout = String::from_utf8_lossy(&output.stdout);
-    let lines: Vec<_> = stdout.lines().collect();
-    assert!(!lines.is_empty(), "must emit at least one JSONL line");
+    let lines: Vec<_> = stdout.lines().filter(|l| !l.is_empty()).collect();
+    assert!(
+        lines.len() >= 2,
+        "jsonl must have at least started + terminal events: {stdout}"
+    );
 
     // First line should be started event.
     let first: serde_json::Value = serde_json::from_str(lines[0]).expect("jsonl line 1");
@@ -283,35 +287,6 @@ fn workflow_list_shows_plain_language_fields_only() {
     assert!(!stdout.contains("workflows/"));
 }
 
-/// JSONL streaming emits events before terminal completion.
-#[test]
-fn workflow_run_jsonl_streams_before_terminal() {
-    write_user_workflow_basic("jsonl-run", "return { ok = true }\n");
-
-    let output = neo()
-        .stdin(Stdio::null())
-        .args(["workflow", "run", "jsonl-run", "--output", "jsonl"])
-        .output()
-        .expect("run");
-
-    assert!(output.status.success());
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    let lines: Vec<_> = stdout.lines().filter(|l| !l.is_empty()).collect();
-    assert!(
-        lines.len() >= 2,
-        "jsonl must have at least started + terminal events: {stdout}"
-    );
-
-    let started: serde_json::Value = serde_json::from_str(lines[0]).expect("started jsonl");
-    assert_eq!(started["type"], "started");
-
-    let terminal: serde_json::Value =
-        serde_json::from_str(lines[lines.len() - 1]).expect("terminal jsonl");
-    assert_eq!(terminal["type"], "terminal");
-}
-
-/// The complete public command family SHALL be exactly `list`, `run`, `check`,
-/// and `test` with no hidden aliases (spec §9.1, §9.6).
 #[test]
 fn workflow_cli_exposes_exactly_four_commands_and_plain_language_list() {
     let temp = TempDir::new().expect("tempdir");
