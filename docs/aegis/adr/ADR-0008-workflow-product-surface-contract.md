@@ -153,6 +153,37 @@ settings, endpoint allowlists, probes, automatic protocol fallback, optional
 inline schemas, flat tool aliases, catchable terminal failure, and second
 parsers/validators/prompt owners. None of these paths exist in the codebase.
 
+## Amendment (2026-08-07): task browser responsive UI
+
+The approved `/tasks` and Workflow Operator presentation redesign (design
+`docs/aegis/specs/2026-08-07-task-browser-ui-design.md`, implementation plan
+`docs/aegis/plans/2026-08-07-task-browser-ui-redesign.md`) narrows the visual
+and responsive surface contract of the Operator without changing any runtime,
+journal, task-control, persistence, or model-visible behavior:
+
+- The general Task Browser uses a persistent inspector at `>= 100` content
+  columns (task list clamped to `30-42`), one full-width page at `70-99`
+  (list, Details, or Latest output), and the same single-page route below
+  `70` with at most two stable task-row lines.
+- The Workflow Operator uses a wide split (`>= 100`: Steps left, Agents right,
+  lower selected-agent preview), a stacked layout (`70-99`: summary, Steps,
+  Agents, compact preview above a fixed footer), and a small tabbed layout
+  (`< 70`: stable header, `[STEPS]`/`[AGENTS]` selector, one active page).
+- Issued Bash/Terminal commands wrap and scroll in Agent Details and are never
+  silently cut; bounded output regions are visibly labelled `Latest output ·
+  Preview` with a shown/total fraction.
+- Pointer input routes through the same layout geometry as rendering: clicks
+  select the row under the pointer; wheel moves the pane under the pointer;
+  drag/release stay consumed while the browser is open.
+- The former small-width sequential route (`Workflow summary -> Steps ->
+  Agents -> Agent details`) is retired; the only small-width route is
+  `Workflow header -> [Steps | Agents] -> Agent details`. No compatibility
+  setting, alias, or fallback branch preserves the old sequence.
+- Workflow runtime ownership, the canonical journal, child projection,
+  `WorkflowChildRow` fields (including `generated_files`, now copied through
+  to the TUI view), Delegate-family transcript cards, session JSONL, provider
+  requests, and compaction input remain unchanged.
+
 ## Consequences
 
 - CLI scripts using removed commands (`show`, `save`, `answer`, `fork`, `prune`)
