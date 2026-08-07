@@ -17,7 +17,7 @@ use neo_agent_core::workflow::{
 };
 use neo_agent_core::{
     AgentConfig, AgentContext, AgentEvent, ApprovalAction, ApprovalCancelReason,
-    ApprovalPresentation, ApprovalResponse, PermissionMode,
+    ApprovalPresentation, ApprovalRequest, ApprovalResponse, PermissionMode,
 };
 use serde_json::json;
 use tokio_util::sync::CancellationToken;
@@ -130,62 +130,58 @@ async fn verify_command_uses_canonical_bash_permission_path() {
     )));
 }
 
+/// Permission terminal decisions map to typed workflow outcomes on the shared
+/// `tool_result_to_outcome` branch: a cancelled approval and an unanswered
+/// required approval differ only by decision input, never by mapping.
 #[tokio::test]
-async fn cancelled_permission_maps_to_cancelled_workflow_outcome() {
-    let dir = tempfile::tempdir().expect("tempdir");
-    let harness = FakeHarness::from_turns([]);
-    let config = AgentConfig::for_model(harness.model())
-        .with_workspace_root(dir.path())
-        .expect("workspace root")
-        .with_permission_mode(PermissionMode::Ask)
-        .with_approval_handler(|request| ApprovalResponse::Cancelled {
-            request_id: request.id.clone(),
-            reason: ApprovalCancelReason::Escape,
-        });
-    let handle = handle(
-        config,
-        &harness,
-        Arc::new(ToolRegistry::with_builtin_tools()),
-        AgentContext::new(),
+async fn permission_decisions_map_to_typed_workflow_outcomes() {
+    type PermissionCase = (
+        &'static str,
+        Option<fn(&ApprovalRequest) -> ApprovalResponse>,
+        WorkflowOutcomeStatus,
+        &'static str,
     );
+    let cases: [PermissionCase; 2] = [
+        (
+            "cancelled",
+            Some(|request: &ApprovalRequest| ApprovalResponse::Cancelled {
+                request_id: request.id.clone(),
+                reason: ApprovalCancelReason::Escape,
+            }),
+            WorkflowOutcomeStatus::Cancelled,
+            "cancelled",
+        ),
+        ("required", None, WorkflowOutcomeStatus::Denied, "required"),
+    ];
 
-    let outcome = handle
-        .run_one(
-            invocation("inv_permission_cancelled"),
-            "Bash",
-            json!({"command": "sudo --version"}),
-        )
-        .await;
+    for (case, handler, expected_status, expected_decision) in cases {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let harness = FakeHarness::from_turns([]);
+        let mut config = AgentConfig::for_model(harness.model())
+            .with_workspace_root(dir.path())
+            .expect("workspace root")
+            .with_permission_mode(PermissionMode::Ask);
+        if let Some(handler) = handler {
+            config = config.with_approval_handler(handler);
+        }
+        let handle = handle(
+            config,
+            &harness,
+            Arc::new(ToolRegistry::with_builtin_tools()),
+            AgentContext::new(),
+        );
 
-    assert_eq!(outcome.status, WorkflowOutcomeStatus::Cancelled);
-    assert_eq!(outcome.details["decision"], "cancelled");
-}
+        let outcome = handle
+            .run_one(
+                invocation(&format!("inv_permission_{case}")),
+                "Bash",
+                json!({"command": "sudo --version"}),
+            )
+            .await;
 
-#[tokio::test]
-async fn required_permission_maps_to_denied_workflow_outcome() {
-    let dir = tempfile::tempdir().expect("tempdir");
-    let harness = FakeHarness::from_turns([]);
-    let config = AgentConfig::for_model(harness.model())
-        .with_workspace_root(dir.path())
-        .expect("workspace root")
-        .with_permission_mode(PermissionMode::Ask);
-    let handle = handle(
-        config,
-        &harness,
-        Arc::new(ToolRegistry::with_builtin_tools()),
-        AgentContext::new(),
-    );
-
-    let outcome = handle
-        .run_one(
-            invocation("inv_permission_required"),
-            "Bash",
-            json!({"command": "sudo --version"}),
-        )
-        .await;
-
-    assert_eq!(outcome.status, WorkflowOutcomeStatus::Denied);
-    assert_eq!(outcome.details["decision"], "required");
+        assert_eq!(outcome.status, expected_status, "case={case}");
+        assert_eq!(outcome.details["decision"], expected_decision, "case={case}");
+    }
 }
 
 struct SpoofedPermissionDecisionTool;
