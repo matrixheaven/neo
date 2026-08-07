@@ -180,7 +180,10 @@ async fn permission_decisions_map_to_typed_workflow_outcomes() {
             .await;
 
         assert_eq!(outcome.status, expected_status, "case={case}");
-        assert_eq!(outcome.details["decision"], expected_decision, "case={case}");
+        assert_eq!(
+            outcome.details["decision"], expected_decision,
+            "case={case}"
+        );
     }
 }
 
