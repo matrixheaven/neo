@@ -218,7 +218,7 @@ fn release_ends_drag_and_hover_motion_never_extends() {
 }
 
 #[test]
-fn click_never_selects_but_long_press_activates_after_delay() {
+fn quick_click_never_selects_and_held_press_stays_tentative() {
     let mut pane = pane_with_status_rows(8);
     let _ = pane.render_visible_slice(80, 6);
 
@@ -233,7 +233,9 @@ fn click_never_selects_but_long_press_activates_after_delay() {
     );
 
     // A press held still is tentative: no highlight appears before the
-    // long-press delay elapses, even across rendered frames.
+    // long-press delay elapses, even across rendered frames (the delay
+    // activation itself is guarded with explicit time at the unit layer by
+    // `DocumentSelection::long_press_activates_after_delay_without_movement`).
     pane.handle_mouse_event(mouse(MouseKind::Press, 1, 1), 1, 0);
     let before_delay = pane.render_visible_slice(80, 6);
     assert!(
@@ -242,24 +244,11 @@ fn click_never_selects_but_long_press_activates_after_delay() {
             .all(|line| selection_bg_ranges(line).is_empty()),
         "a held press must not highlight before the long-press delay"
     );
-
-    // Once the delay elapses, the next frame activates the selection
-    // anchored at the press point (cell 0 of "row-5").
-    std::thread::sleep(
-        neo_tui::transcript::LONG_PRESS_DELAY + std::time::Duration::from_millis(50),
-    );
-    let after_delay = pane.render_visible_slice(80, 6);
-    assert!(
-        after_delay
-            .iter()
-            .any(|line| !selection_bg_ranges(line).is_empty()),
-        "a held press activates the selection after the long-press delay"
-    );
+    // Releasing the tentative press never materializes a selection.
     pane.handle_mouse_event(mouse(MouseKind::Release, 1, 1), 1, 0);
-    assert_eq!(
-        pane.copy_selected_transcript_text().as_deref(),
-        Some("r"),
-        "the long-press selection materializes the pressed cell"
+    assert!(
+        pane.copy_selected_transcript_text().is_none(),
+        "a released tentative press must not select"
     );
 }
 

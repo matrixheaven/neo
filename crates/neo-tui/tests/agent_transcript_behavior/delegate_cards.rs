@@ -873,7 +873,7 @@ fn delegate_card_layout_is_unchanged_by_batch_write_summary() {
 }
 
 #[test]
-fn delegate_card_marks_unfinished_tool_as_using_with_neutral_marker() {
+fn delegate_card_marks_ongoing_tool_as_using_with_active_color() {
     let theme = TuiTheme::default()
         .with_text_primary(Color::Rgb(230, 230, 230))
         .with_status_ok(Color::Rgb(1, 220, 120));
@@ -917,10 +917,10 @@ fn delegate_card_marks_unfinished_tool_as_using_with_neutral_marker() {
         .find(|row| strip_ansi(&row.to_ansi()).contains("Using Bash"))
         .expect("using line")
         .to_ansi();
-    assert_ansi_contains_color(&using_line, theme.text_primary);
+    assert_ansi_contains_color(&using_line, theme.status_ok);
     assert!(
-        !using_line.contains("\u{1b}[38;2;1;220;120m"),
-        "pending tool marker should be neutral, not success green: {using_line:?}"
+        !using_line.contains("\u{1b}[38;2;230;230;230m"),
+        "the ongoing marker must use the active color, not text_primary: {using_line:?}"
     );
 }
 

@@ -256,137 +256,81 @@ fn list_delegates_renders_structured_rows_without_opaque_cursor() {
 }
 
 #[test]
-fn mcp_startup_status_updates_pending_spinner_to_green_connected_row() {
-    let theme = TuiTheme::default().with_status_ok(Color::Rgb(1, 180, 90));
-    let mut transcript_pane = TranscriptPane::new(100, 12);
-    transcript_pane.set_theme(theme);
+fn mcp_startup_status_transitions_render_terminal_phase_rows() {
+    let theme = TuiTheme::default()
+        .with_status_ok(Color::Rgb(1, 180, 90))
+        .with_status_error(Color::Rgb(211, 37, 69));
 
-    transcript_pane.upsert_mcp_startup_status(McpStartupStatusData {
-        id: "linear".to_owned(),
-        transport: "http".to_owned(),
-        phase: McpStartupPhase::Connecting,
-    });
-    transcript_pane.advance_animation_at_ms(80);
+    let cases: [(&str, McpStartupPhase, &str, Option<Color>); 3] = [
+        (
+            "connected",
+            McpStartupPhase::Connected { tool_count: 47 },
+            "MCP server \"linear\" connected · 47 tools (http)",
+            Some(Color::Rgb(1, 180, 90)),
+        ),
+        (
+            "cancelled",
+            McpStartupPhase::Cancelled,
+            "MCP server \"linear\" startup interrupted (http)",
+            None,
+        ),
+        (
+            "failed",
+            McpStartupPhase::Failed {
+                message: "timeout connecting to server".to_owned(),
+            },
+            "✗ MCP server \"linear\" failed · timeout connecting to server",
+            Some(Color::Rgb(211, 37, 69)),
+        ),
+    ];
 
-    let pending = plain_frame(&mut transcript_pane, 100, 12);
-    assert!(
-        pending
-            .iter()
-            .any(|line| line.contains("MCP server \"linear\" connecting")),
-        "pending frame: {pending:?}"
-    );
-    assert_eq!(
-        transcript_pane
-            .transcript()
-            .entries()
-            .iter()
-            .filter(|entry| matches!(entry, TranscriptEntry::McpStartupStatus { .. }))
-            .count(),
-        1
-    );
+    for (name, terminal_phase, expected_row, expected_color) in cases {
+        let mut transcript_pane = TranscriptPane::new(100, 12);
+        transcript_pane.set_theme(theme);
 
-    transcript_pane.upsert_mcp_startup_status(McpStartupStatusData {
-        id: "linear".to_owned(),
-        transport: "http".to_owned(),
-        phase: McpStartupPhase::Connected { tool_count: 47 },
-    });
-    let _ = transcript_pane.render_frame(100, 12);
+        transcript_pane.upsert_mcp_startup_status(McpStartupStatusData {
+            id: "linear".to_owned(),
+            transport: "http".to_owned(),
+            phase: McpStartupPhase::Connecting,
+        });
+        transcript_pane.advance_animation_at_ms(80);
 
-    let connected_ansi = transcript_pane.frame_ansi_lines().join("\n");
-    let connected_plain = strip_ansi(&connected_ansi);
-    assert!(
-        connected_plain.contains("MCP server \"linear\" connected · 47 tools (http)"),
-        "{connected_plain}"
-    );
-    assert!(
-        connected_ansi.contains(&ansi_for_color(theme.status_ok)),
-        "{connected_ansi}"
-    );
-    assert_eq!(
-        transcript_pane
-            .transcript()
-            .entries()
-            .iter()
-            .filter(|entry| matches!(entry, TranscriptEntry::McpStartupStatus { .. }))
-            .count(),
-        1
-    );
-}
+        let pending = plain_frame(&mut transcript_pane, 100, 12);
+        assert!(
+            pending
+                .iter()
+                .any(|line| line.contains("MCP server \"linear\" connecting")),
+            "{name}: pending frame: {pending:?}"
+        );
 
-#[test]
-fn mcp_startup_status_updates_pending_spinner_to_interrupted_row() {
-    let mut transcript_pane = TranscriptPane::new(100, 12);
-    transcript_pane.upsert_mcp_startup_status(McpStartupStatusData {
-        id: "linear".to_owned(),
-        transport: "http".to_owned(),
-        phase: McpStartupPhase::Connecting,
-    });
-    transcript_pane.upsert_mcp_startup_status(McpStartupStatusData {
-        id: "linear".to_owned(),
-        transport: "http".to_owned(),
-        phase: McpStartupPhase::Cancelled,
-    });
+        transcript_pane.upsert_mcp_startup_status(McpStartupStatusData {
+            id: "linear".to_owned(),
+            transport: "http".to_owned(),
+            phase: terminal_phase,
+        });
+        let _ = transcript_pane.render_frame(100, 12);
 
-    let rendered = plain_frame(&mut transcript_pane, 100, 12).join("\n");
-    assert!(
-        rendered.contains("MCP server \"linear\" startup interrupted (http)"),
-        "{rendered}"
-    );
-    assert!(!rendered.contains("connecting..."), "{rendered}");
-}
-
-#[test]
-fn mcp_startup_status_updates_pending_spinner_to_red_failed_row() {
-    let theme = TuiTheme::default().with_status_error(Color::Rgb(211, 37, 69));
-    let mut transcript_pane = TranscriptPane::new(100, 12);
-    transcript_pane.set_theme(theme);
-    transcript_pane.upsert_mcp_startup_status(McpStartupStatusData {
-        id: "linear".to_owned(),
-        transport: "http".to_owned(),
-        phase: McpStartupPhase::Connecting,
-    });
-
-    let pending = transcript_pane.render_visible_slice(100, 12);
-    assert!(
-        pending
-            .iter()
-            .map(|line| strip_ansi(line))
-            .any(|line| line.contains("MCP server \"linear\" connecting"))
-    );
-
-    transcript_pane.upsert_mcp_startup_status(McpStartupStatusData {
-        id: "linear".to_owned(),
-        transport: "http".to_owned(),
-        phase: McpStartupPhase::Failed {
-            message: "timeout connecting to server".to_owned(),
-        },
-    });
-    let failed = transcript_pane.render_visible_slice(100, 12);
-    let failed_plain = failed
-        .iter()
-        .map(|line| strip_ansi(line))
-        .collect::<Vec<_>>()
-        .join("\n");
-
-    assert!(
-        failed_plain.contains("✗ MCP server \"linear\" failed · timeout connecting to server"),
-        "{failed_plain}"
-    );
-    assert!(
-        failed
-            .iter()
-            .any(|line| line.contains(&ansi_for_color(theme.status_error))),
-        "failed state must keep the error color"
-    );
-    assert_eq!(
-        transcript_pane
-            .transcript()
-            .entries()
-            .iter()
-            .filter(|entry| matches!(entry, TranscriptEntry::McpStartupStatus { .. }))
-            .count(),
-        1
-    );
+        let ansi = transcript_pane.frame_ansi_lines().join("\n");
+        let rendered = strip_ansi(&ansi);
+        assert!(
+            rendered.contains(expected_row),
+            "{name}: terminal row: {rendered}"
+        );
+        if let Some(color) = expected_color {
+            assert!(ansi.contains(&ansi_for_color(color)), "{name}: {ansi}");
+        }
+        assert!(!rendered.contains("connecting..."), "{name}: {rendered}");
+        assert_eq!(
+            transcript_pane
+                .transcript()
+                .entries()
+                .iter()
+                .filter(|entry| matches!(entry, TranscriptEntry::McpStartupStatus { .. }))
+                .count(),
+            1,
+            "{name}: upsert must keep a single startup entry"
+        );
+    }
 }
 
 #[test]

@@ -188,44 +188,45 @@ fn code_block_has_rounded_box_borders_and_language_header() {
     assert!(joined.contains("rust"), "language header: {joined}");
     assert!(!joined.contains("```"), "no fence backticks: {joined}");
     assert!(joined.contains("fn main() {}"), "code content: {joined}");
-}
 
-#[test]
-fn fenced_bash_block_does_not_leak_thinking_or_prompt_chrome() {
+    // A real-world fenced bash block surrounded by document prose must not
+    // leak the surrounding chrome (or stale thinking text) into the box.
     let thinking = "I now have a comprehensive understanding of this project.";
-    let md = "快速上手\n\n```bash\n# 查看可用模型\ncargo run -p neo-agent -- models list\n```\n\n安全与约束".to_string();
-    let lines = plain(&md, 80);
-    let joined = lines.join("\n");
+    let real_world = "快速上手\n\n```bash\n# 查看可用模型\ncargo run -p neo-agent -- models list\n```\n\n安全与约束".to_string();
+    let real_lines = plain(&real_world, 80);
+    let real_joined = real_lines.join("\n");
+    assert!(
+        !real_joined.contains("```"),
+        "code block should not use fence backticks: {real_joined}"
+    );
+    assert!(
+        real_joined.contains('╭') && real_joined.contains('╮'),
+        "code block should have rounded top border: {real_joined}"
+    );
+    assert!(
+        real_joined.contains('╰') && real_joined.contains('╯'),
+        "code block should have rounded bottom border: {real_joined}"
+    );
+    assert!(
+        !real_joined.contains(thinking),
+        "code block should not contain stale thinking text: {real_joined}"
+    );
+    assert!(
+        !real_joined.contains("│  >"),
+        "body markdown should not contain prompt chrome: {real_joined}"
+    );
 
+    // A diff fence keeps its added/removed content lines inside the box.
+    let diff_lines = plain("```diff\n+added line\n-removed line\n```", 80);
+    let diff_joined = diff_lines.join("\n");
     assert!(
-        !joined.contains("```"),
-        "code block should not use fence backticks: {joined}"
+        diff_joined.contains("added line"),
+        "added present: {diff_joined}"
     );
     assert!(
-        joined.contains('╭') && joined.contains('╮'),
-        "code block should have rounded top border: {joined}"
+        diff_joined.contains("removed line"),
+        "removed present: {diff_joined}"
     );
-    assert!(
-        joined.contains('╰') && joined.contains('╯'),
-        "code block should have rounded bottom border: {joined}"
-    );
-    assert!(
-        !joined.contains(thinking),
-        "code block should not contain stale thinking text: {joined}"
-    );
-    assert!(
-        !joined.contains("│  >"),
-        "body markdown should not contain prompt chrome: {joined}"
-    );
-}
-
-#[test]
-fn diff_code_block_colors_add_remove() {
-    let md = "```diff\n+added line\n-removed line\n```";
-    let lines = plain(md, 80);
-    let joined = lines.join("\n");
-    assert!(joined.contains("added line"), "added present: {joined}");
-    assert!(joined.contains("removed line"), "removed present: {joined}");
 }
 
 #[test]

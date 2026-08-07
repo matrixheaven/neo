@@ -92,62 +92,104 @@ fn theme_manager_overlay_hides_transcript_and_composer() {
 }
 
 #[test]
-fn wide_layout_shows_list_and_preview_side_by_side() {
-    let chrome = open_manager();
-    let plain = overlay_plain(&chrome, 120, 24);
-    let rendered = plain.join("\n");
-    // Both panes visible in the same frame.
-    assert!(rendered.contains(" themes "), "{rendered}");
-    assert!(rendered.contains(" preview "), "{rendered}");
-    // The preview pane renders the shared sample surface with the selected
-    // theme (default = Solarized Dark, the first entry).
-    assert!(rendered.contains("Welcome back"), "{rendered}");
-    assert!(rendered.contains("Approve write access"), "{rendered}");
-    assert!(rendered.contains("12.4k/200k"), "{rendered}");
-}
+fn theme_manager_breakpoints_map_width_to_layout() {
+    // Each named case renders the same manager fixture at a breakpoint and
+    // asserts the layout contract for that width/height.
+    struct Case {
+        name: &'static str,
+        width: usize,
+        height: usize,
+        assert: fn(&mut NeoChromeState, &[String]),
+    }
 
-#[test]
-fn medium_layout_stacks_list_over_preview() {
-    let chrome = open_manager();
-    let plain = overlay_plain(&chrome, 80, 20);
-    let rendered = plain.join("\n");
-    assert!(rendered.contains(" themes "), "{rendered}");
-    assert!(rendered.contains(" preview "), "{rendered}");
-    // List rows appear above the preview pane in the stacked layout.
-    let list_at = plain.iter().position(|line| line.contains(" themes "));
-    let preview_at = plain.iter().position(|line| line.contains(" preview "));
-    assert!(list_at < preview_at, "{rendered}");
-}
-
-#[test]
-fn narrow_layout_renders_one_focused_panel() {
-    let mut chrome = open_manager();
-    // Default focus is List: only the list panel renders.
-    let plain = overlay_plain(&chrome, 60, 20);
-    let rendered = plain.join("\n");
-    assert!(rendered.contains("focus List"), "{rendered}");
-    assert!(rendered.contains("Solarized Dark"), "{rendered}");
-    assert!(!rendered.contains("Approve write access"), "{rendered}");
-
-    // Tab to Preview: the preview panel replaces the list.
-    chrome.handle_focused_dialog_input(InputEvent::Insert('\t'));
-    let plain = overlay_plain(&chrome, 60, 20);
-    let rendered = plain.join("\n");
-    assert!(rendered.contains("focus Preview"), "{rendered}");
-    assert!(rendered.contains("Approve write access"), "{rendered}");
-    assert!(!rendered.contains("Solarized Dark"), "{rendered}");
-}
-
-#[test]
-fn very_short_layout_keeps_header_and_essential_action() {
-    let chrome = open_manager();
-    for width in [40, 80, 120] {
-        let plain = overlay_plain(&chrome, width, 5);
-        assert_eq!(plain.len(), 5, "width={width}");
+    fn assert_wide(_: &mut NeoChromeState, plain: &[String]) {
         let rendered = plain.join("\n");
-        assert!(rendered.contains("THEME MANAGER"), "{rendered}");
+        // Both panes visible in the same frame.
+        assert!(rendered.contains(" themes "), "{rendered}");
+        assert!(rendered.contains(" preview "), "{rendered}");
+        // The preview pane renders the shared sample surface with the
+        // selected theme (default = Solarized Dark, the first entry).
+        assert!(rendered.contains("Welcome back"), "{rendered}");
+        assert!(rendered.contains("Approve write access"), "{rendered}");
+        assert!(rendered.contains("12.4k/200k"), "{rendered}");
+    }
+
+    fn assert_medium(_: &mut NeoChromeState, plain: &[String]) {
+        let rendered = plain.join("\n");
+        assert!(rendered.contains(" themes "), "{rendered}");
+        assert!(rendered.contains(" preview "), "{rendered}");
+        // List rows appear above the preview pane in the stacked layout.
+        let list_at = plain.iter().position(|line| line.contains(" themes "));
+        let preview_at = plain.iter().position(|line| line.contains(" preview "));
+        assert!(list_at < preview_at, "{rendered}");
+    }
+
+    fn assert_narrow_list(_: &mut NeoChromeState, plain: &[String]) {
+        let rendered = plain.join("\n");
         assert!(rendered.contains("focus List"), "{rendered}");
-        assert!(rendered.contains("Enter apply"), "{rendered}");
+        assert!(rendered.contains("Solarized Dark"), "{rendered}");
+        assert!(!rendered.contains("Approve write access"), "{rendered}");
+    }
+
+    fn assert_narrow_preview_after_tab(chrome: &mut NeoChromeState, _: &[String]) {
+        // Tab to Preview: the preview panel replaces the list.
+        chrome.handle_focused_dialog_input(InputEvent::Insert('\t'));
+        let plain = overlay_plain(chrome, 60, 20);
+        let rendered = plain.join("\n");
+        assert!(rendered.contains("focus Preview"), "{rendered}");
+        assert!(rendered.contains("Approve write access"), "{rendered}");
+        assert!(!rendered.contains("Solarized Dark"), "{rendered}");
+    }
+
+    fn assert_short(_: &mut NeoChromeState, _: &[String]) {
+        let mut chrome = open_manager();
+        for width in [40, 80, 120] {
+            let plain = overlay_plain(&mut chrome, width, 5);
+            assert_eq!(plain.len(), 5, "width={width}");
+            let rendered = plain.join("\n");
+            assert!(rendered.contains("THEME MANAGER"), "{rendered}");
+            assert!(rendered.contains("focus List"), "{rendered}");
+            assert!(rendered.contains("Enter apply"), "{rendered}");
+        }
+    }
+
+    let cases = [
+        Case {
+            name: "wide",
+            width: 120,
+            height: 24,
+            assert: assert_wide,
+        },
+        Case {
+            name: "medium",
+            width: 80,
+            height: 20,
+            assert: assert_medium,
+        },
+        Case {
+            name: "narrow_list",
+            width: 60,
+            height: 20,
+            assert: assert_narrow_list,
+        },
+        Case {
+            name: "narrow_preview_after_tab",
+            width: 60,
+            height: 20,
+            assert: assert_narrow_preview_after_tab,
+        },
+        Case {
+            name: "short",
+            width: 120,
+            height: 5,
+            assert: assert_short,
+        },
+    ];
+
+    for case in &cases {
+        let mut chrome = open_manager();
+        let plain = overlay_plain(&mut chrome, case.width, case.height);
+        (case.assert)(&mut chrome, &plain);
     }
 }
 

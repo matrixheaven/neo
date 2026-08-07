@@ -431,8 +431,21 @@ fn edit_approval_prompt_follows_global_expansion() {
         .map(|line| line.text())
         .collect::<Vec<_>>()
         .join("\n");
-    assert!(collapsed.contains("files · 1 replacements"), "{collapsed}");
-    assert!(!collapsed.contains("src/file2.rs"), "{collapsed}");
+    assert!(
+        collapsed.contains("4 files · 4 replacements"),
+        "{collapsed}"
+    );
+    // Collapsed: the per-file stat row shows the omitted file path while the
+    // full diff details stay hidden behind the expand hint.
+    assert!(
+        collapsed.contains("src/file2.rs"),
+        "collapsed stat row should show the file path: {collapsed}"
+    );
+    assert!(
+        collapsed.contains("diff details hidden"),
+        "collapsed card should hide the full diff: {collapsed}"
+    );
+    assert!(!collapsed.contains("old2"), "{collapsed}");
     assert!(
         collapsed.contains('╭') && collapsed.contains('╰'),
         "{collapsed}"

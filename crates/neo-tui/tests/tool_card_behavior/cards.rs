@@ -171,100 +171,61 @@ fn empty_args_tool_header_omits_parens() {
 }
 
 #[test]
-fn exit_plan_mode_header_shows_approved_with_label() {
+fn exit_plan_mode_header_covers_approved_label_and_rejected() {
     use neo_tui::transcript::tool_renderers::exit_plan_mode_header_spans;
 
     let theme = TuiTheme::default();
-    let state = ToolCallState {
+    let state = |status: ToolStatusKind, details: Option<serde_json::Value>| ToolCallState {
         id: "plan-1".to_owned(),
         name: "ExitPlanMode".to_owned(),
         arguments: Some("{}".to_owned()),
         result: None,
-        details: Some(serde_json::json!({
-            "plan_selected_label": "incremental",
-        })),
-        status: ToolStatusKind::Succeeded,
+        details,
+        status,
         exit_code: None,
     };
 
-    let rows = plain(vec![Line::from_spans(exit_plan_mode_header_spans(
-        &state, &theme,
-    ))]);
-    let header = &rows[0];
-    assert!(
-        header.contains("Current plan"),
-        "header should say 'Current plan': {header:?}"
-    );
-    assert!(
-        header.contains("Approved: incremental"),
-        "header should show 'Approved: incremental': {header:?}"
-    );
-}
-
-#[test]
-fn exit_plan_mode_header_shows_approved_without_label() {
-    use neo_tui::transcript::tool_renderers::exit_plan_mode_header_spans;
-
-    let theme = TuiTheme::default();
-    let state = ToolCallState {
-        id: "plan-1".to_owned(),
-        name: "ExitPlanMode".to_owned(),
-        arguments: Some("{}".to_owned()),
-        result: None,
-        details: None,
-        status: ToolStatusKind::Succeeded,
-        exit_code: None,
-    };
-
-    let rows = plain(vec![Line::from_spans(exit_plan_mode_header_spans(
-        &state, &theme,
-    ))]);
-    let header = &rows[0];
-    assert!(
-        header.contains("Current plan"),
-        "header should say 'Current plan': {header:?}"
-    );
-    assert!(
-        header.contains("Approved"),
-        "header should show 'Approved' on success: {header:?}"
-    );
-    assert!(
-        !header.contains("ExitPlanMode"),
-        "header should not show generic tool name: {header:?}"
-    );
-}
-
-#[test]
-fn exit_plan_mode_header_shows_rejected_on_failure() {
-    use neo_tui::transcript::tool_renderers::exit_plan_mode_header_spans;
-
-    let theme = TuiTheme::default();
-    let state = ToolCallState {
-        id: "plan-1".to_owned(),
-        name: "ExitPlanMode".to_owned(),
-        arguments: Some("{}".to_owned()),
-        result: None,
-        details: None,
-        status: ToolStatusKind::Failed,
-        exit_code: None,
-    };
-
-    let rows = plain(vec![Line::from_spans(exit_plan_mode_header_spans(
-        &state, &theme,
-    ))]);
-    let header = &rows[0];
-    assert!(
-        header.contains("Current plan"),
-        "header should say 'Current plan': {header:?}"
-    );
-    assert!(
-        header.contains("Rejected"),
-        "header should show 'Rejected' on failure: {header:?}"
-    );
-    assert!(
-        !header.contains("Approved"),
-        "header should not show 'Approved' on failure: {header:?}"
-    );
+    let cases: [(&str, ToolCallState, &[&str], &[&str]); 3] = [
+        (
+            "approved_with_label",
+            state(
+                ToolStatusKind::Succeeded,
+                Some(serde_json::json!({ "plan_selected_label": "incremental" })),
+            ),
+            &["Current plan", "Approved: incremental"],
+            &[],
+        ),
+        (
+            "approved_without_label",
+            state(ToolStatusKind::Succeeded, None),
+            &["Current plan", "Approved"],
+            &["ExitPlanMode"],
+        ),
+        (
+            "rejected_on_failure",
+            state(ToolStatusKind::Failed, None),
+            &["Current plan", "Rejected"],
+            &["Approved"],
+        ),
+    ];
+    for (name, state, expected, absent) in cases {
+        let rows = plain(vec![Line::from_spans(exit_plan_mode_header_spans(
+            &state, &theme,
+        ))]);
+        let header = &rows[0];
+        for needle in expected {
+            assert!(
+                header.contains(needle),
+                "{name}: header should contain {needle:?}: {header:?}"
+            );
+        }
+        for needle in absent {
+            assert!(
+                !header.contains(needle),
+                "{name}: header must not contain {needle:?}: {header:?}"
+            );
+        }
+    }
 }
 
 #[test]

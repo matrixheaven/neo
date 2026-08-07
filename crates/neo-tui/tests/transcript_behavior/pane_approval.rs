@@ -350,8 +350,23 @@ fn transcript_pane_edit_approval_follows_global_expansion() {
         request: edit_request("edit-1", "verified", 4),
     });
 
+    // Collapsed: the card shows the per-file stat row (path + +/- counts)
+    // inside its frame and hides the omitted file's diff details.
     let collapsed = plain_frame(&mut pane, 64, 80);
-    assert!(!collapsed.iter().any(|line| line.contains("verified_2.rs")));
+    assert!(
+        collapsed.iter().any(|line| line.contains("verified_2.rs")),
+        "collapsed stat row should show the file path: {collapsed:?}"
+    );
+    assert!(
+        collapsed
+            .iter()
+            .any(|line| line.contains("diff details hidden")),
+        "collapsed card should hide the full diff: {collapsed:?}"
+    );
+    assert!(
+        !collapsed.iter().any(|line| line.contains("old2")),
+        "collapsed card should not show the omitted file's diff: {collapsed:?}"
+    );
     let collapsed_bottom = collapsed
         .iter()
         .rposition(|line| line.trim_start().starts_with('╰'))
@@ -359,7 +374,14 @@ fn transcript_pane_edit_approval_follows_global_expansion() {
 
     pane.set_tool_output_expanded(true);
     let expanded = plain_frame(&mut pane, 64, 80);
-    assert!(expanded.iter().any(|line| line.contains("verified_2.rs")));
+    assert!(
+        expanded.iter().any(|line| line.contains("verified_2.rs")),
+        "expanded card shows the file path: {expanded:?}"
+    );
+    assert!(
+        expanded.iter().any(|line| line.contains("old2")),
+        "expanded card reveals the full diff details: {expanded:?}"
+    );
     let expanded_bottom = expanded
         .iter()
         .rposition(|line| line.trim_start().starts_with('╰'))
@@ -494,7 +516,7 @@ fn transcript_pane_renders_inline_bash_approval_prompt() {
 }
 
 #[test]
-fn transcript_pane_renders_only_earliest_pending_approval() {
+fn earliest_pending_approval_owns_visible_window_until_resolved() {
     let mut transcript_pane = TranscriptPane::new(100, 24);
 
     for number in 1..=3 {
@@ -504,21 +526,30 @@ fn transcript_pane_renders_only_earliest_pending_approval() {
         });
     }
 
-    // Every approval has its transcript position on arrival; the earliest
-    // unresolved one owns interactive input while all cards stay visible in
-    // the document in arrival order.
+    // The earliest unresolved approval owns the visible window: its card
+    // rows are visible while later approval cards stay in the document
+    // (their rows are counted by the layout) but outside the visible slice
+    // until the blocking entry resolves.
     let slice = transcript_pane
         .render_visible_slice(100, 40)
         .iter()
         .map(|line| plain(line))
         .collect::<Vec<_>>();
-    let first = slice.iter().position(|line| line.contains("$ printf 1"));
-    let second = slice.iter().position(|line| line.contains("$ printf 2"));
-    let third = slice.iter().position(|line| line.contains("$ printf 3"));
-    assert!(first.is_some() && second.is_some() && third.is_some());
     assert!(
-        first.unwrap() < second.unwrap() && second.unwrap() < third.unwrap(),
-        "approval cards keep arrival order in the document: {slice:?}"
+        slice.iter().any(|line| line.contains("$ printf 1")),
+        "earliest approval card must own the visible window: {slice:?}"
+    );
+    assert!(
+        !slice.iter().any(|line| line.contains("$ printf 2")),
+        "later approval must stay outside the visible window: {slice:?}"
+    );
+    assert!(
+        !slice.iter().any(|line| line.contains("$ printf 3")),
+        "later approval must stay outside the visible window: {slice:?}"
+    );
+    assert!(
+        transcript_pane.document().total_rows() > slice.len(),
+        "later approval cards remain in the document: {slice:?}"
     );
     assert_eq!(
         transcript_pane.earliest_blocking_entry(),
@@ -527,8 +558,26 @@ fn transcript_pane_renders_only_earliest_pending_approval() {
         ))
     );
 
-    // Resolving the earliest approval advances the blocking focus in order.
+    // Resolving the earliest approval advances the blocking focus to the
+    // next card, which then owns the visible window.
     transcript_pane.resolve_approval("bash-1", &approved_resolution());
+    let advanced = transcript_pane
+        .render_visible_slice(100, 40)
+        .iter()
+        .map(|line| plain(line))
+        .collect::<Vec<_>>();
+    assert!(
+        advanced.iter().any(|line| line.contains("$ printf 2")),
+        "resolved focus moves to the next approval card: {advanced:?}"
+    );
+    assert!(
+        !advanced.iter().any(|line| line.contains("$ printf 1")),
+        "the resolved card leaves the visible window: {advanced:?}"
+    );
+    assert!(
+        !advanced.iter().any(|line| line.contains("$ printf 3")),
+        "later approval stays outside the visible window: {advanced:?}"
+    );
     assert_eq!(
         transcript_pane.earliest_blocking_entry(),
         Some(neo_tui::transcript::BlockingEntryKind::Approval(
