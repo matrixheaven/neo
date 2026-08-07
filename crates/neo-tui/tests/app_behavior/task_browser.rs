@@ -132,31 +132,216 @@ fn browser_keeps_keyed_task_selection_and_filters_active_tasks() {
     state.handle_action(TaskBrowserAction::ToggleFilter);
     assert_eq!(state.visible_items().len(), 2);
     assert!(state.list_refresh_requested());
+
+    // The header always shows all three choices with only the active one
+    // bracketed, whichever filter is selected.
+    let active_header = render_plain(&state, 99, 20).join("\n");
+    assert!(active_header.contains(" TASKS  ALL  [ACTIVE]  WORKFLOWS  2 tasks "));
+
+    state.handle_action(TaskBrowserAction::ToggleFilter);
+    let workflow_header = render_plain(&state, 99, 20).join("\n");
+    assert!(workflow_header.contains(" TASKS  ALL  ACTIVE  [WORKFLOWS]  0 tasks "));
 }
 
 #[test]
 fn browser_opens_non_workflow_details_and_scrolls_its_output() {
     let mut task = browser_item("bash", TaskBrowserStatus::Running);
+    let long_command = format!("run --flag {}", "very-long-command-word-".repeat(12));
+    task.detail_lines = vec![format!("Command: {long_command}")];
     task.preview_lines = (0..24).map(|line| format!("output {line}")).collect();
     let mut state = TaskBrowserState::new();
     state.apply_snapshot(&TaskBrowserSnapshot::new(vec![task]));
 
     state.handle_action(TaskBrowserAction::OpenTaskDetails);
     assert!(state.task_details_open());
-    assert!(render_plain(&state, 120, 20).join("\n").contains("Details"));
+
+    // Wide split: the inspector is always visible and follows the selection.
+    let wide = render_plain(&state, 120, 20).join("\n");
+    assert!(wide.contains(" DETAILS "));
+    assert!(wide.contains(" LATEST OUTPUT · Preview 7/24 "));
+    assert!(wide.contains("running  bash"));
+    assert!(wide.contains("output 0"));
+
+    // Medium width swaps to one full-width Details page.
+    let medium_details = render_plain(&state, 99, 20).join("\n");
+    assert!(medium_details.contains(" DETAILS "));
+    assert!(medium_details.contains("running  bash"));
+    assert!(!medium_details.contains(" LATEST OUTPUT · Preview "));
+
+    // The long command wraps instead of being replaced by an ellipsis: its
+    // final chunk is fully visible in the wide inspector, and the medium
+    // Details page keeps every character (only line breaks are added).
+    assert!(wide.contains(&long_command[long_command.len() - 46..]));
+    assert!(
+        wide.lines()
+            .filter(|line| line.contains("very-long"))
+            .count()
+            >= 3
+    );
+    let compact_frame = |frame: &str| {
+        frame
+            .chars()
+            .filter(|character| !character.is_whitespace())
+            .collect::<String>()
+    };
+    let compact_command = long_command
+        .chars()
+        .filter(|character| !character.is_whitespace())
+        .collect::<String>();
+    assert!(compact_frame(&medium_details).contains(&compact_command));
 
     state.handle_action(TaskBrowserAction::ToggleOutputFocus);
     assert_eq!(state.focus(), TaskBrowserFocus::Output);
     state.handle_action(TaskBrowserAction::SelectPageDown);
     assert_eq!(state.output_scroll(), 10);
-    assert!(
-        render_plain(&state, 120, 20)
-            .join("\n")
-            .contains("output 10")
-    );
 
+    // Medium and small widths render the same single full-width page; the
+    // divider reports how much of the wrapped preview is shown.
+    let medium = render_plain(&state, 99, 20).join("\n");
+    assert!(medium.contains(" LATEST OUTPUT · Preview 14/24 "));
+    assert!(medium.contains("output 10"));
+    assert!(!medium.contains(" DETAILS "));
+    let small = render_plain(&state, 69, 20).join("\n");
+    assert!(small.contains(" LATEST OUTPUT · Preview 14/24 "));
+    assert!(small.contains("output 10"));
+
+    // The wide split keeps both sections; scrolling only moves the preview.
+    let scrolled = render_plain(&state, 120, 20).join("\n");
+    assert!(scrolled.contains("output 10"));
+    assert!(!scrolled.contains("output 0"));
+    assert!(scrolled.contains(" DETAILS "));
+
+    // Esc closes details first (back to the list page), then closes the
+    // browser.
     state.handle_action(TaskBrowserAction::Cancel);
     assert!(!state.task_details_open());
+    assert_eq!(state.focus(), TaskBrowserFocus::Tasks);
+    let list = render_plain(&state, 99, 20).join("\n");
+    assert!(list.contains(" Tasks "));
+    assert!(!list.contains(" LATEST OUTPUT · Preview "));
+    assert!(!list.contains(" DETAILS "));
+    assert_eq!(
+        state.handle_action(TaskBrowserAction::Cancel),
+        Some("__close__".to_owned())
+    );
+}
+
+#[test]
+fn browser_renderer_matches_general_layout_at_supported_sizes() {
+    let mut task = browser_item("bash", TaskBrowserStatus::Running);
+    task.detail_lines = vec![format!("Command: {}", "x".repeat(200))];
+    task.preview_lines = (0..24).map(|line| format!("output {line}")).collect();
+    let mut state = TaskBrowserState::new();
+    state.apply_snapshot(&TaskBrowserSnapshot::new(vec![task]));
+
+    for width in [32, 69, 70, 99, 100, 120, 180] {
+        for height in [12, 20, 40] {
+            let lines = render_plain(&state, width, height);
+            assert_eq!(lines.len(), height, "width={width}, height={height}");
+            assert!(
+                lines.iter().all(|line| visible_width(line) <= width),
+                "width={width}, height={height}:\n{}",
+                lines.join("\n")
+            );
+            let frame = lines.join("\n");
+            if width >= 100 {
+                // Wide split: the inspector is always present, even with
+                // details closed, and the list never overlaps it.
+                let list_width = (width / 3).clamp(30, 42);
+                for line in lines.iter().skip(1).take(height - 2) {
+                    assert_eq!(
+                        line.chars().nth(list_width),
+                        Some(' '),
+                        "width={width}, height={height}, line={line:?}"
+                    );
+                }
+                assert!(
+                    frame.contains(" DETAILS "),
+                    "width={width}, height={height}"
+                );
+                assert!(
+                    frame.contains(" LATEST OUTPUT · Preview "),
+                    "width={width}, height={height}"
+                );
+                assert!(
+                    frame.contains("running  bash"),
+                    "width={width}, height={height}"
+                );
+            } else {
+                // Exactly one full-width page: the top content row spans the
+                // whole terminal and no inspector sections exist.
+                assert_eq!(
+                    visible_width(&lines[1]),
+                    width,
+                    "width={width}, height={height}, line={:?}",
+                    lines[1]
+                );
+                assert!(frame.contains(" Tasks "), "width={width}, height={height}");
+                assert!(
+                    !frame.contains(" DETAILS "),
+                    "width={width}, height={height}"
+                );
+                assert!(
+                    !frame.contains(" LATEST OUTPUT · Preview "),
+                    "width={width}, height={height}"
+                );
+            }
+        }
+    }
+
+    // A width narrower than the marker must stay panic-free (a zero-width
+    // task row truncates to empty before painting) with an exact frame
+    // height and no overflow.
+    let tiny = render_plain(&state, 2, 12);
+    assert_eq!(tiny.len(), 12);
+    assert!(
+        tiny.iter().all(|line| visible_width(line) <= 2),
+        "width=2:\n{}",
+        tiny.join("\n")
+    );
+
+    // Details open: small and medium widths swap to the single Details page.
+    state.handle_action(TaskBrowserAction::OpenTaskDetails);
+    assert!(state.task_details_open());
+    for width in [32, 69, 70, 99] {
+        let frame = render_plain(&state, width, 20).join("\n");
+        assert!(frame.contains(" DETAILS "), "width={width}");
+        assert!(frame.contains("┌ DETAILS"), "width={width}");
+        assert!(
+            !frame.contains(" LATEST OUTPUT · Preview "),
+            "width={width}"
+        );
+    }
+
+    // Output focus: the single page becomes the Latest output preview, and
+    // the divider reports how much of the wrapped output is shown.
+    state.handle_action(TaskBrowserAction::ToggleOutputFocus);
+    assert_eq!(state.focus(), TaskBrowserFocus::Output);
+    for width in [32, 69, 70, 99] {
+        let frame = render_plain(&state, width, 20).join("\n");
+        assert!(frame.contains(" LATEST OUTPUT · Preview "), "width={width}");
+        assert!(frame.contains("┌ LATEST OUTPUT"), "width={width}");
+        assert!(!frame.contains(" DETAILS "), "width={width}");
+    }
+    assert!(
+        render_plain(&state, 99, 20)
+            .join("\n")
+            .contains("Preview 17/24"),
+        "frame:\n{}",
+        render_plain(&state, 99, 20).join("\n")
+    );
+    assert!(
+        render_plain(&state, 99, 12)
+            .join("\n")
+            .contains("Preview 9/24")
+    );
+    // Tall enough to show every line: no fraction is appended to the divider.
+    let full = render_plain(&state, 99, 40).join("\n");
+    let divider = full
+        .lines()
+        .find(|line| line.starts_with("┌"))
+        .expect("output divider");
+    assert!(!divider.contains('/'), "divider:\n{divider}");
 }
 
 #[test]

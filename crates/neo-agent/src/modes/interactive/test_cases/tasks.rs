@@ -573,7 +573,7 @@ async fn task_browser_stays_inside_existing_fullscreen_surface() {
         .collect::<Vec<_>>()
         .join("\n");
     assert!(
-        overlay_text.contains("TASK BROWSER"),
+        overlay_text.contains("TASKS"),
         "overlay frame:\n{overlay_text}"
     );
 

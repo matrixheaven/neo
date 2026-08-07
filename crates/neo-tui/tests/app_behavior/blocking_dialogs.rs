@@ -560,8 +560,8 @@ fn task_browser_overlay_blocks_prompt_and_renders_own_footer() {
     let rendered = plain.join("\n");
 
     assert!(cursor.is_none());
-    assert!(rendered.contains("TASK BROWSER"));
-    assert!(rendered.contains("filter=ALL"));
+    assert!(rendered.contains("TASKS"));
+    assert!(rendered.contains("[ALL]"));
     assert!(rendered.contains("Tasks"));
     assert!(rendered.contains("bash-1"));
     assert!(rendered.contains("cargo test"));
@@ -599,7 +599,7 @@ fn task_browser_overlay_replaces_existing_transcript_body() {
         .collect::<Vec<_>>()
         .join("\n");
 
-    assert!(rendered.contains("TASK BROWSER"));
+    assert!(rendered.contains("TASKS"));
     assert!(!rendered.contains("old transcript line should be hidden"));
 
     tui.chrome_mut().close_focused_overlay();
