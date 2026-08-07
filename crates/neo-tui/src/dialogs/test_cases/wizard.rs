@@ -121,7 +121,7 @@ fn selected_editable_field_renders_brand_cursor_and_hierarchy() {
 }
 
 #[test]
-fn test_result_render_offers_save_anyway_on_failure() {
+fn failed_test_result_offers_save_anyway() {
     let mut state = state();
     state.apply_test_result(Err("401 Unauthorized".to_owned()));
     let visible = visible(&state);

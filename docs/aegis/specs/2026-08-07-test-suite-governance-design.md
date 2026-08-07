@@ -176,25 +176,25 @@
 
 `workflow_*.rs` 的展开清单固定为：`admission`、`artifacts`、`builtins`、`check`、`child_journal`、`dispatch`、`harness`、`journal`、`launch`、`lineage`、`lua`、`model_visibility`、`output`、`recovery_dispatch`、`registry`、`runtime_contract`、`schema`、`swarm`、`tool_policy`、`user_input`，以及前述三个运行时子模块。现有顶层文件迁空后立即删除，不保留转发入口。
 
-### 5.9 当前超限文件的强制处理清单
+### 5.9 已完成的超限文件迁移基线
 
-下列测试专用文件在当前工作树已经超过 1,200 行或 30 个测试，全部属于本轮范围，不得留作“后续治理”：
+下列测试专用文件在本轮治理开始时超过 1,200 行或 30 个测试，现已全部处理。此清单保留为历史验收证据，不是当前待办：
 
 - `neo-ai`：`tests/real_provider_adapters.rs`。
 - `neo-agent-core`：`tests/instruction_registry.rs`、`tests/multi_agent_background.rs`、`tests/multi_agent_runtime.rs`、`tests/runtime_turn.rs`、`tests/session_jsonl.rs`、`tests/workflow_dispatch.rs`、`tests/workflow_journal.rs`、`tests/workflow_registry.rs`、`tests/workflow_runtime.rs`。
 - `neo-tui`：`tests/app_shell.rs`、`tests/multi_agent_transcript.rs`、`tests/progressive_transcript.rs`、`tests/tool_cards.rs`、`tests/transcript_pane.rs`、`tests/transcript_store.rs`、`tests/workflow_transcript.rs`。
 - `neo-agent`：`tests/cli_commands.rs`、`tests/tool_terminal_guardian.rs`、`src/modes/interactive/tests.rs`。
 
-源码侧测试以“超过 12 个测试”为本轮强制提取条件。当前清单如下；执行者只能在对应生产模块旁创建 `test_cases/`，不能迁入 crate 顶层 `tests/`：
+源码侧测试当时以“超过 12 个测试”为强制提取条件，迁移清单如下；这些测试只提取到对应生产模块旁的 `test_cases/`，没有迁入 crate 顶层 `tests/`：
 
 - `neo-ai`：`src/providers/common/error.rs`。
 - `neo-agent-core`：`src/compaction/mod.rs`、`src/compaction/projection.rs`、`src/multi_agent/progress.rs`、`src/multi_agent/runtime.rs`、`src/runtime/permission.rs`、`src/tools/ask_user.rs`、`src/tools/background_tasks.rs`、`src/tools/glob.rs`、`src/tools/grep.rs`、`src/tools/mcp/oauth/service.rs`、`src/tools/mcp_manager.rs`、`src/tools/mod.rs`、`src/tools/plan_mode.rs`、`src/tools/read.rs`、`src/tools/shell_env.rs`、`src/tools/skills_manager.rs`、`src/tools/todo.rs`。
 - `neo-tui`：`src/dialogs/custom_endpoint_wizard.rs`、`src/dialogs/mcp_add_form.rs`、`src/dialogs/mcp_manager.rs`、`src/dialogs/model_selector.rs`、`src/dialogs/provider_manager.rs`、`src/input/mod.rs`、`src/input/raw_input.rs`、`src/markdown.rs`、`src/paste.rs`、`src/primitive/ansi_escape.rs`、`src/shell/theme_manager.rs`、`src/transcript/entry/mod.rs`、`src/transcript/plan_box.rs`、`src/widgets/btw_panel.rs`、`src/widgets/todo_panel.rs`。
 - `neo-agent`：`src/config/mod.rs`、`src/config/mutations.rs`、`src/mcp_ops.rs`、`src/modes/run/mod.rs`、`src/theme_draft.rs`、`src/themes.rs`、`src/workspaces.rs`。
 
-`src/modes/interactive/tests.rs` 使用固定目录 `src/modes/interactive/test_cases/`，固定文件为 `input.rs`、`sessions.rs`、`workflow.rs`、`themes.rs`、`tasks.rs`、`approvals.rs`、`clipboard.rs`、`transcript.rs`、`terminal.rs`。其他源码侧文件按现有测试函数的生产行为前缀拆分；若无法在不自创分类的情况下满足 30 个测试上限，停止该文件并请求协调者裁决，不得使用 `part1.rs`、`other.rs` 或数字分片。
+`src/modes/interactive/tests.rs` 迁移到固定目录 `src/modes/interactive/test_cases/`；最初固定的文件为 `input.rs`、`sessions.rs`、`workflow.rs`、`themes.rs`、`tasks.rs`、`approvals.rs`、`clipboard.rs`、`transcript.rs`、`terminal.rs`，后续按已记录的协调者裁决使用明确行为前缀扩展。其他源码侧文件按测试函数的生产行为前缀拆分，没有使用 `part1.rs`、`other.rs` 或数字分片。
 
-规模上限的适用范围是：本轮清单中的文件、所有本轮触及的测试文件、所有新增测试文件。未触及且不在清单中的现有源码测试不因生产文件总行数被迫搬迁。这样既保证当前巨型文件全部处理，又不把生产文件总长度误当成测试块长度。
+本轮迁移将规模上限用于清单内文件、所有触及的测试文件和所有新增测试文件；未触及且不在清单中的源码测试没有因为生产文件总行数被迫搬迁。该边界避免把生产文件总长度误当成测试块长度。
 
 ### 5.10 测试退役记录
 

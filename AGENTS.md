@@ -73,7 +73,7 @@ Do not use broad `cargo test`, package-wide `cargo nextest run`, or vague substr
 
 ## Test suite governance
 
-The four crates share one set of test rules. One-time migration lists (fixed top-level targets, current over-limit files) live in §5.8/§5.9 of `docs/aegis/specs/2026-08-07-test-suite-governance-design.md` and are not copied here.
+The four crates share one set of test rules. Canonical top-level targets live in §5.8 of `docs/aegis/specs/2026-08-07-test-suite-governance-design.md`. The completed over-limit migration baseline in §5.9 is historical evidence, not pending work.
 
 ### Structure
 
@@ -117,7 +117,7 @@ Classification language only — tests still run under Cargo and Nextest.
 
 - **Keep** when it uniquely guards user-visible behavior, public API, or cross-module integration; guards append-only context, cache prefix, persistence, permissions, security, data-loss, or recovery semantics; guards a real historical defect whose fault class can recur; guards platform differences, error branches, resource boundaries, protocol ordering, or concurrency final states; or no cheaper stronger test captures the same fault.
 - **Merge** into one table-driven test with named cases when tests vary only input values over the same branch and assertions, or repeat full fixtures for one mapping table. Each case must be named so a failure is directly locatable; never chain sequentially dependent scenarios into one test.
-- **Delete** only when all four hold: (1) no independent user behavior, risk boundary, or historical defect; (2) a retained test fails on the same production fault; (3) assertions verify only derived capabilities, stdlib behavior, test-helper interfaces, non-empty text, or duplicated snapshot details; (4) running the precise target shows retained tests still prove the same semantics. High-risk duplicates get one temporary fault injection (reverted before commit) when call paths cannot prove the overlap. Deletion ships with evidence: the retained guard failing on the same fault, the exact single-package/single-target command, and a non-zero run count.
+- **Delete** through one of two evidence paths. For a duplicate guard: it has no independent user behavior, risk boundary, or historical defect; a retained test fails on the same production fault; and the precise target proves the retained semantics with a non-zero run count. For a non-guard: its assertions cover only derived capabilities, stdlib behavior, test-helper interfaces, non-empty text, or duplicated snapshot details; record why no meaningful production fault exists, then run the precise target after deletion with a non-zero run count. Do not add a replacement test solely to authorize deletion. High-risk duplicates get one temporary fault injection (reverted before commit) when call paths cannot prove the overlap. Every deletion records the exact single-package/single-target command and evidence path used.
 - **Rewrite** when behavior matters but the test depends on fixed waits, real network, fixed ports, shared cwd, global env, or incomplete process reclamation — use paused time, readiness signals, `127.0.0.1:0`, `tempfile`, and existing fake models instead.
 
 ### Layering dedup
