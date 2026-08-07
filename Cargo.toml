@@ -39,10 +39,7 @@ serde = { version = "1.0.228", features = ["derive"] }
 serde_json = "1.0.145"
 serde_yaml = "0.9"
 sha2 = "0.10.9"
-# `skim` is used only as a maintained fuzzy matcher engine. Even with default
-# features disabled it carries finder/runtime dependencies; this is an explicit
-# trade-off for staying on the actively maintained upstream matcher.
-skim = { version = "5.0.0", default-features = false }
+fuzzy-matcher = "0.3.7"
 sse-stream = "0.2"
 syntect = { version = "5.3.0", default-features = false, features = ["default-fancy"] }
 sysinfo = "0.37.2"

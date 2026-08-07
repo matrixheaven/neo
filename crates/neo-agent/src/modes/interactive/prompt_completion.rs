@@ -4,8 +4,8 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
+use fuzzy_matcher::{FuzzyMatcher, skim::SkimMatcherV2};
 use ignore::WalkBuilder;
-use skim::fuzzy_matcher::{FuzzyMatcher, skim::SkimMatcherV2};
 
 use crate::prompt::templates::{PromptTemplate, load_project_prompt_templates};
 use neo_agent_core::skills::SkillStore;
