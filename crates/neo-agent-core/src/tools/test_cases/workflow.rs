@@ -60,6 +60,7 @@ fn live_workflow_agent_for_test(
         cache_write_token_count: 3,
         elapsed_ms: 1_000,
         latest_text: Some("fallback text".to_owned()),
+        latest_thinking: None,
         last_tool: Some(DelegateToolProgress {
             id: "tool-1".to_owned(),
             name: "Read".to_owned(),

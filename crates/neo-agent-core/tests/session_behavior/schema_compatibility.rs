@@ -65,6 +65,7 @@ fn compact_delegate_progress_events_deserialize_and_do_not_replay_messages() {
         cache_write_token_count: 0,
         elapsed_ms: 500,
         latest_text: Some("reading files".to_owned()),
+        latest_thinking: None,
         last_tool: Some(DelegateToolProgress {
             id: "tool-1".to_owned(),
             name: "Read".to_owned(),
@@ -150,6 +151,7 @@ fn compact_swarm_progress_events_deserialize_and_do_not_replay_messages() {
                 cache_write_token_count: 0,
                 elapsed_ms: 0,
                 latest_text: None,
+                latest_thinking: None,
                 last_tool: None,
                 outcome: None,
             },

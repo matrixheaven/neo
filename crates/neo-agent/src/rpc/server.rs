@@ -572,7 +572,7 @@ async fn handle_prompt(
     let (event_tx, mut event_rx) = mpsc::unbounded_channel();
     let prompt = vec![message.to_owned()];
     let mut turn = std::pin::pin!(run::run_prompt_with_event_stream(&prompt, config, event_tx));
-    let mut turn_result: Option<anyhow::Result<run::PromptTurn>> = None;
+    let mut turn_result: Option<anyhow::Result<run::StreamingPromptTurn>> = None;
     loop {
         if let Some(result) = turn_result.take() {
             match event_rx.recv().await {
@@ -599,7 +599,7 @@ async fn handle_prompt(
                                 request.id,
                                 json!({
                                     "assistant_text": turn.assistant_text,
-                                    "event_count": turn.events.len(),
+                                    "event_count": turn.event_count,
                                 }),
                             )),
                         );

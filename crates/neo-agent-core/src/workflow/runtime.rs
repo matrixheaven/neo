@@ -3874,7 +3874,7 @@ pub fn project_child_structured_output(
     first_output: &ChildRunOutput,
 ) -> ChildStructuredProjection {
     let first_raw = child_final_assistant_text(first_output);
-    let first_usage = accumulate_child_usage(None, &first_output.events);
+    let first_usage = first_output.actual_usage;
     let projection = accept_structured_output(
         schema,
         StructuredOutputSource::AssistantText(first_raw.clone()),
@@ -3893,7 +3893,7 @@ pub fn project_child_structured_output(
 
 fn child_run_to_outcome(output: &ChildRunOutput) -> WorkflowInvocationOutcome {
     let mut outcome = child_agent_to_outcome(&output.snapshot);
-    outcome.actual_usage = accumulate_child_usage(None, &output.events);
+    outcome.actual_usage = output.actual_usage;
     outcome
 }
 
@@ -3983,18 +3983,6 @@ fn child_spec(input: &serde_json::Value) -> (Option<String>, Option<String>) {
         .filter(|value| !value.trim().is_empty())
         .map(str::to_owned);
     (title, role)
-}
-
-fn accumulate_child_usage(
-    total: Option<AgentTokenUsage>,
-    events: &[crate::AgentEvent],
-) -> Option<AgentTokenUsage> {
-    events.iter().fold(total, |total, event| {
-        let crate::AgentEvent::TokenUsage { usage, .. } = event else {
-            return total;
-        };
-        Some(add_usage(total, *usage))
-    })
 }
 
 fn observe_outcome(

@@ -287,6 +287,8 @@ pub struct AgentProgressSnapshot {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub latest_text: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub latest_thinking: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_tool: Option<DelegateToolProgress>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub outcome: Option<AgentTerminalOutcome>,
@@ -315,6 +317,16 @@ impl AgentProgressSnapshot {
                 .latest_text
                 .as_deref()
                 .map(|text| truncate_progress_text(text, MAX_PROGRESS_TEXT_CHARS)),
+            latest_thinking: agent.activity.last().and_then(|entry| match &entry.kind {
+                AgentActivityKind::Text {
+                    text,
+                    thinking: true,
+                } => Some(truncate_progress_text(text, MAX_PROGRESS_TEXT_CHARS)),
+                AgentActivityKind::Text {
+                    thinking: false, ..
+                }
+                | AgentActivityKind::Tool { .. } => None,
+            }),
             last_tool: agent
                 .activity
                 .iter()
@@ -362,6 +374,7 @@ impl AgentProgressSnapshot {
             cache_read_token_count: self.cache_read_token_count,
             cache_write_token_count: self.cache_write_token_count,
             latest_text: self.latest_text.clone(),
+            latest_thinking: self.latest_thinking.clone(),
             last_tool: self.last_tool.clone(),
             outcome: self.outcome.clone(),
         }
@@ -387,6 +400,7 @@ pub struct AgentProgressSignature {
     pub cache_read_token_count: usize,
     pub cache_write_token_count: usize,
     pub latest_text: Option<String>,
+    pub latest_thinking: Option<String>,
     pub last_tool: Option<DelegateToolProgress>,
     pub outcome: Option<AgentTerminalOutcome>,
 }
@@ -500,7 +514,10 @@ pub fn apply_agent_progress(
         upsert_progress_tool(&mut snapshot.activity, tool);
     }
     if let Some(text) = &progress.latest_text {
-        upsert_progress_text(&mut snapshot.activity, text);
+        upsert_progress_text(&mut snapshot.activity, text, false);
+    }
+    if let Some(thinking) = &progress.latest_thinking {
+        upsert_progress_text(&mut snapshot.activity, thinking, true);
     }
     trim_progress_activity(&mut snapshot.activity);
     true
@@ -574,20 +591,20 @@ fn clear_live_queue_metadata_from_phase(phase: &mut AgentToolActivityPhase) {
     }
 }
 
-fn upsert_progress_text(activity: &mut Vec<AgentActivityEntry>, text: &str) {
+fn upsert_progress_text(activity: &mut Vec<AgentActivityEntry>, text: &str, thinking: bool) {
     let trimmed = text.trim();
     if trimmed.is_empty() {
         return;
     }
     if activity.iter().rev().any(|entry| {
-        matches!(&entry.kind, AgentActivityKind::Text { text, thinking: false } if text.trim() == trimmed)
+        matches!(&entry.kind, AgentActivityKind::Text { text, thinking: existing } if *existing == thinking && text.trim() == trimmed)
     }) {
         return;
     }
     activity.push(AgentActivityEntry {
         kind: AgentActivityKind::Text {
             text: text.to_owned(),
-            thinking: false,
+            thinking,
         },
     });
 }

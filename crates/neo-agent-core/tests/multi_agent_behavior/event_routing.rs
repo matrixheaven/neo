@@ -383,34 +383,25 @@ async fn delegate_streams_child_activity_updates_before_finish() {
     let updates = events
         .iter()
         .filter_map(|event| match event {
-            AgentEvent::DelegateUpdated { agent, .. } => Some(agent),
+            AgentEvent::DelegateProgressUpdated { progress, .. } => Some(progress),
             _ => None,
         })
         .collect::<Vec<_>>();
     assert!(
-        updates.iter().any(|agent| {
-            agent.activity.iter().any(|entry| {
-                matches!(
-                    &entry.kind,
-                    AgentActivityKind::Tool {
-                        name,
-                        summary,
-                        phase: AgentToolActivityPhase::Ongoing,
-                        ..
-                    }
-                        if name == "Read"
-                            && summary.as_deref()
-                                == Some("crates/neo-agent-core/src/lib.rs")
-                )
+        updates.iter().any(|progress| {
+            progress.last_tool.as_ref().is_some_and(|tool| {
+                tool.name == "Read"
+                    && tool.summary.as_deref() == Some("crates/neo-agent-core/src/lib.rs")
+                    && tool.phase == AgentToolActivityPhase::Ongoing
             })
         }),
-        "expected live DelegateUpdated with Read activity: {updates:#?}"
+        "expected live DelegateProgressUpdated with Read activity: {updates:#?}"
     );
     assert!(
         updates
             .iter()
-            .any(|agent| agent.latest_text.as_deref() == Some("34 lines")),
-        "expected live DelegateUpdated with child text: {updates:#?}"
+            .any(|progress| progress.latest_text.as_deref() == Some("34 lines")),
+        "expected live DelegateProgressUpdated with child text: {updates:#?}"
     );
     let finished = events
         .iter()

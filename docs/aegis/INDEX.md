@@ -558,3 +558,19 @@ Entries are workspace records, not authoritative runtime decisions.
 | 2026-08-07 | work | docs/aegis/work/2026-08-07-task-browser-ui-redesign/proof-bundle.md | 2026-08-07-task-browser-ui-redesign proof bundle |
 | 2026-08-07 | artifact | docs/aegis/work/2026-08-07-tui-mouse-text-selection/gate-input-pack.json | 2026-08-07-tui-mouse-text-selection gate input pack |
 | 2026-08-07 | work | docs/aegis/work/2026-08-07-tui-mouse-text-selection/proof-bundle.md | 2026-08-07-tui-mouse-text-selection proof bundle |
+| 2026-08-08 | work | docs/aegis/work/2026-08-08-bounded-runtime-memory/10-intent.md | Bound Neo runtime memory intent |
+| 2026-08-08 | work | docs/aegis/work/2026-08-08-bounded-runtime-memory/20-checkpoint.md | Bound Neo runtime memory checkpoint |
+| 2026-08-08 | work | docs/aegis/work/2026-08-08-bounded-runtime-memory/90-evidence.md | Bound Neo runtime memory evidence |
+| 2026-08-08 | work | docs/aegis/work/2026-08-08-bounded-runtime-memory/99-reflection.md | Bound Neo runtime memory reflection |
+| 2026-08-08 | artifact | docs/aegis/work/2026-08-08-bounded-runtime-memory/task-intent-draft.json | Bound Neo runtime memory task intent draft |
+| 2026-08-08 | artifact | docs/aegis/work/2026-08-08-bounded-runtime-memory/baseline-read-set-hint.json | Bound Neo runtime memory baseline read-set hint |
+| 2026-08-08 | artifact | docs/aegis/work/2026-08-08-bounded-runtime-memory/baseline-usage-draft.json | Bound Neo runtime memory baseline usage draft |
+| 2026-08-08 | artifact | docs/aegis/work/2026-08-08-bounded-runtime-memory/impact-statement-draft.json | Bound Neo runtime memory impact statement draft |
+| 2026-08-08 | artifact | docs/aegis/work/2026-08-08-bounded-runtime-memory/todo-checkpoint-draft.json | Bound Neo runtime memory todo checkpoint draft |
+| 2026-08-08 | artifact | docs/aegis/work/2026-08-08-bounded-runtime-memory/drift-check-draft.json | Bound Neo runtime memory drift check draft |
+| 2026-08-08 | spec | docs/aegis/specs/2026-08-08-bounded-runtime-memory-design.md | Neo bounded runtime memory design |
+| 2026-08-08 | plan | docs/aegis/plans/2026-08-08-bounded-runtime-memory.md | Neo bounded runtime memory implementation plan |
+| 2026-08-08 | artifact | docs/aegis/work/2026-08-08-bounded-runtime-memory/resume-state-hint.json | 2026-08-08-bounded-runtime-memory resume state hint |
+| 2026-08-08 | work | docs/aegis/work/2026-08-08-bounded-runtime-memory/proof-bundle.md | Bound Neo runtime memory proof bundle |
+| 2026-08-08 | artifact | docs/aegis/work/2026-08-08-bounded-runtime-memory/gate-input-pack.json | 2026-08-08-bounded-runtime-memory gate input pack |
+| 2026-08-08 | work | docs/aegis/work/2026-08-08-bounded-runtime-memory/proof-bundle.md | 2026-08-08-bounded-runtime-memory proof bundle |

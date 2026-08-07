@@ -247,6 +247,12 @@ pub struct PromptTurn {
     pub assistant_text: String,
 }
 
+pub struct StreamingPromptTurn {
+    pub session_id: String,
+    pub assistant_text: String,
+    pub event_count: usize,
+}
+
 /// One live approval: the canonical request plus its single response channel.
 ///
 /// The UI registers this atomically (store responder, open chrome modal, upsert
@@ -260,7 +266,7 @@ pub async fn run_prompt_with_event_stream(
     prompt: &[String],
     config: &AppConfig,
     event_tx: mpsc::UnboundedSender<anyhow::Result<AgentEvent>>,
-) -> anyhow::Result<PromptTurn> {
+) -> anyhow::Result<StreamingPromptTurn> {
     run_prompt_streaming_with_retry_notices(prompt, config, event_tx).await
 }
 
@@ -268,7 +274,7 @@ async fn run_prompt_streaming_with_retry_notices(
     prompt: &[String],
     config: &AppConfig,
     event_tx: mpsc::UnboundedSender<anyhow::Result<AgentEvent>>,
-) -> anyhow::Result<PromptTurn> {
+) -> anyhow::Result<StreamingPromptTurn> {
     let prompt_text = prompt.join(" ");
     let content = vec![Content::text(prompt_text.as_str())];
     let created = crate::modes::sessions::create_new_session(config).await?;
@@ -308,11 +314,11 @@ async fn run_prompt_streaming_with_retry_notices(
         AgentContext::new(),
         &mut writer,
         runtime,
-        Vec::new(),
         streaming,
     )
     .await?;
-    record_initial_session_title(config, &turn, &prompt_text).await;
+    record_initial_session_title(config, &turn.session_id, &turn.assistant_text, &prompt_text)
+        .await;
     Ok(turn)
 }
 
@@ -364,7 +370,8 @@ async fn run_prompt_with_retry_notices(
         show_retry_notices,
     )
     .await?;
-    record_initial_session_title(config, &turn, &prompt_text).await;
+    record_initial_session_title(config, &turn.session_id, &turn.assistant_text, &prompt_text)
+        .await;
     Ok(turn)
 }
 
@@ -450,7 +457,7 @@ pub async fn run_prompt_streaming(
     request: TurnRequest,
     channels: TurnChannels,
     config: &AppConfig,
-) -> anyhow::Result<PromptTurn> {
+) -> anyhow::Result<StreamingPromptTurn> {
     ensure_new_workflow_context_capacity(&request, &channels, config).await?;
     let prepared = prepare_new_streaming_turn(
         &request.prompt,
@@ -477,7 +484,7 @@ pub async fn run_prompt_streaming(
         request.compaction_only,
     )
     .await?;
-    record_initial_session_title(config, &turn, &prompt).await;
+    record_initial_session_title(config, &turn.session_id, &turn.assistant_text, &prompt).await;
     Ok(turn)
 }
 
@@ -486,7 +493,7 @@ pub async fn run_prompt_in_session_streaming(
     request: TurnRequest,
     channels: TurnChannels,
     config: &AppConfig,
-) -> anyhow::Result<PromptTurn> {
+) -> anyhow::Result<StreamingPromptTurn> {
     let prepared = prepare_existing_streaming_turn(
         session_id,
         &request.prompt,
@@ -551,7 +558,6 @@ async fn prepare_new_streaming_turn(
         context: streaming_context(skill_context),
         writer,
         user_message,
-        initial_events: Vec::new(),
     })
 }
 
@@ -588,7 +594,6 @@ async fn prepare_existing_streaming_turn(
         context,
         writer,
         user_message,
-        initial_events: Vec::new(),
     })
 }
 
@@ -619,14 +624,13 @@ async fn run_prepared_streaming_turn(
     event_tx: mpsc::UnboundedSender<anyhow::Result<AgentEvent>>,
     cancel_token: CancellationToken,
     compaction_only: bool,
-) -> anyhow::Result<PromptTurn> {
+) -> anyhow::Result<StreamingPromptTurn> {
     let PreparedStreamingTurn {
         session_id,
         session_directory: _,
         context,
         mut writer,
         user_message,
-        initial_events,
         prompt: _,
     } = prepared;
     let streaming = StreamingTurnIo {
@@ -635,18 +639,9 @@ async fn run_prepared_streaming_turn(
         cancel_token,
     };
     if compaction_only {
-        finish_compaction_turn_streaming(context, &mut writer, runtime, initial_events, streaming)
-            .await
+        finish_compaction_turn_streaming(context, &mut writer, runtime, streaming).await
     } else {
-        finish_prompt_turn_streaming(
-            user_message,
-            context,
-            &mut writer,
-            runtime,
-            initial_events,
-            streaming,
-        )
-        .await
+        finish_prompt_turn_streaming(user_message, context, &mut writer, runtime, streaming).await
     }
 }
 
@@ -1038,7 +1033,6 @@ struct PreparedStreamingTurn {
     context: AgentContext,
     writer: JsonlSessionWriter,
     user_message: AgentMessage,
-    initial_events: Vec<AgentEvent>,
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -1053,32 +1047,31 @@ async fn finish_prompt_turn_streaming(
     mut context: AgentContext,
     writer: &mut JsonlSessionWriter,
     runtime: AgentRuntime,
-    initial_events: Vec<AgentEvent>,
     streaming: StreamingTurnIo,
-) -> anyhow::Result<PromptTurn> {
-    let mut events = forward_initial_streaming_events(&streaming.event_tx, initial_events);
+) -> anyhow::Result<StreamingPromptTurn> {
     let mut assistant_text = String::new();
+    let mut event_count = 0;
     let mut persistence = SessionEventPersistence::default();
     let mut stream =
         runtime.run_turn_with_cancel(&mut context, user_message.clone(), streaming.cancel_token);
     while let Some(event) = stream.next().await {
         let event = streaming_event_or_bail(event, &streaming.event_tx)?;
         append_streaming_event(
-            &event,
+            event,
             writer,
             &mut assistant_text,
             &streaming.event_tx,
-            &mut events,
+            &mut event_count,
             &mut persistence,
         )
         .await?;
     }
     writer.flush().await?;
 
-    Ok(PromptTurn {
+    Ok(StreamingPromptTurn {
         session_id: streaming.session_id,
-        events,
         assistant_text,
+        event_count,
     })
 }
 
@@ -1086,10 +1079,9 @@ async fn finish_compaction_turn_streaming(
     mut context: AgentContext,
     writer: &mut JsonlSessionWriter,
     runtime: AgentRuntime,
-    initial_events: Vec<AgentEvent>,
     streaming: StreamingTurnIo,
-) -> anyhow::Result<PromptTurn> {
-    let mut events = forward_initial_streaming_events(&streaming.event_tx, initial_events);
+) -> anyhow::Result<StreamingPromptTurn> {
+    let mut event_count = 0;
     let mut stream =
         runtime.run_manual_compaction_turn_with_cancel(&mut context, streaming.cancel_token);
     while let Some(event) = stream.next().await {
@@ -1101,26 +1093,16 @@ async fn finish_compaction_turn_streaming(
             }
         };
         writer.append_event(&event).await?;
-        let _ = streaming.event_tx.send(Ok(event.clone()));
-        events.push(event);
+        event_count += 1;
+        let _ = streaming.event_tx.send(Ok(event));
     }
     writer.flush().await?;
 
-    Ok(PromptTurn {
+    Ok(StreamingPromptTurn {
         session_id: streaming.session_id,
-        events,
         assistant_text: String::new(),
+        event_count,
     })
-}
-
-fn forward_initial_streaming_events(
-    event_tx: &mpsc::UnboundedSender<anyhow::Result<AgentEvent>>,
-    initial_events: Vec<AgentEvent>,
-) -> Vec<AgentEvent> {
-    for event in &initial_events {
-        let _ = event_tx.send(Ok(event.clone()));
-    }
-    initial_events
 }
 
 fn streaming_event_or_bail<E: std::fmt::Display>(
@@ -1140,23 +1122,23 @@ fn streaming_error(
 }
 
 async fn append_streaming_event(
-    event: &AgentEvent,
+    event: AgentEvent,
     writer: &mut JsonlSessionWriter,
     assistant_text: &mut String,
     event_tx: &mpsc::UnboundedSender<anyhow::Result<AgentEvent>>,
-    events: &mut Vec<AgentEvent>,
+    event_count: &mut usize,
     persistence: &mut SessionEventPersistence,
 ) -> anyhow::Result<()> {
-    let effect = streaming_event_effect(event);
+    let effect = streaming_event_effect(&event);
     if let Some(text) = effect.assistant_text {
         assistant_text.push_str(&text);
     }
     if effect.persist {
-        for persisted in persistence.persisted_events(event) {
+        for persisted in persistence.persisted_events(&event) {
             writer.append_event(&persisted).await?;
         }
         if matches!(
-            event,
+            &event,
             AgentEvent::MessageAppended { message }
                 if WorkflowNotification::projection_id(message).is_some()
         ) {
@@ -1164,8 +1146,8 @@ async fn append_streaming_event(
         }
     }
     if effect.forward {
-        let _ = event_tx.send(Ok(event.clone()));
-        events.push(event.clone());
+        *event_count += 1;
+        let _ = event_tx.send(Ok(event));
     }
     Ok(())
 }

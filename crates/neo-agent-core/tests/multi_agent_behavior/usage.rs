@@ -831,8 +831,11 @@ async fn assert_runtime_child_inherits_and_persists_epoch(
         .expect("inherit child run");
     let child_id = output.snapshot.id.as_str().to_owned();
 
-    let baseline = output
-        .events
+    let wire = agent_wire_path(session_dir, &child_id);
+    let replayed = JsonlSessionReader::read_all(&wire)
+        .await
+        .expect("read child wire");
+    let baseline = replayed
         .iter()
         .find_map(|event| match event {
             AgentEvent::InstructionEpoch { epoch } => Some(epoch),
@@ -854,10 +857,6 @@ async fn assert_runtime_child_inherits_and_persists_epoch(
     assert!(sent.contains("nested rules"), "{sent}");
     assert!(sent.contains("root rules"), "{sent}");
 
-    let wire = agent_wire_path(session_dir, &child_id);
-    let replayed = JsonlSessionReader::read_all(&wire)
-        .await
-        .expect("read child wire");
     assert!(
         replayed.iter().any(|event| matches!(
             event,

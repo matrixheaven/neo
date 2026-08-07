@@ -153,7 +153,7 @@ fn retry_scheduled_notice_is_plain_non_tty_stderr() {
 }
 
 #[tokio::test]
-async fn append_streaming_event_persists_user_message_once() {
+async fn streaming_turn_forwards_and_counts_events_without_retaining_them() {
     let dir = tempfile::tempdir().expect("tempdir");
     let session_path = dir.path().join("session.jsonl");
     let mut writer = JsonlSessionWriter::create(&session_path)
@@ -165,15 +165,15 @@ async fn append_streaming_event_persists_user_message_once() {
         message: user_message.clone(),
     };
     let mut assistant_text = String::new();
-    let mut events = Vec::new();
+    let mut event_count = 0;
     let mut persistence = super::super::SessionEventPersistence::default();
 
     super::super::append_streaming_event(
-        &event,
+        event.clone(),
         &mut writer,
         &mut assistant_text,
         &event_tx,
-        &mut events,
+        &mut event_count,
         &mut persistence,
     )
     .await
@@ -185,7 +185,7 @@ async fn append_streaming_event_persists_user_message_once() {
         .expect("forwarded event")
         .expect("successful event");
     assert_eq!(forwarded, event);
-    assert_eq!(events, vec![event]);
+    assert_eq!(event_count, 1);
     assert!(assistant_text.is_empty());
     assert_eq!(
         JsonlSessionReader::replay_messages(&session_path)
@@ -241,7 +241,6 @@ async fn failed_streaming_compaction_flushes_error_terminal_event() {
         AgentContext::new(),
         &mut writer,
         runtime,
-        Vec::new(),
         super::super::StreamingTurnIo {
             event_tx,
             session_id: "session-test".to_owned(),

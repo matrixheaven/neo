@@ -7,8 +7,6 @@ use neo_ai::{ChatMessage, ChatRequest, ContentPart, ModelSpec, RequestOptions};
 
 use crate::config::{AppConfig, workspace_sessions_dir};
 
-use super::PromptTurn;
-
 pub(super) fn session_id_from_path(path: &Path) -> anyhow::Result<String> {
     let session_dir = session_root_from_wire_path(path)?;
     let dir_name = session_dir
@@ -116,7 +114,8 @@ pub(super) fn record_session_activity(config: &AppConfig, session_id: &str, prom
 
 pub(super) async fn record_initial_session_title(
     config: &AppConfig,
-    turn: &PromptTurn,
+    session_id: &str,
+    assistant_text: &str,
     prompt: &str,
 ) {
     let bucket_dir = workspace_sessions_dir(config);
@@ -126,7 +125,7 @@ pub(super) async fn record_initial_session_title(
     };
     let Some(record) = sessions
         .into_iter()
-        .find(|session| session.id == turn.session_id)
+        .find(|session| session.id == session_id)
     else {
         return;
     };
@@ -135,28 +134,27 @@ pub(super) async fn record_initial_session_title(
     }
 
     let fallback = one_line(prompt, 40);
-    let (title, model_label) =
-        match generate_session_title(config, prompt, &turn.assistant_text).await {
-            Ok((title, model_label)) if !title.is_empty() => (title, Some(model_label)),
-            Ok((_, _)) => {
-                tracing::warn!(
-                    "session {}: title generation returned an empty title; \
+    let (title, model_label) = match generate_session_title(config, prompt, assistant_text).await {
+        Ok((title, model_label)) if !title.is_empty() => (title, Some(model_label)),
+        Ok((_, _)) => {
+            tracing::warn!(
+                "session {}: title generation returned an empty title; \
                      using a prompt truncation fallback",
-                    turn.session_id
-                );
-                (fallback, None)
-            }
-            Err(error) => {
-                tracing::warn!(
-                    error = ?error,
-                    "session {}: title generation failed; using a prompt truncation fallback",
-                    turn.session_id
-                );
-                (fallback, None)
-            }
-        };
+                session_id
+            );
+            (fallback, None)
+        }
+        Err(error) => {
+            tracing::warn!(
+                error = ?error,
+                "session {}: title generation failed; using a prompt truncation fallback",
+                session_id
+            );
+            (fallback, None)
+        }
+    };
     let _ = store.record_title(
-        &turn.session_id,
+        session_id,
         title,
         model_label,
         super::output::current_unix_timestamp(),

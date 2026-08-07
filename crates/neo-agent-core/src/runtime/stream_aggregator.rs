@@ -65,6 +65,8 @@ struct ModelTurnState {
     content: Vec<Content>,
     active_text_index: Option<usize>,
     active_thinking_index: Option<usize>,
+    active_text_buffer: Option<String>,
+    active_thinking_buffer: Option<String>,
     tool_calls: Vec<AgentToolCall>,
     tool_names: std::collections::HashMap<String, String>,
     current_message_id: Option<String>,
@@ -78,6 +80,8 @@ impl ModelTurnState {
             content: Vec::new(),
             active_text_index: None,
             active_thinking_index: None,
+            active_text_buffer: None,
+            active_thinking_buffer: None,
             tool_calls: Vec::new(),
             tool_names: std::collections::HashMap::new(),
             current_message_id: None,
@@ -153,6 +157,8 @@ impl ModelTurnState {
         kind: ThinkingKind,
         emitter: &mut EventEmitter,
     ) {
+        self.finish_active_text();
+        self.finish_active_thinking(None, false);
         self.content.push(Content::thinking_with_kind_and_id(
             "",
             None,
@@ -161,16 +167,16 @@ impl ModelTurnState {
             Some(id.clone().into()),
         ));
         self.active_thinking_index = Some(self.content.len() - 1);
+        self.active_thinking_buffer = Some(String::new());
         self.active_text_index = None;
+        self.active_text_buffer = None;
         emitter.emit(AgentEvent::ThinkingStarted { turn, id, kind });
     }
 
     fn apply_thinking_delta(&mut self, turn: u32, text: String, emitter: &mut EventEmitter) {
-        let index = self.ensure_active_thinking();
-        if let Some(Content::Thinking { text: thinking, .. }) = self.content.get_mut(index) {
-            let mut s = String::from(&**thinking);
-            s.push_str(&text);
-            *thinking = Arc::from(s);
+        self.ensure_active_thinking();
+        if let Some(buffer) = self.active_thinking_buffer.as_mut() {
+            buffer.push_str(&text);
         }
         emitter.emit(AgentEvent::ThinkingDelta { turn, text });
     }
@@ -183,12 +189,15 @@ impl ModelTurnState {
         emitter: &mut EventEmitter,
     ) {
         let index = self.ensure_active_thinking();
+        let text = self.active_thinking_buffer.take().unwrap_or_default();
         if let Some(Content::Thinking {
+            text: thinking,
             signature: thinking_signature,
             redacted: thinking_redacted,
             ..
         }) = self.content.get_mut(index)
         {
+            *thinking = Arc::from(text);
             *thinking_signature = signature.map(Arc::from);
             *thinking_redacted = redacted;
         }
@@ -252,21 +261,35 @@ impl ModelTurnState {
     }
 
     fn into_assistant_message(self, stop_reason: StopReason) -> AgentMessage {
-        AgentMessage::assistant(self.content, self.tool_calls, stop_reason)
+        let mut state = self;
+        state.finish_active_text();
+        state.finish_active_thinking(None, false);
+        AgentMessage::assistant(state.content, state.tool_calls, stop_reason)
     }
 
     fn append_text(&mut self, delta: &str) {
         if let Some(index) = self.active_text_index
-            && let Some(Content::Text { text }) = self.content.get_mut(index)
+            && self.content.get(index).is_some()
         {
-            let mut s = String::from(&**text);
-            s.push_str(delta);
-            *text = Arc::from(s);
+            self.active_text_buffer
+                .get_or_insert_with(String::new)
+                .push_str(delta);
             return;
         }
 
-        self.content.push(Content::text(delta));
+        self.content.push(Content::text(""));
         self.active_text_index = Some(self.content.len() - 1);
+        self.active_text_buffer = Some(delta.to_owned());
+    }
+
+    fn finish_active_text(&mut self) {
+        let Some(index) = self.active_text_index.take() else {
+            return;
+        };
+        let text = self.active_text_buffer.take().unwrap_or_default();
+        if let Some(Content::Text { text: content }) = self.content.get_mut(index) {
+            *content = Arc::from(text);
+        }
     }
 
     fn ensure_active_thinking(&mut self) -> usize {
@@ -276,11 +299,32 @@ impl ModelTurnState {
             return index;
         }
 
+        self.finish_active_text();
         self.content.push(Content::thinking("", None, false));
         let index = self.content.len() - 1;
         self.active_thinking_index = Some(index);
+        self.active_thinking_buffer = Some(String::new());
         self.active_text_index = None;
+        self.active_text_buffer = None;
         index
+    }
+
+    fn finish_active_thinking(&mut self, signature: Option<String>, redacted: bool) {
+        let Some(index) = self.active_thinking_index.take() else {
+            return;
+        };
+        let text = self.active_thinking_buffer.take().unwrap_or_default();
+        if let Some(Content::Thinking {
+            text: content,
+            signature: current_signature,
+            redacted: current_redacted,
+            ..
+        }) = self.content.get_mut(index)
+        {
+            *content = Arc::from(text);
+            *current_signature = signature.map(Arc::from);
+            *current_redacted = redacted;
+        }
     }
 }
 
@@ -470,5 +514,38 @@ mod tests {
         assert_eq!(first_text.as_ref(), "first");
         assert_eq!(second_id.as_deref(), Some("summary-2"));
         assert_eq!(second_text.as_ref(), "second");
+    }
+
+    #[test]
+    fn implicit_thinking_start_preserves_buffered_text() {
+        let (sender, _receiver) = tokio::sync::mpsc::unbounded_channel();
+        let mut emitter = EventEmitter::new(sender, crate::AgentContext::new());
+        let mut state = ModelTurnState::new();
+
+        state.apply_model_event(
+            1,
+            AiStreamEvent::TextDelta {
+                text: "before".to_owned(),
+            },
+            &mut emitter,
+        );
+        state.apply_model_event(
+            1,
+            AiStreamEvent::ThinkingDelta {
+                text: "thought".to_owned(),
+            },
+            &mut emitter,
+        );
+
+        let AgentMessage::Assistant { content, .. } =
+            state.into_assistant_message(StopReason::EndTurn)
+        else {
+            panic!("expected assistant message");
+        };
+        assert!(matches!(&content[0], Content::Text { text } if text.as_ref() == "before"));
+        assert!(matches!(
+            &content[1],
+            Content::Thinking { text, .. } if text.as_ref() == "thought"
+        ));
     }
 }

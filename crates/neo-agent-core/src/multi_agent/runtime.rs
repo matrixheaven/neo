@@ -1,9 +1,12 @@
 use std::{
-    collections::{BTreeMap, BTreeSet, HashMap},
+    collections::{BTreeMap, BTreeSet},
     path::PathBuf,
     sync::{Arc, Mutex},
     time::{Duration, Instant},
 };
+
+#[cfg(test)]
+use std::collections::HashMap;
 
 use futures::StreamExt;
 use neo_ai::{ModelClient, RequestOptions};
@@ -20,7 +23,8 @@ use crate::runtime::{
     ActiveTurnInput, AgentConfig, AgentContext, SteerInputHandle, effective_max_context_tokens,
 };
 use crate::{
-    AgentEvent, AgentMessage, AgentRuntime, AgentToolCall, Content, StopReason, ToolRegistry,
+    AgentEvent, AgentMessage, AgentRuntime, AgentTokenUsage, AgentToolCall, Content, StopReason,
+    ToolRegistry,
 };
 
 use super::state::derive_title;
@@ -1417,16 +1421,33 @@ pub struct AgentRunUpdate {
 #[derive(Debug, Clone)]
 pub struct ChildRunOutput {
     pub snapshot: AgentSnapshot,
-    pub events: Vec<AgentEvent>,
     pub messages: Vec<AgentMessage>,
+    pub assistant_text: String,
+    pub actual_usage: Option<AgentTokenUsage>,
+}
+
+#[derive(Default)]
+struct ChildRunSummary {
+    messages: Vec<AgentMessage>,
+    assistant_text: String,
+    actual_usage: Option<AgentTokenUsage>,
+    tool_count: usize,
+    token_count: usize,
+    cache_read_token_count: usize,
+    cache_write_token_count: usize,
+    cancelled: bool,
+    failed: bool,
+    last_finished_turn: u32,
 }
 
 /// Final assistant text from a completed child turn (strict host JSON candidate).
 #[must_use]
 pub fn child_final_assistant_text(output: &ChildRunOutput) -> String {
-    latest_assistant_text(&output.events)
-        .or_else(|| output.snapshot.latest_text.clone())
-        .unwrap_or_default()
+    if !output.assistant_text.trim().is_empty() {
+        output.assistant_text.clone()
+    } else {
+        output.snapshot.latest_text.clone().unwrap_or_default()
+    }
 }
 
 /// Outcome of an atomic live-steer delivery attempt.
@@ -1887,7 +1908,7 @@ impl MultiAgentRuntime {
         on_update: F,
     ) -> ChildRunOutput
     where
-        F: FnMut(AgentSnapshot) + Send,
+        F: FnMut(AgentProgressSnapshot) + Send,
     {
         self.run_started_child_turn_with_schema(deps, snapshot, context, None, on_update)
             .await
@@ -1902,18 +1923,19 @@ impl MultiAgentRuntime {
         mut on_update: F,
     ) -> ChildRunOutput
     where
-        F: FnMut(AgentSnapshot) + Send,
+        F: FnMut(AgentProgressSnapshot) + Send,
     {
         let started_at = Instant::now();
         let snapshot = self.mark_delegate_running(&snapshot.id).unwrap_or(snapshot);
-        on_update(snapshot.clone());
+        on_update(snapshot.progress_snapshot());
         // Short-circuit if the child was already cancelled before this turn
         // started (e.g. queued swarm child cancelled by cancel_swarm).
         if snapshot.state.is_terminal() {
             return ChildRunOutput {
                 snapshot,
-                events: Vec::new(),
                 messages: Vec::new(),
+                assistant_text: String::new(),
+                actual_usage: None,
             };
         }
         let mut deps = deps;
@@ -1933,6 +1955,7 @@ impl MultiAgentRuntime {
         deps.config.instruction_inheritance = instruction_inheritance_for(context);
         let live_steer = self.register_live_steer(agent_id.as_str());
         let child_wire_path = self.child_wire_path(agent_id.as_str());
+        let mut last_progress_update = None;
         let run = run_agent_snapshot(
             deps,
             prompt,
@@ -1941,10 +1964,14 @@ impl MultiAgentRuntime {
             agent_id.as_str().to_owned(),
             child_wire_path,
             |event| {
-                if runtime
-                    .apply_child_event(&agent_id, started_at, event)
-                    .is_some()
-                    && let Some(updated) = runtime.agent_snapshot(agent_id.as_str())
+                if let Some(updated) =
+                    runtime.apply_child_event_and_project_when(&agent_id, started_at, event, || {
+                        child_progress_update_is_due(
+                            event,
+                            started_at.elapsed(),
+                            &mut last_progress_update,
+                        )
+                    })
                 {
                     on_update(updated);
                 }
@@ -2031,8 +2058,9 @@ impl MultiAgentRuntime {
         if snapshot.state.is_terminal() {
             return ChildRunOutput {
                 snapshot,
-                events: Vec::new(),
                 messages: Vec::new(),
+                assistant_text: String::new(),
+                actual_usage: None,
             };
         }
         let mut deps = deps;
@@ -2055,6 +2083,7 @@ impl MultiAgentRuntime {
         deps.config.instruction_inheritance = instruction_inheritance_for(context);
         let live_steer = self.register_live_steer(agent_id.as_str());
         let child_wire_path = self.child_wire_path(agent_id.as_str());
+        let mut last_progress_update = None;
         let run = run_agent_snapshot(
             deps,
             prompt,
@@ -2063,7 +2092,15 @@ impl MultiAgentRuntime {
             agent_id.as_str().to_owned(),
             child_wire_path,
             |event| {
-                if let Some(updated) = runtime.apply_child_event(&agent_id, started_at, event) {
+                if let Some(updated) =
+                    runtime.apply_child_event_and_project_when(&agent_id, started_at, event, || {
+                        child_progress_update_is_due(
+                            event,
+                            started_at.elapsed(),
+                            &mut last_progress_update,
+                        )
+                    })
+                {
                     on_update(updated);
                 }
             },
@@ -2082,6 +2119,16 @@ impl MultiAgentRuntime {
         id: &AgentId,
         started_at: Instant,
         event: &AgentEvent,
+    ) -> Option<AgentProgressSnapshot> {
+        self.apply_child_event_and_project_when(id, started_at, event, || true)
+    }
+
+    fn apply_child_event_and_project_when(
+        &self,
+        id: &AgentId,
+        started_at: Instant,
+        event: &AgentEvent,
+        should_project: impl FnOnce() -> bool,
     ) -> Option<AgentProgressSnapshot> {
         let mut locked = self.state.lock().expect("multi-agent state poisoned");
         let MultiAgentState {
@@ -2114,6 +2161,10 @@ impl MultiAgentRuntime {
             return None;
         }
         *attempt_start = attempt_start.saturating_sub(trim_activity(&mut snapshot.activity));
+        if !should_project() {
+            return None;
+        }
+        snapshot.latest_text = latest_text_activity(&snapshot.activity, false);
         Some(snapshot.progress_snapshot())
     }
 
@@ -2121,18 +2172,33 @@ impl MultiAgentRuntime {
         &self,
         snapshot: &AgentSnapshot,
         started_at: Instant,
-        run: Result<(Vec<AgentEvent>, Vec<AgentMessage>), String>,
+        run: Result<ChildRunSummary, String>,
     ) -> ChildRunOutput {
         match run {
-            Ok((events, messages)) => {
-                let mut update = summarize_child_events(&events, started_at.elapsed());
-                let (state, is_error) = if child_events_were_cancelled(&events) {
+            Ok(run) => {
+                let latest_text = (!run.assistant_text.trim().is_empty())
+                    .then(|| bounded_latest_text(&run.assistant_text));
+                let summary = latest_text
+                    .clone()
+                    .unwrap_or_else(|| "Child agent completed without text output.".to_owned());
+                let activity = self
+                    .agent_snapshot(snapshot.id.as_str())
+                    .map_or_else(Vec::new, |current| current.activity);
+                let update = AgentRunUpdate {
+                    summary,
+                    tool_count: run.tool_count,
+                    token_count: run.token_count,
+                    cache_read_token_count: run.cache_read_token_count,
+                    cache_write_token_count: run.cache_write_token_count,
+                    elapsed: started_at.elapsed(),
+                    latest_text,
+                    activity,
+                };
+                let (state, is_error) = if run.cancelled {
                     (AgentLifecycleState::Cancelled, true)
-                } else if child_events_have_error(&events) {
+                } else if run.failed {
                     (AgentLifecycleState::Failed, true)
                 } else {
-                    update.latest_text = update.latest_text.as_deref().map(bounded_latest_text);
-                    update.summary = bounded_latest_text(&update.summary);
                     (AgentLifecycleState::Completed, false)
                 };
                 let completed = self.finalize_child_run_with_messages(
@@ -2140,12 +2206,13 @@ impl MultiAgentRuntime {
                     state,
                     update,
                     is_error,
-                    &messages,
+                    &run.messages,
                 );
                 ChildRunOutput {
                     snapshot: completed,
-                    events,
-                    messages,
+                    messages: run.messages,
+                    assistant_text: run.assistant_text,
+                    actual_usage: run.actual_usage,
                 }
             }
             Err(error) => {
@@ -2169,8 +2236,9 @@ impl MultiAgentRuntime {
                 );
                 ChildRunOutput {
                     snapshot: failed,
-                    events: Vec::new(),
                     messages,
+                    assistant_text: String::new(),
+                    actual_usage: None,
                 }
             }
         }
@@ -2486,7 +2554,7 @@ async fn run_agent_snapshot(
     agent_id: String,
     child_wire_path: Option<PathBuf>,
     mut on_event: impl FnMut(&AgentEvent) + Send,
-) -> Result<(Vec<AgentEvent>, Vec<AgentMessage>), String> {
+) -> Result<ChildRunSummary, String> {
     let parent_instruction_state = deps.parent_instruction_state;
     let child_config = child_config(deps.config, deps.role).with_agent_id(agent_id.clone());
     let child_tools = Arc::new(deps.tools.filtered_for_agent_role(deps.role));
@@ -2542,13 +2610,12 @@ async fn run_agent_snapshot(
     let child_runtime =
         AgentRuntime::with_shared_tools_and_configured_specs(child_config, deps.model, child_tools)
             .with_steer_input(steer_input);
-    let mut events = Vec::new();
+    let mut summary = ChildRunSummary::default();
     if let Some(epoch) = baseline_epoch {
         // Child epochs go to the child's own wire JSONL.
         let event = AgentEvent::InstructionEpoch { epoch };
         persist_child_wire_event(&mut writer, &mut persistence, &event).await?;
         on_event(&event);
-        events.push(event);
     }
     let mut stream = child_runtime.run_turn_with_cancel(
         &mut context,
@@ -2560,21 +2627,14 @@ async fn run_agent_snapshot(
             Ok(event) => event,
             Err(err) => {
                 let event = AgentEvent::Error {
-                    turn: events
-                        .iter()
-                        .rev()
-                        .find_map(|event| match event {
-                            AgentEvent::RunFinished { turn, .. } => Some(*turn),
-                            _ => None,
-                        })
-                        .unwrap_or_default(),
+                    turn: summary.last_finished_turn,
                     message: err.to_string(),
                     code: err.code().map(str::to_owned),
                     retry_after: None,
                 };
                 persist_child_wire_event(&mut writer, &mut persistence, &event).await?;
+                observe_child_run_event(&mut summary, &event);
                 on_event(&event);
-                events.push(event);
                 break;
             }
         };
@@ -2596,16 +2656,94 @@ async fn run_agent_snapshot(
             let _ = flush_child_writer(&mut writer).await;
             return Err(err.to_string());
         }
+        observe_child_run_event(&mut summary, &event);
         on_event(&event);
-        events.push(event);
     }
     flush_child_writer(&mut writer).await?;
     cancel_token.cancel();
     drop(stream);
     // Extract the accumulated messages (prior + this turn) so they can be
     // stored on the snapshot for future resume.
-    let messages = context.messages().to_vec();
-    Ok((events, messages))
+    summary.messages = context.messages().to_vec();
+    Ok(summary)
+}
+
+fn observe_child_run_event(summary: &mut ChildRunSummary, event: &AgentEvent) {
+    match event {
+        AgentEvent::MessageAppended {
+            message: AgentMessage::Assistant { content, .. },
+        } => {
+            let text = content_text(content);
+            if !text.trim().is_empty() {
+                summary.assistant_text = text;
+            }
+        }
+        AgentEvent::TokenUsage { usage, .. } => {
+            summary.actual_usage = Some(
+                summary
+                    .actual_usage
+                    .map_or(*usage, |total| total.saturating_add(*usage)),
+            );
+            summary.token_count = summary
+                .token_count
+                .saturating_add((usage.input_tokens + usage.output_tokens) as usize);
+            summary.cache_read_token_count = summary
+                .cache_read_token_count
+                .saturating_add(usage.input_cache_read_tokens as usize);
+            summary.cache_write_token_count = summary
+                .cache_write_token_count
+                .saturating_add(usage.input_cache_write_tokens as usize);
+        }
+        AgentEvent::ToolExecutionFinished { .. } => {
+            summary.tool_count = summary.tool_count.saturating_add(1);
+        }
+        AgentEvent::Error { message, .. } => {
+            if !message.trim().is_empty() {
+                summary.assistant_text.clone_from(message);
+            }
+            summary.failed = true;
+        }
+        AgentEvent::TurnFinished {
+            stop_reason: StopReason::Cancelled,
+            ..
+        }
+        | AgentEvent::RunFinished {
+            stop_reason: StopReason::Cancelled,
+            ..
+        } => summary.cancelled = true,
+        AgentEvent::TurnFinished {
+            stop_reason: StopReason::Error,
+            ..
+        }
+        | AgentEvent::RunFinished {
+            stop_reason: StopReason::Error,
+            ..
+        } => summary.failed = true,
+        _ => {}
+    }
+    if let AgentEvent::RunFinished { turn, .. } = event {
+        summary.last_finished_turn = *turn;
+    }
+}
+
+const CHILD_PROGRESS_INTERVAL: Duration = Duration::from_millis(33);
+
+fn child_progress_update_is_due(
+    event: &AgentEvent,
+    elapsed: Duration,
+    last_published: &mut Option<Duration>,
+) -> bool {
+    let stream_delta = matches!(
+        event,
+        AgentEvent::TextDelta { .. } | AgentEvent::ThinkingDelta { .. }
+    );
+    let due = !stream_delta
+        || last_published
+            .is_none_or(|published| elapsed.saturating_sub(published) >= CHILD_PROGRESS_INTERVAL);
+    if due {
+        *last_published = Some(elapsed);
+    }
+    due
 }
 
 async fn flush_child_writer(
@@ -2687,6 +2825,7 @@ fn block_forbidden_subagent_tool_call(
     None
 }
 
+#[cfg(test)]
 fn summarize_child_events(events: &[AgentEvent], elapsed: Duration) -> AgentRunUpdate {
     let latest_text = latest_assistant_text(events).map(|text| bounded_latest_text(&text));
     let summary = latest_text
@@ -2732,38 +2871,7 @@ fn summarize_child_events(events: &[AgentEvent], elapsed: Duration) -> AgentRunU
     }
 }
 
-fn child_events_have_error(events: &[AgentEvent]) -> bool {
-    events.iter().any(|event| {
-        matches!(
-            event,
-            AgentEvent::Error { .. }
-                | AgentEvent::TurnFinished {
-                    stop_reason: StopReason::Error,
-                    ..
-                }
-                | AgentEvent::RunFinished {
-                    stop_reason: StopReason::Error,
-                    ..
-                }
-        )
-    })
-}
-
-fn child_events_were_cancelled(events: &[AgentEvent]) -> bool {
-    events.iter().any(|event| {
-        matches!(
-            event,
-            AgentEvent::TurnFinished {
-                stop_reason: StopReason::Cancelled,
-                ..
-            } | AgentEvent::RunFinished {
-                stop_reason: StopReason::Cancelled,
-                ..
-            }
-        )
-    })
-}
-
+#[cfg(test)]
 fn latest_assistant_text(events: &[AgentEvent]) -> Option<String> {
     events.iter().rev().find_map(|event| match event {
         AgentEvent::Error { message, .. } => (!message.trim().is_empty()).then(|| message.clone()),
@@ -2783,6 +2891,7 @@ fn latest_assistant_text(events: &[AgentEvent]) -> Option<String> {
     })
 }
 
+#[cfg(test)]
 fn summarize_child_activity(events: &[AgentEvent]) -> Vec<AgentActivityEntry> {
     let mut activity = Vec::new();
     let mut attempt_start = 0;
@@ -2804,6 +2913,7 @@ fn summarize_child_activity(events: &[AgentEvent]) -> Vec<AgentActivityEntry> {
     activity
 }
 
+#[cfg(test)]
 fn apply_activity_event(
     activity: &mut Vec<AgentActivityEntry>,
     attempt_start: usize,
@@ -2836,6 +2946,7 @@ fn apply_activity_event(
     }
 }
 
+#[cfg(test)]
 fn tool_summary_from_event(
     details: Option<&serde_json::Value>,
     tool_args: &HashMap<String, serde_json::Value>,
@@ -2854,6 +2965,7 @@ fn tool_summary_from_event(
 }
 
 /// Process tool-related activity events. Returns `true` if the event was handled.
+#[cfg(test)]
 fn apply_tool_activity_event(
     activity: &mut Vec<AgentActivityEntry>,
     tool_args: &mut HashMap<String, serde_json::Value>,
@@ -2998,15 +3110,7 @@ fn push_text_activity(
     text: &str,
     thinking: bool,
 ) {
-    let Some(accumulated) =
-        append_text_activity(&mut snapshot.activity, attempt_start, text, thinking)
-    else {
-        return;
-    };
-
-    if !thinking {
-        snapshot.latest_text = Some(accumulated);
-    }
+    append_text_activity(&mut snapshot.activity, attempt_start, text, thinking);
 }
 
 fn apply_retry_activity(
@@ -3093,7 +3197,7 @@ fn append_text_activity(
     attempt_start: usize,
     text: &str,
     thinking: bool,
-) -> Option<String> {
+) {
     if activity.len() > attempt_start
         && let Some(AgentActivityEntry {
             kind:
@@ -3105,23 +3209,21 @@ fn append_text_activity(
         && *previous_thinking == thinking
     {
         previous.push_str(text);
-        *previous = bounded_stream_text(previous);
-        return Some(previous.trim().to_owned());
+        bound_stream_text_in_place(previous);
+        return;
     }
 
     if text.trim().is_empty() {
-        return None;
+        return;
     }
 
     let bounded = bounded_stream_text(text);
-    let accumulated = bounded.trim().to_owned();
     activity.push(AgentActivityEntry {
         kind: AgentActivityKind::Text {
             text: bounded,
             thinking,
         },
     });
-    Some(accumulated)
 }
 
 const MAX_LATEST_MODEL_TEXT_CHARS: usize = 512;
@@ -3131,15 +3233,23 @@ fn bounded_latest_text(text: &str) -> String {
 }
 
 fn bounded_stream_text(text: &str) -> String {
-    if text.chars().count() <= MAX_LATEST_MODEL_TEXT_CHARS {
-        return text.to_owned();
+    let mut bounded = text.to_owned();
+    bound_stream_text_in_place(&mut bounded);
+    bounded
+}
+
+fn bound_stream_text_in_place(text: &mut String) {
+    let char_count = text.chars().count();
+    if char_count <= MAX_LATEST_MODEL_TEXT_CHARS {
+        return;
     }
     let keep = MAX_LATEST_MODEL_TEXT_CHARS.saturating_sub(3);
     let start = text
         .char_indices()
-        .nth(text.chars().count().saturating_sub(keep))
+        .nth(char_count.saturating_sub(keep))
         .map_or(0, |(index, _)| index);
-    format!("...{}", &text[start..])
+    text.drain(..start);
+    text.insert_str(0, "...");
 }
 
 fn latest_text_activity(activity: &[AgentActivityEntry], thinking: bool) -> Option<String> {
@@ -3369,6 +3479,7 @@ fn last_tool_files(activity: &[AgentActivityEntry], id: &str) -> Vec<AgentToolFi
         .unwrap_or_default()
 }
 
+#[cfg(test)]
 fn tool_files_from_event(
     details: Option<&serde_json::Value>,
     tool_args: &HashMap<String, serde_json::Value>,
@@ -3968,6 +4079,10 @@ mod summaries;
 #[cfg(test)]
 #[path = "test_cases/retry_folds.rs"]
 mod retry_folds;
+
+#[cfg(test)]
+#[path = "test_cases/progress_gate.rs"]
+mod progress_gate;
 
 #[cfg(test)]
 #[path = "test_cases/live_guards.rs"]

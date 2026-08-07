@@ -25,7 +25,7 @@ impl SessionEventPersistence {
             | AgentEvent::ToolCallArgumentsDelta { .. }
             | AgentEvent::ToolCallFinished { .. }
             | AgentEvent::TokenUsage { .. } => {
-                self.attempt.push(event.clone());
+                self.push_attempt_event(event);
                 Vec::new()
             }
             AgentEvent::RetryScheduled { .. } | AgentEvent::CompactionStarted { .. } => {
@@ -112,6 +112,38 @@ impl SessionEventPersistence {
             // events (`ToolExecutionQueued` / `ShellCommandQueued`) persist
             // through this default branch.
             _ => vec![event.clone()],
+        }
+    }
+
+    fn push_attempt_event(&mut self, event: &AgentEvent) {
+        match (self.attempt.last_mut(), event) {
+            (
+                Some(AgentEvent::TextDelta {
+                    turn: previous_turn,
+                    text: previous,
+                }),
+                AgentEvent::TextDelta { turn, text },
+            ) if previous_turn == turn => previous.push_str(text),
+            (
+                Some(AgentEvent::ThinkingDelta {
+                    turn: previous_turn,
+                    text: previous,
+                }),
+                AgentEvent::ThinkingDelta { turn, text },
+            ) if previous_turn == turn => previous.push_str(text),
+            (
+                Some(AgentEvent::ToolCallArgumentsDelta {
+                    turn: previous_turn,
+                    id: previous_id,
+                    json_fragment: previous,
+                }),
+                AgentEvent::ToolCallArgumentsDelta {
+                    turn,
+                    id,
+                    json_fragment,
+                },
+            ) if previous_turn == turn && previous_id == id => previous.push_str(json_fragment),
+            _ => self.attempt.push(event.clone()),
         }
     }
 
@@ -244,7 +276,8 @@ impl PersistedAgentProgress {
             || progress.cache_write_token_count != last.cache_write_token_count
             || progress.last_tool != last.last_tool
             || progress.outcome != last.outcome;
-        let text_changed = progress.latest_text != last.latest_text
+        let text_changed = (progress.latest_text != last.latest_text
+            || progress.latest_thinking != last.latest_thinking)
             && progress
                 .updated_at_ms
                 .saturating_sub(self.last_text_persisted_at_ms)
@@ -409,5 +442,47 @@ mod tests {
                 message_appended("overflow winning")
             ]
         );
+    }
+
+    #[test]
+    fn session_event_persistence_coalesces_adjacent_stream_deltas() {
+        let mut persistence = SessionEventPersistence::default();
+
+        for _ in 0..10_000 {
+            assert!(persistence.persisted_events(&text_delta("x")).is_empty());
+        }
+        assert_eq!(persistence.attempt.len(), 1);
+        let AgentEvent::TextDelta { text, .. } = &persistence.attempt[0] else {
+            panic!("coalesced text delta must remain text");
+        };
+        assert_eq!(text.len(), 10_000);
+
+        let thinking = AgentEvent::ThinkingDelta {
+            turn: 1,
+            text: "y".to_owned(),
+        };
+        for _ in 0..10_000 {
+            assert!(persistence.persisted_events(&thinking).is_empty());
+        }
+        assert_eq!(persistence.attempt.len(), 2);
+        let AgentEvent::ThinkingDelta { text, .. } = &persistence.attempt[1] else {
+            panic!("coalesced thinking delta must remain thinking");
+        };
+        assert_eq!(text.len(), 10_000);
+
+        let arguments = AgentEvent::ToolCallArgumentsDelta {
+            turn: 1,
+            id: "call".to_owned(),
+            json_fragment: "z".to_owned(),
+        };
+        for _ in 0..10_000 {
+            assert!(persistence.persisted_events(&arguments).is_empty());
+        }
+        assert_eq!(persistence.attempt.len(), 3);
+        let AgentEvent::ToolCallArgumentsDelta { json_fragment, .. } = &persistence.attempt[2]
+        else {
+            panic!("coalesced arguments delta must remain tool arguments");
+        };
+        assert_eq!(json_fragment.len(), 10_000);
     }
 }

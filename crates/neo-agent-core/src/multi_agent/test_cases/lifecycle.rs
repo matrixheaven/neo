@@ -131,8 +131,14 @@ fn child_finalization_is_atomic_and_always_persists_messages() {
     runtime.cancel_agent(&child.id).expect("cancel child");
     let messages = vec![AgentMessage::user_text("keep this context")];
 
-    let output =
-        runtime.finish_child_run(&child, Instant::now(), Ok((Vec::new(), messages.clone())));
+    let output = runtime.finish_child_run(
+        &child,
+        Instant::now(),
+        Ok(ChildRunSummary {
+            messages: messages.clone(),
+            ..ChildRunSummary::default()
+        }),
+    );
 
     assert_eq!(output.snapshot.state, AgentLifecycleState::Cancelled);
     assert_eq!(
@@ -148,13 +154,11 @@ fn child_finalization_is_atomic_and_always_persists_messages() {
     let event_output = runtime.finish_child_run(
         &event_cancelled,
         Instant::now(),
-        Ok((
-            vec![AgentEvent::RunFinished {
-                turn: 1,
-                stop_reason: StopReason::Cancelled,
-            }],
-            event_messages.clone(),
-        )),
+        Ok(ChildRunSummary {
+            messages: event_messages.clone(),
+            cancelled: true,
+            ..ChildRunSummary::default()
+        }),
     );
     assert_eq!(event_output.snapshot.state, AgentLifecycleState::Cancelled);
     assert_eq!(
@@ -170,7 +174,10 @@ fn child_finalization_is_atomic_and_always_persists_messages() {
     let completed_output = runtime.finish_child_run(
         &completed,
         Instant::now(),
-        Ok((Vec::new(), completed_messages.clone())),
+        Ok(ChildRunSummary {
+            messages: completed_messages.clone(),
+            ..ChildRunSummary::default()
+        }),
     );
     assert_eq!(
         completed_output.snapshot.state,

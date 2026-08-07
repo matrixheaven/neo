@@ -8,8 +8,8 @@ use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
 use super::multi_agent_format::{
-    SummaryScope, accumulate_actual_usage, agent_details, context_mode_label,
-    delegate_result_content, model_safe_swarm_snapshot, swarm_details,
+    SummaryScope, agent_details, context_mode_label, delegate_result_content,
+    model_safe_swarm_snapshot, swarm_details,
 };
 use super::{
     Tool, ToolContext, ToolError, ToolEventCallback, ToolFuture, ToolResult, parse_input, schema,
@@ -197,10 +197,10 @@ async fn execute_delegate(
             snapshot,
             request.context,
             request.output_schema.as_ref(),
-            |agent| {
-                ctx.emit_event(AgentEvent::DelegateUpdated {
+            |progress| {
+                ctx.emit_event(AgentEvent::DelegateProgressUpdated {
                     turn,
-                    agent,
+                    progress,
                     workflow_origin: None,
                 });
             },
@@ -267,11 +267,11 @@ async fn start_background_delegate(
                     snapshot_for_worker,
                     request_for_worker.context,
                     request_for_worker.output_schema.as_ref(),
-                    move |agent| {
+                    move |progress| {
                         if let Some(callback) = &callback {
-                            callback(AgentEvent::DelegateUpdated {
+                            callback(AgentEvent::DelegateProgressUpdated {
                                 turn,
-                                agent,
+                                progress,
                                 workflow_origin: None,
                             });
                         }
@@ -718,7 +718,7 @@ fn swarm_child_runs(
                         },
                     )
                     .await;
-                let actual_usage = accumulate_actual_usage(None, &output.events);
+                let actual_usage = output.actual_usage;
                 (
                     SwarmChildSnapshot {
                         item_index,
@@ -821,7 +821,7 @@ async fn apply_child_output_schema(
     let Some(schema_doc) = request.output_schema.as_ref() else {
         // The schema is optional: without it the ordinary child result is
         // returned unchanged with its observed usage.
-        let usage = accumulate_actual_usage(None, &output.events);
+        let usage = output.actual_usage;
         let mut extra = json!({});
         if let Some(usage) = usage {
             extra["actual_usage"] = json!(usage);
@@ -838,7 +838,7 @@ async fn apply_child_output_schema(
             .as_ref()
             .is_some_and(|outcome| outcome.is_error);
     if !child_succeeded {
-        let usage = accumulate_actual_usage(None, &output.events);
+        let usage = output.actual_usage;
         let mut extra = json!({});
         if let Some(usage) = usage {
             extra["actual_usage"] = json!(usage);
