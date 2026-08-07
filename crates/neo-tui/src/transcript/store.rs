@@ -2030,6 +2030,17 @@ pub(super) fn merge_delegate_snapshot(
     {
         return current.clone();
     }
+    // Live snapshots can arrive from different update paths. A partial
+    // snapshot must not temporarily shrink the activity list and make the
+    // bottom-following transcript change height from frame to frame.
+    if !current.state.is_terminal()
+        && !incoming.state.is_terminal()
+        && incoming.activity.len() < current.activity.len()
+        && incoming.latest_text.is_none()
+        && incoming.outcome.is_none()
+    {
+        return current.clone();
+    }
     incoming
 }
 
@@ -2146,6 +2157,7 @@ fn child_progress_rank(state: AgentLifecycleState) -> u8 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use neo_agent_core::multi_agent::{AgentActivityEntry, AgentToolActivityPhase};
 
     fn workflow_snapshot_for_route_test() -> WorkflowSnapshot {
         WorkflowSnapshot {
@@ -2272,6 +2284,29 @@ mod tests {
             swarm_snapshot_for_merge_test(old_terminal),
         );
         assert_eq!(stale_swarm.children[0].agent, new_running);
+    }
+
+    #[test]
+    fn delegate_merge_keeps_activity_when_live_snapshot_is_partial() {
+        let mut current = delegate_snapshot_for_merge_test();
+        current.activity.push(AgentActivityEntry {
+            kind: AgentActivityKind::Tool {
+                id: "tool-1".to_owned(),
+                name: "Read".to_owned(),
+                summary: Some("file".to_owned()),
+                phase: AgentToolActivityPhase::Ongoing,
+                output: None,
+                files: Vec::new(),
+                output_ref: None,
+            },
+        });
+        current.latest_text = None;
+
+        let mut partial = current.clone();
+        partial.activity.clear();
+        partial.updated_at_ms = current.updated_at_ms.saturating_add(1);
+
+        assert_eq!(merge_delegate_snapshot(&current, partial), current);
     }
 
     #[test]
