@@ -116,7 +116,7 @@ fn advisory_config_lock_blocks_external_writer() {
     let mut child = Command::new(std::env::current_exe().unwrap())
         .args([
             "--exact",
-            "config::mutations::tests::config_lock_helper",
+            "config::mutations::test_cases::writes::config_lock_helper",
             "--nocapture",
         ])
         .env("NEO_CONFIG_LOCK_HELPER_LOCK", &lock_path)
