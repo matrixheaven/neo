@@ -536,5 +536,25 @@ Entries are workspace records, not authoritative runtime decisions.
 | 2026-08-07 | work | docs/aegis/work/2026-08-07-tui-mouse-text-selection/99-reflection.md | TUI mouse text selection reflection |
 | 2026-08-07 | plan | docs/aegis/plans/2026-08-07-tui-mouse-text-selection.md | Neo TUI Mouse Text Selection Implementation Plan |
 | 2026-08-07 | handoff | docs/aegis/handoffs/2026-08-07-tui-mouse-text-selection.md | Neo TUI Mouse Text Selection Handoff |
+| 2026-08-07 | work | docs/aegis/work/2026-08-07-task-browser-ui-redesign/10-intent.md | Task Browser UI Redesign intent |
+| 2026-08-07 | work | docs/aegis/work/2026-08-07-task-browser-ui-redesign/20-checkpoint.md | Task Browser UI Redesign checkpoint |
+| 2026-08-07 | work | docs/aegis/work/2026-08-07-task-browser-ui-redesign/90-evidence.md | Task Browser UI Redesign evidence |
+| 2026-08-07 | work | docs/aegis/work/2026-08-07-task-browser-ui-redesign/99-reflection.md | Task Browser UI Redesign reflection |
+| 2026-08-07 | artifact | docs/aegis/work/2026-08-07-task-browser-ui-redesign/task-intent-draft.json | Task Browser UI Redesign task intent draft |
+| 2026-08-07 | artifact | docs/aegis/work/2026-08-07-task-browser-ui-redesign/baseline-read-set-hint.json | Task Browser UI Redesign baseline read-set hint |
+| 2026-08-07 | artifact | docs/aegis/work/2026-08-07-task-browser-ui-redesign/baseline-usage-draft.json | Task Browser UI Redesign baseline usage draft |
+| 2026-08-07 | artifact | docs/aegis/work/2026-08-07-task-browser-ui-redesign/impact-statement-draft.json | Task Browser UI Redesign impact statement draft |
+| 2026-08-07 | artifact | docs/aegis/work/2026-08-07-task-browser-ui-redesign/todo-checkpoint-draft.json | Task Browser UI Redesign todo checkpoint draft |
+| 2026-08-07 | artifact | docs/aegis/work/2026-08-07-task-browser-ui-redesign/drift-check-draft.json | Task Browser UI Redesign drift check draft |
+| 2026-08-07 | artifact | docs/aegis/work/2026-08-07-task-browser-ui-redesign/evidence-bundle-draft-approved-design.json | 2026-08-07-task-browser-ui-redesign evidence approved-design |
+| 2026-08-07 | artifact | docs/aegis/work/2026-08-07-task-browser-ui-redesign/evidence-bundle-draft-code-owner-map.json | 2026-08-07-task-browser-ui-redesign evidence code-owner-map |
+| 2026-08-07 | artifact | docs/aegis/work/2026-08-07-task-browser-ui-redesign/evidence-bundle-draft-test-discovery.json | 2026-08-07-task-browser-ui-redesign evidence test-discovery |
+| 2026-08-07 | artifact | docs/aegis/work/2026-08-07-task-browser-ui-redesign/resume-state-hint.json | 2026-08-07-task-browser-ui-redesign resume state hint |
 | 2026-08-07 | artifact | docs/aegis/work/2026-08-07-tui-mouse-text-selection/baseline-usage-draft.json | 2026-08-07-tui-mouse-text-selection baseline usage draft |
+| 2026-08-07 | plan | docs/aegis/plans/2026-08-07-task-browser-ui-redesign.md | Task Browser UI Redesign Implementation Plan |
 | 2026-08-07 | artifact | docs/aegis/work/2026-08-07-tui-mouse-text-selection/evidence-bundle-draft-approved-plan-handoff.json | 2026-08-07-tui-mouse-text-selection evidence approved-plan-handoff |
+| 2026-08-07 | handoff | docs/aegis/handoffs/2026-08-07-task-browser-ui-redesign.md | Task Browser UI Redesign Handoff |
+| 2026-08-07 | artifact | docs/aegis/work/2026-08-07-task-browser-ui-redesign/gate-input-pack.json | 2026-08-07-task-browser-ui-redesign gate input pack |
+| 2026-08-07 | work | docs/aegis/work/2026-08-07-task-browser-ui-redesign/proof-bundle.md | 2026-08-07-task-browser-ui-redesign proof bundle |
+| 2026-08-07 | artifact | docs/aegis/work/2026-08-07-tui-mouse-text-selection/gate-input-pack.json | 2026-08-07-tui-mouse-text-selection gate input pack |
+| 2026-08-07 | work | docs/aegis/work/2026-08-07-tui-mouse-text-selection/proof-bundle.md | 2026-08-07-tui-mouse-text-selection proof bundle |
