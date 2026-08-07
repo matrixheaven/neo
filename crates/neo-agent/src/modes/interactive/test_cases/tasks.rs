@@ -696,11 +696,26 @@ async fn task_browser_mouse_click_selects_rows_and_wheel_uses_pointed_pane() {
         .await
         .expect("show tasks");
     let frame = controller.tui.render_terminal_frame(120, 24);
+    // The background-task list order is recency-based and therefore
+    // timing-dependent between equally fresh tasks, so derive the expected
+    // selection order from the rendered browser state instead of assuming
+    // creation order.
+    let ids = controller
+        .chrome()
+        .task_browser_state()
+        .expect("browser open")
+        .visible_items()
+        .iter()
+        .map(|item| item.id.clone())
+        .collect::<Vec<_>>();
+    assert_eq!(ids.len(), 3, "all three questions must be listed: {ids:?}");
+    // The inspector shows the selected (first) task, so the second task's
+    // handle appears only in its task-list row.
     let row_of_second = frame
         .lines
         .iter()
-        .position(|line| neo_tui::primitive::strip_ansi(line).contains("question-2"))
-        .expect("question-2 row rendered") as u16;
+        .position(|line| neo_tui::primitive::strip_ansi(line).contains(&ids[1]))
+        .expect("second task row rendered") as u16;
     assert!(
         row_of_second >= 2,
         "the second task row must render inside the task pane, got {row_of_second}"
@@ -714,31 +729,31 @@ async fn task_browser_mouse_click_selects_rows_and_wheel_uses_pointed_pane() {
             .selected_task_id()
             .map(str::to_owned)
     }
-    assert_eq!(selected(&controller), Some("question-1".to_owned()));
+    assert_eq!(selected(&controller), Some(ids[0].clone()));
 
     // Press selects the row under the pointer; release changes nothing.
     controller
         .handle_input_event(mouse(MouseKind::Press, 3, row_of_second))
         .await
         .expect("click task row");
-    assert_eq!(selected(&controller), Some("question-2".to_owned()));
+    assert_eq!(selected(&controller), Some(ids[1].clone()));
     controller
         .handle_input_event(mouse(MouseKind::Release, 3, row_of_second))
         .await
         .expect("release task row");
-    assert_eq!(selected(&controller), Some("question-2".to_owned()));
+    assert_eq!(selected(&controller), Some(ids[1].clone()));
 
     // Wheel over the task list moves the task selection.
     controller
         .handle_input_event(mouse(MouseKind::ScrollDown, 3, row_of_second))
         .await
         .expect("wheel task list");
-    assert_eq!(selected(&controller), Some("question-3".to_owned()));
+    assert_eq!(selected(&controller), Some(ids[2].clone()));
     controller
         .handle_input_event(mouse(MouseKind::ScrollUp, 3, row_of_second))
         .await
         .expect("wheel task list up");
-    assert_eq!(selected(&controller), Some("question-2".to_owned()));
+    assert_eq!(selected(&controller), Some(ids[1].clone()));
 
     // Wheel over the inspector output region scrolls output only: the task
     // selection stays put and the single preview line keeps the scroll
@@ -747,7 +762,7 @@ async fn task_browser_mouse_click_selects_rows_and_wheel_uses_pointed_pane() {
         .handle_input_event(mouse(MouseKind::ScrollDown, 60, 20))
         .await
         .expect("wheel inspector output");
-    assert_eq!(selected(&controller), Some("question-2".to_owned()));
+    assert_eq!(selected(&controller), Some(ids[1].clone()));
     assert_eq!(
         controller
             .chrome()
@@ -766,7 +781,7 @@ async fn task_browser_mouse_click_selects_rows_and_wheel_uses_pointed_pane() {
         .handle_input_event(mouse(MouseKind::Drag, 3, row_of_second))
         .await
         .expect("drag task row");
-    assert_eq!(selected(&controller), Some("question-2".to_owned()));
+    assert_eq!(selected(&controller), Some(ids[1].clone()));
     assert!(controller.chrome().prompt().text.is_empty());
     assert!(
         !controller.tui.has_any_selection(),
