@@ -17,6 +17,9 @@ pub struct NeoTui {
     /// Row layout of the most recently rendered frame, used to route mouse
     /// events to the transcript body or the chrome widget that owns a row.
     last_layout: Option<FrameLayout>,
+    /// Terminal size of the most recently rendered frame, used by the Task
+    /// Browser to hit-test pointer events against its rendered regions.
+    last_frame_size: Option<(usize, usize)>,
     /// Plain text a right-click asked to copy (by region), drained by the
     /// controller after the mouse event is routed.
     pending_copy: Option<String>,
@@ -81,6 +84,7 @@ impl NeoTui {
             chrome,
             transcript,
             last_layout: None,
+            last_frame_size: None,
             pending_copy: None,
             clipboard_notice_until: None,
             widget_gesture: None,
@@ -110,6 +114,7 @@ impl NeoTui {
             chrome,
             transcript,
             last_layout: None,
+            last_frame_size: None,
             pending_copy: None,
             clipboard_notice_until: None,
             widget_gesture: None,
@@ -140,11 +145,20 @@ impl NeoTui {
         self.transcript.is_dirty()
     }
 
+    /// Terminal size of the most recently rendered frame. `None` before the
+    /// first render; the Task Browser pointer router treats a missing size as
+    /// "no frame to hit-test yet" and consumes the event as a no-op.
+    #[must_use]
+    pub const fn last_frame_size(&self) -> Option<(usize, usize)> {
+        self.last_frame_size
+    }
+
     pub fn render_frame(
         &mut self,
         width: usize,
         height: usize,
     ) -> (Vec<String>, Option<CursorPos>) {
+        self.last_frame_size = Some((width, height));
         if let Some(mut lines) = render_full_screen_overlay_frame(&self.chrome, width, height) {
             lines.truncate(height);
             apply_gutter(&mut lines);
@@ -191,6 +205,7 @@ impl NeoTui {
         height: usize,
         now: Instant,
     ) -> TerminalFrame {
+        self.last_frame_size = Some((width, height));
         if let Some(mut lines) = render_full_screen_overlay_frame(&self.chrome, width, height) {
             lines.truncate(height);
             apply_gutter(&mut lines);

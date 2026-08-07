@@ -1,5 +1,7 @@
 use super::*;
 
+use neo_tui::tasks_browser::TaskBrowserRenderer;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum ExitGesture {
     CtrlC,
@@ -514,14 +516,18 @@ impl InteractiveController {
             InputEvent::Action(KeybindingAction::SelectPageDown) => {
                 Some(TaskBrowserAction::SelectPageDown)
             }
-            InputEvent::Mouse(MouseEvent {
-                kind: MouseKind::ScrollUp,
-                ..
-            }) => Some(TaskBrowserAction::SelectUp),
-            InputEvent::Mouse(MouseEvent {
-                kind: MouseKind::ScrollDown,
-                ..
-            }) => Some(TaskBrowserAction::SelectDown),
+            InputEvent::Mouse(mouse) => {
+                // Pointer input is routed through the same layout geometry
+                // that rendered the last frame: a left-button press selects
+                // the row under the pointer and a wheel moves the pane under
+                // the pointer. Drag/release map to no action and stay
+                // consumed by the browser. A missing frame or browser state
+                // yields no action (consumed no-op).
+                let (width, height) = self.tui.last_frame_size()?;
+                let state = self.tui.chrome().task_browser_state()?;
+                TaskBrowserRenderer::new(state, self.tui.chrome().theme())
+                    .pointer_action(width, height, &mouse)
+            }
             InputEvent::Action(KeybindingAction::SelectConfirm) | InputEvent::Submit => {
                 self.tui.chrome().task_browser_state().map(|state| {
                     if state.stop_confirmation_task_id().is_some() {

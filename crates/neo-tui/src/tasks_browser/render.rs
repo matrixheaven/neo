@@ -1,12 +1,16 @@
 use std::fmt::Write as _;
 
+use crossterm::event::MouseButton;
+
+use crate::input::{MouseEvent, MouseKind};
 use crate::primitive::theme::TuiTheme;
 use crate::primitive::{
     Color, Style, pad_to_width, paint, truncate_width, visible_width, wrap_text,
 };
+use crate::transcript::{CHROME_GUTTER, frame_content_width};
 
 use super::{
-    state::{TaskBrowserFilter, TaskBrowserFocus, TaskBrowserState},
+    state::{TaskBrowserAction, TaskBrowserFilter, TaskBrowserFocus, TaskBrowserState},
     view::{
         TaskBrowserItem, TaskBrowserStatus, TaskBrowserWorkflowChild, TaskBrowserWorkflowRowState,
         TaskBrowserWorkflowStep,
@@ -65,6 +69,10 @@ struct BrowserLayout {
     agents_top: usize,
     /// Workflow: first content row of the lower selected-agent preview.
     preview_top: usize,
+    /// Split page: absolute screen row where the inspector's LATEST OUTPUT
+    /// divider starts (`content_top + 3 + details_rows`). Other pages never
+    /// render the inspector and default to `content_top`.
+    inspector_output_top: usize,
 }
 
 impl BrowserLayout {
@@ -114,6 +122,14 @@ impl BrowserLayout {
             }
             _ => (content_top, content_top, content_top),
         };
+        // The inspector splits the remaining rows under the two identity rows
+        // and the DETAILS divider in half; the LATEST OUTPUT divider starts
+        // one row after the Details section.
+        let inspector_output_top = if page == BrowserPage::Split {
+            content_top + 3 + content_height.saturating_sub(4) / 2
+        } else {
+            content_top
+        };
         Self {
             width,
             content_top,
@@ -126,6 +142,7 @@ impl BrowserLayout {
             steps_top,
             agents_top,
             preview_top,
+            inspector_output_top,
         }
     }
 }
@@ -151,6 +168,192 @@ impl<'a> TaskBrowserRenderer<'a> {
         } else {
             self.render_browser(width, height)
         }
+    }
+
+    /// Map one terminal-space mouse event to a Task Browser action using the
+    /// exact same `BrowserLayout` geometry the renderer uses.
+    ///
+    /// Only actions this browser owns are produced; no rectangle math leaks
+    /// to callers. `terminal_width` is the full terminal width; the chrome
+    /// gutter and the unused last column are stripped here, so callers pass
+    /// raw terminal coordinates. Drag and release events map to `None` and
+    /// stay consumed by the browser (they never reach the transcript).
+    #[must_use]
+    pub fn pointer_action(
+        &self,
+        terminal_width: usize,
+        terminal_height: usize,
+        mouse: &MouseEvent,
+    ) -> Option<TaskBrowserAction> {
+        if terminal_width == 0 || terminal_height == 0 {
+            return None;
+        }
+        let content_width = frame_content_width(terminal_width);
+        let column = usize::from(mouse.column).checked_sub(CHROME_GUTTER)?;
+        let row = usize::from(mouse.row);
+        if column >= content_width || row >= terminal_height {
+            return None;
+        }
+        let layout = BrowserLayout::new(content_width, terminal_height, self.state);
+        match mouse.kind {
+            MouseKind::Drag | MouseKind::Release => None,
+            MouseKind::Press if mouse.button == MouseButton::Left => {
+                self.pointer_press(&layout, column, row)
+            }
+            MouseKind::ScrollUp => self.pointer_wheel(&layout, column, row, -1),
+            MouseKind::ScrollDown => self.pointer_wheel(&layout, column, row, 1),
+            MouseKind::Press => None,
+        }
+    }
+
+    /// Left-button press: select the row under the pointer. Header rows, pane
+    /// borders, dividers, blank rows below the last item, and the footer are
+    /// no-ops. The index is translated to a stable ID or key by the state
+    /// handler; row numbers never survive a refresh.
+    fn pointer_press(
+        &self,
+        layout: &BrowserLayout,
+        column: usize,
+        row: usize,
+    ) -> Option<TaskBrowserAction> {
+        if row < layout.content_top || row >= layout.footer_top {
+            return None;
+        }
+        match layout.page {
+            BrowserPage::Split | BrowserPage::List => {
+                if layout.page == BrowserPage::Split && column >= layout.list_width {
+                    return None; // inspector column
+                }
+                if row < layout.content_top + 1 {
+                    return None; // pane top border
+                }
+                if row + 1 >= layout.footer_top {
+                    return None; // pane bottom border
+                }
+                let index = (row - layout.content_top - 1) / layout.list_row_height;
+                (index < self.state.visible_items().len())
+                    .then_some(TaskBrowserAction::SelectTaskRow(index))
+            }
+            BrowserPage::Details | BrowserPage::Output => None,
+            BrowserPage::WorkflowWide => {
+                if row + 1 < layout.preview_top && column < layout.list_width {
+                    let index = row.checked_sub(layout.content_top + 1)?;
+                    (index < self.step_count())
+                        .then_some(TaskBrowserAction::SelectWorkflowStepRow(index))
+                } else if row + 1 < layout.preview_top && column >= layout.right_left {
+                    let index = row.checked_sub(layout.content_top + 1)?;
+                    (index < self.agent_count())
+                        .then_some(TaskBrowserAction::SelectWorkflowAgentRow(index))
+                } else {
+                    None
+                }
+            }
+            BrowserPage::WorkflowStacked => {
+                if row > layout.steps_top && row + 1 < layout.agents_top {
+                    let index = row - layout.steps_top - 1;
+                    (index < self.step_count())
+                        .then_some(TaskBrowserAction::SelectWorkflowStepRow(index))
+                } else if row > layout.agents_top && row + 1 < layout.preview_top {
+                    let index = row - layout.agents_top - 1;
+                    (index < self.agent_count())
+                        .then_some(TaskBrowserAction::SelectWorkflowAgentRow(index))
+                } else {
+                    None
+                }
+            }
+            BrowserPage::WorkflowTabs => {
+                if row < layout.content_top + 2 {
+                    return None; // tab selector and pane top border
+                }
+                if row + 1 >= layout.footer_top {
+                    return None; // pane bottom border
+                }
+                let index = row - layout.content_top - 2;
+                if self.state.focus() == TaskBrowserFocus::Steps {
+                    (index < self.step_count())
+                        .then_some(TaskBrowserAction::SelectWorkflowStepRow(index))
+                } else {
+                    (index < self.agent_count())
+                        .then_some(TaskBrowserAction::SelectWorkflowAgentRow(index))
+                }
+            }
+        }
+    }
+
+    /// Pointer wheel: move the selection of the pane under the pointer. The
+    /// wheel never reaches the transcript while the browser is open.
+    fn pointer_wheel(
+        &self,
+        layout: &BrowserLayout,
+        column: usize,
+        row: usize,
+        delta: isize,
+    ) -> Option<TaskBrowserAction> {
+        match layout.page {
+            BrowserPage::Split => {
+                if column < layout.list_width
+                    && row >= layout.content_top
+                    && row < layout.footer_top
+                {
+                    Some(TaskBrowserAction::MoveTaskSelection(delta))
+                } else if row >= layout.content_top && row < layout.footer_top {
+                    // Inspector: only the LATEST OUTPUT section scrolls; the
+                    // identity and Details rows keep the wheel inert.
+                    (row >= layout.inspector_output_top)
+                        .then_some(TaskBrowserAction::MoveOutputScroll(delta))
+                } else {
+                    None
+                }
+            }
+            BrowserPage::List => (row >= layout.content_top && row < layout.footer_top)
+                .then_some(TaskBrowserAction::MoveTaskSelection(delta)),
+            BrowserPage::Details => None,
+            BrowserPage::Output => (row >= layout.content_top && row < layout.footer_top)
+                .then_some(TaskBrowserAction::MoveOutputScroll(delta)),
+            BrowserPage::WorkflowWide => {
+                if row < layout.preview_top && column < layout.list_width {
+                    Some(TaskBrowserAction::MoveWorkflowStepSelection(delta))
+                } else if row < layout.preview_top && column >= layout.right_left {
+                    Some(TaskBrowserAction::MoveWorkflowAgentSelection(delta))
+                } else {
+                    None
+                }
+            }
+            BrowserPage::WorkflowStacked => {
+                if row >= layout.steps_top && row < layout.agents_top {
+                    Some(TaskBrowserAction::MoveWorkflowStepSelection(delta))
+                } else if row >= layout.agents_top && row < layout.preview_top {
+                    Some(TaskBrowserAction::MoveWorkflowAgentSelection(delta))
+                } else {
+                    None
+                }
+            }
+            BrowserPage::WorkflowTabs => {
+                if row > layout.content_top && row < layout.footer_top {
+                    if self.state.focus() == TaskBrowserFocus::Steps {
+                        Some(TaskBrowserAction::MoveWorkflowStepSelection(delta))
+                    } else {
+                        Some(TaskBrowserAction::MoveWorkflowAgentSelection(delta))
+                    }
+                } else {
+                    None
+                }
+            }
+        }
+    }
+
+    fn step_count(&self) -> usize {
+        self.state
+            .workflow_item()
+            .and_then(|item| item.workflow.as_ref())
+            .map_or(0, |workflow| workflow.steps.len())
+    }
+
+    fn agent_count(&self) -> usize {
+        self.state
+            .workflow_item()
+            .and_then(|item| item.workflow.as_ref())
+            .map_or(0, |workflow| workflow.child_page.items.len())
     }
 
     fn render_workflow(&self, width: usize, height: usize) -> Vec<String> {
@@ -685,7 +888,7 @@ impl<'a> TaskBrowserRenderer<'a> {
                             layout.content_height,
                             layout.list_row_height,
                         ),
-                        self.inspector(right_width, layout.content_height),
+                        self.inspector(&layout, right_width, layout.content_height),
                     ],
                     &[layout.list_width, right_width],
                     layout.content_height,
@@ -846,14 +1049,19 @@ impl<'a> TaskBrowserRenderer<'a> {
 
     /// Wide-mode inspector column: identity rows, a Details section, and a
     /// Latest output preview section. Not boxed; follows the selection even
-    /// when `task_details_open` is false.
-    fn inspector(&self, width: usize, height: usize) -> Vec<String> {
+    /// when `task_details_open` is false. The section split comes from the
+    /// single `BrowserLayout` geometry so hit testing and rendering agree.
+    fn inspector(&self, layout: &BrowserLayout, width: usize, height: usize) -> Vec<String> {
         let Some(item) = self.state.selected_item() else {
             return vec![pad_to_width("No task selected.", width)];
         };
         let mut lines = Self::identity_rows(item, width);
         let remaining = height.saturating_sub(4);
-        let details_rows = remaining / 2;
+        // The LATEST OUTPUT divider starts at `inspector_output_top`; the
+        // Details section is everything between it and the identity rows.
+        let details_rows = layout
+            .inspector_output_top
+            .saturating_sub(layout.content_top + 3);
         let output_rows = remaining - details_rows;
         let details_color = if self.state.focus() == TaskBrowserFocus::Tasks {
             self.theme.brand

@@ -75,6 +75,23 @@ pub enum TaskBrowserAction {
     RequestPrevChildPage,
     Cancel,
     Close,
+    /// Select the visible task row under the pointer. The index is translated
+    /// to the item ID immediately; it is never stored across refreshes.
+    SelectTaskRow(usize),
+    /// Select the Workflow step under the pointer and refresh its child page.
+    SelectWorkflowStepRow(usize),
+    /// Select the Workflow agent under the pointer.
+    SelectWorkflowAgentRow(usize),
+    /// Move task-list selection (pointer wheel over the task pane).
+    MoveTaskSelection(isize),
+    /// Move Workflow step selection regardless of the current focus (pointer
+    /// wheel over the Steps pane).
+    MoveWorkflowStepSelection(isize),
+    /// Move Workflow agent selection regardless of the current focus (pointer
+    /// wheel over the Agents pane).
+    MoveWorkflowAgentSelection(isize),
+    /// Scroll the latest-output preview (pointer wheel over the output pane).
+    MoveOutputScroll(isize),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
@@ -887,6 +904,21 @@ impl TaskBrowserState {
             TaskBrowserAction::SubmitAnswer => self.submit_answer(),
             TaskBrowserAction::RequestNextChildPage => self.next_child_page(),
             TaskBrowserAction::RequestPrevChildPage => self.prev_child_page(),
+            TaskBrowserAction::SelectTaskRow(index) => self.select_task_row(index),
+            TaskBrowserAction::SelectWorkflowStepRow(index) => self.select_workflow_step_row(index),
+            TaskBrowserAction::SelectWorkflowAgentRow(index) => {
+                self.select_workflow_agent_row(index)
+            }
+            TaskBrowserAction::MoveTaskSelection(delta) => {
+                if self.workflow_task_id.is_none() {
+                    self.move_selection(delta);
+                }
+            }
+            TaskBrowserAction::MoveWorkflowStepSelection(delta) => self.move_step_selection(delta),
+            TaskBrowserAction::MoveWorkflowAgentSelection(delta) => {
+                self.move_agent_selection(delta)
+            }
+            TaskBrowserAction::MoveOutputScroll(delta) => self.move_output_scroll(delta),
             TaskBrowserAction::Cancel => {
                 if self.stop_confirmation_task_id.take().is_some() {
                     self.footer_message = None;
@@ -1119,27 +1151,84 @@ impl TaskBrowserState {
                 .collect::<Vec<_>>();
             move_keyed(&ids, &mut self.selected_task_id, delta, Clone::clone);
         } else if self.focus == TaskBrowserFocus::Steps {
-            let steps = self
-                .workflow_item()
-                .and_then(|item| item.workflow.as_ref())
-                .map(|workflow| workflow.steps.clone())
-                .unwrap_or_default();
-            move_keyed(&steps, &mut self.selected_step_key, delta, |step| {
-                step.key.clone()
-            });
-            self.child_cursor = None;
-            self.child_prev_cursors.clear();
-            self.child_refresh_requested = true;
+            self.move_step_selection(delta);
         } else {
-            let children = self
-                .workflow_item()
-                .and_then(|item| item.workflow.as_ref())
-                .map(|workflow| workflow.child_page.items.clone())
-                .unwrap_or_default();
-            move_keyed(&children, &mut self.selected_child_key, delta, |child| {
-                child.key.clone()
-            });
+            self.move_agent_selection(delta);
         }
+    }
+
+    /// Move the Workflow step selection and reset the child page to the newly
+    /// selected step. Shared by keyboard moves and pointer wheel over the
+    /// Steps pane (which applies regardless of the current focus).
+    fn move_step_selection(&mut self, delta: isize) {
+        let steps = self
+            .workflow_item()
+            .and_then(|item| item.workflow.as_ref())
+            .map(|workflow| workflow.steps.clone())
+            .unwrap_or_default();
+        move_keyed(&steps, &mut self.selected_step_key, delta, |step| {
+            step.key.clone()
+        });
+        self.child_cursor = None;
+        self.child_prev_cursors.clear();
+        self.child_refresh_requested = true;
+    }
+
+    /// Move the Workflow agent selection. Shared by keyboard moves and
+    /// pointer wheel over the Agents pane (which applies regardless of the
+    /// current focus).
+    fn move_agent_selection(&mut self, delta: isize) {
+        let children = self
+            .workflow_item()
+            .and_then(|item| item.workflow.as_ref())
+            .map(|workflow| workflow.child_page.items.clone())
+            .unwrap_or_default();
+        move_keyed(&children, &mut self.selected_child_key, delta, |child| {
+            child.key.clone()
+        });
+    }
+
+    /// Select the task whose visible row is under the pointer. The index is
+    /// translated to the stable item ID immediately so a later refresh keeps
+    /// the same task selected.
+    fn select_task_row(&mut self, index: usize) {
+        if let Some(id) = self.visible_items().get(index).map(|item| item.id.clone()) {
+            self.selected_task_id = Some(id);
+        }
+    }
+
+    /// Select the Workflow step whose row is under the pointer, focus Steps,
+    /// and request the child-page refresh for the new step (same wiring as a
+    /// keyboard step move).
+    fn select_workflow_step_row(&mut self, index: usize) {
+        let Some(step_key) = self
+            .workflow_item()
+            .and_then(|item| item.workflow.as_ref())
+            .and_then(|workflow| workflow.steps.get(index))
+            .map(|step| step.key.clone())
+        else {
+            return;
+        };
+        self.selected_step_key = Some(step_key);
+        self.focus = TaskBrowserFocus::Steps;
+        self.child_cursor = None;
+        self.child_prev_cursors.clear();
+        self.child_refresh_requested = true;
+    }
+
+    /// Select the Workflow agent whose row is under the pointer and focus
+    /// Agents.
+    fn select_workflow_agent_row(&mut self, index: usize) {
+        let Some(child_key) = self
+            .workflow_item()
+            .and_then(|item| item.workflow.as_ref())
+            .and_then(|workflow| workflow.child_page.items.get(index))
+            .map(|child| child.key.clone())
+        else {
+            return;
+        };
+        self.selected_child_key = Some(child_key);
+        self.focus = TaskBrowserFocus::Agents;
     }
 
     fn move_output_scroll(&mut self, delta: isize) {

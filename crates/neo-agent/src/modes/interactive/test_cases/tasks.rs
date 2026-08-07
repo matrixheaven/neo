@@ -627,6 +627,10 @@ async fn task_browser_mouse_wheel_moves_selection_without_prompt_history() {
         .handle_input_event(InputEvent::Submit)
         .await
         .expect("show tasks");
+    // The wheel routes through the rendered layout, so a known frame must
+    // exist before wheeling. 120x24 is wide: column 10 is inside the task
+    // list column, so the wheel moves the task selection.
+    let _ = controller.tui.render_terminal_frame(120, 24);
 
     let browser = controller
         .chrome()
@@ -648,6 +652,229 @@ async fn task_browser_mouse_wheel_moves_selection_without_prompt_history() {
         Some(second_task_id.as_str())
     );
     assert!(controller.chrome().prompt().text.is_empty());
+}
+
+#[tokio::test]
+async fn task_browser_mouse_click_selects_rows_and_wheel_uses_pointed_pane() {
+    // A click selects the task row under the pointer and a wheel moves the
+    // pane under the pointer — over the task list it moves the task
+    // selection, over the inspector output region it scrolls output only.
+    // Pointer events never reach the prompt or the transcript selection.
+    let temp = tempfile::tempdir().expect("tempdir");
+    let sessions_dir = temp.path().join(".neo/sessions");
+    let mut controller = InteractiveController::new_for_test(
+        "neo",
+        "test-session",
+        "openai/gpt-4.1",
+        temp.path().to_path_buf(),
+        |_request| async move { Ok(Vec::<AgentEvent>::new()) },
+    );
+    let config = test_config(temp.path(), sessions_dir.clone());
+    for (id, question) in [
+        ("question-1", "Pick one"),
+        ("question-2", "Pick two"),
+        ("question-3", "Pick three"),
+    ] {
+        config
+            .background_tasks
+            .start_question(id.to_owned(), question.to_owned())
+            .await;
+    }
+    controller.local_config = Some(config);
+    let mouse = |kind: MouseKind, column: u16, row: u16| {
+        InputEvent::Mouse(MouseEvent {
+            kind,
+            button: MouseButton::Left,
+            column,
+            row,
+            modifiers: KeyModifiers::NONE,
+        })
+    };
+    controller.type_text("/tasks");
+    controller
+        .handle_input_event(InputEvent::Submit)
+        .await
+        .expect("show tasks");
+    let frame = controller.tui.render_terminal_frame(120, 24);
+    let row_of_second = frame
+        .lines
+        .iter()
+        .position(|line| neo_tui::primitive::strip_ansi(line).contains("question-2"))
+        .expect("question-2 row rendered") as u16;
+    assert!(
+        row_of_second >= 2,
+        "the second task row must render inside the task pane, got {row_of_second}"
+    );
+
+    fn selected(controller: &InteractiveController) -> Option<String> {
+        controller
+            .chrome()
+            .task_browser_state()
+            .expect("browser open")
+            .selected_task_id()
+            .map(str::to_owned)
+    }
+    assert_eq!(selected(&controller), Some("question-1".to_owned()));
+
+    // Press selects the row under the pointer; release changes nothing.
+    controller
+        .handle_input_event(mouse(MouseKind::Press, 3, row_of_second))
+        .await
+        .expect("click task row");
+    assert_eq!(selected(&controller), Some("question-2".to_owned()));
+    controller
+        .handle_input_event(mouse(MouseKind::Release, 3, row_of_second))
+        .await
+        .expect("release task row");
+    assert_eq!(selected(&controller), Some("question-2".to_owned()));
+
+    // Wheel over the task list moves the task selection.
+    controller
+        .handle_input_event(mouse(MouseKind::ScrollDown, 3, row_of_second))
+        .await
+        .expect("wheel task list");
+    assert_eq!(selected(&controller), Some("question-3".to_owned()));
+    controller
+        .handle_input_event(mouse(MouseKind::ScrollUp, 3, row_of_second))
+        .await
+        .expect("wheel task list up");
+    assert_eq!(selected(&controller), Some("question-2".to_owned()));
+
+    // Wheel over the inspector output region scrolls output only: the task
+    // selection stays put and the single preview line keeps the scroll
+    // clamped at zero.
+    controller
+        .handle_input_event(mouse(MouseKind::ScrollDown, 60, 20))
+        .await
+        .expect("wheel inspector output");
+    assert_eq!(selected(&controller), Some("question-2".to_owned()));
+    assert_eq!(
+        controller
+            .chrome()
+            .task_browser_state()
+            .expect("browser open")
+            .output_scroll(),
+        0
+    );
+
+    // A press on the footer and a drag stay consumed without selecting.
+    controller
+        .handle_input_event(mouse(MouseKind::Press, 3, 23))
+        .await
+        .expect("press footer");
+    controller
+        .handle_input_event(mouse(MouseKind::Drag, 3, row_of_second))
+        .await
+        .expect("drag task row");
+    assert_eq!(selected(&controller), Some("question-2".to_owned()));
+    assert!(controller.chrome().prompt().text.is_empty());
+    assert!(
+        !controller.tui.has_any_selection(),
+        "pointer events must never reach the prompt or transcript selection"
+    );
+
+    // Workflow: with the Steps/Agents split at 120x24, a click selects the
+    // step row under the pointer, the wheel over Steps moves step selection,
+    // and the wheel over the Agents pane (no agents yet) changes nothing.
+    let mut workflow_controller = InteractiveController::new_for_test(
+        "neo",
+        "test-session",
+        "openai/gpt-4.1",
+        temp.path().to_path_buf(),
+        |_request| async move { Ok(Vec::<AgentEvent>::new()) },
+    );
+    let config = test_config(temp.path(), sessions_dir.clone());
+    let runtime = neo_agent_core::workflow::WorkflowRuntime::new(
+        neo_agent_core::workflow::WorkflowLimits::default(),
+    );
+    let handle = runtime
+        .create_run(
+            &sessions_dir,
+            neo_agent_core::workflow::WorkflowLaunchRequest {
+                name: "pointer-nav".to_owned(),
+                description: "pointer nav".to_owned(),
+                phases: vec![
+                    neo_agent_core::workflow::WorkflowPhase {
+                        id: "work".to_owned(),
+                        description: "work".to_owned(),
+                    },
+                    neo_agent_core::workflow::WorkflowPhase {
+                        id: "verify".to_owned(),
+                        description: "verify".to_owned(),
+                    },
+                ],
+                script: "neo.phase('work')".to_owned(),
+                args: serde_json::json!({}),
+                launch_source: "test".to_owned(),
+                output_schema: None,
+                display_name: None,
+                input_schema: None,
+                definition_origin: None,
+                inline_unsaved: false,
+            },
+        )
+        .await
+        .expect("create workflow");
+    handle
+        .enter_running_for_direct_execution()
+        .await
+        .expect("enter running");
+    let run_id = handle.run_id.0.clone();
+    config
+        .background_tasks
+        .start_workflow(run_id, "pointer nav".to_owned(), handle)
+        .await
+        .expect("register workflow");
+    workflow_controller.local_config = Some(config);
+    workflow_controller.type_text("/tasks");
+    workflow_controller
+        .handle_input_event(InputEvent::Submit)
+        .await
+        .expect("show workflow");
+    let frame = workflow_controller.tui.render_terminal_frame(120, 24);
+    let verify_row = frame
+        .lines
+        .iter()
+        .position(|line| neo_tui::primitive::strip_ansi(line).contains("verify"))
+        .expect("verify step row rendered") as u16;
+    fn selected_step(controller: &InteractiveController) -> Option<String> {
+        controller
+            .chrome()
+            .task_browser_state()
+            .expect("browser open")
+            .selected_workflow_step()
+            .and_then(|step| step.key.phase_id.clone())
+    }
+    assert_eq!(selected_step(&workflow_controller), Some("work".to_owned()));
+    workflow_controller
+        .handle_input_event(mouse(MouseKind::Press, 3, verify_row))
+        .await
+        .expect("click step row");
+    assert_eq!(
+        selected_step(&workflow_controller),
+        Some("verify".to_owned())
+    );
+    workflow_controller
+        .handle_input_event(mouse(MouseKind::ScrollUp, 3, verify_row))
+        .await
+        .expect("wheel steps");
+    assert_eq!(selected_step(&workflow_controller), Some("work".to_owned()));
+    workflow_controller
+        .handle_input_event(mouse(MouseKind::ScrollDown, 80, 4))
+        .await
+        .expect("wheel agents pane");
+    assert_eq!(selected_step(&workflow_controller), Some("work".to_owned()));
+    assert_eq!(
+        workflow_controller
+            .chrome()
+            .task_browser_state()
+            .expect("browser open")
+            .focus(),
+        neo_tui::tasks_browser::TaskBrowserFocus::Steps,
+        "the Agents-pane wheel must not move step selection or focus"
+    );
+    assert!(workflow_controller.chrome().prompt().text.is_empty());
+    assert!(!workflow_controller.tui.has_any_selection());
 }
 
 #[tokio::test]

@@ -1,4 +1,6 @@
+use crossterm::event::{KeyModifiers, MouseButton};
 use neo_agent_core::workflow::{WorkflowChildKey, WorkflowStepKey};
+use neo_tui::input::{MouseEvent, MouseKind};
 use neo_tui::primitive::strip_ansi;
 use neo_tui::primitive::theme::TuiTheme;
 use neo_tui::primitive::visible_width;
@@ -99,6 +101,31 @@ fn render_plain(state: &TaskBrowserState, width: usize, height: usize) -> Vec<St
         .map(|line| strip_ansi(&line))
         .collect()
 }
+
+/// Map one terminal-space left-button mouse event through the same
+/// `BrowserLayout` geometry the renderer uses. `column`/`row` are zero-based
+/// terminal coordinates including the chrome gutter.
+fn pointer_action(
+    state: &TaskBrowserState,
+    terminal_width: usize,
+    terminal_height: usize,
+    kind: MouseKind,
+    column: u16,
+    row: u16,
+) -> Option<TaskBrowserAction> {
+    let mouse = MouseEvent {
+        kind,
+        button: MouseButton::Left,
+        column,
+        row,
+        modifiers: KeyModifiers::NONE,
+    };
+    TaskBrowserRenderer::new(state, TuiTheme::default()).pointer_action(
+        terminal_width,
+        terminal_height,
+        &mouse,
+    )
+}
 fn step(id: &str, sequence: u64, title: &str) -> TaskBrowserWorkflowStep {
     TaskBrowserWorkflowStep {
         key: WorkflowStepKey {
@@ -142,6 +169,248 @@ fn browser_keeps_keyed_task_selection_and_filters_active_tasks() {
     state.handle_action(TaskBrowserAction::ToggleFilter);
     let workflow_header = render_plain(&state, 99, 20).join("\n");
     assert!(workflow_header.contains(" TASKS  ALL  ACTIVE  [WORKFLOWS]  0 tasks "));
+}
+
+#[test]
+fn browser_pointer_hit_testing_uses_rendered_regions_and_stable_keys() {
+    // Wide general browser (terminal 120x24 -> content 118, Split): a
+    // left-button press selects the visible task row under the pointer; the
+    // inspector column, the pane border, blank rows below the last task, and
+    // the footer are no-ops.
+    let mut state = TaskBrowserState::new();
+    state.apply_snapshot(&TaskBrowserSnapshot::new(vec![
+        browser_item("one", TaskBrowserStatus::Running),
+        browser_item("two", TaskBrowserStatus::Waiting),
+        browser_item("three", TaskBrowserStatus::Completed),
+    ]));
+    let action = pointer_action(&state, 120, 24, MouseKind::Press, 3, 3)
+        .expect("click on the second task row maps");
+    assert_eq!(action, TaskBrowserAction::SelectTaskRow(1));
+    state.handle_action(action);
+    assert_eq!(state.selected_task_id(), Some("two"));
+    for (column, row, what) in [
+        (60u16, 3u16, "inspector column"),
+        (3, 1, "pane top border row"),
+        (3, 22, "pane bottom border row"),
+        (3, 10, "blank row below the last task"),
+        (3, 23, "footer"),
+    ] {
+        assert_eq!(
+            pointer_action(&state, 120, 24, MouseKind::Press, column, row),
+            None,
+            "{what} must not select"
+        );
+    }
+
+    // Wheel over the task list column moves the task selection; wheel over
+    // the inspector LATEST OUTPUT section scrolls output; identity and
+    // Details rows stay inert. Drag and release stay consumed as no-ops.
+    assert_eq!(
+        pointer_action(&state, 120, 24, MouseKind::ScrollDown, 3, 3),
+        Some(TaskBrowserAction::MoveTaskSelection(1))
+    );
+    assert_eq!(
+        pointer_action(&state, 120, 24, MouseKind::ScrollUp, 3, 3),
+        Some(TaskBrowserAction::MoveTaskSelection(-1))
+    );
+    assert_eq!(
+        pointer_action(&state, 120, 24, MouseKind::ScrollDown, 60, 20),
+        Some(TaskBrowserAction::MoveOutputScroll(1))
+    );
+    assert_eq!(
+        pointer_action(&state, 120, 24, MouseKind::ScrollDown, 60, 5),
+        None,
+        "wheel over identity/Details rows stays inert"
+    );
+    assert_eq!(
+        pointer_action(&state, 120, 24, MouseKind::Drag, 3, 3),
+        None,
+        "drag stays consumed"
+    );
+    assert_eq!(
+        pointer_action(&state, 120, 24, MouseKind::Release, 3, 3),
+        None,
+        "release stays consumed"
+    );
+
+    // The click target is an index but the selection is keyed: after a
+    // reordered refresh the same task stays selected, and a later click
+    // resolves against the new row order.
+    state.apply_snapshot(&TaskBrowserSnapshot::new(vec![
+        browser_item("two", TaskBrowserStatus::Waiting),
+        browser_item("three", TaskBrowserStatus::Completed),
+        browser_item("one", TaskBrowserStatus::Running),
+    ]));
+    assert_eq!(
+        state.selected_task_id(),
+        Some("two"),
+        "selected task follows its ID, not the clicked index"
+    );
+    let action =
+        pointer_action(&state, 120, 24, MouseKind::Press, 3, 3).expect("click after refresh maps");
+    assert_eq!(action, TaskBrowserAction::SelectTaskRow(1));
+    state.handle_action(action);
+    assert_eq!(state.selected_task_id(), Some("three"));
+
+    // Medium workflow (terminal 80x24 -> content 78, stacked): presses select
+    // the step or agent row under the pointer; section borders, the preview,
+    // blank rows, and the footer are no-ops.
+    let mut workflow = open_workflow(workflow_item(None, false, initial_child_page()));
+    let action = pointer_action(&workflow, 80, 24, MouseKind::Press, 5, 5)
+        .expect("click on the second step row maps");
+    assert_eq!(action, TaskBrowserAction::SelectWorkflowStepRow(1));
+    workflow.handle_action(action);
+    assert_eq!(workflow.focus(), TaskBrowserFocus::Steps);
+    assert!(
+        workflow.take_child_refresh_request(),
+        "step click requests the child page refresh"
+    );
+    let action = pointer_action(&workflow, 80, 24, MouseKind::Press, 5, 4)
+        .expect("click on the first step row maps");
+    assert_eq!(action, TaskBrowserAction::SelectWorkflowStepRow(0));
+    workflow.handle_action(action);
+    assert_eq!(
+        workflow
+            .selected_workflow_step()
+            .and_then(|step| step.key.phase_id.as_deref()),
+        Some("plan")
+    );
+    let action = pointer_action(&workflow, 80, 24, MouseKind::Press, 5, 10)
+        .expect("click on the first agent row maps");
+    assert_eq!(action, TaskBrowserAction::SelectWorkflowAgentRow(0));
+    workflow.handle_action(action);
+    assert_eq!(workflow.focus(), TaskBrowserFocus::Agents);
+    assert_eq!(
+        workflow
+            .selected_workflow_child()
+            .map(|child| child.title.as_str()),
+        Some("Source worker")
+    );
+    for (row, what) in [
+        (3u16, "Steps section top border"),
+        (8, "Steps section bottom border"),
+        (9, "Agents section top border"),
+        (14, "Agents section bottom border"),
+        (15, "preview"),
+        (23, "footer"),
+    ] {
+        assert_eq!(
+            pointer_action(&workflow, 80, 24, MouseKind::Press, 5, row),
+            None,
+            "{what} must not select"
+        );
+    }
+    assert_eq!(
+        pointer_action(&workflow, 80, 24, MouseKind::Press, 5, 7),
+        None,
+        "blank step rows must not select"
+    );
+
+    // Stacked wheel: the pane under the pointer moves — Steps moves step
+    // selection, Agents moves agent selection, the preview stays inert.
+    assert_eq!(
+        pointer_action(&workflow, 80, 24, MouseKind::ScrollDown, 5, 5),
+        Some(TaskBrowserAction::MoveWorkflowStepSelection(1))
+    );
+    assert_eq!(
+        pointer_action(&workflow, 80, 24, MouseKind::ScrollDown, 5, 11),
+        Some(TaskBrowserAction::MoveWorkflowAgentSelection(1))
+    );
+    assert_eq!(
+        pointer_action(&workflow, 80, 24, MouseKind::ScrollDown, 5, 18),
+        None,
+        "preview rows stay inert"
+    );
+
+    // Wide workflow (terminal 120x24 -> content 118, wide split): steps and
+    // agents panes select body rows under the pointer; the pane top and
+    // bottom borders, the preview, and the footer are no-ops.
+    let wide = open_workflow(workflow_item(None, false, initial_child_page()));
+    let action = pointer_action(&wide, 120, 24, MouseKind::Press, 3, 4)
+        .expect("click on the first step row in the wide split maps");
+    assert_eq!(action, TaskBrowserAction::SelectWorkflowStepRow(0));
+    let action = pointer_action(&wide, 120, 24, MouseKind::Press, 80, 4)
+        .expect("click on the first agent row in the wide split maps");
+    assert_eq!(action, TaskBrowserAction::SelectWorkflowAgentRow(0));
+    for (column, row, what) in [
+        (3u16, 3u16, "Steps pane top border"),
+        (3, 16, "Steps pane bottom border"),
+        (80, 3, "Agents pane top border"),
+        (80, 16, "Agents pane bottom border"),
+        (60, 17, "preview"),
+        (3, 23, "footer"),
+    ] {
+        assert_eq!(
+            pointer_action(&wide, 120, 24, MouseKind::Press, column, row),
+            None,
+            "{what} must not select"
+        );
+    }
+
+    // Small workflow (terminal 60x24 -> content 58, tabs): the page under the
+    // pointer maps per focus; the tab selector, the pane border, blank rows,
+    // and the footer are no-ops.
+    let mut tabs = open_workflow(workflow_item(None, false, initial_child_page()));
+    let action = pointer_action(&tabs, 60, 24, MouseKind::Press, 5, 6)
+        .expect("click on the second step row in tabs maps");
+    assert_eq!(action, TaskBrowserAction::SelectWorkflowStepRow(1));
+    tabs.handle_action(action);
+    assert_eq!(
+        tabs.selected_workflow_step()
+            .and_then(|step| step.key.phase_id.as_deref()),
+        Some("execute")
+    );
+    assert_eq!(
+        pointer_action(&tabs, 60, 24, MouseKind::ScrollDown, 5, 5),
+        Some(TaskBrowserAction::MoveWorkflowStepSelection(1)),
+        "tabs wheel follows the Steps focus"
+    );
+    tabs.handle_action(TaskBrowserAction::ToggleWorkflowFocus);
+    let action = pointer_action(&tabs, 60, 24, MouseKind::Press, 5, 6)
+        .expect("click on an agent row in tabs maps");
+    assert_eq!(action, TaskBrowserAction::SelectWorkflowAgentRow(1));
+    tabs.handle_action(action);
+    assert_eq!(
+        tabs.selected_workflow_child()
+            .map(|child| child.title.as_str()),
+        Some("Verify")
+    );
+    assert_eq!(
+        pointer_action(&tabs, 60, 24, MouseKind::ScrollDown, 5, 5),
+        Some(TaskBrowserAction::MoveWorkflowAgentSelection(1)),
+        "tabs wheel follows the Agents focus"
+    );
+    for (row, what) in [
+        (3u16, "tab selector row"),
+        (4, "page pane top border"),
+        (22, "page pane bottom border"),
+        (7, "blank page row"),
+        (23, "footer"),
+    ] {
+        assert_eq!(
+            pointer_action(&tabs, 60, 24, MouseKind::Press, 5, row),
+            None,
+            "{what} must not select"
+        );
+    }
+
+    // Step selection is keyed too: after a refresh that reorders the steps
+    // the same step stays selected.
+    tabs.handle_action(TaskBrowserAction::SelectWorkflowStepRow(1));
+    let mut reordered = workflow_item(None, false, initial_child_page());
+    reordered
+        .workflow
+        .as_mut()
+        .expect("workflow meta")
+        .steps
+        .reverse();
+    tabs.apply_snapshot(&TaskBrowserSnapshot::new(vec![reordered]));
+    assert_eq!(
+        tabs.selected_workflow_step()
+            .and_then(|step| step.key.phase_id.as_deref()),
+        Some("execute"),
+        "selected step survives a reordered refresh by key"
+    );
 }
 
 #[test]
