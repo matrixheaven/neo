@@ -7,23 +7,18 @@ fail-fast = false
 retries = 0
 slow-timeout = { period = "20s", terminate-after = 2 }
 
-[test-groups]
-shell-guardian = { max-threads = 1 }
-
-[[profile.default.overrides]]
-filter = "binary(process_behavior) | binary(runtime_behavior) | binary(tool_behavior)"
-test-group = "shell-guardian"
+# No test group serializes whole binaries: parallel-evidence run of the former
+# shell-guardian members (process_behavior + runtime_behavior + tool_behavior)
+# completed in 49.68s with 0 failures vs 151.36s serialized (target/test-governance/
+# parallel-true.log, 2026-08-07). No test demonstrated shared-resource contention,
+# so all tests stay parallel per the governance spec §5.5/§9.
 
 [[profile.default.overrides]]
 filter = "test(authenticate_tool_reports_unwired_oauth_flow_without_success_claim)"
 slow-timeout = { period = "30s", terminate-after = 3 }
 
-[[profile.default.overrides]]
-filter = "test(mcp_manager_auth_action_shows_status_on_oauth_failure)"
-slow-timeout = { period = "30s", terminate-after = 3 }
-
 # Writes 10_000 journal records (each synced) and paginates all of them;
-# on slow filesystems this takes well over the default 40s budget.
+# on slow filesystems this takes well over the default 20s budget.
 [[profile.default.overrides]]
 filter = "test(child_pages_cover_thousand_and_ten_thousand_rows_with_stable_cursor)"
 slow-timeout = { period = "45s", terminate-after = 3 }

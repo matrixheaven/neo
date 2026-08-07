@@ -1,6 +1,10 @@
 //! Shared CLI domain fixtures: isolated NEO_HOME setup, session
 //! transcript writers, and the single converged mock SSE provider
 //! (previously four per-file copies).
+//!
+//! Every consumer test binary links this whole module but uses only a
+//! subset of the fixtures, so dead-code is expected here.
+#![allow(dead_code)]
 
 use std::{
     collections::BTreeMap,

@@ -40,8 +40,5 @@ jobs:
       - name: Run clippy
         run: cargo clippy --workspace --all-targets --all-features -- -D clippy::all -A clippy::pedantic
 
-      - name: Build neo binary
-        run: cargo build -p neo-agent
-
       - name: Run tests
-        run: cargo nextest run --workspace --all-features
+        run: cargo nextest run --workspace --all-features --profile ci

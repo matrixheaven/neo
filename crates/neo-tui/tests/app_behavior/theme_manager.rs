@@ -190,6 +190,12 @@ fn theme_manager_breakpoints_map_width_to_layout() {
         let mut chrome = open_manager();
         let plain = overlay_plain(&mut chrome, case.width, case.height);
         (case.assert)(&mut chrome, &plain);
+        let rendered = plain.join("\n");
+        assert!(
+            rendered.contains("THEME MANAGER"),
+            "case {} must stay on the manager screen: {rendered}",
+            case.name
+        );
     }
 }
 
