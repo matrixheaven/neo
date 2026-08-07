@@ -195,3 +195,25 @@ cargo test --package neo-agent-core --test multi_agent_behavior -- lifecycle::re
 - `model_selection_with_thinking_preserves_current_structured_reasoning`（选模型保留推理）与 `model_selection_without_thinking_sets_reasoning_off`（关推理）是模型选择器的两个相反分支，保留；`runtime_reasoning_uses_structured_config_and_migrates_legacy_effort`（遗留字段迁移）分支不同，保留。
 - `agent_config_for_app_applies_runtime_config` 在删除 max_tokens 断言行后仍是运行时配置应用（temperature/retry/reasoning/队列/compaction/指令注册表）的主守护；`agent_config_for_app_scales_default_compaction_to_model_context_window`、`agent_config_for_app_keeps_explicit_custom_compaction_threshold` 分支不同，保留。
 - `rpc_sessions_list_returns_local_session_metadata`（sessions.list 处理器字段名边界）与 `rpc_sessions_get_*`（sessions.get 处理器）是两个不同 RPC 方法、两个不同生产函数，保留；`rpc_get_messages_replays_session_jsonl_messages` 与 `rpc_get_messages_returns_empty_replay_for_empty_session` 是回放的两种状态（有内容/空），保留。
+
+## Task 10 调度精确化证据
+
+- 串行成员证据表（2026-08-07，本机）：三个原串行二进制（process_behavior 74 + runtime_behavior 173 + tool_behavior ~90 = 294 测试）。
+  - 串行（旧配置 max-threads=1）：real 151.36s（current-serial.time）。
+  - 真并行（无 test-group）：real 49.68s，0 失败（parallel-true.time/log）。
+  - 结论：无任何测试在并行下失败 → 无测试满足"共享资源+并行失败证据"门槛 → shell-guardian 组整体删除（spec §5.5/§9"没有证据就保持普通并行"）。
+- 资源测试保留：`complete_agent_output_survives_preview_queue_pressure`（12 MiB，45s 覆盖，并行下 20.4s 通过）、`child_pages_cover_thousand_and_ten_thousand_rows_with_stable_cursor`（10k 记录，45s 覆盖）、`authenticate_tool_reports_unwired_oauth_flow_without_success_claim`（30s 覆盖）。
+- 陈旧覆盖删除：`mcp_manager_auth_action_shows_status_on_oauth_failure` 覆盖已移除（测试在治理前已由 759584ec 删除）。
+- CI：`cargo nextest run --workspace --all-features --profile ci`；独立 `cargo build -p neo-agent` 步骤删除 —— 全新 CARGO_TARGET_DIR 无预构建下 `commands::root_command_reports_interactive_entrypoint_without_placeholders` 精确运行 1 passed（binexe-cold.time 77.26s 冷编译含二进制构建，hot 2.75s）。
+- 最终串行过滤表达式：空（无成员），见 target/test-governance/final-serial-filter.txt。
+- 死代码清理：共享夹具 http_server.rs 加 `#![allow(dead_code)]`（28 警告，各消费者二进制只用子集）；theme_manager.rs 表驱动用例补 case.name 断言（1 警告）。
+
+## Task 11 最终验收（部分执行，用户中止）
+
+- 最终冷构建（全新目录）：real 121.65s（基线 203.68s，-40%）。
+- 最终热执行（5 次测量，均 EXIT=0，3455 测试全过）：154.39s / 157.12s / 160.06s / 160.63s / 165.07s；取最优 154.39s。基线热执行 179.50s。降幅约 14%，未达 60% 目标。
+- 性能未达标根因（证据）：热执行墙钟被磁盘绑定测试主导；外部 macOS StorageManagement 扫描（CPU 峰值 130-164%）使同代码测试膨胀 28-63%（child_pages 39.0s→63.6s、complete_agent_output 18.0s→23.1s），CPU 绑定测试稳定（subagent 35.7→35.1s、clamps 18.2→17.7s）。串行组删除已生效：原 152.68s 串行组在并行下 49.68s 完成且 0 失败。
+- 结论：热执行 60% 目标未达成，按计划 Task 11 step 8 提交瓶颈排序并停止删除高价值测试；<20 分钟目标达成（154s << 1200s）。冷阶段 -40%。
+- 最终串行过滤表达式：空（无成员），`final-serial-filter.txt`；Task 11 的 `-E` 空表达式命令以"no tests to run"退出（预期，EXIT=4），串行组时间为 0。
+- 平台矩阵：未执行（用户中止）。macOS 主机 Unix 进程树与全屏转录守护、Fedora/Windows VM 均未运行。
+- 远端：未推送，当前提交远端未验证。
