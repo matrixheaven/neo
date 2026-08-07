@@ -1,0 +1,406 @@
+//! Markdown rendering: verify each element is styled and laid out like Neo.
+
+use neo_tui::markdown::render_markdown;
+use neo_tui::primitive::theme::TuiTheme;
+
+fn plain(text: &str, width: usize) -> Vec<String> {
+    render_markdown(text, width, &TuiTheme::default(), "", "")
+        .into_iter()
+        .map(|line| {
+            neo_tui::primitive::strip_ansi(&line.to_ansi())
+                .trim_end()
+                .to_owned()
+        })
+        .collect()
+}
+fn border_columns(line: &str) -> Vec<usize> {
+    line.char_indices()
+        .filter(|(_, ch)| {
+            matches!(
+                ch,
+                '│' | '┌' | '┬' | '┐' | '├' | '┼' | '┤' | '└' | '┴' | '┘'
+            )
+        })
+        .map(|(idx, _)| unicode_width::UnicodeWidthStr::width(&line[..idx]))
+        .collect()
+}
+
+#[test]
+fn heading_h1_renders_without_hash_prefix() {
+    let lines = plain("# Title", 80);
+    let joined = lines.join("\n");
+    assert!(joined.contains("Title"), "heading text present: {joined}");
+    assert!(
+        !joined.contains("# Title"),
+        "hash prefix stripped: {joined}"
+    );
+}
+
+#[test]
+fn heading_h1_renders_bold_and_underlined() {
+    let lines = render_markdown("# Title", 80, &TuiTheme::default(), "", "");
+    let ansi = lines[0].to_ansi();
+    assert!(
+        ansi.contains("\x1b[1m"),
+        "h1 should emit ANSI bold: {ansi:?}"
+    );
+    assert!(
+        ansi.contains("\x1b[4m"),
+        "h1 should emit ANSI underline: {ansi:?}"
+    );
+}
+
+#[test]
+fn bold_and_italic_strip_markers() {
+    let lines = plain("this is **bold** and *italic*", 80);
+    let joined = lines.join("\n");
+    assert!(joined.contains("bold"), "bold text present: {joined}");
+    assert!(joined.contains("italic"), "italic text present: {joined}");
+    assert!(!joined.contains("**"), "asterisks stripped: {joined}");
+    assert!(
+        !joined.contains("*italic"),
+        "single asterisk stripped: {joined}"
+    );
+}
+
+#[test]
+fn inline_code_renders_without_backticks() {
+    let lines = plain("use `cargo build` to compile", 80);
+    let joined = lines.join("\n");
+    assert!(
+        joined.contains("cargo build"),
+        "code text present: {joined}"
+    );
+    assert!(!joined.contains('`'), "backticks stripped: {joined}");
+}
+
+#[test]
+fn inline_code_renders_with_brand_color() {
+    let theme = TuiTheme::default();
+    let lines = render_markdown("use `cargo build` to compile", 80, &theme, "", "");
+    let ansi = lines[0].to_ansi();
+    assert!(
+        ansi.contains("\x1b[38;2;"),
+        "inline code should be painted with 24-bit color: {ansi:?}"
+    );
+}
+
+#[test]
+fn bold_inline_renders_with_bold_ansi() {
+    let lines = render_markdown("this is **bold** text", 80, &TuiTheme::default(), "", "");
+    let ansi = lines[0].to_ansi();
+    assert!(
+        ansi.contains("\x1b[1m"),
+        "bold inline should emit ANSI bold: {ansi:?}"
+    );
+}
+
+#[test]
+fn link_renders_with_underline_and_brand_color() {
+    let lines = render_markdown(
+        "see [Neo](https://neo.dev) for details",
+        80,
+        &TuiTheme::default(),
+        "",
+        "",
+    );
+    let ansi = lines[0].to_ansi();
+    assert!(
+        ansi.contains("\x1b[38;2;"),
+        "link text should use 24-bit color: {ansi:?}"
+    );
+    assert!(
+        ansi.contains("\x1b[4m"),
+        "link text should be underlined: {ansi:?}"
+    );
+}
+
+#[test]
+fn italic_inline_renders_with_italic_ansi() {
+    let lines = render_markdown("this is *italic* text", 80, &TuiTheme::default(), "", "");
+    let ansi = lines[0].to_ansi();
+    assert!(
+        ansi.contains("\x1b[3m"),
+        "italic inline should emit ANSI italic: {ansi:?}"
+    );
+}
+
+#[test]
+fn strikethrough_inline_renders_with_crossed_out_ansi() {
+    let lines = render_markdown("this is ~~deleted~~ text", 80, &TuiTheme::default(), "", "");
+    let ansi = lines[0].to_ansi();
+    assert!(
+        ansi.contains("\x1b[9m"),
+        "strikethrough inline should emit ANSI crossed-out: {ansi:?}"
+    );
+}
+
+#[test]
+fn unordered_list_uses_bullet() {
+    let lines = plain("- alpha\n- beta\n- gamma", 80);
+    let joined = lines.join("\n");
+    assert!(joined.contains("• alpha"), "bullet + alpha: {joined}");
+    assert!(joined.contains("• beta"), "bullet + beta: {joined}");
+    assert!(joined.contains("• gamma"), "bullet + gamma: {joined}");
+}
+
+#[test]
+fn ordered_list_keeps_number_marker() {
+    let lines = plain("1. first\n2. second\n3. third", 80);
+    let joined = lines.join("\n");
+    assert!(joined.contains("1. first"), "ordered 1: {joined}");
+    assert!(joined.contains("2. second"), "ordered 2: {joined}");
+    assert!(joined.contains("3. third"), "ordered 3: {joined}");
+}
+
+#[test]
+fn task_list_keeps_checkbox() {
+    let lines = plain("- [ ] todo\n- [x] done", 80);
+    let joined = lines.join("\n");
+    assert!(joined.contains("[ ]"), "open checkbox: {joined}");
+    assert!(joined.contains("[x]"), "checked checkbox: {joined}");
+}
+
+#[test]
+fn blockquote_uses_pipe_prefix() {
+    let lines = plain("> a quoted line", 80);
+    let joined = lines.join("\n");
+    assert!(joined.contains("│ a quoted line"), "pipe prefix: {joined}");
+}
+
+#[test]
+fn horizontal_rule_uses_box_chars() {
+    let lines = plain("---", 80);
+    let joined = lines.join("\n");
+    assert!(joined.contains('─'), "horizontal rule: {joined}");
+}
+
+#[test]
+fn code_block_has_rounded_box_borders_and_language_header() {
+    let md = "```rust\nfn main() {}\n```";
+    let lines = plain(md, 80);
+    let joined = lines.join("\n");
+    assert!(joined.contains('╭'), "top-left corner: {joined}");
+    assert!(joined.contains('╮'), "top-right corner: {joined}");
+    assert!(joined.contains('╰'), "bottom-left corner: {joined}");
+    assert!(joined.contains('╯'), "bottom-right corner: {joined}");
+    assert!(joined.contains('│'), "side borders: {joined}");
+    assert!(joined.contains("rust"), "language header: {joined}");
+    assert!(!joined.contains("```"), "no fence backticks: {joined}");
+    assert!(joined.contains("fn main() {}"), "code content: {joined}");
+}
+
+#[test]
+fn fenced_bash_block_does_not_leak_thinking_or_prompt_chrome() {
+    let thinking = "I now have a comprehensive understanding of this project.";
+    let md = "快速上手\n\n```bash\n# 查看可用模型\ncargo run -p neo-agent -- models list\n```\n\n安全与约束".to_string();
+    let lines = plain(&md, 80);
+    let joined = lines.join("\n");
+
+    assert!(
+        !joined.contains("```"),
+        "code block should not use fence backticks: {joined}"
+    );
+    assert!(
+        joined.contains('╭') && joined.contains('╮'),
+        "code block should have rounded top border: {joined}"
+    );
+    assert!(
+        joined.contains('╰') && joined.contains('╯'),
+        "code block should have rounded bottom border: {joined}"
+    );
+    assert!(
+        !joined.contains(thinking),
+        "code block should not contain stale thinking text: {joined}"
+    );
+    assert!(
+        !joined.contains("│  >"),
+        "body markdown should not contain prompt chrome: {joined}"
+    );
+}
+
+#[test]
+fn diff_code_block_colors_add_remove() {
+    let md = "```diff\n+added line\n-removed line\n```";
+    let lines = plain(md, 80);
+    let joined = lines.join("\n");
+    assert!(joined.contains("added line"), "added present: {joined}");
+    assert!(joined.contains("removed line"), "removed present: {joined}");
+}
+
+#[test]
+fn table_has_box_borders_and_bold_header() {
+    let md = "| Crate | Role |\n|---|---|\n| neo-ai | providers |\n| neo-tui | terminal UI |";
+    let lines = plain(md, 80);
+    let joined = lines.join("\n");
+    assert!(joined.contains('┌'), "top-left corner: {joined}");
+    assert!(joined.contains('┐'), "top-right corner: {joined}");
+    assert!(joined.contains('└'), "bottom-left corner: {joined}");
+    assert!(joined.contains('┘'), "bottom-right corner: {joined}");
+    assert!(joined.contains('│'), "vertical borders: {joined}");
+    assert!(joined.contains("Crate"), "header cell present: {joined}");
+    assert!(joined.contains("neo-ai"), "body cell present: {joined}");
+}
+
+#[test]
+fn mixed_content_renders_in_order() {
+    let md = "# Heading\n\nSome **bold** text.\n\n- item one\n- item two\n\n```rs\nlet x = 1;\n```";
+    let lines = plain(md, 80);
+    let joined = lines.join("\n");
+    assert!(joined.contains("Heading"), "heading: {joined}");
+    assert!(joined.contains("bold"), "bold inline: {joined}");
+    assert!(joined.contains("• item one"), "list item: {joined}");
+    assert!(joined.contains("let x = 1"), "code block: {joined}");
+}
+
+#[test]
+fn empty_input_produces_no_lines() {
+    let lines = plain("", 80);
+    assert!(lines.is_empty(), "empty input -> no lines");
+}
+
+#[test]
+fn finalized_bullet_prefix_keeps_first_line_inline_and_indents_continuation() {
+    // With first_prefix "● " and cont_prefix "  ", the first line starts with
+    // "● " then the heading text, and continuation lines start with "  ".
+    let lines = render_markdown(
+        "Hello world this is a long line that should wrap\nsecond paragraph",
+        30,
+        &TuiTheme::default(),
+        "● ",
+        "  ",
+    );
+    let plain: Vec<String> = lines
+        .iter()
+        .map(|l| neo_tui::primitive::strip_ansi(&l.to_ansi()))
+        .collect();
+    // First line: bullet + text inline (NOT bullet on its own line).
+    assert!(
+        plain[0].starts_with("● ") && plain[0].chars().count() > 2,
+        "first line has bullet + text inline: {:?}",
+        plain[0]
+    );
+    // Continuation lines start with the indent prefix, not the bullet.
+    for line in &plain[1..] {
+        assert!(
+            line.starts_with("  "),
+            "continuation line indented with two spaces: {line:?}"
+        );
+    }
+}
+
+#[test]
+fn wrapped_inline_code_keeps_brand_color_on_continuation_lines() {
+    // Force a wrap so the styled inline code may land on a continuation line.
+    let lines = render_markdown(
+        "some words before `cargo build` and more words after",
+        20,
+        &TuiTheme::default(),
+        "● ",
+        "  ",
+    );
+    assert!(
+        lines.len() > 1,
+        "text should wrap to multiple lines: {lines:?}"
+    );
+    let joined = lines
+        .iter()
+        .map(neo_tui::primitive::Line::to_ansi)
+        .collect::<Vec<_>>()
+        .join("\n");
+    let brand_color = "\x1b[38;2;198;120;221m";
+    assert!(
+        joined.contains(brand_color),
+        "wrapped inline code should still be painted with brand color: {joined:?}"
+    );
+}
+
+#[test]
+fn table_wraps_long_cells_without_truncating_content() {
+    let md = "| h\n|---|\n| this is a very long body cell that exceeds the column |";
+    let lines = plain(md, 24);
+    let joined = lines.join("\n");
+    assert!(joined.contains('┌'), "box border present: {joined}");
+    for line in &lines {
+        let w = neo_tui::primitive::visible_width(line);
+        assert!(w <= 24, "line within width ({w} > 24): {line:?}");
+    }
+    assert!(!joined.contains('…'), "long content should wrap: {joined}");
+    assert!(
+        joined.contains("this is a very"),
+        "first wrapped row: {joined}"
+    );
+    assert!(
+        joined.contains("body cell that"),
+        "middle wrapped row: {joined}"
+    );
+    assert!(
+        joined.contains("exceeds the column"),
+        "table cells should prefer word boundaries: {joined}"
+    );
+}
+
+#[test]
+fn table_inserts_separator_between_every_body_row() {
+    let md = "| 项目 | 结果 |\n|---|---|\n| alpha | ✅ |\n| beta | ✅ |";
+    let lines = plain(md, 40);
+    let joined = lines.join("\n");
+    let separator_count = lines
+        .iter()
+        .filter(|line| line.starts_with('├') && line.ends_with('┤'))
+        .count();
+    assert_eq!(
+        separator_count, 2,
+        "header separator plus separator between body rows: {joined}"
+    );
+}
+
+#[test]
+fn table_handles_cjk_full_width_cells() {
+    // CJK characters are width-2; the column widths must account for that so
+    // the grid stays aligned.
+    let md = "| 名称 | 说明 |\n|---|---|\n| 甲 | 第一项 |\n| 乙 | 第二项 |";
+    let lines = plain(md, 40);
+    let joined = lines.join("\n");
+    assert!(joined.contains('┌'), "box border: {joined}");
+    assert!(joined.contains("名称"), "CJK header: {joined}");
+    assert!(joined.contains("第一项"), "CJK body: {joined}");
+    // Borders must align: every non-border line should have the same width.
+    let body_widths: Vec<usize> = lines
+        .iter()
+        .filter(|l| l.contains('│'))
+        .map(|l| neo_tui::primitive::visible_width(l))
+        .collect();
+    if !body_widths.is_empty() {
+        let w0 = body_widths[0];
+        for (i, w) in body_widths.iter().enumerate() {
+            assert!(*w == w0, "row {i} width {w} != {w0}: {}", lines[i]);
+        }
+    }
+}
+
+#[test]
+fn table_aligns_borders_with_emoji_grapheme_clusters() {
+    let md = "| 题目 | 结果 | 评价 |\n\
+              |---|---|---|\n\
+              | 1 + 1 = ? | ✅ 2 | 正确 |\n\
+              | 哪些是质数? | ⚠️ 7, 13 | 漏了一个 |\n\
+              | 三角形内角和? | ✅ 180° | 满分 🎉 |";
+    let lines = plain(md, 80);
+    let joined = lines.join("\n");
+    assert!(joined.contains("⚠️"), "emoji row present: {joined}");
+
+    let table_lines: Vec<&str> = lines
+        .iter()
+        .map(String::as_str)
+        .filter(|line| line.contains('│') || line.contains('┌') || line.contains('└'))
+        .collect();
+    let expected = border_columns(table_lines[0]);
+    for (i, line) in table_lines.iter().enumerate() {
+        assert_eq!(
+            border_columns(line),
+            expected,
+            "table border columns drift on row {i}: {line:?}\n{joined}"
+        );
+    }
+}
