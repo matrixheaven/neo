@@ -66,17 +66,25 @@ impl Tool for GlobTool {
         "Find files and optionally directories by glob pattern, sorted by modification time \
         (most recent first).\
         \
+        Tool choice:\
+        - Use List first for a compact view of a directory's immediate structure.\
+        - Use Glob when you know the filename shape, extension, or directory pattern and need a \
+          path inventory before reading selected files.\
+        - Use Find for a literal substring in a path name; use Grep for text, symbols, or other \
+          content; use Read when you already know a concrete path.\
+        \
         Good patterns:\
         - `*.ts` — files in the current directory matching an extension\
         - `src/**/*.ts` — recursive walk with a subdirectory anchor and extension\
         - `**/*.py` — recursive walk from the search root for an extension\
+        - `crates/*/src/**/*.rs` — source files across a known workspace layout\
         - `*.{ts,tsx}` — brace expansion is supported; expanded into `*.ts` and `*.tsx` before walking\
         - `{src,test}/**/*.ts` — cartesian brace expansion is supported too\
         \
-        Results are capped at the first `max_matches` matching paths (walk order, not global \
-        modification-time order). If a search returns more, a truncation marker is appended with \
-        the count of matches seen so far. Refine the pattern (extension, subdirectory) when the cap \
-        is hit, or call again with a narrower anchor.\
+        Results are sorted by modification time before the `max_matches` cap is applied. If a search \
+        returns more, only the most recently modified paths are returned and a truncation marker is \
+        appended. Refine the pattern (extension, subdirectory) when the cap is hit, or call again \
+        with a narrower anchor.\
         \
         Large-directory caveat — avoid recursing into dependency / build output even with an anchor:\
         - `node_modules/**/*.js`, `.venv/**/*.py`, `__pycache__/**`, `target/**` all match \
