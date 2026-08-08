@@ -181,6 +181,13 @@ fn aggregate_mutation_state(tools: &[ToolCallComponent], name: &str) -> ToolCall
                 changes.extend(items.iter().cloned());
                 continue;
             }
+            if details
+                .get("coalesced")
+                .and_then(Value::as_bool)
+                .unwrap_or(false)
+            {
+                continue;
+            }
         }
         changes.push(project_argument_change(state, name));
     }
@@ -191,12 +198,17 @@ fn aggregate_mutation_state(tools: &[ToolCallComponent], name: &str) -> ToolCall
         "committed"
     };
     let projecting_intent = any_active && !any_failed;
+    let files = if name == "Edit" {
+        changes.len()
+    } else {
+        states.len()
+    };
     let details = if name == "Edit" {
         json!({
             "kind": if projecting_intent { "edit_prepared" } else { "edit" },
             "status": terminal_status,
             "verified": !projecting_intent,
-            "files": states.len(),
+            "files": files,
             "replacements": states.len(),
             "added": added,
             "removed": removed,
@@ -207,7 +219,7 @@ fn aggregate_mutation_state(tools: &[ToolCallComponent], name: &str) -> ToolCall
             "kind": if projecting_intent { "write_prepared" } else { "write" },
             "status": terminal_status,
             "verified": !projecting_intent,
-            "files": states.len(),
+            "files": files,
             "created": created,
             "overwritten": overwritten,
             "added": added,
@@ -1252,5 +1264,67 @@ mod tests {
             !before_prefix.contains(&selection_bg),
             "the prompt prefix must stay unpainted"
         );
+    }
+
+    #[test]
+    fn coalesced_edit_followers_do_not_create_zero_stat_rows() {
+        use crate::shell::ToolStatusKind;
+
+        let primary = ToolCallComponent::new(ToolCallState {
+            id: "primary".to_owned(),
+            name: "Edit".to_owned(),
+            arguments: Some(r#"{"path":"src/file.rs","old":"before","new":"after"}"#.to_owned()),
+            result: Some("committed".to_owned()),
+            details: Some(serde_json::json!({
+                "kind": "edit",
+                "status": "committed",
+                "files": 1,
+                "replacements": 3,
+                "added": 0,
+                "removed": 10,
+                "changes": [{
+                    "path": "src/file.rs",
+                    "status": "committed",
+                    "replacements": 3,
+                    "added": 0,
+                    "removed": 10,
+                    "diff": "--- src/file.rs\n+++ src/file.rs\n@@ -1,10 +1,0 @@\n-old\n"
+                }]
+            })),
+            status: ToolStatusKind::Succeeded,
+            exit_code: None,
+        });
+        let follower = |id: &str| {
+            ToolCallComponent::new(ToolCallState {
+                id: id.to_owned(),
+                name: "Edit".to_owned(),
+                arguments: Some(
+                    r#"{"path":"src/file.rs","old":"before","new":"after"}"#.to_owned(),
+                ),
+                result: Some("committed as part of same-file transaction".to_owned()),
+                details: Some(serde_json::json!({
+                    "kind": "edit",
+                    "status": "coalesced",
+                    "coalesced": true,
+                    "primary_call_id": "primary"
+                })),
+                status: ToolStatusKind::Succeeded,
+                exit_code: None,
+            })
+        };
+
+        let tools = vec![primary, follower("follower-1"), follower("follower-2")];
+        let details = aggregate_mutation_state(&tools, "Edit")
+            .details
+            .expect("projected details");
+        let changes = details["changes"].as_array().expect("changes");
+
+        assert_eq!(details["files"], 1);
+        assert_eq!(details["replacements"], 3);
+        assert_eq!(details["added"], 0);
+        assert_eq!(details["removed"], 10);
+        assert_eq!(changes.len(), 1);
+        assert_eq!(changes[0]["replacements"], 3);
+        assert_eq!(changes[0]["removed"], 10);
     }
 }
