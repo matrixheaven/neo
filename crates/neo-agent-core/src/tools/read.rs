@@ -509,9 +509,173 @@ fn contains_nul(text: &str) -> bool {
     text.contains('\0')
 }
 
+enum TextLineReader {
+    Utf8(BufReader<tokio::fs::File>),
+    Utf16(Utf16LineReader),
+}
+
+impl TextLineReader {
+    async fn read_line(&mut self, output: &mut String) -> Result<usize, ReadError> {
+        match self {
+            Self::Utf8(reader) => Ok(reader.read_line(output).await?),
+            Self::Utf16(reader) => reader.read_line(output).await,
+        }
+    }
+}
+
+#[derive(Clone, Copy)]
+enum Utf16ByteOrder {
+    LittleEndian,
+    BigEndian,
+}
+
+struct Utf16LineReader {
+    file: tokio::fs::File,
+    byte_order: Utf16ByteOrder,
+    byte_buffer: Vec<u8>,
+    decoded: String,
+    pending_byte: Option<u8>,
+    pending_high_surrogate: Option<u16>,
+    eof: bool,
+}
+
+impl Utf16LineReader {
+    fn new(file: tokio::fs::File, byte_order: Utf16ByteOrder) -> Self {
+        Self {
+            file,
+            byte_order,
+            byte_buffer: vec![0; READ_CHUNK_SIZE],
+            decoded: String::new(),
+            pending_byte: None,
+            pending_high_surrogate: None,
+            eof: false,
+        }
+    }
+
+    async fn read_line(&mut self, output: &mut String) -> Result<usize, ReadError> {
+        let start_len = output.len();
+        loop {
+            if let Some(newline) = self.decoded.find('\n') {
+                output.push_str(&self.decoded[..=newline]);
+                self.decoded.drain(..=newline);
+                return Ok(output.len() - start_len);
+            }
+            if self.eof {
+                if self.decoded.is_empty() {
+                    return Ok(0);
+                }
+                output.push_str(&self.decoded);
+                self.decoded.clear();
+                return Ok(output.len() - start_len);
+            }
+            self.fill().await?;
+        }
+    }
+
+    async fn fill(&mut self) -> Result<(), ReadError> {
+        let bytes_read = self.file.read(&mut self.byte_buffer).await?;
+        if bytes_read == 0 {
+            self.eof = true;
+            self.finish_decoding();
+            return Ok(());
+        }
+
+        for index in 0..bytes_read {
+            self.push_byte(self.byte_buffer[index]);
+        }
+        Ok(())
+    }
+
+    fn push_byte(&mut self, byte: u8) {
+        let Some(first) = self.pending_byte.replace(byte) else {
+            return;
+        };
+        self.pending_byte = None;
+        let unit = match self.byte_order {
+            Utf16ByteOrder::LittleEndian => u16::from_le_bytes([first, byte]),
+            Utf16ByteOrder::BigEndian => u16::from_be_bytes([first, byte]),
+        };
+        self.push_unit(unit);
+    }
+
+    fn push_unit(&mut self, unit: u16) {
+        if let Some(high) = self.pending_high_surrogate.take() {
+            if (0xdc00..=0xdfff).contains(&unit) {
+                let scalar =
+                    0x1_0000 + (((u32::from(high) - 0xd800) << 10) | (u32::from(unit) - 0xdc00));
+                self.decoded
+                    .push(char::from_u32(scalar).expect("valid UTF-16 surrogate pair"));
+                return;
+            }
+            self.decoded.push(char::REPLACEMENT_CHARACTER);
+        }
+
+        match unit {
+            0xd800..=0xdbff => self.pending_high_surrogate = Some(unit),
+            0xdc00..=0xdfff => self.decoded.push(char::REPLACEMENT_CHARACTER),
+            _ => self
+                .decoded
+                .push(char::from_u32(u32::from(unit)).expect("non-surrogate UTF-16 unit is valid")),
+        }
+    }
+
+    fn finish_decoding(&mut self) {
+        if self.pending_high_surrogate.take().is_some() {
+            self.decoded.push(char::REPLACEMENT_CHARACTER);
+        }
+        if self.pending_byte.take().is_some() {
+            self.decoded.push(char::REPLACEMENT_CHARACTER);
+        }
+    }
+}
+
+async fn open_text_line_reader(path: &std::path::Path) -> Result<TextLineReader, ReadError> {
+    let mut file = tokio::fs::File::open(path).await?;
+    let mut sample = [0; ENCODING_DETECTION_SAMPLE_BYTES];
+    let sample_len = file.read(&mut sample).await?;
+    let (byte_order, bom_len) = detect_utf16_byte_order(&sample[..sample_len]);
+    file.seek(SeekFrom::Start(bom_len)).await?;
+
+    Ok(match byte_order {
+        Some(byte_order) => TextLineReader::Utf16(Utf16LineReader::new(file, byte_order)),
+        None => TextLineReader::Utf8(BufReader::with_capacity(READ_CHUNK_SIZE, file)),
+    })
+}
+
+fn detect_utf16_byte_order(bytes: &[u8]) -> (Option<Utf16ByteOrder>, u64) {
+    if bytes.starts_with(&[0xff, 0xfe]) {
+        return (Some(Utf16ByteOrder::LittleEndian), 2);
+    }
+    if bytes.starts_with(&[0xfe, 0xff]) {
+        return (Some(Utf16ByteOrder::BigEndian), 2);
+    }
+
+    let (zeros_at_even, zeros_at_odd) =
+        bytes
+            .iter()
+            .enumerate()
+            .fold((0, 0), |(even, odd), (index, byte)| {
+                if *byte != 0 {
+                    (even, odd)
+                } else if index % 2 == 0 {
+                    (even + 1, odd)
+                } else {
+                    (even, odd + 1)
+                }
+            });
+
+    if zeros_at_even == 0 && zeros_at_odd >= MIN_UTF16_ZERO_BYTES {
+        (Some(Utf16ByteOrder::LittleEndian), 0)
+    } else if zeros_at_odd == 0 && zeros_at_even >= MIN_UTF16_ZERO_BYTES {
+        (Some(Utf16ByteOrder::BigEndian), 0)
+    } else {
+        (None, 0)
+    }
+}
+
 fn not_readable_error(path: &std::path::Path) -> ReadError {
     ReadError::NotReadable(format!(
-        "\"{}\" is not readable as UTF-8 text. If it is an image or video, use ReadMediaFile. For other binary formats, use Bash or an MCP tool if available.",
+        "\"{}\" is not readable as text. If it is an image or video, use ReadMediaFile. For other binary formats, use Bash or an MCP tool if available.",
         path.display()
     ))
 }
