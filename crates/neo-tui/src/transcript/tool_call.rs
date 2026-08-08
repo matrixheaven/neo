@@ -79,7 +79,10 @@ pub struct ToolCallComponent {
     live_rendered: bool,
 }
 
-const MAX_LIVE_OUTPUT_LINES: usize = 6;
+// Live tail line cap matches the white head preview (RESULT_PREVIEW_LINES=3
+// + one truncation hint), so frozen streamed results and instantly-delivered
+// results occupy the same total height.
+const MAX_LIVE_OUTPUT_LINES: usize = 3;
 const MAX_LIVE_OUTPUT_CHARS: usize = 50_000;
 
 impl ToolCallComponent {
@@ -993,17 +996,19 @@ mod tests {
         let joined: Vec<String> = rendered.iter().map(|line| line.text()).collect();
         let joined = joined.join("\n");
 
-        // The streamed tail stays on screen (6 lines: line two..line seven).
+        // The streamed tail stays on screen (3 lines: line five..line seven,
+        // matching the white preview's 3-line body + one hint row).
         assert!(joined.contains("line seven"), "{joined}");
         assert!(joined.contains("line six"), "{joined}");
+        assert!(joined.contains("line five"), "{joined}");
         // The white head preview must not replace the tail: lines that were
         // never streamed are hidden behind the truncation note.
         assert!(!joined.contains("line eight"), "{joined}");
         assert!(!joined.contains("line nine"), "{joined}");
-        // The dropped first line is folded into the result-based note.
+        // The dropped first lines are folded into the result-based note.
         assert!(!joined.contains("line one"), "{joined}");
         assert!(
-            joined.contains("... (3 more lines, ctrl+o to expand)"),
+            joined.contains("... (6 more lines, ctrl+o to expand)"),
             "{joined}"
         );
     }
