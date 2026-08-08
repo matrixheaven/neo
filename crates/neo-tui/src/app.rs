@@ -24,8 +24,9 @@ pub struct NeoTui {
     /// controller after the mouse event is routed.
     pending_copy: Option<String>,
     clipboard_notice_until: Option<Instant>,
-    /// Press anchor of an in-progress prompt mouse gesture.
-    widget_gesture: Option<WidgetGesture>,
+    /// Owner of the in-progress pointer gesture (left press → drag →
+    /// release), fixed at the press and cleared at the release.
+    active_gesture: Option<GestureOwner>,
     /// Final-frame text map of the most recently rendered frame, used to
     /// materialize frame-selection copies from the visible rows.
     frame_map: FrameTextMap,
@@ -61,21 +62,29 @@ fn prompt_content_col(chrome_col: usize) -> usize {
     chrome_col.saturating_sub(1 + 3)
 }
 
-/// Which chrome widget owns the current pointer gesture.
+/// Which region owns the current pointer gesture. The owner is fixed at the
+/// left-button press and never re-evaluated, so a drag crossing out of its
+/// region still routes back to it; the release ends and clears the gesture
+/// wherever the pointer lands.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum WidgetRegion {
-    Prompt,
+enum GestureOwner {
+    Transcript,
+    Prompt(PromptGesture),
+    Frame,
 }
 
 /// Press anchor of a prompt mouse gesture; the selection endpoints are only
 /// created once movement past the threshold confirms a drag.
-#[derive(Debug, Clone, Copy)]
-struct WidgetGesture {
-    region: WidgetRegion,
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct PromptGesture {
+    /// Screen row of the press, for the click/drag movement threshold even
+    /// after the pointer leaves the prompt rows.
     press_row: usize,
+    /// Screen column (minus the gutter) of the press.
     press_col: usize,
-    /// Char index of the press inside the prompt (Prompt gestures only).
-    anchor_char: Option<usize>,
+    /// Char index of the press inside the prompt.
+    anchor_char: usize,
+    /// Threshold crossed: the gesture is a drag, not a click.
     dragging: bool,
 }
 
@@ -92,7 +101,7 @@ impl NeoTui {
             last_frame_size: None,
             pending_copy: None,
             clipboard_notice_until: None,
-            widget_gesture: None,
+            active_gesture: None,
             frame_map: FrameTextMap::default(),
             frame_selection: FrameSelection::new(),
         }
@@ -124,7 +133,7 @@ impl NeoTui {
             last_frame_size: None,
             pending_copy: None,
             clipboard_notice_until: None,
-            widget_gesture: None,
+            active_gesture: None,
             frame_map: FrameTextMap::default(),
             frame_selection: FrameSelection::new(),
         }
@@ -379,12 +388,15 @@ impl NeoTui {
         }
     }
 
-    /// Route one screen-space mouse event by region: the transcript body
-    /// (rows above the chrome), the prompt input box, or the frame surface
-    /// (todo panel, footer, rich dialogs, full-screen overlays). Column
-    /// coordinates are the screen column minus the gutter. Wheel events and
-    /// Shift-modified drags are not consumed here; the runtime routes wheels
-    /// and the terminal emulator owns Shift selection.
+    /// Route one screen-space mouse event by gesture owner. The left-button
+    /// press picks the owner from the row it lands on (transcript body,
+    /// prompt box, or frame surface); every drag and the release of that
+    /// gesture keep routing to the same owner, so a drag that crosses out of
+    /// its region — the transcript body into the chrome rows, or the prompt
+    /// box into the footer — still drives the region that started it.
+    /// Column coordinates are the screen column minus the gutter. Wheel
+    /// events and Shift-modified drags are not consumed here; the runtime
+    /// routes wheels and the terminal emulator owns Shift selection.
     pub fn handle_mouse_event(&mut self, event: MouseEvent) {
         if !event.is_selection_event() || event.is_shift_modified() {
             return;
@@ -392,34 +404,50 @@ impl NeoTui {
         let row = usize::from(event.row);
         let col = usize::from(event.column).saturating_sub(CHROME_GUTTER);
 
-        // A release always ends an in-progress gesture, wherever the pointer
-        // lands (a drag may cross out of the widget's rows). Frame releases
-        // are no-ops outside an open frame gesture, so a standing selection
-        // survives unrelated releases.
-        if event.kind == crate::transcript::MouseKind::Release {
-            self.finish_widget_gesture();
-            self.frame_selection.release(&self.frame_map);
-        }
-
+        // Before the first frame there is no layout to route against:
+        // selection events are ignored instead of guessed at a region.
         let Some(layout) = self.last_layout.clone() else {
-            // No frame rendered yet: preserve the historical behavior of
-            // routing everything to the transcript body.
-            self.transcript.handle_mouse_event(event, row, col);
-            if event.kind == crate::transcript::MouseKind::Press
-                && event.button == crossterm::event::MouseButton::Right
-            {
-                self.pending_copy = self.transcript.copy_selected_transcript_text();
-            }
             return;
         };
+
+        match event.kind {
+            crate::transcript::MouseKind::Press
+                if event.button == crossterm::event::MouseButton::Left =>
+            {
+                self.begin_gesture(event, &layout, row, col);
+            }
+            crate::transcript::MouseKind::Press
+                if event.button == crossterm::event::MouseButton::Right =>
+            {
+                self.right_click_press(&layout, row);
+            }
+            crate::transcript::MouseKind::Drag
+                if event.button == crossterm::event::MouseButton::Left =>
+            {
+                // A drag is forwarded only to the gesture's owner, never
+                // re-routed by the row the pointer currently crosses.
+                if let Some(owner) = self.active_gesture {
+                    self.forward_drag(event, &layout, row, col, owner);
+                }
+            }
+            crate::transcript::MouseKind::Release => {
+                // The release ends the gesture wherever the pointer lands;
+                // releases outside an open gesture are inert.
+                if let Some(owner) = self.active_gesture.take() {
+                    self.finish_gesture(event, owner);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    /// Left-button press: pick the gesture owner from the row under the
+    /// pointer and clear the other regions' selections before the press.
+    fn begin_gesture(&mut self, event: MouseEvent, layout: &FrameLayout, row: usize, col: usize) {
         if row < layout.body_rows {
             self.clear_widget_selections();
             self.transcript.handle_mouse_event(event, row, col);
-            if event.kind == crate::transcript::MouseKind::Press
-                && event.button == crossterm::event::MouseButton::Right
-            {
-                self.pending_copy = self.transcript.copy_selected_transcript_text();
-            }
+            self.active_gesture = Some(GestureOwner::Transcript);
             return;
         }
         let chrome_row = row.saturating_sub(layout.body_rows);
@@ -428,10 +456,173 @@ impl NeoTui {
         };
         match kind {
             ChromeRowKind::Prompt => {
-                self.handle_prompt_mouse_event(event, &layout, chrome_row, col);
+                let Some(row_in_prompt) = layout.region_row(ChromeRowKind::Prompt, chrome_row)
+                else {
+                    return;
+                };
+                let body_width = prompt_body_width(frame_content_width(layout.width));
+                self.transcript.clear_transcript_selection();
+                self.frame_selection.clear();
+                let char_pos = self.chrome.prompt().char_index_at_content_position(
+                    row_in_prompt,
+                    prompt_content_col(col),
+                    body_width,
+                );
+                self.chrome
+                    .prompt_mut()
+                    .move_cursor_to(char_pos, body_width);
+                self.active_gesture = Some(GestureOwner::Prompt(PromptGesture {
+                    press_row: row,
+                    press_col: col,
+                    anchor_char: char_pos,
+                    dragging: false,
+                }));
             }
             ChromeRowKind::Other => {
-                self.handle_frame_mouse_event(event, &layout, chrome_row);
+                self.transcript.clear_transcript_selection();
+                self.chrome.prompt_mut().clear_selection();
+                // Frame-selection endpoints are full-line display cells (the
+                // frame map is recorded after the gutter): the raw screen
+                // row and column.
+                self.frame_selection
+                    .press(row, usize::from(event.column), Instant::now());
+                self.active_gesture = Some(GestureOwner::Frame);
+            }
+        }
+    }
+
+    /// Left-button drag: forward to the gesture owner. The transcript keeps
+    /// the real screen row — crossing the body bottom into the chrome rows
+    /// drives its down auto-scroll — and the prompt clamps its endpoint to
+    /// the visible character boundaries once the pointer leaves the prompt
+    /// rows.
+    fn forward_drag(
+        &mut self,
+        event: MouseEvent,
+        layout: &FrameLayout,
+        row: usize,
+        col: usize,
+        owner: GestureOwner,
+    ) {
+        match owner {
+            GestureOwner::Transcript => {
+                self.transcript.handle_mouse_event(event, row, col);
+            }
+            GestureOwner::Prompt(mut gesture) => {
+                let crossing = gesture.dragging
+                    || row.abs_diff(gesture.press_row) > usize::from(MOVEMENT_THRESHOLD)
+                    || col.abs_diff(gesture.press_col) > usize::from(MOVEMENT_THRESHOLD);
+                if !crossing {
+                    return;
+                }
+                gesture.dragging = true;
+                if let Some(active) = &mut self.active_gesture {
+                    *active = GestureOwner::Prompt(gesture);
+                }
+                let body_width = prompt_body_width(frame_content_width(layout.width));
+                let chrome_row = row.saturating_sub(layout.body_rows);
+                let prompt_rows = layout
+                    .row_kinds
+                    .iter()
+                    .filter(|kind| **kind == ChromeRowKind::Prompt)
+                    .count();
+                let char_pos = match layout
+                    .row_kinds
+                    .iter()
+                    .position(|kind| *kind == ChromeRowKind::Prompt)
+                {
+                    Some(prompt_start) if chrome_row >= prompt_start => {
+                        let row_in_prompt = chrome_row - prompt_start;
+                        if row_in_prompt < prompt_rows {
+                            // Inside the box: the pointer row and column map
+                            // to the text.
+                            self.chrome.prompt().char_index_at_content_position(
+                                row_in_prompt,
+                                prompt_content_col(col),
+                                body_width,
+                            )
+                        } else {
+                            // Below the box: clamp the endpoint to the last
+                            // visible character (the end of the last rendered
+                            // prompt row), never into the text hidden behind
+                            // the scroll window.
+                            self.chrome.prompt().char_index_at_content_position(
+                                prompt_rows - 1,
+                                body_width,
+                                body_width,
+                            )
+                        }
+                    }
+                    Some(_) => {
+                        // Above the box: clamp the endpoint to the first
+                        // visible character.
+                        self.chrome
+                            .prompt()
+                            .char_index_at_content_position(0, 0, body_width)
+                    }
+                    None => self.chrome.prompt().char_len(),
+                };
+                let prompt = self.chrome.prompt_mut();
+                prompt.begin_drag_selection(gesture.anchor_char);
+                prompt.extend_drag_selection(char_pos);
+            }
+            GestureOwner::Frame => {
+                self.frame_selection.drag(row, usize::from(event.column));
+            }
+        }
+    }
+
+    /// Release: end the gesture in its owner. A prompt click that never
+    /// confirmed a drag collapses the selection (a click only places the
+    /// caret); confirmed drags keep their selection for copy.
+    fn finish_gesture(&mut self, event: MouseEvent, owner: GestureOwner) {
+        match owner {
+            GestureOwner::Transcript => {
+                self.transcript.handle_mouse_event(event, 0, 0);
+            }
+            GestureOwner::Prompt(gesture) => {
+                if !gesture.dragging {
+                    self.chrome.prompt_mut().clear_selection();
+                }
+            }
+            GestureOwner::Frame => {
+                self.frame_selection.release(&self.frame_map);
+            }
+        }
+    }
+
+    /// Right-button press: copy by the row under the pointer, independent of
+    /// any in-progress left gesture (transcript, prompt, or frame copy).
+    fn right_click_press(&mut self, layout: &FrameLayout, row: usize) {
+        if row < layout.body_rows {
+            self.clear_widget_selections();
+            self.pending_copy = self.transcript.copy_selected_transcript_text();
+            return;
+        }
+        let chrome_row = row.saturating_sub(layout.body_rows);
+        let Some(&kind) = layout.row_kinds.get(chrome_row) else {
+            return;
+        };
+        match kind {
+            ChromeRowKind::Prompt => {
+                self.pending_copy = self
+                    .chrome
+                    .prompt()
+                    .selection_text()
+                    .or_else(|| self.chrome.prompt().copy_text());
+                // Mirror the transcript: right-click copy also collapses the
+                // selection.
+                self.chrome.prompt_mut().clear_selection();
+            }
+            ChromeRowKind::Other => {
+                // Validate before materializing so a selection whose visual
+                // state changed since the last frame is never copied with
+                // text that differs from its highlight.
+                self.frame_selection.validate_against(&self.frame_map);
+                self.pending_copy = self.frame_map.materialize(&self.frame_selection);
+                // Mirror the prompt: right-click copy also collapses the
+                // selection (the transcript keeps its highlight instead).
+                self.frame_selection.clear();
             }
         }
     }
@@ -472,155 +663,6 @@ impl NeoTui {
     fn clear_widget_selections(&mut self) {
         self.chrome.prompt_mut().clear_selection();
         self.frame_selection.clear();
-    }
-
-    fn handle_prompt_mouse_event(
-        &mut self,
-        event: MouseEvent,
-        layout: &FrameLayout,
-        chrome_row: usize,
-        col: usize,
-    ) {
-        match event.kind {
-            crate::transcript::MouseKind::Press
-                if event.button == crossterm::event::MouseButton::Left =>
-            {
-                let Some(row_in_prompt) = layout.region_row(ChromeRowKind::Prompt, chrome_row)
-                else {
-                    return;
-                };
-                let body_width = prompt_body_width(frame_content_width(layout.width));
-                self.transcript.clear_transcript_selection();
-                self.frame_selection.clear();
-                let char_pos = self.chrome.prompt().char_index_at_content_position(
-                    row_in_prompt,
-                    prompt_content_col(col),
-                    body_width,
-                );
-                self.chrome
-                    .prompt_mut()
-                    .move_cursor_to(char_pos, body_width);
-                self.widget_gesture = Some(WidgetGesture {
-                    region: WidgetRegion::Prompt,
-                    press_row: row_in_prompt,
-                    press_col: col,
-                    anchor_char: Some(char_pos),
-                    dragging: false,
-                });
-            }
-            crate::transcript::MouseKind::Press
-                if event.button == crossterm::event::MouseButton::Right =>
-            {
-                self.pending_copy = self
-                    .chrome
-                    .prompt()
-                    .selection_text()
-                    .or_else(|| self.chrome.prompt().copy_text());
-                // Mirror the transcript: right-click copy also collapses the
-                // selection.
-                self.chrome.prompt_mut().clear_selection();
-            }
-            crate::transcript::MouseKind::Drag
-                if event.button == crossterm::event::MouseButton::Left =>
-            {
-                let Some(row_in_prompt) = layout.region_row(ChromeRowKind::Prompt, chrome_row)
-                else {
-                    return;
-                };
-                let crossing = {
-                    let Some(gesture) = &self.widget_gesture else {
-                        return;
-                    };
-                    if !matches!(gesture.region, WidgetRegion::Prompt) {
-                        return;
-                    }
-                    gesture.dragging
-                        || row_in_prompt.abs_diff(gesture.press_row)
-                            > usize::from(MOVEMENT_THRESHOLD)
-                        || col.abs_diff(gesture.press_col) > usize::from(MOVEMENT_THRESHOLD)
-                };
-                if !crossing {
-                    return;
-                }
-                if let Some(gesture) = &mut self.widget_gesture {
-                    gesture.dragging = true;
-                }
-                let body_width = prompt_body_width(frame_content_width(layout.width));
-                let char_pos = self.chrome.prompt().char_index_at_content_position(
-                    row_in_prompt,
-                    prompt_content_col(col),
-                    body_width,
-                );
-                let anchor_char = self
-                    .widget_gesture
-                    .as_ref()
-                    .and_then(|gesture| gesture.anchor_char);
-                let prompt = self.chrome.prompt_mut();
-                if let Some(anchor) = anchor_char {
-                    prompt.begin_drag_selection(anchor);
-                    prompt.extend_drag_selection(char_pos);
-                }
-            }
-            _ => {}
-        }
-    }
-
-    /// Route one selection event on a frame row (todo panel, footer, rich
-    /// dialog, full-screen overlay) to the frame selection gesture. Frame
-    /// releases are handled before region routing so a drag crossing out of
-    /// the frame rows still ends cleanly.
-    fn handle_frame_mouse_event(
-        &mut self,
-        event: MouseEvent,
-        layout: &FrameLayout,
-        chrome_row: usize,
-    ) {
-        // Frame-selection endpoints are full-line display cells (the frame
-        // map is recorded after the gutter), i.e. the raw screen column.
-        let row = layout.body_rows + chrome_row;
-        let cell = usize::from(event.column);
-        match event.kind {
-            crate::transcript::MouseKind::Press
-                if event.button == crossterm::event::MouseButton::Left =>
-            {
-                self.transcript.clear_transcript_selection();
-                self.chrome.prompt_mut().clear_selection();
-                self.frame_selection.press(row, cell, Instant::now());
-            }
-            crate::transcript::MouseKind::Press
-                if event.button == crossterm::event::MouseButton::Right =>
-            {
-                // Validate before materializing so a selection whose visual
-                // state changed since the last frame is never copied with
-                // text that differs from its highlight.
-                self.frame_selection.validate_against(&self.frame_map);
-                self.pending_copy = self.frame_map.materialize(&self.frame_selection);
-                // Mirror the prompt: right-click copy also collapses the
-                // selection (the transcript keeps its highlight instead).
-                self.frame_selection.clear();
-            }
-            crate::transcript::MouseKind::Drag
-                if event.button == crossterm::event::MouseButton::Left =>
-            {
-                self.frame_selection.drag(row, cell);
-            }
-            _ => {}
-        }
-    }
-
-    fn finish_widget_gesture(&mut self) {
-        let Some(gesture) = self.widget_gesture.take() else {
-            return;
-        };
-        match gesture.region {
-            WidgetRegion::Prompt => {
-                // A click places the caret and keeps no selection; a drag
-                // leaves the selected range materialized for copy.
-                if !gesture.dragging {
-                    self.chrome.prompt_mut().clear_selection();
-                }
-            }
-        }
     }
 
     pub fn render(&mut self, width: usize, height: usize) -> Vec<String> {

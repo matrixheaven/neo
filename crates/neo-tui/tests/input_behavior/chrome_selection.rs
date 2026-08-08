@@ -14,7 +14,8 @@ use neo_tui::primitive::{TuiTheme, bg_to_ansi, strip_ansi};
 use neo_tui::shell::{NeoChromeState, OverlayKind};
 use neo_tui::tasks_browser::TaskBrowserState;
 use neo_tui::transcript::{
-    LONG_PRESS_DELAY, MouseEvent, MouseKind, TranscriptPane, slice_text_by_cells,
+    LONG_PRESS_DELAY, MouseEvent, MouseKind, TranscriptPane, frame_content_width,
+    prompt_body_width, slice_text_by_cells,
 };
 use neo_tui::widgets::todo_panel::{TodoDisplayItem, TodoDisplayStatus};
 use std::time::{Duration, Instant};
@@ -493,4 +494,143 @@ fn masked_overlay_selection_exposes_only_rendered_mask() {
         !copied.contains("sk-supersecret"),
         "the raw secret must never be copied"
     );
+}
+
+#[test]
+fn prompt_gesture_releases_outside_prompt_without_switching_owner() {
+    let mut tui = new_tui();
+    tui.chrome_mut().prompt_mut().set_text("hello world");
+    tui.transcript_mut().push_status("alpha");
+    let now = Instant::now();
+    let frame = tui.render_terminal_frame_at(80, 24, now).lines;
+    let (prompt_row, hello_col) = locate(&frame, "hello");
+    assert!(prompt_row > 0, "the status body sits above the prompt box");
+    let footer_row = frame.len() - 1;
+    assert!(footer_row > prompt_row, "the footer sits below the prompt");
+
+    // Press inside the prompt and drag down past the box into the footer:
+    // the endpoint clamps to the last visible character, the owner never
+    // switches to the frame surface, and the release closes the gesture.
+    tui.handle_mouse_event(mouse(MouseKind::Press, cell(hello_col), cell(prompt_row)));
+    tui.handle_mouse_event(mouse(
+        MouseKind::Drag,
+        cell(hello_col + 5),
+        cell(footer_row),
+    ));
+    tui.handle_mouse_event(mouse(
+        MouseKind::Release,
+        cell(hello_col + 5),
+        cell(footer_row),
+    ));
+    assert_eq!(
+        tui.chrome().prompt().selection_text().as_deref(),
+        Some("hello world"),
+        "the endpoint clamps to the last visible character below the prompt"
+    );
+    assert!(
+        !tui.transcript().has_transcript_selection(),
+        "the crossing drag must not activate the transcript owner"
+    );
+    assert!(
+        tui.frame_selection_text().is_none(),
+        "the crossing drag must not activate the frame owner"
+    );
+
+    // The gesture is closed: hover motion after the release never extends.
+    tui.handle_mouse_event(mouse(
+        MouseKind::Drag,
+        cell(hello_col + 8),
+        cell(footer_row),
+    ));
+    assert_eq!(
+        tui.chrome().prompt().selection_text().as_deref(),
+        Some("hello world"),
+        "motion after release must not extend the prompt selection"
+    );
+
+    // Press at the end of the text and drag up into the transcript body:
+    // the endpoint clamps to the first visible character.
+    tui.handle_mouse_event(mouse(
+        MouseKind::Press,
+        cell(hello_col + 11),
+        cell(prompt_row),
+    ));
+    tui.handle_mouse_event(mouse(MouseKind::Drag, cell(3), cell(0)));
+    tui.handle_mouse_event(mouse(MouseKind::Release, cell(3), cell(0)));
+    assert_eq!(
+        tui.chrome().prompt().selection_text().as_deref(),
+        Some("hello world"),
+        "the endpoint clamps to the first visible character above the prompt"
+    );
+}
+
+#[test]
+fn prompt_drag_below_scrolled_box_clamps_to_last_visible_row() {
+    // A scrolled multi-line prompt: dragging below the box must clamp the
+    // endpoint to the last visible character, never into the text hidden
+    // behind the scroll window.
+    let mut tui = new_tui();
+    let text = (0..30)
+        .map(|index| format!("row-{index:02}"))
+        .collect::<Vec<_>>()
+        .join("\n");
+    let body_width = prompt_body_width(frame_content_width(80));
+    tui.chrome_mut().prompt_mut().set_text(&text);
+    // Move the caret to line 15: the scroll window shows lines 8..15.
+    tui.chrome_mut()
+        .prompt_mut()
+        .move_cursor_to(15 * 7, body_width);
+    let now = Instant::now();
+    let frame = tui.render_terminal_frame_at(80, 24, now).lines;
+    let (prompt_row, row_col) = locate(&frame, "row-08");
+    let footer_row = frame.len() - 1;
+    assert!(footer_row > prompt_row, "the footer sits below the prompt");
+
+    // Press on the first visible line and drag down past the box: the
+    // selection covers exactly the visible window.
+    tui.handle_mouse_event(mouse(MouseKind::Press, cell(row_col), cell(prompt_row)));
+    tui.handle_mouse_event(mouse(MouseKind::Drag, cell(10), cell(footer_row)));
+    tui.handle_mouse_event(mouse(MouseKind::Release, cell(10), cell(footer_row)));
+    assert_eq!(
+        tui.chrome().prompt().selection_text().as_deref(),
+        Some("row-08\nrow-09\nrow-10\nrow-11\nrow-12\nrow-13\nrow-14\nrow-15"),
+        "the endpoint clamps to the last visible row, not the text end"
+    );
+}
+
+#[test]
+fn selection_before_first_frame_is_ignored() {
+    let mut tui = new_tui();
+    tui.chrome_mut().prompt_mut().set_text("type here");
+    tui.transcript_mut().push_status("alpha");
+    let cursor_before = tui.chrome().prompt().cursor;
+    // No frame was ever rendered, so there is no layout to route against:
+    // selection events must be ignored rather than guessed at a region, and
+    // no owner may open or select anything.
+    tui.handle_mouse_event(mouse(MouseKind::Press, 1, 0));
+    tui.handle_mouse_event(mouse(MouseKind::Drag, 10, 4));
+    tui.handle_mouse_event(mouse(MouseKind::Release, 10, 4));
+    tui.handle_mouse_event(mouse(MouseKind::Press, 3, cell(5)));
+    tui.handle_mouse_event(mouse(MouseKind::Release, 3, cell(5)));
+    tui.handle_mouse_event(right_mouse(MouseKind::Press, 10, cell(5)));
+    assert!(
+        !tui.has_any_selection(),
+        "pre-frame selection events must not select anything"
+    );
+    assert!(
+        !tui.transcript().has_transcript_selection(),
+        "pre-frame events must not open a transcript selection"
+    );
+    assert_eq!(tui.frame_selection_text(), None);
+    assert_eq!(
+        tui.take_pending_copy(),
+        None,
+        "pre-frame right-click must not copy any region"
+    );
+    assert_eq!(
+        tui.chrome().prompt().cursor,
+        cursor_before,
+        "no caret move without a rendered frame"
+    );
+    assert_eq!(tui.chrome().prompt().selection_range(), None);
 }

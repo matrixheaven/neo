@@ -11,6 +11,7 @@ use neo_tui::primitive::{TuiTheme, strip_ansi, visible_width};
 use neo_tui::screen_output::TerminalFrame;
 use neo_tui::shell::NeoChromeState;
 use neo_tui::transcript::{MouseEvent, MouseKind, TranscriptPane};
+use neo_tui::widgets::todo_panel::{TodoDisplayItem, TodoDisplayStatus};
 use std::time::Instant;
 
 fn pane_with_status_rows(count: usize) -> TranscriptPane {
@@ -28,6 +29,9 @@ fn mouse(kind: MouseKind, column: u16, row: u16) -> MouseEvent {
         row,
         modifiers: KeyModifiers::NONE,
     }
+}
+fn cell(value: usize) -> u16 {
+    u16::try_from(value).expect("fits u16")
 }
 fn selection_bg_ranges(line: &str) -> Vec<(usize, usize)> {
     const SELECTION_BG: &str = "\x1b[100m"; // TuiTheme::default().selection_bg
@@ -521,5 +525,87 @@ fn active_selection_does_not_reduce_visible_body_height() {
         last_visible_line_row(&selected),
         last_visible_line_row(&cleared),
         "clearing the selection must not reduce the body height"
+    );
+}
+
+#[test]
+fn transcript_gesture_crosses_chrome_autoscrolls_down_and_releases() {
+    // A real NeoTui route: the press lands in the transcript body, the drag
+    // crosses the body bottom into the chrome rows, and the pane's down
+    // auto-scroll (body_row >= body_height) engages through the rendered
+    // frames; the release still lands on the transcript owner and closes the
+    // gesture.
+    let mut tui = NeoTui::new(
+        NeoChromeState::new("neo", "s1", "m1", "/tmp/ws"),
+        TranscriptPane::new(80, 24),
+    );
+    tui.transcript_mut().push_status(
+        (0..30)
+            .map(|index| format!("line-{index:02}"))
+            .collect::<Vec<_>>()
+            .join("\n"),
+    );
+    tui.chrome_mut().set_todo_items(vec![
+        TodoDisplayItem::new("first item", TodoDisplayStatus::Pending),
+        TodoDisplayItem::new("second item", TodoDisplayStatus::Done),
+    ]);
+    let now = Instant::now();
+    let frame = tui.render_terminal_frame_at(80, 24, now).lines;
+    let body_bottom = frame
+        .iter()
+        .rposition(|line| strip_ansi(line).contains("line-"))
+        .expect("the tall card fills the visible body");
+    assert!(
+        body_bottom + 1 < frame.len(),
+        "todo and prompt chrome rows must follow the body"
+    );
+
+    // Lock the view above the tail so the crossing drag has document rows to
+    // reveal below the fold.
+    tui.transcript_mut().scroll_transcript_up(12);
+    let scrolled = tui.render_terminal_frame_at(80, 24, now).lines;
+    let first_visible = scrolled
+        .iter()
+        .find_map(|line| {
+            strip_ansi(line).split_whitespace().find_map(|word| {
+                word.strip_prefix("line-")
+                    .and_then(|number| number.parse::<usize>().ok())
+            })
+        })
+        .expect("the scrolled card is visible");
+
+    // Press on a body row, drag down past the body bottom into the chrome
+    // rows (the terminal bottom row), and hold while rendered frames drive
+    // the down auto-scroll; release over the chrome rows.
+    let bottom_row = frame.len() - 1;
+    tui.handle_mouse_event(mouse(MouseKind::Press, 1, 0));
+    tui.handle_mouse_event(mouse(MouseKind::Drag, 10, cell(bottom_row)));
+    for _ in 0..20 {
+        let _ = tui.render_terminal_frame_at(80, 24, now);
+    }
+    tui.handle_mouse_event(mouse(MouseKind::Release, 10, cell(bottom_row)));
+
+    let materialized = tui
+        .transcript_mut()
+        .copy_selected_transcript_text()
+        .expect("the crossing drag materializes");
+    assert!(
+        materialized.contains(&format!("line-{first_visible:02}")),
+        "the selection anchors at the press row: {materialized:?}"
+    );
+    assert!(
+        materialized.contains("line-29"),
+        "the crossing drag auto-scrolled to the document end: {materialized:?}"
+    );
+
+    // The gesture is closed: hover motion after the release never extends
+    // the materialized text.
+    tui.handle_mouse_event(mouse(MouseKind::Drag, 20, cell(bottom_row)));
+    assert_eq!(
+        tui.transcript_mut()
+            .copy_selected_transcript_text()
+            .as_deref(),
+        Some(materialized.as_str()),
+        "motion after release must not extend the selection"
     );
 }
