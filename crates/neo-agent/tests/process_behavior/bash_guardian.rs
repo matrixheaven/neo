@@ -351,7 +351,7 @@ async fn background_output_is_persisted_by_guardian_in_agent_task_log() {
         "the guardian must open the artifact before the start result returns"
     );
 
-    for _ in 0..100 {
+    for _ in 0..500 {
         if ctx
             .background_tasks
             .snapshot(&task_id)
