@@ -860,4 +860,5 @@ fn rebuild_transcript_from_session_restores_footer_token_usage() {
     assert!(footer.contains("↑33.9k"));
     assert!(footer.contains("↓2.8k"));
     assert!(footer.contains("cache 169.2k read"));
+    assert!(footer.contains("hit 100%"));
 }

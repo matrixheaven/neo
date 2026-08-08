@@ -121,6 +121,13 @@ impl MainAgentTokenUsage {
         {
             parts.push(cache);
         }
+        if let Some(hit_rate) = format_cache_hit_rate(
+            self.input_tokens,
+            self.input_cache_read_tokens,
+            self.input_cache_write_tokens,
+        ) {
+            parts.push(hit_rate);
+        }
         Some(parts.join(" · "))
     }
 }
@@ -137,6 +144,16 @@ fn format_cache_usage(read: u64, write: u64) -> Option<String> {
             format_usage_token_count(write)
         )),
     }
+}
+
+#[must_use]
+fn format_cache_hit_rate(input: u64, read: u64, write: u64) -> Option<String> {
+    let denominator = input.max(read.saturating_add(write));
+    if denominator == 0 || read == 0 {
+        return None;
+    }
+    let percent = read.saturating_mul(100) / denominator;
+    Some(format!("hit {percent}%"))
 }
 
 #[must_use]
@@ -173,5 +190,15 @@ mod tests {
             format_cache_usage(16_435_200, 0),
             Some("cache 16.4M read".to_owned())
         );
+    }
+
+    #[test]
+    fn format_cache_hit_rate_uses_effective_input_as_denominator() {
+        assert_eq!(
+            format_cache_hit_rate(4_200_000, 4_100_000, 0),
+            Some("hit 97%".to_owned())
+        );
+        assert_eq!(format_cache_hit_rate(10, 8, 2), Some("hit 80%".to_owned()));
+        assert_eq!(format_cache_hit_rate(10, 0, 0), None);
     }
 }
