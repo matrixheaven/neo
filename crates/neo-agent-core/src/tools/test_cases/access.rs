@@ -157,6 +157,71 @@ async fn read_tool_rejects_sensitive_files() {
 }
 
 #[tokio::test]
+async fn read_tool_transcodes_utf16_text() {
+    use super::{ReadTool, Tool};
+
+    let temp = tempfile::tempdir().expect("tempdir");
+    let workspace = temp.path().join("workspace");
+    std::fs::create_dir_all(&workspace).expect("workspace dir");
+
+    let text = "first line\r\n第二行\r\n";
+    let mut utf16_le_bom = vec![0xff, 0xfe];
+    let mut utf16_le = Vec::new();
+    let mut utf16_be_bom = vec![0xfe, 0xff];
+    for unit in text.encode_utf16() {
+        utf16_le_bom.extend_from_slice(&unit.to_le_bytes());
+        utf16_le.extend_from_slice(&unit.to_le_bytes());
+        utf16_be_bom.extend_from_slice(&unit.to_be_bytes());
+    }
+
+    let ctx = crate::ToolContext::new(&workspace)
+        .expect("tool context")
+        .with_access(crate::ToolAccess {
+            file_read: true,
+            file_write: false,
+            shell: false,
+            tool: false,
+            user_question: false,
+        });
+    let tool = ReadTool;
+
+    for (name, bytes) in [
+        ("utf16le-bom.txt", utf16_le_bom),
+        ("utf16le.txt", utf16_le),
+        ("utf16be-bom.txt", utf16_be_bom),
+    ] {
+        std::fs::write(workspace.join(name), bytes).expect("write UTF-16 text");
+        let result = tool
+            .execute(&ctx, json!({ "path": name }))
+            .await
+            .expect("execute");
+
+        assert!(
+            !result.is_error,
+            "unexpected read error: {}",
+            result.content
+        );
+        assert!(
+            result.content.contains("1\tfirst line"),
+            "{}",
+            result.content
+        );
+        assert!(result.content.contains("2\t第二行"), "{}", result.content);
+
+        let tail = tool
+            .execute(
+                &ctx,
+                json!({ "path": name, "line_offset": -1, "n_lines": 1 }),
+            )
+            .await
+            .expect("read tail");
+        assert!(!tail.is_error, "unexpected tail error: {}", tail.content);
+        assert!(tail.content.contains("2\t第二行"), "{}", tail.content);
+        assert!(!tail.content.contains("1\tfirst line"), "{}", tail.content);
+    }
+}
+
+#[tokio::test]
 async fn read_tool_rejects_nul_bytes() {
     use super::{ReadTool, Tool};
     use serde_json::json;
@@ -183,7 +248,7 @@ async fn read_tool_rejects_nul_bytes() {
     let input = json!({"path": "blob.bin"});
     let result = tool.execute(&ctx, input).await.expect("execute");
     assert!(result.is_error);
-    assert!(result.content.contains("not readable as UTF-8 text"));
+    assert!(result.content.contains("not readable as text"));
 }
 
 #[tokio::test]

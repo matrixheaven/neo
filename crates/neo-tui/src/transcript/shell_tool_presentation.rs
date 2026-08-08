@@ -72,9 +72,10 @@ pub(super) fn render_body(
     width: usize,
     theme: &TuiTheme,
     workspace_dir: Option<&Path>,
+    include_result: bool,
 ) -> Option<Vec<Line>> {
     match state.name.as_str() {
-        "Bash" => render_bash_body(state, expanded, width, theme, workspace_dir),
+        "Bash" => render_bash_body(state, expanded, width, theme, workspace_dir, include_result),
         "Terminal" => render_terminal_body(state, expanded, width, theme, workspace_dir),
         _ => None,
     }
@@ -86,6 +87,7 @@ fn render_bash_body(
     width: usize,
     theme: &TuiTheme,
     workspace_dir: Option<&Path>,
+    include_result: bool,
 ) -> Option<Vec<Line>> {
     let arguments = Arguments::new(state.arguments.as_deref());
     let command = arguments.string("command")?;
@@ -99,7 +101,9 @@ fn render_bash_body(
 
     if is_backgrounded(state) {
         rows.push(background_summary(state, &arguments, width, theme));
-    } else if let Some(result) = state.result.as_deref().filter(|result| !result.is_empty()) {
+    } else if include_result
+        && let Some(result) = state.result.as_deref().filter(|result| !result.is_empty())
+    {
         rows.extend(render_text_preview_themed(result, expanded, width, theme));
     }
     (!rows.is_empty()).then_some(rows)
@@ -561,7 +565,7 @@ mod tests {
             status: crate::shell::ToolStatusKind::Running,
             exit_code: None,
         };
-        let terminal_rows = render_body(&terminal_write, false, 100, &theme, None).unwrap();
+        let terminal_rows = render_body(&terminal_write, false, 100, &theme, None, true).unwrap();
         let terminal_text = terminal_rows.iter().map(Line::text).collect::<String>();
         assert!(terminal_text.contains(r"alpha\n世界 literal \\x03:\x03beta\x1b\x7f"));
         assert!(
@@ -620,7 +624,7 @@ mod tests {
             (successful_write, r"literal \\x03"),
             (successful_resize, "size 80 × 24"),
         ] {
-            let text = render_body(&state, false, 100, &theme, None)
+            let text = render_body(&state, false, 100, &theme, None, true)
                 .unwrap()
                 .iter()
                 .map(Line::text)
@@ -634,7 +638,7 @@ mod tests {
         let mut failed_write = terminal_write.clone();
         failed_write.status = ToolStatusKind::Failed;
         failed_write.result = Some("terminal write failed: unknown handle".to_owned());
-        let failed_write_rows = render_body(&failed_write, false, 100, &theme, None).unwrap();
+        let failed_write_rows = render_body(&failed_write, false, 100, &theme, None, true).unwrap();
         let failed_write_text = failed_write_rows.iter().map(Line::text).collect::<String>();
         assert!(failed_write_text.contains(r"literal \\x03:\x03beta"));
         assert!(failed_write_text.contains("terminal write failed: unknown handle"));
@@ -645,7 +649,7 @@ mod tests {
             "status": "parent_exited",
             "output": ""
         }));
-        let parent_exited_text = render_body(&parent_exited_write, false, 100, &theme, None)
+        let parent_exited_text = render_body(&parent_exited_write, false, 100, &theme, None, true)
             .unwrap()
             .iter()
             .map(Line::text)
@@ -662,7 +666,7 @@ mod tests {
                 status: crate::shell::ToolStatusKind::Succeeded,
                 exit_code: None,
             };
-            let text = render_body(&state, false, 100, &theme, None)
+            let text = render_body(&state, false, 100, &theme, None, true)
                 .unwrap()
                 .iter()
                 .map(Line::text)
@@ -686,7 +690,7 @@ mod tests {
             status: crate::shell::ToolStatusKind::Running,
             exit_code: None,
         };
-        let request_rows = render_body(&bash_background, false, 100, &theme, None).unwrap();
+        let request_rows = render_body(&bash_background, false, 100, &theme, None, true).unwrap();
         let request_text = request_rows.iter().map(Line::text).collect::<String>();
         assert!(!request_text.contains("background"));
         assert_eq!(header_metadata(&bash_background, &theme), Some(Vec::new()));
@@ -697,7 +701,8 @@ mod tests {
             "outcome": "backgrounded",
             "task_id": "bash-1"
         }));
-        let background_rows = render_body(&confirmed_background, false, 100, &theme, None).unwrap();
+        let background_rows =
+            render_body(&confirmed_background, false, 100, &theme, None, true).unwrap();
         let background_text = background_rows.iter().map(Line::text).collect::<String>();
         assert!(background_text.contains("task bash-1 · run focused tests"));
         assert_eq!(
@@ -714,7 +719,7 @@ mod tests {
         failed_background.result = Some("background launch failed".to_owned());
         failed_background.details = Some(serde_json::json!({"outcome": "failed"}));
         let failed_background_rows =
-            render_body(&failed_background, false, 100, &theme, None).unwrap();
+            render_body(&failed_background, false, 100, &theme, None, true).unwrap();
         let failed_background_text = failed_background_rows
             .iter()
             .map(Line::text)

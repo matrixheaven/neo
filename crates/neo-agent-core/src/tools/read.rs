@@ -1,6 +1,8 @@
+use std::io::SeekFrom;
+
 use schemars::JsonSchema;
 use serde::Deserialize;
-use tokio::io::{AsyncBufReadExt, BufReader};
+use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncSeekExt, BufReader};
 
 use super::{SnipHint, Tool, ToolContext, ToolError, ToolFuture, ToolResult, parse_input, schema};
 use crate::workspace_policy::normalize_path;
@@ -10,6 +12,8 @@ const DEFAULT_LINES: usize = 400;
 const MAX_LINE_LENGTH: usize = 2000;
 const MAX_BYTES: usize = 100 * 1024;
 const READ_CHUNK_SIZE: usize = 64 * 1024;
+const ENCODING_DETECTION_SAMPLE_BYTES: usize = 512;
+const MIN_UTF16_ZERO_BYTES: usize = 2;
 
 #[derive(Debug, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
@@ -36,7 +40,7 @@ impl Tool for ReadTool {
     }
 
     fn description(&self) -> &'static str {
-        "Read a UTF-8 text file.\
+        "Read a UTF-8 or UTF-16 text file.\
         \
         If the user provides a concrete file path, call Read directly. Do not use Glob, ls, or \
         other pre-checks for known text file paths; missing or invalid paths return errors you can \
@@ -63,7 +67,7 @@ impl Tool for ReadTool {
           much was read and is not part of the file itself.\
         - Page larger files with multiple Read calls using line_offset and n_lines.\
         - When you need several files, prefer reading them in parallel.\
-        - Only UTF-8 text files can be read. Binary files, images, and videos are refused."
+        - UTF-16LE/BE text is converted transparently. Binary files, images, and videos are refused."
     }
 
     fn input_schema(&self) -> serde_json::Value {
@@ -349,8 +353,7 @@ async fn read_forward(
     effective_limit: usize,
     requested_lines: usize,
 ) -> Result<ReadRenderResult, ReadError> {
-    let file = tokio::fs::File::open(path).await?;
-    let mut reader = BufReader::with_capacity(READ_CHUNK_SIZE, file);
+    let mut reader = open_text_line_reader(path).await?;
 
     let mut flags = LineEndingFlags::default();
     let mut current_line_no: usize = 0;
@@ -411,8 +414,7 @@ async fn read_tail(
     effective_limit: usize,
     requested_lines: usize,
 ) -> Result<ReadRenderResult, ReadError> {
-    let file = tokio::fs::File::open(path).await?;
-    let mut reader = BufReader::with_capacity(READ_CHUNK_SIZE, file);
+    let mut reader = open_text_line_reader(path).await?;
 
     let mut flags = LineEndingFlags::default();
     let mut current_line_no: usize = 0;

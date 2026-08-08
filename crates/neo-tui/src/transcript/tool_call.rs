@@ -38,6 +38,15 @@ struct QueueDisplayState {
     observed_at: Instant,
 }
 
+/// The streamed live tail frozen at a terminal transition, so the rows the
+/// user was watching stay in place instead of being swapped for the white
+/// head preview (which read as a whole-block flash).
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct FrozenTail {
+    lines: Vec<String>,
+    dropped: usize,
+}
+
 impl QueueDisplayState {
     fn elapsed_ms(&self) -> u64 {
         self.waiting_ms.saturating_add(
@@ -61,6 +70,9 @@ pub struct ToolCallComponent {
     /// artifact by this typed reference, never by inferring it from text,
     /// result JSON, or ids.
     output_ref: Option<ToolOutputRef>,
+    /// Frozen streamed tail for Bash tools that reached a terminal state with
+    /// live rows on screen (see [`FrozenTail`]).
+    final_tail: Option<FrozenTail>,
 }
 
 const MAX_LIVE_OUTPUT_LINES: usize = 6;
@@ -81,6 +93,7 @@ impl ToolCallComponent {
             workflow_origin: None,
             workflow_activity_route_error: false,
             output_ref: None,
+            final_tail: None,
         }
     }
 
@@ -223,6 +236,16 @@ impl ToolCallComponent {
         true
     }
 
+    /// Freeze the live tail for Bash tools that streamed output, so the
+    /// terminal state keeps the same body rows instead of swapping to the
+    /// white head preview.
+    fn capture_final_tail(&mut self) {
+        let (lines, dropped) = self.live_output.finalize();
+        if self.state.name == "Bash" && !lines.is_empty() {
+            self.final_tail = Some(FrozenTail { lines, dropped });
+        }
+    }
+
     pub fn set_result(
         &mut self,
         result: Option<String>,
@@ -252,7 +275,7 @@ impl ToolCallComponent {
         self.state.details = details;
         self.state.exit_code = exit_code;
         self.state.status = status;
-        self.live_output.finalize();
+        self.capture_final_tail();
         self.streaming_started_at = None;
         self.queue = None;
         true
@@ -300,7 +323,7 @@ impl ToolCallComponent {
         }
         self.state.exit_code = None;
         self.state.status = status;
-        self.live_output.finalize();
+        self.capture_final_tail();
         self.streaming_started_at = None;
         self.queue = None;
         true
@@ -487,6 +510,12 @@ impl ToolCallComponent {
             rows.extend(render_theme_draft_preview_card(details, width, theme));
         }
 
+        // Bash results that streamed live rows freeze those rows on completion
+        // instead of swapping to the white head preview. When expanded, the
+        // full white result preview takes over as before.
+        let frozen = (!self.expanded)
+            .then_some(self.final_tail.as_ref())
+            .flatten();
         if is_pending_or_running(self.state.status) && is_file_write_tool(&self.state.name) {
             rows.extend(render_streaming_preview(
                 &self.state,
@@ -495,6 +524,20 @@ impl ToolCallComponent {
                 theme,
                 self.streaming_started_at,
             ));
+        } else if frozen.is_some() {
+            rows.extend(
+                shell_tool_presentation::render_body(
+                    &self.state,
+                    self.expanded,
+                    width,
+                    theme,
+                    self.workspace_dir.as_deref(),
+                    false,
+                )
+                .unwrap_or_else(|| {
+                    render_tool_body_themed(&self.state, self.expanded, width, theme)
+                }),
+            );
         } else {
             rows.extend(
                 shell_tool_presentation::render_body(
@@ -503,6 +546,7 @@ impl ToolCallComponent {
                     width,
                     theme,
                     self.workspace_dir.as_deref(),
+                    true,
                 )
                 .unwrap_or_else(|| {
                     render_tool_body_themed(&self.state, self.expanded, width, theme)
@@ -518,6 +562,36 @@ impl ToolCallComponent {
                 ));
             }
             rows.extend(wrap_live_rows(&self.live_output.tail(), width, live_style));
+        } else if let Some(frozen) = frozen {
+            // Freeze the streamed rows in place: identical content and style to
+            // the last live frame, so the diff renderer repaints nothing here.
+            let live_style = Style::default().fg(theme.text_muted);
+            let visible = frozen.lines.len();
+            let remaining = self
+                .state
+                .result
+                .as_deref()
+                .map_or(0, |result| result.lines().count())
+                .saturating_sub(visible);
+            if frozen.dropped > 0 {
+                // The streaming frame already rendered an earlier-lines note in
+                // this position; swap its text in place (single-row repaint).
+                rows.push(Line::styled(
+                    if remaining > 0 {
+                        format!("  ... ({remaining} more lines, ctrl+o to expand)")
+                    } else {
+                        format!("  ... ({} earlier lines)", frozen.dropped)
+                    },
+                    live_style,
+                ));
+            }
+            rows.extend(wrap_live_rows(&frozen.lines, width, live_style));
+            if frozen.dropped == 0 && remaining > 0 {
+                rows.push(Line::styled(
+                    format!("  ... ({remaining} more lines, ctrl+o to expand)"),
+                    live_style,
+                ));
+            }
         }
         rows
     }
@@ -879,5 +953,108 @@ mod tests {
         let header = component.render(120)[0].text();
 
         assert!(header.contains("~0 tok · 1m 5s"), "{header}");
+    }
+
+    #[test]
+    fn bash_with_streamed_output_freezes_tail_at_completion() {
+        let mut component = ToolCallComponent::new(ToolCallState {
+            id: "bash-1".to_owned(),
+            name: "Bash".to_owned(),
+            arguments: Some(r#"{"command":"cargo build"}"#.to_owned()),
+            result: None,
+            details: None,
+            status: ToolStatusKind::Running,
+            exit_code: None,
+        });
+        component.append_live_output("line one\nline two\nline three\n");
+        component.append_live_output("line four\nline five\nline six\nline seven\n");
+        assert!(component.set_result(
+            Some(
+                "line one\nline two\nline three\nline four\nline five\nline six\nline seven\nline eight\nline nine\n"
+                    .to_owned()
+            ),
+            None,
+            false,
+            Some(0),
+        ));
+
+        let rendered = component.render(120);
+        let joined: Vec<String> = rendered.iter().map(|line| line.text()).collect();
+        let joined = joined.join("\n");
+
+        // The streamed tail stays on screen (6 lines: line two..line seven).
+        assert!(joined.contains("line seven"), "{joined}");
+        assert!(joined.contains("line six"), "{joined}");
+        // The white head preview must not replace the tail: lines that were
+        // never streamed are hidden behind the truncation note.
+        assert!(!joined.contains("line eight"), "{joined}");
+        assert!(!joined.contains("line nine"), "{joined}");
+        // The dropped first line is folded into the result-based note.
+        assert!(!joined.contains("line one"), "{joined}");
+        assert!(
+            joined.contains("... (3 more lines, ctrl+o to expand)"),
+            "{joined}"
+        );
+    }
+
+    #[test]
+    fn bash_without_stream_keeps_white_head_preview() {
+        let mut component = ToolCallComponent::new(ToolCallState {
+            id: "bash-2".to_owned(),
+            name: "Bash".to_owned(),
+            arguments: Some(r#"{"command":"echo hi"}"#.to_owned()),
+            result: None,
+            details: None,
+            status: ToolStatusKind::Running,
+            exit_code: None,
+        });
+        assert!(component.set_result(
+            Some("line one\nline two\nline three\nline four\n".to_owned()),
+            None,
+            false,
+            Some(0),
+        ));
+
+        let rendered = component.render(120);
+        let joined: Vec<String> = rendered.iter().map(|line| line.text()).collect();
+        let joined = joined.join("\n");
+
+        assert!(joined.contains("line one"), "{joined}");
+        assert!(joined.contains("line two"), "{joined}");
+        assert!(joined.contains("line three"), "{joined}");
+        assert!(
+            joined.contains("... (1 more lines, ctrl+o to expand)"),
+            "{joined}"
+        );
+    }
+
+    #[test]
+    fn frozen_bash_expands_to_full_result_preview() {
+        let mut component = ToolCallComponent::new(ToolCallState {
+            id: "bash-3".to_owned(),
+            name: "Bash".to_owned(),
+            arguments: Some(r#"{"command":"cargo build"}"#.to_owned()),
+            result: None,
+            details: None,
+            status: ToolStatusKind::Running,
+            exit_code: None,
+        });
+        component.append_live_output("line one\nline two\nline three\n");
+        assert!(component.set_result(
+            Some("line one\nline two\nline three\nline four\n".to_owned()),
+            None,
+            false,
+            Some(0),
+        ));
+        component.set_expanded(true);
+
+        let rendered = component.render(120);
+        let joined: Vec<String> = rendered.iter().map(|line| line.text()).collect();
+        let joined = joined.join("\n");
+
+        // Ctrl+O still reveals the complete result as the white preview.
+        assert!(joined.contains("line one"), "{joined}");
+        assert!(joined.contains("line four"), "{joined}");
+        assert!(!joined.contains("more lines, ctrl+o to expand"), "{joined}");
     }
 }
