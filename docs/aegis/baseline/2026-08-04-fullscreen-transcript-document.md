@@ -264,3 +264,25 @@ Landed in task order (plan `docs/aegis/plans/2026-08-07-tui-mouse-text-selection
   mouse hardware, system clipboard side effects, and Shift-drag bypass need a
   human in a graphical terminal — macOS Terminal/iTerm2 and a Windows Terminal
   logged-in desktop session were not runnable from this automated session.
+
+### Frame Selection Purification (2026-08-08, user-reported follow-up)
+
+- `d878c12b` — `fix(tui): exclude decorations from frame selection`
+  (user feedback: borders/line frames, the Todo divider row, and the chat
+  input were dragged into frame selections; the footer notice overwrote a
+  selected last line and invalidated the selection). One shared purification
+  model now drives both highlight and copy: leading/trailing Box Drawing
+  cells (U+2500–U+257F) plus their adjacent spacing are excluded, pure border
+  rows are skipped without leaving blank lines, chat-input
+  (`FrameRowKind::Prompt`) rows are excluded from frame gestures (their text
+  stays selectable through the prompt's own selection), column separators
+  inside table rows remain content, and empty/whitespace rows keep their
+  newline. Highlighted and copied cells stay identical. The footer
+  "copied"/"selected" notice never overwrites a selected last line, and the
+  fullscreen-overlay branch merges the clipboard-notice deadline.
+- macOS host: `--test input_behavior` 16/16, `--test rendering_behavior`
+  98/98, `--test transcript_behavior` focused regressions, and the neo-agent
+  frame-selection filters pass; content-span unit tests include a
+  fault-injection guard for the border-run edge shape; negative `rg`,
+  rustfmt, and `git diff --check` clean. Windows and graphical-terminal
+  verification remain unexecuted residual risk as above.

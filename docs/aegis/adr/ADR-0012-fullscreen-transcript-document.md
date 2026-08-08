@@ -223,7 +223,18 @@ Landed implementation commits, in task order:
 - `c6838f11` — `feat(tui): select text from final frames`;
 - `a8be8931` — `fix(tui): keep mouse selection gesture ownership`;
 - `f35cc9b4` — `fix(tui): route selection before overlays`;
-- `314c11ba` — `fix(tui): gate ctrl+c copy on materialized selection`.
+- `314c11ba` — `fix(tui): gate ctrl+c copy on materialized selection`;
+- `d878c12b` — `fix(tui): exclude decorations from frame selection`
+  (user-reported follow-up: frame-selection highlight and copy are purified
+  with one shared model — leading/trailing Box Drawing border cells
+  (U+2500–U+257F) and their adjacent spacing are neither highlighted nor
+  copied, pure border rows are skipped entirely, and chat-input
+  (`FrameRowKind::Prompt`) rows are excluded from frame gestures; column
+  separators inside table rows stay content. Empty and whitespace rows keep
+  their newline (visible-row semantics), so highlight and copied cells remain
+  identical. The footer "copied"/"selected" notice never overwrites a
+  selected last line, and the fullscreen-overlay frame deadline merges the
+  clipboard notice so the notice expires on cadence).
 
 Verification split by platform (evidence record in the landed baseline):
 
