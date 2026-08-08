@@ -1021,7 +1021,7 @@ fn assert_task_output_context(output: &ToolResult, expected: &str) {
     assert!(
         output
             .content
-            .contains(&format!("context_mode: {expected}")),
+            .contains(&format!("\"context_mode\":\"{expected}\"")),
         "{}",
         output.content
     );
@@ -1057,7 +1057,7 @@ fn normal_turn_events() -> Vec<AiStreamEvent> {
 /// task nested inside AgentRuntime).
 fn panic_on_worker_progress() -> Arc<dyn Fn(AgentEvent) + Send + Sync> {
     Arc::new(move |event: AgentEvent| match event {
-        AgentEvent::DelegateUpdated { .. }
+        AgentEvent::DelegateProgressUpdated { .. }
         | AgentEvent::DelegateSwarmUpdated { .. }
         | AgentEvent::DelegateSwarmProgressUpdated { .. } => {
             panic!("delegate worker test panic");

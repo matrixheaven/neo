@@ -235,8 +235,13 @@ fn delegate_terminal_history_keeps_latest_four_tools_after_activity_trimming() {
     }
 
     // A later snapshot trims the completed tools away. The card re-renders
-    // from the trimmed snapshot inside the same document.
+    // from the trimmed snapshot inside the same document. Real trimmed
+    // snapshots always carry the ongoing latest text, so the store accepts
+    // the shrink (a partial delta without text would be rejected to avoid
+    // height flicker).
     let mut trimmed = agent_snapshot("delegate-a", AgentLifecycleState::Running);
+    trimmed.updated_at_ms = 3;
+    trimmed.latest_text = Some("working text".to_owned());
     trimmed.activity = vec![tool_activity(
         "grep-1",
         "Grep",

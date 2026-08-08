@@ -581,13 +581,12 @@ async fn delegate_resume_reuses_agent_identity_and_role() {
     assert_eq!(details["resumed_from"], agent_id.as_str());
     assert_eq!(details["previous_status"], "completed");
     assert_eq!(details["summary_scope"], "current_run");
-    assert!(
-        second.content.contains("previous_status: completed"),
-        "{}",
-        second.content
-    );
-    assert!(
-        second.content.contains("status: completed"),
+    let content: serde_json::Value =
+        serde_json::from_str(&second.content).expect("resume result content is JSON");
+    assert_eq!(content["status"], "completed", "{}", second.content);
+    assert_eq!(
+        content["target"]["id"],
+        agent_id.as_str(),
         "{}",
         second.content
     );

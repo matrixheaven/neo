@@ -679,13 +679,18 @@ async fn delegate_swarm_substitutes_canonical_placeholders_only() {
             _ => None,
         })
         .expect("swarm result");
-    assert!(
-        swarm_result.content.contains("swarm_id:"),
+    let content: serde_json::Value =
+        serde_json::from_str(&swarm_result.content).expect("swarm result content is JSON");
+    assert_eq!(content["status"], "completed", "{}", swarm_result.content);
+    assert_eq!(
+        content["target"]["kind"], "swarm",
         "{}",
         swarm_result.content
     );
     assert!(
-        swarm_result.content.contains("status: completed"),
+        content["target"]["id"]
+            .as_str()
+            .is_some_and(|id| id.starts_with("swarm_")),
         "{}",
         swarm_result.content
     );
