@@ -200,7 +200,7 @@ async fn event_loop_dispatches_editor_keybinding_actions_to_prompt_edits() {
 }
 
 #[tokio::test]
-async fn event_loop_default_ctrl_c_clears_prompt_instead_of_copying() {
+async fn event_loop_default_ctrl_c_does_not_copy_or_clear_the_prompt() {
     let mut controller = InteractiveController::new_for_test(
         "neo",
         "test-session",
@@ -217,7 +217,7 @@ async fn event_loop_default_ctrl_c_clears_prompt_instead_of_copying() {
         .expect("clear keybinding handled");
 
     assert_eq!(controller.chrome().copy_buffer(), None);
-    assert_eq!(controller.chrome().prompt().text, "");
+    assert_eq!(controller.chrome().prompt().text, "copy through keybinding");
 }
 
 #[tokio::test]
