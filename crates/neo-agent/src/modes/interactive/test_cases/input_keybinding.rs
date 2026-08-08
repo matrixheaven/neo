@@ -323,7 +323,7 @@ async fn event_loop_ctrl_c_cancels_overlay_without_copying_prompt() {
 }
 
 #[tokio::test]
-async fn event_loop_ctrl_c_clears_prompt_before_confirming_exit() {
+async fn event_loop_ctrl_c_preserves_prompt_before_confirming_exit() {
     let mut controller = InteractiveController::new_for_test(
         "neo",
         "test-session",
@@ -336,10 +336,10 @@ async fn event_loop_ctrl_c_clears_prompt_before_confirming_exit() {
     let should_exit = controller
         .handle_input_event(InputEvent::Key(KeyId::new("ctrl+c").expect("valid key")))
         .await
-        .expect("ctrl-c handles prompt clear");
+        .expect("ctrl-c starts exit confirmation");
 
     assert!(!should_exit);
-    assert_eq!(controller.chrome().prompt().text, "");
+    assert_eq!(controller.chrome().prompt().text, "draft prompt");
     assert_eq!(
         controller.chrome().exit_confirmation_label(),
         Some("Press Ctrl-C again to exit")

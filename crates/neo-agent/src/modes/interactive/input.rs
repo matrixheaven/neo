@@ -1627,12 +1627,6 @@ impl InteractiveController {
             self.clear_pending_exit_confirmation();
             return false;
         }
-        if !self.tui.chrome_mut().prompt().text.is_empty() {
-            self.tui
-                .chrome_mut()
-                .prompt_mut()
-                .apply_edit(PromptEdit::Clear);
-        }
         self.handle_exit_confirmation(ExitGesture::CtrlC)
     }
 
