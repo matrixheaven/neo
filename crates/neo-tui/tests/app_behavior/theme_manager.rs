@@ -142,7 +142,7 @@ fn theme_manager_breakpoints_map_width_to_layout() {
     }
 
     fn assert_short(_: &mut NeoChromeState, _: &[String]) {
-        let mut chrome = open_manager();
+        let chrome = open_manager();
         for width in [40, 80, 120] {
             let plain = overlay_plain(&chrome, width, 5);
             assert_eq!(plain.len(), 5, "width={width}");
