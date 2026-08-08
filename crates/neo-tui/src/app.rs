@@ -190,9 +190,8 @@ impl NeoTui {
             return (lines, None);
         }
 
-        let mut chrome_render =
+        let chrome_render =
             fit_chrome_to_height(render_chrome(&mut self.chrome, width, height), height);
-        self.apply_clipboard_notice(&mut chrome_render, width, Instant::now());
         let chrome_height = chrome_render.lines.len();
         self.transcript.set_theme(self.chrome.theme());
         self.transcript
@@ -251,14 +250,16 @@ impl NeoTui {
             self.finalize_frame(&mut lines, width, height, now, 0, &row_kinds);
             // The fullscreen surface is already active; blocking overlays
             // (Task Browser, rich dialogs) render inside it without any
-            // physical transition. Frames continue only while a pending
+            // physical transition. Frames continue while a pending
             // frame-selection press needs the cadence for long-press
-            // activation.
+            // activation, and while a clipboard notice is still visible so
+            // it gets a later frame to expire.
             let animation_deadline = self
                 .frame_selection
                 .requests_animation()
                 .then(|| now.checked_add(ANIMATION_INTERVAL).unwrap_or(now));
-            return TerminalFrame::with_animation_deadline(lines, None, animation_deadline);
+            let next_animation_deadline = self.next_frame_deadline_at(animation_deadline);
+            return TerminalFrame::with_animation_deadline(lines, None, next_animation_deadline);
         }
 
         self.transcript.set_theme(self.chrome.theme());
@@ -274,9 +275,8 @@ impl NeoTui {
         // locked-view activity notice in the very frame that renders it.
         self.transcript.ensure_layout_current();
 
-        let mut chrome_render =
+        let chrome_render =
             fit_chrome_to_height(render_chrome(&mut self.chrome, width, height), height);
-        self.apply_clipboard_notice(&mut chrome_render, width, now);
         let chrome_height = chrome_render.lines.len();
         let mut lines = self
             .transcript
@@ -292,12 +292,19 @@ impl NeoTui {
         self.finalize_frame(&mut lines, width, height, now, body_rows, &row_kinds);
 
         let animation_deadline = self.animation_deadline_at(now);
-        let next_animation_deadline = match (animation_deadline, self.clipboard_notice_until) {
-            (Some(animation), Some(clipboard)) => Some(animation.min(clipboard)),
-            (animation, clipboard) => animation.or(clipboard),
-        };
+        let next_animation_deadline = self.next_frame_deadline_at(animation_deadline);
 
         TerminalFrame::with_animation_deadline(lines, cursor, next_animation_deadline)
+    }
+
+    /// The deadline of the next frame the render loop must produce: the
+    /// earliest of the animation deadline and the clipboard-notice expiry,
+    /// so the "copied" hint always gets a later frame to clear itself.
+    fn next_frame_deadline_at(&self, animation_deadline: Option<Instant>) -> Option<Instant> {
+        match (animation_deadline, self.clipboard_notice_until) {
+            (Some(animation), Some(clipboard)) => Some(animation.min(clipboard)),
+            (animation, clipboard) => animation.or(clipboard),
+        }
     }
 
     /// Whether the frame loop must keep rendering at the 100 ms cadence:
@@ -314,10 +321,11 @@ impl NeoTui {
 
     /// Shared final-frame pass for both render entry points: record the
     /// final frame into the text map, drive long-press activation, invalidate
-    /// a frame selection whose visual state changed, then paint the selection
-    /// background over the frame. Runs after cursor extraction and the gutter
-    /// on both paths (the clipboard notice is applied before it on the
-    /// normal path only).
+    /// a frame selection whose visual state changed, write the selection or
+    /// copy notice into the footer, then paint the selection background over
+    /// the frame. Runs after cursor extraction and the gutter on both paths.
+    /// The notice is written before the highlight so a selected footer keeps
+    /// its original text (see [`Self::apply_footer_notice`]).
     fn finalize_frame(
         &mut self,
         lines: &mut [String],
@@ -337,8 +345,9 @@ impl NeoTui {
         );
         self.frame_selection.tick(now);
         self.frame_selection.validate_against(&self.frame_map);
+        self.apply_footer_notice(lines, width, now);
         self.frame_selection
-            .paint_into(lines, self.chrome.theme().selection_bg);
+            .paint_into(lines, &self.frame_map, self.chrome.theme().selection_bg);
     }
 
     pub fn advance_animation_at(&mut self, _now: Instant) {
@@ -350,17 +359,24 @@ impl NeoTui {
         self.clipboard_notice_until = now.checked_add(CLIPBOARD_NOTICE_DURATION);
     }
 
-    fn apply_clipboard_notice(
-        &mut self,
-        chrome_render: &mut ChromeRender,
-        width: usize,
-        now: Instant,
-    ) {
+    /// Rewrite the footer with the selection/copy hint, unless the footer
+    /// itself is selected: a selected footer keeps its original text so the
+    /// selection stays copyable instead of being covered by the hint. Runs
+    /// after the frame map is recorded and the selection is validated, so
+    /// the protection sees the same selection the highlight uses; the frame
+    /// lines already carry the gutter, which the rewritten footer keeps.
+    fn apply_footer_notice(&mut self, lines: &mut [String], width: usize, now: Instant) {
         if self
             .clipboard_notice_until
             .is_some_and(|deadline| deadline <= now)
         {
             self.clipboard_notice_until = None;
+        }
+        if !lines.is_empty()
+            && self.frame_selection.is_active()
+            && self.frame_selection.contains_row(lines.len() - 1)
+        {
+            return;
         }
         let content_width = frame_content_width(width);
         let notice = if self.clipboard_notice_until.is_some() {
@@ -376,14 +392,18 @@ impl NeoTui {
         } else {
             None
         };
-        if let (Some(notice), Some(footer)) = (notice, chrome_render.lines.last_mut()) {
+        if let (Some(notice), Some(footer)) = (notice, lines.last_mut()) {
             let label = truncate_to_width(&format!(" {notice} "), content_width);
-            *footer = paint(
-                &pad_to_width(&label, content_width),
-                Style::default()
-                    .fg(self.chrome.theme().selected_fg)
-                    .bg(self.chrome.theme().selected_bg)
-                    .bold(),
+            *footer = format!(
+                "{}{}",
+                " ".repeat(CHROME_GUTTER),
+                paint(
+                    &pad_to_width(&label, content_width),
+                    Style::default()
+                        .fg(self.chrome.theme().selected_fg)
+                        .bg(self.chrome.theme().selected_bg)
+                        .bold(),
+                )
             );
         }
     }

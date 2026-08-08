@@ -21,7 +21,7 @@
 
 use std::time::Instant;
 
-use crate::primitive::{Color, strip_ansi};
+use crate::primitive::{Color, strip_ansi, visible_width};
 use crate::shell::OverlayId;
 use crate::transcript::{
     ChromeRowKind, LONG_PRESS_DELAY, MOVEMENT_THRESHOLD, paint_selection_range, slice_text_by_cells,
@@ -102,20 +102,152 @@ impl FrameTextMap {
 
     /// Plain text of `selection`'s display-cell range, sliced from the map's
     /// visible rows. Visible newlines and blank rows inside the range are
-    /// kept; source tabs are never reconstructed. Returns `None` when the
-    /// selection is empty or covers nothing visible.
+    /// kept; source tabs are never reconstructed. Rows are purified before
+    /// slicing: prompt rows and decoration rows — rows with Box Drawing
+    /// characters whose [`content_span`] covers no content cell — contribute
+    /// no line, while blank rows (empty or space-only, no Box Drawing) keep
+    /// their newline, and each remaining row contributes only its
+    /// intersection with the selection. Returns `None` when the selection is
+    /// empty or covers nothing visible.
     #[must_use]
     pub fn materialize(&self, selection: &FrameSelection) -> Option<String> {
         let (min_row, max_row) = selection.row_range()?;
         let mut slices = Vec::with_capacity(max_row - min_row + 1);
         for row in min_row..=max_row {
             let visible = self.rows.get(row)?;
-            let (start, end) = selection.cell_span(row);
+            if visible.kind == FrameRowKind::Prompt {
+                continue;
+            }
+            let (sel_start, sel_end) = selection.cell_span(row);
+            if !has_box_drawing(&visible.text) {
+                // Blank or plain rows (no border characters) keep their
+                // line: an empty row slices to an empty line that still
+                // joins with a newline.
+                slices.push(slice_text_by_cells(&visible.text, sel_start, sel_end));
+                continue;
+            }
+            // Decorated rows contribute only their content cells inside the
+            // selection; a row whose content span is empty is pure border
+            // decoration and is dropped without leaving a blank line.
+            let (span_start, span_end) = content_span(&visible.text);
+            if span_start >= span_end {
+                continue;
+            }
+            let start = span_start.max(sel_start);
+            let end = span_end.min(sel_end);
+            if start >= end {
+                continue;
+            }
             slices.push(slice_text_by_cells(&visible.text, start, end));
         }
         let text = slices.join("\n");
         (!text.is_empty()).then_some(text)
     }
+
+    /// Classification of one final-frame row, or `None` when the row is
+    /// outside the recorded frame.
+    #[must_use]
+    pub(crate) fn row_kind(&self, row: usize) -> Option<FrameRowKind> {
+        self.rows.get(row).map(|row| row.kind)
+    }
+
+    /// Plain visible text of one final-frame row (gutter cell included), or
+    /// `None` when the row is outside the recorded frame.
+    #[must_use]
+    pub(crate) fn plain_row(&self, row: usize) -> Option<&str> {
+        self.rows.get(row).map(|row| row.text.as_str())
+    }
+}
+
+/// True for Box Drawing block characters (U+2500..=U+257F): frame borders,
+/// separators, and corner glyphs. All of them occupy exactly one display
+/// cell.
+fn is_box_drawing(ch: char) -> bool {
+    ('\u{2500}'..='\u{257F}').contains(&ch)
+}
+
+/// Whether a row contains any Box Drawing character — the marker that
+/// distinguishes a decoration row (border content with an empty
+/// [`content_span`], dropped from copies) from a blank row (empty or
+/// space-only, which keeps its newline).
+fn has_box_drawing(text: &str) -> bool {
+    text.chars().any(is_box_drawing)
+}
+
+/// 行内容单元格区间（显示单元格）：剥离行首连续 Box Drawing 字符及其后
+/// 紧邻空格、行尾连续 Box Drawing 字符及其前紧邻空格。无边框的行（如缩进
+/// 行）原样保留（缩进是内容）。返回 `(start_cell, end_cell)`（end 不含，
+/// 均为显示单元格，直接供 `slice_text_by_cells`/`paint_selection_range`
+/// 使用）。
+///
+/// The recorded rows keep the leading gutter cell, so the leading border run
+/// is detected after the leading spaces; when no run follows, indentation
+/// stays content. A pure border row (`────`) collapses to an empty span and
+/// is dropped by materialization, while blank rows (empty or space-only,
+/// without Box Drawing characters) keep their newline there, and a mid-line
+/// column separator (`│ text │ │ other │`) survives inside the content.
+///
+/// The stripped runs consist only of spaces and box-drawing characters —
+/// every one a single-width cell — so the walks accumulate exactly one cell
+/// per consumed character and both returned boundaries land on whole
+/// character edges: a wide content character next to a border is never
+/// split, keeping its cells fully inside or outside the span.
+#[must_use]
+fn content_span(text: &str) -> (usize, usize) {
+    let total_width = visible_width(text);
+    let chars: Vec<char> = text.chars().collect();
+    let len = chars.len();
+
+    // Leading run: spaces (the gutter), then consecutive box-drawing
+    // characters, then the spaces right after the run.
+    let mut index = 0;
+    let mut width = 0usize;
+    let mut saw_border_run = false;
+    while index < len && chars[index] == ' ' {
+        index += 1;
+        width += 1;
+    }
+    let start = if index < len && is_box_drawing(chars[index]) {
+        saw_border_run = true;
+        while index < len && is_box_drawing(chars[index]) {
+            index += 1;
+            width += 1;
+        }
+        while index < len && chars[index] == ' ' {
+            index += 1;
+            width += 1;
+        }
+        width
+    } else {
+        0
+    };
+
+    // The leading walk consumed the whole line through a border run: the
+    // row is pure decoration — a border run plus padding, e.g. `" ──── "`
+    // or `" ┌────┐ "` — with no content character at all, so collapse it
+    // to an empty span instead of treating the padding as content.
+    // Space-only rows never take this branch and keep their full span
+    // (blank-line semantics).
+    if saw_border_run && index == len {
+        return (start, start);
+    }
+
+    // Trailing run: consecutive box-drawing characters at the line end plus
+    // the spaces right before them, counted back from the total width.
+    let mut end = total_width;
+    index = len;
+    while index > 0 && is_box_drawing(chars[index - 1]) {
+        index -= 1;
+        end -= 1;
+    }
+    if index < len {
+        while index > 0 && chars[index - 1] == ' ' {
+            index -= 1;
+            end -= 1;
+        }
+    }
+
+    (start, end)
 }
 
 /// Screen-coordinate selection over the final frame: endpoints, the
@@ -207,6 +339,13 @@ impl FrameSelection {
         } else {
             (active_row, anchor_row)
         })
+    }
+
+    /// Whether `row` falls inside the confirmed selection's row range.
+    #[must_use]
+    pub fn contains_row(&self, row: usize) -> bool {
+        self.row_range()
+            .is_some_and(|(min_row, max_row)| row >= min_row && row <= max_row)
     }
 
     /// Display-cell span of `row` inside the selection: the min row is cut by
@@ -380,9 +519,14 @@ impl FrameSelection {
     }
 
     /// Paint the selection background over the final frame lines, keeping
-    /// every grapheme whole. The selection was validated against the frame
-    /// before painting, so the endpoints are within the current map.
-    pub fn paint_into(&self, lines: &mut [String], bg: Color) {
+    /// every grapheme whole and never painting decoration or prompt rows:
+    /// a decorated row highlights only the intersection of its selection
+    /// span with its [`content_span`], while blank rows (empty or
+    /// space-only, no Box Drawing) have nothing to highlight, so the
+    /// highlight and the materialized copy stay identical. The selection
+    /// was validated against the frame before painting, so the endpoints
+    /// are within the current map.
+    pub fn paint_into(&self, lines: &mut [String], map: &FrameTextMap, bg: Color) {
         let Some((min_row, max_row)) = self.row_range() else {
             return;
         };
@@ -390,7 +534,28 @@ impl FrameSelection {
             let Some(line) = lines.get_mut(row) else {
                 continue;
             };
-            let (start, end) = self.cell_span(row);
+            if map.row_kind(row) == Some(FrameRowKind::Prompt) {
+                continue;
+            }
+            let Some(plain) = map.plain_row(row) else {
+                continue;
+            };
+            let (sel_start, sel_end) = self.cell_span(row);
+            if !has_box_drawing(plain) {
+                // Blank or plain rows: the selection span is painted
+                // directly — an empty row has no cells to paint.
+                *line = paint_selection_range(line, sel_start, sel_end, bg);
+                continue;
+            }
+            let (span_start, span_end) = content_span(plain);
+            if span_start >= span_end {
+                continue;
+            }
+            let start = span_start.max(sel_start);
+            let end = span_end.min(sel_end);
+            if start >= end {
+                continue;
+            }
             *line = paint_selection_range(line, start, end, bg);
         }
     }
@@ -406,5 +571,57 @@ impl FrameSelection {
         self.gesture_active = false;
         self.pending_point = None;
         self.selected_rows = Vec::new();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::time::Instant;
+
+    use crate::transcript::ChromeRowKind;
+
+    use super::{FrameSelection, FrameTextMap, content_span};
+
+    #[test]
+    fn content_span_collapses_border_rows_and_keeps_blank_rows() {
+        // Pure decoration rows — a border run plus trailing padding —
+        // collapse to an empty span even when the line ends in spaces.
+        assert_eq!(content_span(" ──── "), (6, 6));
+        assert_eq!(content_span(" ┌────┐ "), (8, 8));
+        // A space-only row keeps its full span: blank lines stay blank.
+        assert_eq!(content_span("   "), (0, 3));
+        // Indented content keeps its indentation; bordered content strips
+        // the leading and trailing border plus the adjacent spaces, with
+        // wide characters measured in display cells.
+        assert_eq!(content_span("   ○ item"), (0, 9));
+        assert_eq!(content_span(" │ 中文任务 │"), (3, 11));
+    }
+
+    #[test]
+    fn materialize_keeps_blank_rows_and_drops_decoration_rows() {
+        let mut map = FrameTextMap::default();
+        map.record(
+            12,
+            5,
+            None,
+            &[
+                " alpha".to_owned(),
+                String::new(),
+                " ──── ".to_owned(),
+                " │ text │".to_owned(),
+                String::new(),
+            ],
+            0,
+            &[ChromeRowKind::Other; 5],
+        );
+        let mut selection = FrameSelection::new();
+        selection.press(0, 0, Instant::now());
+        selection.drag(4, 9);
+        selection.release(&map);
+        assert_eq!(
+            map.materialize(&selection).as_deref(),
+            Some(" alpha\n\ntext\n"),
+            "blank rows keep their newline; the pure border row is dropped"
+        );
     }
 }

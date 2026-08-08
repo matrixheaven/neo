@@ -12,7 +12,9 @@ use neo_tui::input::InputEvent;
 use neo_tui::primitive::text_layout::visible_width;
 use neo_tui::primitive::{TuiTheme, bg_to_ansi, strip_ansi};
 use neo_tui::shell::{NeoChromeState, OverlayKind};
-use neo_tui::tasks_browser::TaskBrowserState;
+use neo_tui::tasks_browser::{
+    TaskBrowserItem, TaskBrowserKind, TaskBrowserSnapshot, TaskBrowserState, TaskBrowserStatus,
+};
 use neo_tui::transcript::{
     LONG_PRESS_DELAY, MouseEvent, MouseKind, TranscriptPane, frame_content_width,
     prompt_body_width, slice_text_by_cells,
@@ -633,4 +635,236 @@ fn selection_before_first_frame_is_ignored() {
         "no caret move without a rendered frame"
     );
     assert_eq!(tui.chrome().prompt().selection_range(), None);
+}
+
+#[test]
+fn frame_selection_excludes_borders_and_decoration_rows() {
+    // (a) Todo panel: a block drag from the horizontal border row down to
+    // the last todo row copies the items without the border, and the pure
+    // border row leaves no blank line behind.
+    let mut tui = tui_with_todos();
+    let now = Instant::now();
+    let frame = tui.render_terminal_frame_at(80, 24, now).lines;
+    let (border_row, _) = locate(&frame, "\u{2500}");
+    let (row2, col2) = locate(&frame, "second item");
+    let end_col = col2 + "second item".len();
+    drag_select(&mut tui, border_row, 1, row2, end_col);
+    tui.handle_mouse_event(right_mouse(MouseKind::Press, cell(col2), cell(row2)));
+    let copied = tui.take_pending_copy().expect("todo block copy");
+    assert!(copied.contains("first item"), "{copied}");
+    assert!(
+        copied
+            .chars()
+            .all(|ch| !('\u{2500}'..='\u{257F}').contains(&ch)),
+        "box-drawing border characters must never be copied: {copied:?}"
+    );
+    assert!(
+        !copied.lines().any(|line| line.trim().is_empty()),
+        "a pure border row must not leave a blank line: {copied:?}"
+    );
+
+    // (b) Task browser: dragging across a pane content row from the leading
+    // `│` to the trailing `│` highlights only the content cells and copies
+    // without the column separators.
+    let mut tui = new_tui();
+    tui.chrome_mut()
+        .push_task_browser_overlay(TaskBrowserState::new());
+    let now = Instant::now();
+    let frame = tui.render_terminal_frame_at(80, 24, now).lines;
+    let (row, _) = locate(&frame, "No tasks.");
+    let plain = strip_ansi(&frame[row]);
+    let lead_col = locate_in(&frame[row], "\u{2502}");
+    let trail_byte = plain.rfind('\u{2502}').expect("trailing pane border");
+    let trail_col = plain[..trail_byte].chars().count();
+    drag_select(&mut tui, row, lead_col, row, trail_col);
+    assert!(tui.has_any_selection(), "pane content rows are selectable");
+
+    let frame = tui.render_terminal_frame_at(80, 24, now).lines;
+    let painted = &frame[row];
+    let first_bg = painted
+        .find(&selection_bg())
+        .expect("the content cells are highlighted");
+    assert_eq!(
+        strip_ansi(&painted[..first_bg]),
+        " \u{2502} ",
+        "the leading border cell must not be highlighted: {painted:?}"
+    );
+    let last_bg = painted
+        .rfind(&selection_bg())
+        .expect("the content cells are highlighted");
+    let after = strip_ansi(&painted[last_bg + selection_bg().len()..]);
+    assert!(after.contains("No tasks."), "{after:?}");
+    assert!(
+        after.ends_with(" \u{2502}"),
+        "the trailing border cell must not be highlighted: {after:?}"
+    );
+
+    tui.handle_mouse_event(right_mouse(MouseKind::Press, cell(lead_col), cell(row)));
+    let copied = tui.take_pending_copy().expect("pane row copy");
+    assert!(copied.contains("No tasks."), "{copied}");
+    assert!(
+        !copied.contains('\u{2502}'),
+        "column separators must never be copied: {copied:?}"
+    );
+}
+
+#[test]
+fn frame_selection_skips_prompt_rows_when_crossing() {
+    let mut tui = tui_with_todos();
+    tui.chrome_mut().prompt_mut().set_text("input-box-text");
+    let now = Instant::now();
+    let frame = tui.render_terminal_frame_at(80, 24, now).lines;
+    let (todo_row, todo_col) = locate(&frame, "first item");
+    let (prompt_row, prompt_col) = locate(&frame, "input-box-text");
+
+    // Drag from the todo panel down into the prompt box: the crossing drag
+    // stays with the frame owner, but prompt rows are excluded from both
+    // the highlight and the materialized copy.
+    drag_select(&mut tui, todo_row, todo_col, prompt_row, prompt_col + 6);
+    assert!(tui.has_any_selection(), "the crossing drag selects");
+
+    let frame = tui.render_terminal_frame_at(80, 24, now).lines;
+    let (painted_todo, _) = locate(&frame, "first item");
+    assert!(
+        frame[painted_todo].contains(&selection_bg()),
+        "todo rows stay highlighted"
+    );
+    let (prompt_row, _) = locate(&frame, "input-box-text");
+    assert!(
+        !frame[prompt_row].contains(&selection_bg()),
+        "prompt rows must never be highlighted"
+    );
+
+    tui.handle_mouse_event(right_mouse(
+        MouseKind::Press,
+        cell(todo_col),
+        cell(todo_row),
+    ));
+    let copied = tui.take_pending_copy().expect("crossing copy");
+    assert!(copied.contains("first item"), "{copied}");
+    assert!(
+        !copied.contains("input-box-text"),
+        "the prompt input must never be copied: {copied:?}"
+    );
+}
+
+#[test]
+fn frame_selection_cjk_row_keeps_full_content_and_highlight() {
+    // A pane row with wide (CJK) content between the column borders: the
+    // content span is measured in display cells, so the whole title is
+    // highlighted and copied — never truncated at the wide-char boundary.
+    let mut tui = new_tui();
+    let mut state = TaskBrowserState::new();
+    state.apply_snapshot(&TaskBrowserSnapshot::new(vec![TaskBrowserItem {
+        id: "task-1".to_owned(),
+        kind: TaskBrowserKind::Question,
+        status: TaskBrowserStatus::Waiting,
+        title: "中文任务".to_owned(),
+        description: String::new(),
+        elapsed: String::new(),
+        detail_lines: Vec::new(),
+        preview_lines: Vec::new(),
+        can_stop: false,
+        human_handle: None,
+        list_cursor: None,
+        workflow: None,
+    }]));
+    tui.chrome_mut().push_task_browser_overlay(state);
+    let now = Instant::now();
+    let frame = tui.render_terminal_frame_at(80, 24, now).lines;
+    let (row, _) = locate(&frame, "中文任务");
+    let plain = strip_ansi(&frame[row]);
+    let lead_col = locate_in(&frame[row], "\u{2502}");
+    let trail_byte = plain.rfind('\u{2502}').expect("trailing pane border");
+    let trail_col = plain[..trail_byte].chars().count();
+    drag_select(&mut tui, row, lead_col, row, trail_col);
+    assert!(tui.has_any_selection(), "the CJK pane row is selectable");
+
+    // The highlight covers every CJK cell: the text after the last selection
+    // background keeps the full title, and the trailing border stays clean.
+    let frame = tui.render_terminal_frame_at(80, 24, now).lines;
+    let painted = &frame[row];
+    let last_bg = painted
+        .rfind(&selection_bg())
+        .expect("the CJK content cells are highlighted");
+    let after = strip_ansi(&painted[last_bg + selection_bg().len()..]);
+    assert!(
+        after.contains("中文任务"),
+        "the full CJK title must be highlighted: {after:?}"
+    );
+    assert!(
+        after.ends_with(" \u{2502}"),
+        "the trailing border cell must not be highlighted: {after:?}"
+    );
+
+    // The copy keeps every CJK character whole.
+    tui.handle_mouse_event(right_mouse(MouseKind::Press, cell(lead_col), cell(row)));
+    let copied = tui.take_pending_copy().expect("CJK pane row copy");
+    assert!(
+        copied.contains("中文任务"),
+        "the CJK title must copy whole: {copied:?}"
+    );
+    assert!(
+        !copied.contains('\u{2502}'),
+        "column separators must never be copied: {copied:?}"
+    );
+}
+
+#[test]
+fn frame_selection_notice_never_overwrites_selected_footer() {
+    let mut tui = tui_with_todos();
+    let now = Instant::now();
+    let frame = tui.render_terminal_frame_at(80, 24, now).lines;
+    let footer_row = frame.len() - 1;
+    let footer_before = strip_ansi(&frame[footer_row]);
+    assert!(
+        !footer_before.contains("selected"),
+        "no selection hint before any selection: {footer_before:?}"
+    );
+
+    // Selecting the footer itself must not replace it with the hint: the
+    // footer keeps its text, stays highlighted, and copies as selected text.
+    drag_select(&mut tui, footer_row, 1, footer_row, 12);
+    assert!(tui.has_any_selection(), "the footer row is selectable");
+    let frame = tui.render_terminal_frame_at(80, 24, now).lines;
+    let footer_after = strip_ansi(frame.last().expect("footer"));
+    assert_eq!(
+        footer_after, footer_before,
+        "a selected footer must keep its original text"
+    );
+    assert!(
+        !footer_after.contains("selected"),
+        "no hint may cover a selected footer: {footer_after:?}"
+    );
+    assert!(
+        frame.last().expect("footer").contains(&selection_bg()),
+        "the selected footer stays highlighted"
+    );
+    tui.handle_mouse_event(right_mouse(MouseKind::Press, cell(5), cell(footer_row)));
+    let copied = tui.take_pending_copy().expect("footer copy");
+    assert_eq!(
+        copied,
+        slice_text_by_cells(&footer_before, 1, 13),
+        "the footer copies as ordinary selected text"
+    );
+    assert!(!copied.contains("selected"), "{copied:?}");
+
+    // Control: a selection elsewhere still writes the hint into the footer.
+    let mut tui = tui_with_todos();
+    let now = Instant::now();
+    let frame = tui.render_terminal_frame_at(80, 24, now).lines;
+    let (todo_row, todo_col) = locate(&frame, "first item");
+    let (row2, col2) = locate(&frame, "second item");
+    drag_select(
+        &mut tui,
+        todo_row,
+        todo_col,
+        row2,
+        col2 + "second item".len(),
+    );
+    let frame = tui.render_terminal_frame_at(80, 24, now).lines;
+    assert!(
+        strip_ansi(frame.last().expect("footer")).contains("selected"),
+        "the hint still replaces the footer when the selection is elsewhere"
+    );
 }
