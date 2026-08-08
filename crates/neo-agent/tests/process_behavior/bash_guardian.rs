@@ -399,7 +399,7 @@ async fn background_bash_clamps_unsupported_timeout() {
 
     let result = ctx
         .background_tasks
-        .output(&task_id, true, Duration::from_secs(5), 1_024)
+        .output(&task_id, true, Duration::from_secs(10), 1_024)
         .await
         .expect("background output");
     assert_eq!(

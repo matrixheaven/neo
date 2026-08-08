@@ -39,11 +39,13 @@ fn live_budget_truncation_keeps_recent_whole_blocks() {
         "slice must stay bounded by the terminal height: {}",
         slice.len()
     );
-    // The adjacent tool cards render as one grouped block; the newest rows
-    // survive instead of a mid-card row slice.
-    assert_eq!(live.matches("Using Read").count(), 1, "slice:\n{live}");
+    // Consecutive streaming tool cards render solo: each keeps its own
+    // header (tree grouping is reserved for cards without live rows).
+    assert_eq!(live.matches("Using Read").count(), 2, "slice:\n{live}");
+    assert!(live.contains("one.rs"), "slice:\n{live}");
+    assert!(live.contains("two.rs"), "slice:\n{live}");
+    // The budget truncation is row-aligned: the newest output rows survive.
     assert!(live.contains("latest-output"), "slice:\n{live}");
-    assert!(!live.contains("earlier rows omitted"), "slice:\n{live}");
 }
 
 #[test]
