@@ -1185,8 +1185,11 @@ mod tests {
         assert!(!prompt_rows.is_empty(), "prompt content rows classified");
         // Prompt content rows are contiguous and sit between the borders.
         assert!(prompt_rows.windows(2).all(|w| w[1] == w[0] + 1));
-        assert!(render.row_kinds[prompt_rows[0] - 1] == ChromeRowKind::Other);
-        assert!(render.row_kinds[prompt_rows[prompt_rows.len() - 1] + 1] == ChromeRowKind::Other);
+        assert_eq!(render.row_kinds[prompt_rows[0] - 1], ChromeRowKind::Other);
+        assert_eq!(
+            render.row_kinds[prompt_rows[prompt_rows.len() - 1] + 1],
+            ChromeRowKind::Other
+        );
         // The todo panel rows (header + items + counts) precede the prompt.
         assert!(
             prompt_rows[0] >= 4,
@@ -1197,12 +1200,7 @@ mod tests {
         // Without todos the prompt is still classified.
         let app = NeoChromeState::new("neo", "s", "m", "/tmp");
         let render = render_chrome_lines(&app, 60, 24);
-        assert!(
-            render
-                .row_kinds
-                .iter()
-                .any(|kind| *kind == ChromeRowKind::Prompt)
-        );
+        assert!(render.row_kinds.contains(&ChromeRowKind::Prompt));
     }
 
     #[test]

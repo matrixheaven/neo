@@ -1621,16 +1621,13 @@ impl InteractiveController {
     }
 
     pub(super) fn handle_app_clear(&mut self) -> bool {
-        // Ctrl+C with any selection copies it instead of clearing the prompt
-        // or arming the exit confirmation. A new press already cleared the
-        // other selection owners, so the unified query's region order
-        // (transcript, frame, prompt selection) is defensive only; the
-        // prompt never contributes its whole text here — "selected" is the
-        // gate, not the fallback.
-        if self.tui.has_any_selection() {
-            if let Some(text) = self.current_selection_text() {
-                self.write_clipboard_text(&text);
-            }
+        // Ctrl+C with any active selection copies it instead of clearing the
+        // prompt or arming the exit confirmation: the transcript selection
+        // first, then the frame selection, then the prompt selection. A
+        // selection that no longer materializes (e.g. an invalidated frame
+        // selection) falls through to the normal clear/exit behavior.
+        if let Some(text) = self.current_selection_text() {
+            self.write_clipboard_text(&text);
             self.clear_pending_exit_confirmation();
             return false;
         }
