@@ -32,6 +32,9 @@ impl ExitConfirmation {
 impl InteractiveController {
     pub(super) async fn handle_input_event(&mut self, event: InputEvent) -> Result<bool> {
         self.drain_deferred_approval_response().await;
+        if self.route_selection_before_overlays(&event) {
+            return Ok(false);
+        }
         if self.handle_blocking_entry_event(&event).await? {
             return Ok(false);
         }
@@ -70,13 +73,40 @@ impl InteractiveController {
         Ok(false)
     }
 
+    /// Pre-route one selection event (non-Shift left/right press, drag, or
+    /// release) to the TUI before any overlay input path can swallow it.
+    /// The TUI routes the gesture by region and records any right-click
+    /// copy, which is drained into the system clipboard here. Returns `true`
+    /// when the event is fully handled; while the task browser is open the
+    /// event still continues through [`Self::handle_task_browser_event`] so
+    /// its left-press row navigation keeps working (drag/release map to no
+    /// browser action and never disturb the frame gesture). Wheel events and
+    /// Shift-modified drags are not selection events and keep their existing
+    /// paths.
+    fn route_selection_before_overlays(&mut self, event: &InputEvent) -> bool {
+        let InputEvent::Mouse(mouse) = event else {
+            return false;
+        };
+        if mouse.is_wheel() || mouse.is_shift_modified() || !mouse.is_selection_event() {
+            return false;
+        }
+        self.tui.handle_mouse_event(*mouse);
+        if let Some(text) = self.tui.take_pending_copy() {
+            self.write_clipboard_text(&text);
+        }
+        if self.tui.chrome().task_browser_state().is_some() {
+            return false;
+        }
+        true
+    }
+
     /// Route one typed mouse event. Wheel events scroll the transcript
     /// (transcript-wide navigation, matching the historical wheel behavior);
     /// Shift-modified drags are not interpreted by Neo — Shift selection
-    /// stays with the terminal emulator. The TUI routes pointer events by
-    /// region (transcript body, prompt box, Todo panel) and records the text
-    /// a right-click asks to copy; the controller drains it into the system
-    /// clipboard.
+    /// stays with the terminal emulator. Selection events (non-Shift
+    /// left/right press, drag, release) never reach this path: they are
+    /// pre-routed by [`Self::route_selection_before_overlays`] ahead of the
+    /// overlay input handlers.
     fn handle_mouse_event(&mut self, mouse: MouseEvent) {
         if mouse.is_wheel() {
             if mouse.is_wheel_up() {
@@ -88,10 +118,6 @@ impl InteractiveController {
         }
         if mouse.is_shift_modified() {
             return;
-        }
-        self.tui.handle_mouse_event(mouse);
-        if let Some(text) = self.tui.take_pending_copy() {
-            self.write_clipboard_text(&text);
         }
     }
 
@@ -1596,14 +1622,14 @@ impl InteractiveController {
 
     pub(super) fn handle_app_clear(&mut self) -> bool {
         // Ctrl+C with any selection copies it instead of clearing the prompt
-        // or arming the exit confirmation: the transcript selection first,
-        // then the widget chain (Todo selection, prompt selection, whole
-        // prompt).
+        // or arming the exit confirmation. A new press already cleared the
+        // other selection owners, so the unified query's region order
+        // (transcript, frame, prompt selection) is defensive only; the
+        // prompt never contributes its whole text here — "selected" is the
+        // gate, not the fallback.
         if self.tui.has_any_selection() {
-            if self.tui.transcript().has_transcript_selection() {
-                self.copy_transcript_selection_to_clipboard();
-            } else {
-                self.copy_input_selection_to_clipboard();
+            if let Some(text) = self.current_selection_text() {
+                self.write_clipboard_text(&text);
             }
             self.clear_pending_exit_confirmation();
             return false;

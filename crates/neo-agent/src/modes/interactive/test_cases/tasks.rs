@@ -772,7 +772,9 @@ async fn task_browser_mouse_click_selects_rows_and_wheel_uses_pointed_pane() {
         0
     );
 
-    // A press on the footer and a drag stay consumed without selecting.
+    // A press on the footer and a drag stay consumed without selecting
+    // prompt or transcript text; the drag itself forms a frame selection
+    // over the visible rows (final-frame selection covers the browser).
     controller
         .handle_input_event(mouse(MouseKind::Press, 3, 23))
         .await
@@ -784,8 +786,13 @@ async fn task_browser_mouse_click_selects_rows_and_wheel_uses_pointed_pane() {
     assert_eq!(selected(&controller), Some(ids[1].clone()));
     assert!(controller.chrome().prompt().text.is_empty());
     assert!(
-        !controller.tui.has_any_selection(),
+        !controller.chrome().prompt().selection_range().is_some()
+            && !controller.transcript().has_transcript_selection(),
         "pointer events must never reach the prompt or transcript selection"
+    );
+    assert!(
+        controller.tui.has_any_selection(),
+        "the drag forms a frame selection over the visible browser rows"
     );
 
     // Workflow: with the Steps/Agents split at 120x24, a click selects the

@@ -847,10 +847,26 @@ impl InteractiveController {
         self.write_clipboard_text(&copied);
     }
 
-    /// Ctrl+C fallback (no transcript selection): copy the frame selection,
-    /// else the prompt selection, else the whole prompt text.
-    pub(super) fn copy_input_selection_to_clipboard(&mut self) {
+    /// Plain text of the current selection across every region, in owner
+    /// priority: the transcript body, the frame surface, then the prompt
+    /// selection. A new press clears the other owners, so at most one region
+    /// answers; the ordering is defensive only. The prompt contributes its
+    /// selection alone — the "copy only when something is selected" gate is
+    /// [`NeoTui::has_any_selection`], never the whole prompt text.
+    pub(super) fn current_selection_text(&mut self) -> Option<String> {
+        if self.tui.transcript().has_transcript_selection() {
+            return self.transcript_mut().copy_selected_transcript_text();
+        }
         if let Some(text) = self.tui.frame_selection_text() {
+            return Some(text);
+        }
+        self.tui.chrome().prompt().selection_text()
+    }
+
+    /// `InputCopy` binding: the unified current selection, else the whole
+    /// prompt text.
+    pub(super) fn copy_input_selection_to_clipboard(&mut self) {
+        if let Some(text) = self.current_selection_text() {
             self.write_clipboard_text(&text);
             return;
         }

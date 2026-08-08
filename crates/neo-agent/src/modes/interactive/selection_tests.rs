@@ -108,20 +108,30 @@ fn selection_controller() -> InteractiveController {
     controller
 }
 
-/// Drag across the whole visible body. The tail view shows the pending
-/// approval/question card, so the materialized text covers the card's
-/// visible rows; the caller asserts on the card's stable labels.
-async fn drag_visible_tail(controller: &mut InteractiveController) {
+/// Drag from the top of the tail view down to `needle`'s row. The full
+/// frame render gives mouse routing a layout whose transcript body shows
+/// the pending approval/question card, so the materialized text covers the
+/// card's option rows; the caller asserts on the card's stable labels.
+async fn drag_visible_tail(controller: &mut InteractiveController, needle: &str) {
     // Re-render so a pending approval/question card joins the layout; the
     // tail-following view then shows that card.
-    let _ = controller.transcript_mut().render_visible_slice(80, 6);
+    let frame = controller
+        .tui
+        .render_terminal_frame_at(80, 24, Instant::now())
+        .lines;
+    let (row, _) = locate_in_frame(&frame, needle);
     for event in [
         mouse_event(MouseKind::Press, 1, 0, crossterm::event::KeyModifiers::NONE),
-        mouse_event(MouseKind::Drag, 4, 5, crossterm::event::KeyModifiers::NONE),
+        mouse_event(
+            MouseKind::Drag,
+            60,
+            row as u16,
+            crossterm::event::KeyModifiers::NONE,
+        ),
         mouse_event(
             MouseKind::Release,
-            4,
-            5,
+            60,
+            row as u16,
             crossterm::event::KeyModifiers::NONE,
         ),
     ] {
@@ -130,6 +140,35 @@ async fn drag_visible_tail(controller: &mut InteractiveController) {
             .await
             .expect("mouse event routed");
     }
+}
+
+/// A task-browser item whose title renders in the list pane.
+fn task_item(id: &str, title: &str) -> neo_tui::tasks_browser::TaskBrowserItem {
+    neo_tui::tasks_browser::TaskBrowserItem {
+        id: id.to_owned(),
+        kind: neo_tui::tasks_browser::TaskBrowserKind::Question,
+        status: neo_tui::tasks_browser::TaskBrowserStatus::Waiting,
+        title: title.to_owned(),
+        description: String::new(),
+        elapsed: String::new(),
+        detail_lines: Vec::new(),
+        preview_lines: Vec::new(),
+        can_stop: false,
+        human_handle: None,
+        list_cursor: None,
+        workflow: None,
+    }
+}
+
+/// A task browser pre-loaded with three tasks.
+fn task_browser_with_items() -> neo_tui::tasks_browser::TaskBrowserState {
+    let mut state = neo_tui::tasks_browser::TaskBrowserState::new();
+    state.apply_snapshot(&neo_tui::tasks_browser::TaskBrowserSnapshot::new(vec![
+        task_item("task-1", "first task"),
+        task_item("task-2", "second task"),
+        task_item("task-3", "third task"),
+    ]));
+    state
 }
 
 #[tokio::test]
@@ -146,18 +185,34 @@ async fn selection_and_task_browser_preserve_input_priority() {
             .transcript_mut()
             .push_status(format!("row-{index}"));
     }
-    // Establish the pane body height (6 rows) and the tail-following layout.
-    let _ = controller.transcript_mut().render_visible_slice(80, 6);
+    // Establish the tail-following layout: the full frame render gives
+    // mouse routing a layout whose transcript body shows every status row.
+    let frame = controller
+        .tui
+        .render_terminal_frame_at(80, 24, Instant::now())
+        .lines;
 
     // A plain left-button drag across card boundaries selects and
     // materializes the exact document text.
+    let (row5, _) = locate_in_frame(&frame, "row-5");
+    let (row6, _) = locate_in_frame(&frame, "row-6");
     for event in [
-        mouse_event(MouseKind::Press, 1, 1, crossterm::event::KeyModifiers::NONE),
-        mouse_event(MouseKind::Drag, 7, 3, crossterm::event::KeyModifiers::NONE),
+        mouse_event(
+            MouseKind::Press,
+            1,
+            row5 as u16,
+            crossterm::event::KeyModifiers::NONE,
+        ),
+        mouse_event(
+            MouseKind::Drag,
+            7,
+            row6 as u16,
+            crossterm::event::KeyModifiers::NONE,
+        ),
         mouse_event(
             MouseKind::Release,
             7,
-            3,
+            row6 as u16,
             crossterm::event::KeyModifiers::NONE,
         ),
     ] {
@@ -206,24 +261,36 @@ async fn selection_and_task_browser_preserve_input_priority() {
         before_shift
     );
 
-    // Task Browser keeps input priority: while it is open, mouse events are
-    // consumed by the browser and never reach the document selection.
+    // Task Browser keeps keyboard and wheel priority. Selection events are
+    // pre-routed to the TUI before overlay input, so a drag over the task
+    // rows selects the frame surface; the browser still receives the same
+    // events afterwards (its left-press row navigation) and keeps focus.
     controller
         .tui
         .chrome_mut()
-        .push_task_browser_overlay(neo_tui::tasks_browser::TaskBrowserState::new());
+        .push_task_browser_overlay(task_browser_with_items());
     assert!(controller.chrome().task_browser_state().is_some());
-    let before_browser = controller
-        .transcript_mut()
-        .copy_selected_transcript_text()
-        .expect("selection still active");
+    let frame = controller.tui.render_terminal_frame(120, 24).lines;
+    let (row, col) = locate_in_frame(&frame, "first task");
+    let (row2, col2) = locate_in_frame(&frame, "third task");
+    let end_col = col2 + "third task".len();
     for event in [
-        mouse_event(MouseKind::Press, 1, 1, crossterm::event::KeyModifiers::NONE),
-        mouse_event(MouseKind::Drag, 1, 5, crossterm::event::KeyModifiers::NONE),
+        mouse_event(
+            MouseKind::Press,
+            col as u16,
+            row as u16,
+            crossterm::event::KeyModifiers::NONE,
+        ),
+        mouse_event(
+            MouseKind::Drag,
+            end_col as u16,
+            row2 as u16,
+            crossterm::event::KeyModifiers::NONE,
+        ),
         mouse_event(
             MouseKind::Release,
-            1,
-            5,
+            end_col as u16,
+            row2 as u16,
             crossterm::event::KeyModifiers::NONE,
         ),
     ] {
@@ -232,17 +299,56 @@ async fn selection_and_task_browser_preserve_input_priority() {
             .await
             .expect("browser mouse event handled");
     }
+    let frame_selection = controller
+        .tui
+        .frame_selection_text()
+        .expect("drag over task rows built a frame selection");
+    assert!(
+        frame_selection.contains("first task") && frame_selection.contains("third task"),
+        "the frame surface captures the task rows: {frame_selection:?}"
+    );
+
+    // Keyboard still owns the browser: SelectDown moves the task selection.
+    controller
+        .handle_input_event(InputEvent::Action(KeybindingAction::SelectDown))
+        .await
+        .expect("arrow down reaches the browser");
+    assert_eq!(
+        controller
+            .chrome()
+            .task_browser_state()
+            .expect("browser open")
+            .selected_task_id(),
+        Some("task-2"),
+        "keyboard selection moves inside the browser"
+    );
+
+    // Wheel over the task list still moves the browser selection.
+    controller
+        .handle_input_event(mouse_event(
+            MouseKind::ScrollDown,
+            col as u16,
+            row as u16,
+            crossterm::event::KeyModifiers::NONE,
+        ))
+        .await
+        .expect("wheel reaches the browser");
+    assert_eq!(
+        controller
+            .chrome()
+            .task_browser_state()
+            .expect("browser open")
+            .selected_task_id(),
+        Some("task-3"),
+        "wheel selection moves inside the browser"
+    );
     assert!(
         controller.chrome().task_browser_state().is_some(),
         "task browser keeps focus through mouse events"
     );
-    assert_eq!(
-        controller
-            .transcript_mut()
-            .copy_selected_transcript_text()
-            .expect("selection still active"),
-        before_browser,
-        "selection untouched while task browser is open"
+    assert!(
+        !controller.transcript().has_transcript_selection(),
+        "keyboard and wheel must not touch the transcript selection"
     );
 }
 
@@ -257,7 +363,7 @@ async fn mouse_selection_works_while_approval_owns_keyboard() {
     // Left-button selection events keep reaching the transcript selection
     // while the approval owns keyboard selection and submission. The tail
     // view shows the pending approval card, so the drag selects its rows.
-    drag_visible_tail(&mut controller).await;
+    drag_visible_tail(&mut controller, "Reject").await;
     let selected = controller
         .transcript_mut()
         .copy_selected_transcript_text()
@@ -335,7 +441,7 @@ async fn mouse_selection_works_while_question_owns_keyboard() {
     // Left-button selection events keep reaching the transcript while the
     // question dialog owns keyboard input. The tail view shows the pending
     // question card, so the drag selects its option rows.
-    drag_visible_tail(&mut controller).await;
+    drag_visible_tail(&mut controller, "Right").await;
     let selected = controller
         .transcript_mut()
         .copy_selected_transcript_text()
@@ -368,6 +474,12 @@ async fn mouse_selection_works_while_question_owns_keyboard() {
 #[tokio::test]
 async fn right_click_copies_current_selection_to_clipboard() {
     let mut controller = selection_controller();
+    // A full frame render gives mouse routing a layout whose transcript
+    // body shows every status row.
+    let frame = controller
+        .tui
+        .render_terminal_frame_at(80, 24, Instant::now())
+        .lines;
     let recorded = Arc::new(Mutex::new(Vec::new()));
     let writer_recorded = Arc::clone(&recorded);
     controller.set_clipboard_writer(Arc::new(move |text| {
@@ -379,13 +491,25 @@ async fn right_click_copies_current_selection_to_clipboard() {
     }));
 
     // A plain left-button drag materializes the selection first.
+    let (row5, _) = locate_in_frame(&frame, "row-5");
+    let (row6, _) = locate_in_frame(&frame, "row-6");
     for event in [
-        mouse_event(MouseKind::Press, 1, 1, crossterm::event::KeyModifiers::NONE),
-        mouse_event(MouseKind::Drag, 7, 3, crossterm::event::KeyModifiers::NONE),
+        mouse_event(
+            MouseKind::Press,
+            1,
+            row5 as u16,
+            crossterm::event::KeyModifiers::NONE,
+        ),
+        mouse_event(
+            MouseKind::Drag,
+            7,
+            row6 as u16,
+            crossterm::event::KeyModifiers::NONE,
+        ),
         mouse_event(
             MouseKind::Release,
             7,
-            3,
+            row6 as u16,
             crossterm::event::KeyModifiers::NONE,
         ),
     ] {
@@ -557,6 +681,263 @@ async fn right_click_in_prompt_copies_prompt_selection() {
 }
 
 #[tokio::test]
+async fn selection_routes_before_task_browser_and_rich_dialog_without_stealing_input() {
+    // (a) Task browser: a drag over the task rows reaches the frame
+    // selection first, while keyboard and wheel keep going to the browser.
+    let mut controller = InteractiveController::new_for_test(
+        "neo",
+        "test-session",
+        "openai/gpt-4.1",
+        test_workspace_root(),
+        |_request| async move { Ok(Vec::<AgentEvent>::new()) },
+    );
+    controller
+        .tui
+        .chrome_mut()
+        .push_task_browser_overlay(task_browser_with_items());
+    let frame = controller.tui.render_terminal_frame(120, 24).lines;
+    let (row, col) = locate_in_frame(&frame, "first task");
+    let (row2, col2) = locate_in_frame(&frame, "third task");
+    let end_col = col2 + "third task".len();
+    for event in [
+        mouse_event(
+            MouseKind::Press,
+            col as u16,
+            row as u16,
+            crossterm::event::KeyModifiers::NONE,
+        ),
+        mouse_event(
+            MouseKind::Drag,
+            end_col as u16,
+            row2 as u16,
+            crossterm::event::KeyModifiers::NONE,
+        ),
+        mouse_event(
+            MouseKind::Release,
+            end_col as u16,
+            row2 as u16,
+            crossterm::event::KeyModifiers::NONE,
+        ),
+    ] {
+        controller
+            .handle_input_event(event)
+            .await
+            .expect("browser drag handled");
+    }
+    assert!(
+        controller.tui.has_any_selection(),
+        "selection events pre-route before the task browser"
+    );
+    controller
+        .handle_input_event(InputEvent::Action(KeybindingAction::SelectDown))
+        .await
+        .expect("keyboard reaches the browser");
+    assert_eq!(
+        controller
+            .chrome()
+            .task_browser_state()
+            .expect("browser open")
+            .selected_task_id(),
+        Some("task-2")
+    );
+    controller
+        .handle_input_event(mouse_event(
+            MouseKind::ScrollDown,
+            col as u16,
+            row as u16,
+            crossterm::event::KeyModifiers::NONE,
+        ))
+        .await
+        .expect("wheel reaches the browser");
+    assert_eq!(
+        controller
+            .chrome()
+            .task_browser_state()
+            .expect("browser open")
+            .selected_task_id(),
+        Some("task-3"),
+        "the wheel still moves the browser selection"
+    );
+
+    // (b) Rich dialog (choice picker): a drag over the dialog text reaches
+    // the frame selection, while plain keys and the wheel still go through
+    // the dialog's own input path.
+    let mut controller = InteractiveController::new_for_test(
+        "neo",
+        "test-session",
+        "openai/gpt-4.1",
+        test_workspace_root(),
+        |_request| async move { Ok(Vec::<AgentEvent>::new()) },
+    );
+    let theme = controller.tui.chrome().theme();
+    controller
+        .tui
+        .chrome_mut()
+        .open_choice_picker(neo_tui::dialogs::ChoicePickerOptions {
+            title: "Pick one".to_owned(),
+            items: vec![
+                neo_tui::dialogs::ChoiceItem::new("option-1", "option-1"),
+                neo_tui::dialogs::ChoiceItem::new("option-2", "option-2"),
+                neo_tui::dialogs::ChoiceItem::new("option-3", "option-3"),
+            ],
+            initial_id: None,
+            theme,
+            page_size: 0,
+            current_id: None,
+        });
+    let frame = controller.tui.render_terminal_frame(80, 24).lines;
+    let (row, col) = locate_in_frame(&frame, "option-1");
+    let (row2, col2) = locate_in_frame(&frame, "option-3");
+    let end_col = col2 + "option-3".len();
+    for event in [
+        mouse_event(
+            MouseKind::Press,
+            col as u16,
+            row as u16,
+            crossterm::event::KeyModifiers::NONE,
+        ),
+        mouse_event(
+            MouseKind::Drag,
+            end_col as u16,
+            row2 as u16,
+            crossterm::event::KeyModifiers::NONE,
+        ),
+        mouse_event(
+            MouseKind::Release,
+            end_col as u16,
+            row2 as u16,
+            crossterm::event::KeyModifiers::NONE,
+        ),
+    ] {
+        controller
+            .handle_input_event(event)
+            .await
+            .expect("picker drag handled");
+    }
+    let frame_selection = controller
+        .tui
+        .frame_selection_text()
+        .expect("drag over the picker built a frame selection");
+    assert!(
+        frame_selection.contains("option-1") && frame_selection.contains("option-3"),
+        "the frame surface captures the picker rows: {frame_selection:?}"
+    );
+
+    // Plain keys still enter the picker: SelectDown moves its selection.
+    controller
+        .handle_input_event(InputEvent::Action(KeybindingAction::SelectDown))
+        .await
+        .expect("keyboard reaches the picker");
+    let frame = controller.tui.render_terminal_frame(80, 24).lines;
+    let (marker_row, _) = locate_in_frame(&frame, "▸");
+    let (option2_row, _) = locate_in_frame(&frame, "option-2");
+    assert_eq!(
+        marker_row, option2_row,
+        "the picker selection follows the keyboard"
+    );
+
+    // The wheel still scrolls the picker along its own path.
+    controller
+        .handle_input_event(mouse_event(
+            MouseKind::ScrollDown,
+            col as u16,
+            row as u16,
+            crossterm::event::KeyModifiers::NONE,
+        ))
+        .await
+        .expect("wheel reaches the picker");
+    let frame = controller.tui.render_terminal_frame(80, 24).lines;
+    let (marker_row, _) = locate_in_frame(&frame, "▸");
+    let (option3_row, _) = locate_in_frame(&frame, "option-3");
+    assert_eq!(
+        marker_row, option3_row,
+        "the wheel moves the picker selection"
+    );
+    assert!(
+        controller.chrome().focused_overlay().is_some(),
+        "the picker stays open through mouse events"
+    );
+}
+
+#[tokio::test]
+async fn right_click_copies_current_frame_selection() {
+    let mut controller = InteractiveController::new_for_test(
+        "neo",
+        "test-session",
+        "openai/gpt-4.1",
+        test_workspace_root(),
+        |_request| async move { Ok(Vec::<AgentEvent>::new()) },
+    );
+    controller.tui.chrome_mut().set_todo_items(vec![
+        neo_tui::widgets::todo_panel::TodoDisplayItem::new(
+            "first item",
+            neo_tui::widgets::todo_panel::TodoDisplayStatus::Pending,
+        ),
+        neo_tui::widgets::todo_panel::TodoDisplayItem::new(
+            "second item",
+            neo_tui::widgets::todo_panel::TodoDisplayStatus::Done,
+        ),
+    ]);
+    let _ = controller
+        .tui
+        .render_terminal_frame_at(80, 24, Instant::now());
+    let recorded = Arc::new(Mutex::new(Vec::new()));
+    let writer_recorded = Arc::clone(&recorded);
+    controller.set_clipboard_writer(Arc::new(move |text| {
+        let recorded = Arc::clone(&writer_recorded);
+        Box::pin(async move {
+            recorded.lock().expect("record clipboard text").push(text);
+            Ok(())
+        })
+    }));
+
+    let frame = controller
+        .tui
+        .render_terminal_frame_at(80, 24, Instant::now())
+        .lines;
+    let (row, col) = locate_in_frame(&frame, "first item");
+    let (row2, col2) = locate_in_frame(&frame, "second item");
+    let end_col = col2 + "second item".len();
+    for event in [
+        mouse_event(
+            MouseKind::Press,
+            col as u16,
+            row as u16,
+            crossterm::event::KeyModifiers::NONE,
+        ),
+        mouse_event(
+            MouseKind::Drag,
+            end_col as u16,
+            row2 as u16,
+            crossterm::event::KeyModifiers::NONE,
+        ),
+        mouse_event(
+            MouseKind::Release,
+            end_col as u16,
+            row2 as u16,
+            crossterm::event::KeyModifiers::NONE,
+        ),
+    ] {
+        controller
+            .handle_input_event(event)
+            .await
+            .expect("frame drag handled");
+    }
+    controller
+        .handle_input_event(right_button_event(MouseKind::Press, col as u16, row as u16))
+        .await
+        .expect("right click handled");
+    wait_for_clipboard_write(&mut controller).await;
+    let copied = recorded.lock().expect("clipboard writes");
+    assert_eq!(copied.len(), 1, "{copied:?}");
+    assert!(
+        copied[0].contains("first item") && copied[0].contains("second item"),
+        "right-click copies the current frame selection: {:?}",
+        copied
+    );
+}
+
+#[tokio::test]
 async fn ctrl_c_prefers_prompt_selection_over_whole_text() {
     let mut controller = prompt_selection_controller();
     let recorded = Arc::new(Mutex::new(Vec::new()));
@@ -622,7 +1003,7 @@ async fn ctrl_c_prefers_prompt_selection_over_whole_text() {
 }
 
 #[tokio::test]
-async fn ctrl_c_copies_todo_selection() {
+async fn ctrl_c_copies_frame_selection_from_todo_rows() {
     let mut controller = InteractiveController::new_for_test(
         "neo",
         "test-session",
@@ -683,7 +1064,7 @@ async fn ctrl_c_copies_todo_selection() {
         controller
             .handle_input_event(event)
             .await
-            .expect("todo drag handled");
+            .expect("frame drag handled");
     }
     controller
         .handle_input_event(InputEvent::Key(KeyId::new("ctrl+c").expect("valid key")))
@@ -694,13 +1075,13 @@ async fn ctrl_c_copies_todo_selection() {
     assert_eq!(copied.len(), 1, "{copied:?}");
     assert!(
         copied[0].contains("first item") && copied[0].contains("second item"),
-        "ctrl+c copies the todo selection: {:?}",
+        "ctrl+c copies the frame selection: {:?}",
         copied
     );
     assert_eq!(
         controller.chrome().exit_confirmation_label(),
         None,
-        "ctrl+c with a todo selection must not arm the exit confirmation"
+        "ctrl+c with a frame selection must not arm the exit confirmation"
     );
 }
 
