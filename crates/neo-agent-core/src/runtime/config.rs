@@ -676,24 +676,6 @@ pub struct CompactionSettings {
     pub reserved_context_tokens: usize,
     /// Maximum recent messages to keep during auto-compaction.
     pub max_recent_messages: usize,
-    /// Whether experimental micro compaction (old tool-result truncation) is on.
-    pub micro_enabled: bool,
-    /// Number of recent messages exempt from micro compaction.
-    pub micro_keep_recent: usize,
-    /// Whether stale oversized tool results are shortened to head/tail in the
-    /// model input. Off by default: the rewrite changes the provider cache
-    /// prefix, so it engages only inside the `snip_trigger_ratio` occupancy
-    /// band (see `request_projection_plan`). Independent of `micro_enabled`.
-    pub snip_enabled: bool,
-    /// Minimum estimated tool-result tokens before a stale result is snipped.
-    pub snip_min_tokens: usize,
-    /// Number of newest messages exempt from snip.
-    pub snip_keep_recent: usize,
-    /// Fraction of the model context window at which the snip maintenance pass
-    /// engages (reasonix's tool-result-snip band). Below the band the request
-    /// prefix stays append-only and cache-stable; the pass only runs once the
-    /// cumulative session has grown into the band.
-    pub snip_trigger_ratio: f64,
     /// Maximum compaction rounds per invocation.
     pub max_rounds: usize,
     /// Maximum retry attempts for empty/truncated summaries.
@@ -710,12 +692,6 @@ impl CompactionSettings {
             trigger_ratio: 0.85,
             reserved_context_tokens: 50_000,
             max_recent_messages: 4,
-            micro_enabled: false,
-            micro_keep_recent: 20,
-            snip_enabled: false,
-            snip_min_tokens: 1_000,
-            snip_keep_recent: 16,
-            snip_trigger_ratio: 0.6,
             max_rounds: 5,
             max_retry_attempts: 5,
         }
@@ -786,22 +762,6 @@ mod tests {
             *config.observed_max_context_tokens.lock().unwrap(),
             Some(85_000)
         );
-    }
-
-    #[test]
-    fn compaction_settings_disable_micro_by_default() {
-        let settings = CompactionSettings::new(100_000, 4);
-
-        assert!(!settings.micro_enabled);
-    }
-
-    #[test]
-    fn compaction_settings_new_disables_snip_by_default() {
-        let settings = CompactionSettings::new(100_000, 4);
-        assert!(!settings.snip_enabled);
-        assert_eq!(settings.snip_min_tokens, 1_000);
-        assert_eq!(settings.snip_keep_recent, 16);
-        assert_eq!(settings.snip_trigger_ratio, 0.6);
     }
 
     #[test]

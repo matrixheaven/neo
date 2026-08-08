@@ -4,7 +4,6 @@ use neo_ai::{ApiKind, ChatMessage, ContentPart, ModelCapabilities, ModelSpec, Pr
 
 use super::*;
 use crate::Content;
-use crate::compaction::projection::{ProjectionMode, ProjectionPlan};
 use crate::tools::ToolRegistry;
 
 fn tool_model() -> ModelSpec {
@@ -51,42 +50,6 @@ fn tool_result_texts(request: &ChatRequest) -> String {
 }
 
 #[tokio::test]
-async fn chat_request_applies_supplied_projection_plan() {
-    let mut context = AgentContext::new();
-    context.append_message(AgentMessage::assistant(
-        Vec::new(),
-        vec![crate::AgentToolCall {
-            id: "call".into(),
-            name: "Read".into(),
-            raw_arguments: "{}".into(),
-        }],
-        crate::StopReason::ToolUse,
-    ));
-    context.append_message(AgentMessage::tool_result(
-        "call",
-        "Read",
-        vec![Content::text("x".repeat(8_000))],
-        false,
-    ));
-    let config = AgentConfig::for_model(tool_model())
-        .with_compaction(crate::CompactionSettings::new(usize::MAX, 4));
-    let plan = ProjectionPlan {
-        enabled: true,
-        cutoff_index: 2,
-        min_tool_result_tokens: 100,
-        keep_recent_messages: 0,
-        snip_enabled: false,
-        snip_min_tokens: 0,
-        snip_keep_recent: 0,
-        mode: ProjectionMode::Request,
-    };
-
-    let request = chat_request(&config, &context, &plan).await;
-
-    assert!(tool_result_texts(&request).contains("[tool result omitted"));
-}
-
-#[tokio::test]
 async fn chat_request_disabled_projection_keeps_tool_result_content() {
     let mut context = AgentContext::new();
     context.append_message(AgentMessage::assistant(
@@ -107,7 +70,7 @@ async fn chat_request_disabled_projection_keeps_tool_result_content() {
     let config = AgentConfig::for_model(tool_model())
         .with_compaction(crate::CompactionSettings::new(usize::MAX, 4));
 
-    let request = chat_request(&config, &context, &ProjectionPlan::disabled()).await;
+    let request = chat_request(&config, &context).await;
 
     assert!(tool_result_texts(&request).contains(&"x".repeat(100)));
 }
@@ -120,7 +83,7 @@ async fn chat_request_sends_tools_without_duplicate_system_schema_catalog() {
         .with_tools(tools.clone());
     let context = AgentContext::new();
 
-    let request = chat_request(&config, &context, &ProjectionPlan::disabled()).await;
+    let request = chat_request(&config, &context).await;
     let system_text = system_texts(&request);
 
     assert!(
@@ -135,7 +98,7 @@ async fn chat_request_omits_tool_schema_catalog_when_no_tools_are_available() {
     let config = AgentConfig::for_model(tool_model()).with_system_prompt("Base system");
     let context = AgentContext::new();
 
-    let request = chat_request(&config, &context, &ProjectionPlan::disabled()).await;
+    let request = chat_request(&config, &context).await;
     let system_text = system_texts(&request);
 
     assert!(
@@ -151,7 +114,7 @@ async fn chat_request_uses_session_directory_name_as_prompt_cache_key() {
         .with_session_directory("/tmp/neo/session_00000000-0000-4000-8000-000000000123");
     let context = AgentContext::new();
 
-    let request = chat_request(&config, &context, &ProjectionPlan::disabled()).await;
+    let request = chat_request(&config, &context).await;
 
     assert_eq!(
         request.options.session_id.as_deref(),
@@ -169,7 +132,7 @@ async fn chat_request_injects_runtime_context_without_live_mode_labels() {
         .with_permission_mode(crate::PermissionMode::Yolo);
     let context = AgentContext::new();
 
-    let request = chat_request(&config, &context, &ProjectionPlan::disabled()).await;
+    let request = chat_request(&config, &context).await;
     let system_text = system_texts(&request);
 
     assert!(system_text.contains("Runtime Context"), "{system_text}");
@@ -224,12 +187,7 @@ async fn chat_request_keeps_todo_changes_out_of_dynamic_system_context() {
         .iter(),
     );
 
-    let request = chat_request(
-        &AgentConfig::for_model(tool_model()),
-        &context,
-        &ProjectionPlan::disabled(),
-    )
-    .await;
+    let request = chat_request(&AgentConfig::for_model(tool_model()), &context).await;
     let system_text = system_texts(&request);
 
     assert!(!system_text.contains("Runtime Todo State"), "{system_text}");
@@ -239,22 +197,12 @@ async fn chat_request_keeps_todo_changes_out_of_dynamic_system_context() {
     assert!(system_text.contains("in_progress"), "{system_text}");
 
     context.todos[1].status = "done".to_owned();
-    let changed_todos_request = chat_request(
-        &AgentConfig::for_model(tool_model()),
-        &context,
-        &ProjectionPlan::disabled(),
-    )
-    .await;
+    let changed_todos_request = chat_request(&AgentConfig::for_model(tool_model()), &context).await;
 
     assert_eq!(changed_todos_request.messages, request.messages);
 
     context.append_message(AgentMessage::user_text("Newest request"));
-    let appended_request = chat_request(
-        &AgentConfig::for_model(tool_model()),
-        &context,
-        &ProjectionPlan::disabled(),
-    )
-    .await;
+    let appended_request = chat_request(&AgentConfig::for_model(tool_model()), &context).await;
 
     assert_eq!(
         &appended_request.messages[..request.messages.len()],
@@ -269,7 +217,7 @@ async fn chat_request_does_not_add_review_mode_system_message() {
     let mut context = AgentContext::new();
     context.append_message(AgentMessage::user_text("Please review this change"));
 
-    let request = chat_request(&config, &context, &ProjectionPlan::disabled()).await;
+    let request = chat_request(&config, &context).await;
     let system_text = system_texts(&request);
 
     assert!(!system_text.contains("Review Mode"), "{system_text}");
@@ -289,7 +237,7 @@ async fn chat_request_does_not_project_unappended_workflow_injection() {
     ));
     context.append_message(AgentMessage::user_text("Current request"));
 
-    let request = chat_request(&config, &context, &ProjectionPlan::disabled()).await;
+    let request = chat_request(&config, &context).await;
     assert!(!format!("{request:?}").contains("Workflow guidance"));
 }
 
@@ -302,7 +250,7 @@ async fn chat_request_preserves_prefix_when_instruction_update_appends() {
             "instruction_epoch",
         ));
     context.append_message(AgentMessage::user_text("First request"));
-    let first = chat_request(&config, &context, &ProjectionPlan::disabled()).await;
+    let first = chat_request(&config, &context).await;
 
     context.append_message(AgentMessage::assistant(
         vec![Content::text("First answer")],
@@ -313,7 +261,7 @@ async fn chat_request_preserves_prefix_when_instruction_update_appends() {
         "<instruction_active_state generation=\"2\" />",
         "instruction_epoch",
     ));
-    let second = chat_request(&config, &context, &ProjectionPlan::disabled()).await;
+    let second = chat_request(&config, &context).await;
 
     assert_eq!(first.tools, second.tools);
     assert_eq!(first.messages, second.messages[..first.messages.len()]);
@@ -321,81 +269,4 @@ async fn chat_request_preserves_prefix_when_instruction_update_appends() {
         second.messages.last(),
         Some(ChatMessage::User { .. })
     ));
-}
-
-#[tokio::test]
-async fn chat_request_applies_sniped_projection_plan() {
-    // Ensure a snip hint exists for "ChatRequestRead" in this process
-    // regardless of whether other parallel lib tests registered the
-    // built-in ReadTool (the unique name avoids touching the process-level
-    // "Read" hint table; registration is idempotent by constant and the
-    // assertion below is geometry-agnostic).
-    {
-        struct HintedRead;
-        impl crate::tools::Tool for HintedRead {
-            fn name(&self) -> &str {
-                "ChatRequestRead"
-            }
-            fn description(&self) -> &str {
-                "hinted read"
-            }
-            fn input_schema(&self) -> serde_json::Value {
-                serde_json::json!({"type": "object"})
-            }
-            fn execute<'a>(
-                &'a self,
-                _ctx: &'a crate::tools::ToolContext,
-                _input: serde_json::Value,
-            ) -> crate::tools::ToolFuture<'a> {
-                Box::pin(async { Ok(crate::tools::ToolResult::ok("ok")) })
-            }
-            fn snip_hint(&self) -> Option<crate::tools::SnipHint> {
-                Some(crate::tools::SnipHint {
-                    head_lines: 3,
-                    tail_lines: 2,
-                    head_chars: 100,
-                    tail_chars: 100,
-                })
-            }
-        }
-        let mut registry = ToolRegistry::default();
-        registry.register(HintedRead);
-    }
-
-    let mut context = AgentContext::new();
-    context.append_message(AgentMessage::assistant(
-        Vec::new(),
-        vec![crate::AgentToolCall {
-            id: "call".into(),
-            name: "ChatRequestRead".into(),
-            raw_arguments: "{}".into(),
-        }],
-        crate::StopReason::ToolUse,
-    ));
-    let content = (1..=200)
-        .map(|i| format!("line {i}"))
-        .collect::<Vec<_>>()
-        .join("\n");
-    context.append_message(AgentMessage::tool_result(
-        "call",
-        "ChatRequestRead",
-        vec![Content::text(content)],
-        false,
-    ));
-    let config = AgentConfig::for_model(tool_model())
-        .with_compaction(crate::CompactionSettings::new(usize::MAX, 4));
-    let plan = ProjectionPlan {
-        enabled: true,
-        cutoff_index: 2,
-        min_tool_result_tokens: usize::MAX,
-        keep_recent_messages: 0,
-        snip_enabled: true,
-        snip_min_tokens: 100,
-        snip_keep_recent: 0,
-        mode: ProjectionMode::Request,
-    };
-
-    let request = chat_request(&config, &context, &plan).await;
-
-    assert!(tool_result_texts(&request).contains("[tool result snipped: tool=ChatRequestRead"));
 }

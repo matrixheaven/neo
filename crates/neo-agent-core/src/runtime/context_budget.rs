@@ -4,7 +4,6 @@ use super::context::AgentContext;
 use super::tokens::{
     estimate_message_tokens, estimate_messages_tokens, estimate_tool_specs_tokens,
 };
-use crate::compaction::projection::{ProjectionPlan, project_for_request, project_for_summary};
 use crate::events::ContextWindowSource;
 
 const SMALL_WINDOW_MAX_TOKENS: usize = 128_000;
@@ -26,7 +25,6 @@ pub struct ContextBudgetSnapshot {
     pub remaining_to_trigger: Option<usize>,
     pub remaining_to_max: Option<usize>,
     pub source: ContextWindowSource,
-    pub projection: ProjectionPlan,
 }
 
 pub struct ContextBudgetEstimator;
@@ -56,23 +54,14 @@ impl ContextBudgetSnapshot {
 
 impl ContextBudgetEstimator {
     #[must_use]
-    pub fn snapshot(
-        config: &AgentConfig,
-        context: &AgentContext,
-        projection: ProjectionPlan,
-    ) -> ContextBudgetSnapshot {
+    pub fn snapshot(config: &AgentConfig, context: &AgentContext) -> ContextBudgetSnapshot {
         let fixed_overhead_tokens = fixed_overhead_tokens(config, context);
         let tool_schema_tokens = *config
             .cached_tool_spec_tokens
             .get_or_init(|| estimate_tool_specs_tokens(&config.tools));
         let durable_tokens = context.estimated_tokens();
         let raw_effective_tokens = durable_tokens + fixed_overhead_tokens + tool_schema_tokens;
-        let projected_tokens = projected_effective_tokens(
-            context,
-            projection,
-            fixed_overhead_tokens,
-            tool_schema_tokens,
-        );
+        let projected_tokens = raw_effective_tokens;
         let max_context_tokens = config
             .model
             .capabilities
@@ -113,7 +102,6 @@ impl ContextBudgetEstimator {
             remaining_to_trigger,
             remaining_to_max,
             source,
-            projection,
         }
     }
 }
@@ -132,25 +120,6 @@ fn fixed_overhead_tokens(config: &AgentConfig, context: &AgentContext) -> usize 
         });
 
     system_tokens + workspace_tokens + transform_tokens
-}
-
-fn projected_effective_tokens(
-    context: &AgentContext,
-    projection: ProjectionPlan,
-    fixed_overhead_tokens: usize,
-    tool_schema_tokens: usize,
-) -> usize {
-    let projected_message_tokens = match projection.mode {
-        crate::compaction::projection::ProjectionMode::None => context.estimated_tokens(),
-        crate::compaction::projection::ProjectionMode::Request => {
-            project_for_request(context.messages(), &projection).projected_tokens
-        }
-        crate::compaction::projection::ProjectionMode::SummaryInput => {
-            project_for_summary(context.messages(), &projection).projected_tokens
-        }
-    };
-
-    projected_message_tokens + fixed_overhead_tokens + tool_schema_tokens
 }
 
 fn effective_context_window(
@@ -199,9 +168,8 @@ mod tests {
     use super::super::config::{AgentConfig, CompactionSettings, observe_context_overflow};
     use super::super::context::AgentContext;
     use super::*;
-    use crate::compaction::projection::ProjectionPlan;
     use crate::harness::fake_model;
-    use crate::{AgentEvent, AgentMessage, Content, TodoEventData};
+    use crate::{AgentEvent, AgentMessage, TodoEventData};
 
     #[test]
     fn budget_includes_system_workspace_transform_and_tools() {
@@ -225,8 +193,7 @@ mod tests {
             })
             .with_compaction(CompactionSettings::new(usize::MAX, 4));
 
-        let snapshot =
-            ContextBudgetEstimator::snapshot(&config, &context, ProjectionPlan::disabled());
+        let snapshot = ContextBudgetEstimator::snapshot(&config, &context);
 
         assert!(snapshot.fixed_overhead_tokens > 0);
         assert!(snapshot.tool_schema_tokens > 0);
@@ -248,10 +215,8 @@ mod tests {
             .iter(),
         );
 
-        let empty_snapshot =
-            ContextBudgetEstimator::snapshot(&config, &empty, ProjectionPlan::disabled());
-        let todo_snapshot =
-            ContextBudgetEstimator::snapshot(&config, &context, ProjectionPlan::disabled());
+        let empty_snapshot = ContextBudgetEstimator::snapshot(&config, &empty);
+        let todo_snapshot = ContextBudgetEstimator::snapshot(&config, &context);
 
         assert_eq!(
             todo_snapshot.fixed_overhead_tokens,
@@ -268,8 +233,7 @@ mod tests {
         observe_context_overflow(&config, 100_000);
         let context = AgentContext::new();
 
-        let snapshot =
-            ContextBudgetEstimator::snapshot(&config, &context, ProjectionPlan::disabled());
+        let snapshot = ContextBudgetEstimator::snapshot(&config, &context);
 
         assert_eq!(snapshot.effective_max_context_tokens, Some(85_000));
         assert_eq!(snapshot.source, ContextWindowSource::ObservedOverflow);
@@ -282,42 +246,9 @@ mod tests {
         config.model.capabilities.max_context_tokens = Some(64_000);
         let context = AgentContext::new();
 
-        let snapshot =
-            ContextBudgetEstimator::snapshot(&config, &context, ProjectionPlan::disabled());
+        let snapshot = ContextBudgetEstimator::snapshot(&config, &context);
 
         assert_eq!(snapshot.trigger_tokens, Some(51_200));
-    }
-
-    #[test]
-    fn budget_uses_projected_tokens_for_remaining_counts() {
-        let mut context = AgentContext::new();
-        context.append_message(AgentMessage::tool_result(
-            "old_call",
-            "Read",
-            vec![Content::text("x".repeat(16_000))],
-            false,
-        ));
-        let mut config = AgentConfig::for_model(fake_model())
-            .with_compaction(CompactionSettings::new(usize::MAX, 4));
-        config.model.capabilities.max_context_tokens = Some(10_000);
-        let plan = ProjectionPlan {
-            enabled: true,
-            cutoff_index: context.messages().len(),
-            min_tool_result_tokens: 100,
-            keep_recent_messages: 0,
-            snip_enabled: false,
-            snip_min_tokens: 0,
-            snip_keep_recent: 0,
-            mode: crate::compaction::projection::ProjectionMode::Request,
-        };
-
-        let snapshot = ContextBudgetEstimator::snapshot(&config, &context, plan);
-
-        assert!(snapshot.projected_tokens < snapshot.raw_effective_tokens);
-        assert_eq!(
-            snapshot.remaining_to_max,
-            Some(10_000usize.saturating_sub(snapshot.projected_tokens))
-        );
     }
 
     #[test]
@@ -361,8 +292,7 @@ mod tests {
         let config = config_with_window(32_768, 2_048, usize::MAX);
         let mut context = AgentContext::new();
         context.append_message(AgentMessage::user_text("ordinary history ".repeat(40)));
-        let snapshot =
-            ContextBudgetEstimator::snapshot(&config, &context, ProjectionPlan::disabled());
+        let snapshot = ContextBudgetEstimator::snapshot(&config, &context);
         let safe = snapshot
             .safely_available_instruction_tokens()
             .expect("configured window is known");
@@ -377,8 +307,7 @@ mod tests {
         // The absolute estimator cap binds below the effective window.
         let config = config_with_window(1_048_576, 2_048, 40_000);
         let context = AgentContext::new();
-        let snapshot =
-            ContextBudgetEstimator::snapshot(&config, &context, ProjectionPlan::disabled());
+        let snapshot = ContextBudgetEstimator::snapshot(&config, &context);
         let safe = snapshot
             .safely_available_instruction_tokens()
             .expect("configured window is known");

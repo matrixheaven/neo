@@ -3,14 +3,9 @@ use neo_ai::{AiError, ChatMessage, ChatRequest, ContentPart, RequestOptions};
 use super::config::AgentConfig;
 use super::context::AgentContext;
 use super::image_blobs::resolve_image_blobs;
-use crate::compaction::projection::{ProjectionPlan, project_for_request};
 use crate::{AgentMessage, sanitize_tool_exchange_messages};
 
-pub(super) async fn chat_request(
-    config: &AgentConfig,
-    context: &AgentContext,
-    projection_plan: &ProjectionPlan,
-) -> ChatRequest {
+pub(super) async fn chat_request(config: &AgentConfig, context: &AgentContext) -> ChatRequest {
     let mut messages = Vec::new();
     if let Some(system_prompt) = &config.system_prompt {
         messages.push(AgentMessage::system_text(system_prompt.as_str()).to_chat_message());
@@ -25,7 +20,6 @@ pub(super) async fn chat_request(
     // Resolve blob references to inline base64 before sending to the provider.
     let context_messages =
         resolve_image_blobs(context_messages, config.session_directory.as_deref()).await;
-    let context_messages = project_for_request(&context_messages, projection_plan).messages;
     // Never send a provider request with an assistant message that has pending
     // tool_calls but no matching tool results.  This guards against incomplete
     // trailing tool turns and against compaction boundaries that accidentally

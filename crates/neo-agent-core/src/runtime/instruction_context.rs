@@ -12,7 +12,6 @@ use super::context::AgentContext;
 use super::context_budget::{ContextBudgetEstimator, ContextBudgetSnapshot};
 use super::estimate_message_tokens;
 use crate::AgentMessage;
-use crate::compaction::projection::ProjectionPlan;
 use crate::instructions::{
     InstructionBudget, InstructionEpochData, InstructionError, InstructionFingerprint,
     InstructionRegistry, InstructionScopeKind,
@@ -234,7 +233,7 @@ impl InstructionContextBridge {
     }
 
     fn snapshot(config: &AgentConfig, context: &AgentContext) -> ContextBudgetSnapshot {
-        ContextBudgetEstimator::snapshot(config, context, ProjectionPlan::disabled())
+        ContextBudgetEstimator::snapshot(config, context)
     }
 }
 

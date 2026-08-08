@@ -239,37 +239,8 @@ pub struct RuntimeCompactionConfig {
     pub trigger_ratio: f64,
     pub reserved_context_tokens: usize,
     pub max_recent_messages: usize,
-    pub micro_enabled: bool,
-    pub micro_keep_recent: usize,
-    #[serde(default = "default_snip_enabled")]
-    pub snip_enabled: bool,
-    #[serde(default = "default_snip_min_tokens")]
-    pub snip_min_tokens: usize,
-    #[serde(default = "default_snip_keep_recent")]
-    pub snip_keep_recent: usize,
-    #[serde(default = "default_snip_trigger_ratio")]
-    pub snip_trigger_ratio: f64,
     pub max_rounds: usize,
     pub max_retry_attempts: u32,
-}
-
-/// Snip rewrites old tool results in the model input and therefore breaks the
-/// provider prefix cache once per rewritten result; keep it opt-in so paid
-/// providers keep the append-only prefix by default.
-fn default_snip_enabled() -> bool {
-    false
-}
-
-fn default_snip_min_tokens() -> usize {
-    1_000
-}
-
-fn default_snip_keep_recent() -> usize {
-    16
-}
-
-fn default_snip_trigger_ratio() -> f64 {
-    0.6
 }
 
 impl Default for RuntimeCompactionConfig {
@@ -281,12 +252,6 @@ impl Default for RuntimeCompactionConfig {
             trigger_ratio: 0.85,
             reserved_context_tokens: 50_000,
             max_recent_messages: 4,
-            micro_enabled: false,
-            micro_keep_recent: 20,
-            snip_enabled: false,
-            snip_min_tokens: 1_000,
-            snip_keep_recent: 16,
-            snip_trigger_ratio: 0.6,
             max_rounds: 5,
             max_retry_attempts: 5,
         }

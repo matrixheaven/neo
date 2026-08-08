@@ -4,7 +4,7 @@ use schemars::JsonSchema;
 use serde::Deserialize;
 use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncSeekExt, BufReader};
 
-use super::{SnipHint, Tool, ToolContext, ToolError, ToolFuture, ToolResult, parse_input, schema};
+use super::{Tool, ToolContext, ToolError, ToolFuture, ToolResult, parse_input, schema};
 use crate::workspace_policy::normalize_path;
 
 const MAX_LINES: usize = 1000;
@@ -48,8 +48,7 @@ impl Tool for ReadTool {
         \
         Prefer targeted reads: for files over ~200 lines, use `line_offset` and `n_lines` to read \
         only the range you need instead of the whole file. Small windows keep the context and the \
-        provider cache small; a full read of a large file costs tokens for every line, and old \
-        read results are shortened in the model input when they go stale.\
+        provider cache small; a full read of a large file costs tokens for every line.\
         \
         Parameters:\
         - path: Path to the text file. Relative paths resolve against the working directory; \
@@ -93,15 +92,6 @@ impl Tool for ReadTool {
                 Err(ReadError::NotReadable(message)) => Ok(ToolResult::error(message)),
                 Err(ReadError::Missing(message)) => Ok(ToolResult::error(message)),
             }
-        })
-    }
-
-    fn snip_hint(&self) -> Option<SnipHint> {
-        Some(SnipHint {
-            head_lines: 120,
-            tail_lines: 12,
-            head_chars: 12_000,
-            tail_chars: 2_000,
         })
     }
 }

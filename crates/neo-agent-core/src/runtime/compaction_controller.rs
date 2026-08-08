@@ -2,7 +2,6 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
 use super::context_budget::ContextBudgetSnapshot;
-use crate::compaction::projection::ProjectionMode;
 use crate::events::CompactionReason;
 
 pub struct CompactionController;
@@ -42,11 +41,6 @@ impl CompactionController {
             };
         }
 
-        if snapshot.projection.enabled && snapshot.projection.mode != ProjectionMode::None {
-            let plan = snapshot.projection;
-            return CompactionDecision::UseProjectionOnly { snapshot, plan };
-        }
-
         CompactionDecision::NoAction { snapshot }
     }
 }
@@ -55,10 +49,6 @@ impl CompactionController {
 pub enum CompactionDecision {
     NoAction {
         snapshot: ContextBudgetSnapshot,
-    },
-    UseProjectionOnly {
-        snapshot: ContextBudgetSnapshot,
-        plan: crate::compaction::projection::ProjectionPlan,
     },
     RunFullCompaction {
         snapshot: ContextBudgetSnapshot,
@@ -176,7 +166,6 @@ fn crosses_trigger(snapshot: &ContextBudgetSnapshot) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use crate::compaction::projection::ProjectionPlan;
     use crate::events::{CompactionReason, ContextWindowSource};
     use crate::runtime::context_budget::ContextBudgetSnapshot;
 
@@ -204,7 +193,6 @@ mod tests {
             remaining_to_max: effective_max_context_tokens
                 .map(|tokens| tokens.saturating_sub(projected_tokens)),
             source: ContextWindowSource::Configured,
-            projection: ProjectionPlan::disabled(),
         }
     }
 

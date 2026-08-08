@@ -226,16 +226,8 @@ Context compaction is enabled by default. Fresh config writes include this table
 | `trigger_ratio` | f64 | `0.85` | Context occupancy threshold that triggers compaction |
 | `reserved_context_tokens` | usize | `50000` | Reserved trailing token margin |
 | `max_recent_messages` | usize | `4` | Number of very recent messages preserved during automatic compaction |
-| `micro_enabled` | bool | `false` | Whether micro compaction (truncation of old tool results) is enabled |
-| `micro_keep_recent` | usize | `20` | Number of recent messages exempt from micro compaction |
-| `snip_enabled` | bool | `false` | Whether stale oversized tool results (e.g. long Read outputs) are shortened to a head/tail snippet in the model input. Off by default: snip rewrites old results, which breaks the provider prefix cache once per rewritten result — enable it only when you accept that trade-off (e.g. local models) |
-| `snip_min_tokens` | usize | `1000` | Minimum tool-result size before a stale result is snipped |
-| `snip_keep_recent` | usize | `16` | Number of recent messages exempt from snip |
-| `snip_trigger_ratio` | f64 | `0.6` | Fraction of the model context window at which the snip pass engages. Below it the request prefix stays append-only (cache-stable); the pass only runs once the cumulative session grows into the band |
 | `max_rounds` | usize | `5` | Maximum rounds in a single compaction |
 | `max_retry_attempts` | u32 | `5` | Maximum retry attempts for empty/truncated summaries |
-
-> Tips: both `micro_enabled` and `snip_enabled` rewrite old tool results in the middle of the context, which breaks the provider prefix cache from that message onward (once per rewritten result). They trade a temporary hit-rate drop for a smaller history; keep both off for paid providers. Snip is the gentler variant (head/tail retention, deterministic rewrite, Read-only by default), but it is still a prefix rewrite — enable it only for local or experimental setups.
 
 ## `[tui]` Table
 

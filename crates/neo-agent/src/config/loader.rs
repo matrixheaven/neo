@@ -375,12 +375,6 @@ fn runtime_compaction_from_file(
             trigger_ratio: compaction.trigger_ratio.unwrap_or(0.85),
             reserved_context_tokens: compaction.reserved_context_tokens.unwrap_or(50_000),
             max_recent_messages: compaction.max_recent_messages.unwrap_or(4),
-            micro_enabled: compaction.micro_enabled.unwrap_or(false),
-            micro_keep_recent: compaction.micro_keep_recent.unwrap_or(20),
-            snip_enabled: false,
-            snip_min_tokens: 1_000,
-            snip_keep_recent: 16,
-            snip_trigger_ratio: 0.6,
             max_rounds: compaction.max_rounds.unwrap_or(5),
             max_retry_attempts: compaction.max_retry_attempts.unwrap_or(5),
         }

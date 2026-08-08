@@ -129,11 +129,6 @@ fn config_allows_capacity_larger_than_per_command_memory_percent() {
 }
 
 #[test]
-fn runtime_compaction_default_disables_micro_projection() {
-    assert!(!RuntimeCompactionConfig::default().micro_enabled);
-}
-
-#[test]
 fn config_defaults_to_enabled_runtime_compaction() {
     let (_temp, config_path, project_dir) = temp_project_config("");
     let config = load_config(config_path, project_dir);
@@ -197,20 +192,6 @@ temperature = 0.2
     let compaction = config.runtime.compaction.expect("compaction default");
     assert!(compaction.enabled);
     assert_eq!(compaction.keep_recent_messages, 20);
-}
-
-#[test]
-fn config_partial_compaction_disables_micro_projection_by_default() {
-    let (_temp, config_path, project_dir) = temp_project_config(
-        r"
-[runtime.compaction]
-enabled = true
-",
-    );
-
-    let config = load_config(config_path, project_dir);
-
-    assert!(!config.runtime.compaction.expect("compaction").micro_enabled);
 }
 
 #[test]

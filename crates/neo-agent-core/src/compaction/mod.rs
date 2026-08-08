@@ -13,7 +13,6 @@
 //!   structured summary.
 //! - [`CompactionStrategy`] — trigger ratio and retention heuristics.
 
-pub mod projection;
 pub mod summary;
 
 use std::sync::Arc;

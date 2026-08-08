@@ -28,7 +28,6 @@ use super::tool_dispatch::{
     terminates_tool_batch,
 };
 use crate::compaction::CompactionError;
-use crate::compaction::projection::{ProjectionMode, ProjectionPlan};
 use crate::compaction::summary::{FullCompactionInput, run_full_compaction};
 use crate::goal::GoalManager;
 use crate::instructions::{
@@ -168,17 +167,11 @@ async fn recover_from_overflow(
     turn: u32,
     retries_used: &mut u32,
 ) -> Result<Option<AgentMessage>, AgentRuntimeError> {
-    let snapshot = super::context_budget::ContextBudgetEstimator::snapshot(
-        config,
-        &emitter.context,
-        ProjectionPlan::disabled(),
-    );
+    let snapshot =
+        super::context_budget::ContextBudgetEstimator::snapshot(config, &emitter.context);
     super::config::observe_context_overflow(config, snapshot.raw_effective_tokens);
-    let snapshot = super::context_budget::ContextBudgetEstimator::snapshot(
-        config,
-        &emitter.context,
-        ProjectionPlan::disabled(),
-    );
+    let snapshot =
+        super::context_budget::ContextBudgetEstimator::snapshot(config, &emitter.context);
     let compaction_sink = emitter.sink();
     run_full_compaction(
         model,
@@ -197,7 +190,7 @@ async fn recover_from_overflow(
     rehydrate_instruction_context_after_compaction(emitter, true).await;
 
     // Rebuild request with compacted context and retry once.
-    let retry_request = chat_request(config, &emitter.context, &ProjectionPlan::disabled()).await;
+    let retry_request = chat_request(config, &emitter.context).await;
     run_model_request_with_retries(
         model,
         config,
@@ -255,9 +248,8 @@ async fn run_next_model_turn(
         .workflow_dispatch_resolver
         .update_event_route_turn(config.session_directory.as_deref(), turn)
         .map_err(std::io::Error::other)?;
-    let projection =
-        prepare_model_request(model, config, emitter, cancel_token, pending_debt).await?;
-    let request = chat_request(config, &emitter.context, &projection).await;
+    prepare_model_request(model, config, emitter, cancel_token, pending_debt).await?;
+    let request = chat_request(config, &emitter.context).await;
     validate_model_capabilities(&request)?;
     match run_model_turn_with_recovery(model, config, request, turn, emitter, cancel_token).await {
         Ok(message) => Ok(ModelTurnOutcome::Assistant { turn, message }),
@@ -691,11 +683,8 @@ async fn admit_pending_epoch_compact_first(
     if InstructionContextBridge::prepare_pending_epoch(config, &emitter.context, &epoch)
         == PendingEpochAdmission::CompactFirst
     {
-        let snapshot = super::context_budget::ContextBudgetEstimator::snapshot(
-            config,
-            &emitter.context,
-            ProjectionPlan::disabled(),
-        );
+        let snapshot =
+            super::context_budget::ContextBudgetEstimator::snapshot(config, &emitter.context);
         let compaction_sink = emitter.sink();
         match run_full_compaction(
             model,
@@ -1013,26 +1002,17 @@ async fn prepare_model_request(
     emitter: &mut EventEmitter,
     cancel_token: &CancellationToken,
     pending_debt: Option<DeferredCompaction>,
-) -> Result<ProjectionPlan, AgentRuntimeError> {
+) -> Result<(), AgentRuntimeError> {
     let manual_requested = take_manual_compact_request(config).is_some();
-    let request_projection = request_projection_plan(config, &emitter.context);
-    let mut snapshot = context_budget_snapshot(config, &emitter.context, request_projection);
+    let mut snapshot = context_budget_snapshot(config, &emitter.context);
 
-    let projection_plan = match CompactionController::decide_before_model_call(
+    match CompactionController::decide_before_model_call(
         snapshot.clone(),
         pending_debt.as_ref(),
         manual_requested,
     ) {
         CompactionDecision::NoAction { snapshot: decided } => {
             snapshot = decided;
-            snapshot.projection
-        }
-        CompactionDecision::UseProjectionOnly {
-            snapshot: decided,
-            plan,
-        } => {
-            snapshot = decided;
-            plan
         }
         CompactionDecision::RunFullCompaction {
             snapshot: decided,
@@ -1056,35 +1036,24 @@ async fn prepare_model_request(
             if matches!(compaction_result, Err(CompactionError::NoBoundary))
                 && reason == crate::CompactionReason::Threshold
             {
-                snapshot = context_budget_snapshot(
-                    config,
-                    &emitter.context,
-                    request_projection_plan(config, &emitter.context),
-                );
-                snapshot.projection
+                snapshot = context_budget_snapshot(config, &emitter.context);
             } else {
                 compaction_result?;
                 rehydrate_instruction_context_after_compaction(emitter, true).await;
-                snapshot = context_budget_snapshot(
-                    config,
-                    &emitter.context,
-                    request_projection_plan(config, &emitter.context),
-                );
-                snapshot.projection
+                snapshot = context_budget_snapshot(config, &emitter.context);
             }
         }
     };
 
     emit_context_window_snapshot(emitter, &snapshot);
-    Ok(projection_plan)
+    Ok(())
 }
 
 fn context_budget_snapshot(
     config: &AgentConfig,
     context: &super::context::AgentContext,
-    projection: ProjectionPlan,
 ) -> super::context_budget::ContextBudgetSnapshot {
-    super::context_budget::ContextBudgetEstimator::snapshot(config, context, projection)
+    super::context_budget::ContextBudgetEstimator::snapshot(config, context)
 }
 
 fn observe_tool_group_debt(
@@ -1096,68 +1065,10 @@ fn observe_tool_group_debt(
     if tool_result_count == 0 {
         return None;
     }
-    let snapshot = super::context_budget::ContextBudgetEstimator::snapshot(
-        config,
-        &emitter.context,
-        request_projection_plan(config, &emitter.context),
-    );
+    let snapshot =
+        super::context_budget::ContextBudgetEstimator::snapshot(config, &emitter.context);
     let mut group = ToolGroupBudgetState::new(turn, tool_result_count, snapshot.clone());
     group.observe_completed_result(tool_result_count.saturating_sub(1), snapshot)
-}
-
-fn request_projection_plan(
-    config: &AgentConfig,
-    context: &super::context::AgentContext,
-) -> ProjectionPlan {
-    let Some(settings) = config.compaction else {
-        return ProjectionPlan::disabled();
-    };
-    let micro_on = settings.micro_enabled;
-    // reasonix-style occupancy band: the snip/dedup maintenance pass rewrites
-    // old results and therefore breaks the provider prefix cache, so it only
-    // engages once the cumulative session has grown into the elevated band
-    // (snip_trigger_ratio of the context window). Below the band the request
-    // prefix stays append-only and cache-stable.
-    let snip_on = settings.snip_enabled && snip_band_reached(config, context, &settings);
-    if !micro_on && !snip_on {
-        return ProjectionPlan::disabled();
-    }
-    let message_count = context.messages().len();
-    ProjectionPlan {
-        enabled: true,
-        cutoff_index: if micro_on {
-            message_count.saturating_sub(settings.micro_keep_recent)
-        } else {
-            message_count
-        },
-        min_tool_result_tokens: if micro_on { 1_000 } else { usize::MAX },
-        keep_recent_messages: if micro_on {
-            settings.micro_keep_recent
-        } else {
-            0
-        },
-        snip_enabled: snip_on,
-        snip_min_tokens: settings.snip_min_tokens,
-        snip_keep_recent: settings.snip_keep_recent,
-        mode: ProjectionMode::Request,
-    }
-}
-
-/// Whether the cumulative session occupancy has reached the snip band
-/// (`snip_trigger_ratio` of the model context window). Mirrors reasonix's
-/// tool-result-snip band: the maintenance pass runs only near the window, so
-/// healthy sessions never rewrite the cache prefix. Uses the durable
-/// estimated tokens; an unknown window means the band is never reached.
-fn snip_band_reached(
-    config: &AgentConfig,
-    context: &super::context::AgentContext,
-    settings: &super::config::CompactionSettings,
-) -> bool {
-    let Some(window) = config.model.capabilities.max_context_tokens else {
-        return false;
-    };
-    let threshold = (f64::from(window) * settings.snip_trigger_ratio) as usize;
-    context.estimated_tokens() >= threshold
 }
 
 fn take_manual_compact_request(config: &AgentConfig) -> Option<String> {
@@ -1182,11 +1093,8 @@ pub(super) fn emit_effective_context_window(
     emitter: &mut EventEmitter,
     turn: u32,
 ) {
-    let mut snapshot = super::context_budget::ContextBudgetEstimator::snapshot(
-        config,
-        &emitter.context,
-        ProjectionPlan::disabled(),
-    );
+    let mut snapshot =
+        super::context_budget::ContextBudgetEstimator::snapshot(config, &emitter.context);
     snapshot.turn = turn;
     emit_context_window_snapshot(emitter, &snapshot);
 }
@@ -1344,68 +1252,5 @@ mod tests {
                 .text()
                 .contains(GOAL_MODE_AUTHORING_REMINDER)
         );
-    }
-
-    #[test]
-    fn request_projection_plan_enables_snip_without_micro() {
-        let mut config = AgentConfig::for_model(fake_model()).with_compaction(CompactionSettings {
-            snip_enabled: true,
-            // Ratio 0.0 puts the threshold at zero tokens: the band is always
-            // reached, so the test pins the non-band plan shape.
-            snip_trigger_ratio: 0.0,
-            ..CompactionSettings::new(usize::MAX, 4)
-        });
-        config.model.capabilities.max_context_tokens = Some(100_000);
-        let mut context = super::super::context::AgentContext::new();
-        context.append_message(AgentMessage::user_text("x"));
-        let plan = request_projection_plan(&config, &context);
-        assert!(plan.enabled);
-        assert!(plan.snip_enabled);
-        assert_eq!(plan.min_tool_result_tokens, usize::MAX);
-        assert_eq!(plan.snip_min_tokens, 1_000);
-        assert_eq!(plan.snip_keep_recent, 16);
-        assert_eq!(plan.cutoff_index, context.messages().len());
-        assert_eq!(plan.keep_recent_messages, 0);
-    }
-
-    #[test]
-    fn request_projection_plan_keeps_snip_off_below_band() {
-        // Cumulative session well under snip_trigger_ratio of the window:
-        // the prefix must stay append-only (plan disabled, no rewrite).
-        let mut config = AgentConfig::for_model(fake_model()).with_compaction(CompactionSettings {
-            snip_enabled: true,
-            ..CompactionSettings::new(usize::MAX, 4)
-        });
-        config.model.capabilities.max_context_tokens = Some(100_000);
-        let mut context = super::super::context::AgentContext::new();
-        context.append_message(AgentMessage::user_text("x".repeat(200)));
-        let plan = request_projection_plan(&config, &context);
-        assert!(!plan.enabled);
-        assert!(!plan.snip_enabled);
-    }
-
-    #[test]
-    fn request_projection_plan_snip_requires_known_window() {
-        // fake_model advertises no context window: the band can never be
-        // reached, so snip stays off even when enabled.
-        let config = AgentConfig::for_model(fake_model()).with_compaction(CompactionSettings {
-            snip_enabled: true,
-            snip_trigger_ratio: 0.0,
-            ..CompactionSettings::new(usize::MAX, 4)
-        });
-        let mut context = super::super::context::AgentContext::new();
-        context.append_message(AgentMessage::user_text("x".repeat(10_000)));
-        let plan = request_projection_plan(&config, &context);
-        assert!(!plan.enabled);
-        assert!(!plan.snip_enabled);
-    }
-
-    #[test]
-    fn request_projection_plan_disabled_without_compaction() {
-        let config = AgentConfig::for_model(fake_model());
-        let context = super::super::context::AgentContext::new();
-        let plan = request_projection_plan(&config, &context);
-        assert!(!plan.enabled);
-        assert!(!plan.snip_enabled);
     }
 }

@@ -23,7 +23,6 @@ use super::turn_loop::{
     emit_run_finished, establish_instruction_baseline,
     rehydrate_instruction_context_after_compaction, run_agent_turn,
 };
-use crate::compaction::projection::ProjectionPlan;
 use crate::compaction::summary::{FullCompactionInput, run_full_compaction};
 use crate::goal::GoalManager;
 use crate::skills::{SkillStore, SkillStoreHandle};
@@ -525,11 +524,7 @@ impl AgentRuntime {
                 |poisoned| poisoned.into_inner().take(),
                 |mut guard| guard.take(),
             );
-            let snapshot = ContextBudgetEstimator::snapshot(
-                &config,
-                &emitter.context,
-                ProjectionPlan::disabled(),
-            );
+            let snapshot = ContextBudgetEstimator::snapshot(&config, &emitter.context);
             let compaction_sink = emitter.sink();
             let result = run_full_compaction(
                 &model,
@@ -589,11 +584,7 @@ impl AgentRuntime {
 }
 
 pub(super) fn context_fits_after_compaction(config: &AgentConfig, context: &AgentContext) -> bool {
-    let snapshot = ContextBudgetEstimator::snapshot(
-        config,
-        context,
-        crate::compaction::projection::ProjectionPlan::disabled(),
-    );
+    let snapshot = ContextBudgetEstimator::snapshot(config, context);
     let Some(cap) = [
         snapshot.effective_max_context_tokens,
         snapshot.absolute_max_tokens,
@@ -637,12 +628,6 @@ mod tests {
             trigger_ratio: 0.85,
             reserved_context_tokens: 50_000,
             max_recent_messages: 4,
-            micro_enabled: false,
-            micro_keep_recent: 20,
-            snip_enabled: false,
-            snip_min_tokens: 1_000,
-            snip_keep_recent: 16,
-            snip_trigger_ratio: 0.6,
             max_rounds: 5,
             max_retry_attempts: 5,
         });

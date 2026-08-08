@@ -226,16 +226,8 @@ swarm_concurrency = 4
 | `trigger_ratio` | f64 | `0.85` | 触发压缩的上下文占比阈值 |
 | `reserved_context_tokens` | usize | `50000` | 预留的尾部 token 余量 |
 | `max_recent_messages` | usize | `4` | 自动压缩保留的极近消息数 |
-| `micro_enabled` | bool | `false` | 是否启用微压缩（旧工具结果截断） |
-| `micro_keep_recent` | usize | `20` | 微压缩豁免的最近消息数 |
-| `snip_enabled` | bool | `false` | 是否把过时的大工具结果（如长 Read 输出）在模型输入中裁剪为头+尾片段。默认关闭：裁剪会改写旧结果，每个被改写结果会使前缀缓存失效一次——仅在能接受该代价时开启（如本地模型） |
-| `snip_min_tokens` | usize | `1000` | 触发裁剪的最小工具结果大小 |
-| `snip_keep_recent` | usize | `16` | 裁剪豁免的最近消息数 |
-| `snip_trigger_ratio` | f64 | `0.6` | 裁剪进入占用带的窗口比例阈值。低于该比例时请求前缀保持纯追加（缓存稳定）；仅当会话累计增长进入该带后才执行裁剪 |
 | `max_rounds` | usize | `5` | 单次压缩最大轮数 |
 | `max_retry_attempts` | u32 | `5` | 空/截断摘要的最大重试次数 |
-
-> 提示：`micro_enabled` 与 `snip_enabled` 都会改写上下文中间的历史工具结果，使前缀缓存从该消息起失效（每个被改写结果一次）。它们用暂时的命中率下降换取更小的历史体积；付费服务商建议两者都关闭。裁剪是较温和的变体（保留头尾、确定性改写、默认仅 Read），但仍然是前缀改写——仅建议本地或实验环境开启。
 
 ## `[tui]` 表
 

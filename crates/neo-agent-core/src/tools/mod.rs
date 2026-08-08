@@ -30,11 +30,11 @@ mod todo;
 mod write;
 
 use std::{
-    collections::{BTreeMap, HashMap},
+    collections::BTreeMap,
     future::Future,
     path::{Path, PathBuf},
     pin::Pin,
-    sync::{Arc, Mutex, OnceLock, RwLock},
+    sync::{Arc, Mutex},
 };
 
 use neo_ai::ModelClient;
@@ -686,46 +686,6 @@ impl ToolResult {
     }
 }
 
-/// Geometry for shortening stale oversized tool results in the model input.
-/// The policy travels with the tool definition: `ToolRegistry::register`
-/// records it once, and the request-time projection looks it up by name.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct SnipHint {
-    /// Lines kept from the start of the result.
-    pub head_lines: usize,
-    /// Lines kept from the end of the result.
-    pub tail_lines: usize,
-    /// Runes kept from the start when the result is one giant line.
-    pub head_chars: usize,
-    /// Runes kept from the end when the result is one giant line.
-    pub tail_chars: usize,
-}
-
-/// Process-global name -> hint map, populated at registration so a tool
-/// rename updates the policy in the same place (mirrors reasonix's
-/// "policy travels with the tool" design without threading the registry
-/// through request building).
-static SNIP_HINTS: OnceLock<RwLock<HashMap<String, SnipHint>>> = OnceLock::new();
-
-/// Snip geometry for `name`, if the tool opted in.
-#[must_use]
-pub fn snip_hint_for(name: &str) -> Option<SnipHint> {
-    SNIP_HINTS
-        .get()
-        .and_then(|map| map.read().ok())
-        .and_then(|map| map.get(name).copied())
-}
-
-fn register_snip_hint(name: &str, hint: Option<SnipHint>) {
-    if let Some(hint) = hint
-        && let Ok(mut map) = SNIP_HINTS
-            .get_or_init(|| RwLock::new(HashMap::new()))
-            .write()
-    {
-        map.insert(name.to_owned(), hint);
-    }
-}
-
 pub trait Tool: Send + Sync {
     fn name(&self) -> &str;
     fn description(&self) -> &str;
@@ -738,13 +698,6 @@ pub trait Tool: Send + Sync {
             description: self.description().to_owned(),
             input_schema: self.input_schema(),
         }
-    }
-
-    /// Geometry for shortening stale oversized results this tool produced in
-    /// the model input. `None` (default) keeps the historical full-omission
-    /// marker behavior of micro compaction.
-    fn snip_hint(&self) -> Option<SnipHint> {
-        None
     }
 }
 
@@ -835,7 +788,6 @@ impl ToolRegistry {
         if tool.name() == "Write" {
             self.canonical_prepared_write = false;
         }
-        register_snip_hint(tool.name(), tool.snip_hint());
         self.tools.insert(tool.name().to_owned(), Arc::new(tool));
         self.invalidate_specs();
     }

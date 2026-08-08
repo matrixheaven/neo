@@ -7,7 +7,6 @@ use super::{
     CompactionError, CompactionSource, CompactionStrategy, compute_compact_count,
     generate_compaction_summary,
 };
-use crate::compaction::projection::project_for_summary;
 use crate::events::{AgentEvent, CompactionPhase, CompactionReason};
 use crate::runtime::context_budget::ContextBudgetSnapshot;
 use crate::runtime::{estimate_message_tokens, estimate_messages_tokens};
@@ -19,7 +18,6 @@ pub struct CompactionOutcome {
     pub tokens_before: usize,
     pub tokens_after: usize,
     pub summary_tokens: usize,
-    pub projection_omitted_tokens: usize,
 }
 
 pub(crate) struct FullCompactionInput<'a> {
@@ -85,7 +83,6 @@ where
     });
 
     let messages_to_compact = &messages[..compacted_count];
-    let projection = project_for_summary(messages_to_compact, &snapshot.projection);
 
     emit(AgentEvent::CompactionProgress {
         phase: CompactionPhase::SelectingBoundary,
@@ -99,7 +96,7 @@ where
     let summary_text = generate_compaction_summary(
         model,
         config,
-        &projection.messages,
+        messages_to_compact,
         custom_instruction,
         cancel_token,
         |summary_chars| {
@@ -141,7 +138,6 @@ where
         tokens_before: snapshot.projected_tokens,
         tokens_after,
         summary_tokens,
-        projection_omitted_tokens: projection.omitted_tokens,
     })
 }
 
@@ -151,7 +147,6 @@ fn unchanged_outcome(snapshot: &ContextBudgetSnapshot) -> CompactionOutcome {
         tokens_before: snapshot.projected_tokens,
         tokens_after: snapshot.projected_tokens,
         summary_tokens: 0,
-        projection_omitted_tokens: 0,
     }
 }
 
@@ -160,7 +155,6 @@ mod tests {
     use neo_ai::AiStreamEvent;
     use tokio_util::sync::CancellationToken;
 
-    use crate::compaction::projection::{ProjectionMode, ProjectionPlan};
     use crate::events::CompactionReason;
     use crate::harness::FakeHarness;
     use crate::runtime::context_budget::ContextBudgetEstimator;
@@ -209,26 +203,13 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn full_compaction_uses_summary_projection_before_llm_request() {
+    async fn full_compaction_replaces_old_prefix_with_summary() {
         let harness = fake_summary_harness();
         let model = harness.client();
         let mut context = context_with_old_large_tool_result();
         let config =
             AgentConfig::for_model(harness.model()).with_compaction(CompactionSettings::new(1, 1));
-        let snapshot = ContextBudgetEstimator::snapshot(
-            &config,
-            &context,
-            ProjectionPlan {
-                enabled: true,
-                cutoff_index: context.messages().len(),
-                min_tool_result_tokens: 100,
-                keep_recent_messages: 0,
-                snip_enabled: false,
-                snip_min_tokens: 0,
-                snip_keep_recent: 0,
-                mode: ProjectionMode::SummaryInput,
-            },
-        );
+        let snapshot = ContextBudgetEstimator::snapshot(&config, &context);
 
         let outcome = run_full_compaction(
             &model,
@@ -245,7 +226,7 @@ mod tests {
         .await
         .expect("compaction should succeed");
 
-        assert!(outcome.projection_omitted_tokens > 0);
+        assert!(outcome.compacted_message_count > 0);
         assert!(context.compaction_summary().is_some());
     }
 }
