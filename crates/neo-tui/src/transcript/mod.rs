@@ -39,8 +39,7 @@ pub(crate) use child_activity::{
 };
 pub use chrome_render::{
     CHROME_GUTTER, ChromeRender, ChromeRowKind, apply_gutter, frame_content_width,
-    materialize_todo_selection, prompt_body_width, render_chrome_lines, render_chrome_lines_mut,
-    render_footer_only_lines,
+    prompt_body_width, render_chrome_lines, render_chrome_lines_mut, render_footer_only_lines,
 };
 pub use delegate_card::DelegateCardComponent;
 pub use delegate_group::DelegateGroupComponent;
@@ -56,7 +55,7 @@ pub use plan_box::PlanBoxComponent;
 pub use progressive::{ProgressiveFact, ProgressiveFactId};
 pub use selection::{
     AutoScroll, DocumentPoint, DocumentSelection, LONG_PRESS_DELAY, MOVEMENT_THRESHOLD, MouseEvent,
-    MouseKind, WHEEL_SCROLL_ROWS,
+    MouseKind, WHEEL_SCROLL_ROWS, paint_selection_range, slice_text_by_cells,
 };
 pub use shell_run::{ShellRunComponent, ShellRunState};
 pub use store::{ExpandedOutputCache, TranscriptEntryId, TranscriptStore};

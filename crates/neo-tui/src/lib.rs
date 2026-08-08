@@ -1,6 +1,7 @@
 pub mod app;
 pub mod dialogs;
 pub mod diff_model;
+pub mod frame_selection;
 pub mod input;
 pub mod markdown;
 pub mod notify;

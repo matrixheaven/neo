@@ -16,34 +16,6 @@ use super::pending_input::PendingInputState;
 use super::prompt::PromptState;
 use super::theme_manager::ThemeManagerAction;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-// Endpoints of a mouse text selection over the rendered Todo panel, in
-// panel-local row/cell coordinates (rows are the panel's rendered lines).
-pub struct TodoSelection {
-    pub anchor_row: usize,
-    pub anchor_cell: usize,
-    pub active_row: usize,
-    pub active_cell: usize,
-}
-
-impl TodoSelection {
-    /// Normalized (`min_row`, `max_row`).
-    #[must_use]
-    pub const fn row_range(&self) -> (usize, usize) {
-        if self.anchor_row < self.active_row {
-            (self.anchor_row, self.active_row)
-        } else {
-            (self.active_row, self.anchor_row)
-        }
-    }
-
-    /// Whether the gesture stayed on a single cell (a plain click).
-    #[must_use]
-    pub const fn collapsed(&self) -> bool {
-        self.anchor_row == self.active_row && self.anchor_cell == self.active_cell
-    }
-}
-
 #[derive(Debug, Clone, PartialEq, Eq)]
 // Many independent toggle fields are stored on this central chrome state.
 // Splitting them into smaller enums or sub-states would require a larger
@@ -82,11 +54,6 @@ pub struct NeoChromeState {
     pub(super) todo_items: Vec<TodoDisplayItem>,
     /// Whether the todo panel renders all items instead of the collapsed subset.
     pub(super) todo_panel_expanded: bool,
-    /// Mouse text selection over the rendered Todo panel rows, in panel-local
-    /// (row, cell) coordinates.
-    pub(super) todo_selection: Option<TodoSelection>,
-    /// Plain text materialized from `todo_selection` at mouse release.
-    pub(super) todo_selection_text: Option<String>,
     /// Optional `/btw` sidecar panel state.
     pub(super) btw_panel_state: Option<crate::widgets::btw_panel::BtwPanelState>,
     /// Optional custom label shown in the footer as a working indicator.
@@ -140,8 +107,6 @@ impl NeoChromeState {
             development_mode: DevelopmentMode::Normal,
             todo_items: Vec::new(),
             todo_panel_expanded: false,
-            todo_selection: None,
-            todo_selection_text: None,
             btw_panel_state: None,
             custom_working_label: None,
             mcp_startup_active: false,
@@ -435,27 +400,6 @@ impl NeoChromeState {
 
     pub const fn set_todo_panel_expanded(&mut self, expanded: bool) {
         self.todo_panel_expanded = expanded;
-    }
-
-    #[must_use]
-    pub const fn todo_selection(&self) -> Option<TodoSelection> {
-        self.todo_selection
-    }
-
-    #[must_use]
-    pub fn copy_todo_selection_text(&self) -> Option<String> {
-        self.todo_selection_text.clone()
-    }
-
-    pub fn set_todo_selection(&mut self, selection: Option<TodoSelection>) {
-        self.todo_selection = selection;
-        if selection.is_none() {
-            self.todo_selection_text = None;
-        }
-    }
-
-    pub fn set_todo_selection_text(&mut self, text: Option<String>) {
-        self.todo_selection_text = text;
     }
 
     pub const fn toggle_todo_panel_expanded(&mut self) {

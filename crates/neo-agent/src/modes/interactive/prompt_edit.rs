@@ -847,10 +847,10 @@ impl InteractiveController {
         self.write_clipboard_text(&copied);
     }
 
-    /// Ctrl+C fallback (no transcript selection): copy the Todo selection,
+    /// Ctrl+C fallback (no transcript selection): copy the frame selection,
     /// else the prompt selection, else the whole prompt text.
     pub(super) fn copy_input_selection_to_clipboard(&mut self) {
-        if let Some(text) = self.tui.chrome().copy_todo_selection_text() {
+        if let Some(text) = self.tui.frame_selection_text() {
             self.write_clipboard_text(&text);
             return;
         }

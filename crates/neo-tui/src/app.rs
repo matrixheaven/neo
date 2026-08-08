@@ -1,15 +1,15 @@
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
+use crate::frame_selection::{FrameSelection, FrameTextMap};
 use crate::input::MouseEvent;
 use crate::primitive::{Style, pad_to_width, paint, truncate_to_width};
 use crate::screen_output::{CursorPos, TerminalFrame};
-use crate::shell::{NeoChromeState, OverlayKind, TodoSelection};
+use crate::shell::{NeoChromeState, OverlayKind};
 use crate::transcript::chrome_render::extract_cursor;
 use crate::transcript::{
     CHROME_GUTTER, ChromeRender, ChromeRowKind, MOVEMENT_THRESHOLD, TranscriptPane, apply_gutter,
-    frame_content_width, materialize_todo_selection, prompt_body_width, render_chrome_lines_mut,
-    render_footer_only_lines,
+    frame_content_width, prompt_body_width, render_chrome_lines_mut, render_footer_only_lines,
 };
 pub struct NeoTui {
     chrome: NeoChromeState,
@@ -24,8 +24,14 @@ pub struct NeoTui {
     /// controller after the mouse event is routed.
     pending_copy: Option<String>,
     clipboard_notice_until: Option<Instant>,
-    /// Press anchor of an in-progress prompt/todo mouse gesture.
+    /// Press anchor of an in-progress prompt mouse gesture.
     widget_gesture: Option<WidgetGesture>,
+    /// Final-frame text map of the most recently rendered frame, used to
+    /// materialize frame-selection copies from the visible rows.
+    frame_map: FrameTextMap,
+    /// Screen-coordinate mouse selection over frame rows (todo panel,
+    /// footer, rich dialogs, full-screen overlays).
+    frame_selection: FrameSelection,
 }
 
 /// Per-row classification of the last rendered frame, for mouse routing.
@@ -59,11 +65,10 @@ fn prompt_content_col(chrome_col: usize) -> usize {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum WidgetRegion {
     Prompt,
-    Todo,
 }
 
-/// Press anchor of a prompt/todo mouse gesture; the selection endpoints are
-/// only created once movement past the threshold confirms a drag.
+/// Press anchor of a prompt mouse gesture; the selection endpoints are only
+/// created once movement past the threshold confirms a drag.
 #[derive(Debug, Clone, Copy)]
 struct WidgetGesture {
     region: WidgetRegion,
@@ -88,6 +93,8 @@ impl NeoTui {
             pending_copy: None,
             clipboard_notice_until: None,
             widget_gesture: None,
+            frame_map: FrameTextMap::default(),
+            frame_selection: FrameSelection::new(),
         }
     }
 
@@ -118,6 +125,8 @@ impl NeoTui {
             pending_copy: None,
             clipboard_notice_until: None,
             widget_gesture: None,
+            frame_map: FrameTextMap::default(),
+            frame_selection: FrameSelection::new(),
         }
     }
 
@@ -162,6 +171,13 @@ impl NeoTui {
         if let Some(mut lines) = render_full_screen_overlay_frame(&self.chrome, width, height) {
             lines.truncate(height);
             apply_gutter(&mut lines);
+            let row_kinds = vec![ChromeRowKind::Other; lines.len()];
+            self.last_layout = Some(FrameLayout {
+                width,
+                body_rows: 0,
+                row_kinds: row_kinds.clone(),
+            });
+            self.finalize_frame(&mut lines, width, height, Instant::now(), 0, &row_kinds);
             return (lines, None);
         }
 
@@ -188,8 +204,16 @@ impl NeoTui {
         self.last_layout = Some(FrameLayout {
             width,
             body_rows,
-            row_kinds,
+            row_kinds: row_kinds.clone(),
         });
+        self.finalize_frame(
+            &mut lines,
+            width,
+            height,
+            Instant::now(),
+            body_rows,
+            &row_kinds,
+        );
         (lines, cursor)
     }
 
@@ -209,10 +233,23 @@ impl NeoTui {
         if let Some(mut lines) = render_full_screen_overlay_frame(&self.chrome, width, height) {
             lines.truncate(height);
             apply_gutter(&mut lines);
+            let row_kinds = vec![ChromeRowKind::Other; lines.len()];
+            self.last_layout = Some(FrameLayout {
+                width,
+                body_rows: 0,
+                row_kinds: row_kinds.clone(),
+            });
+            self.finalize_frame(&mut lines, width, height, now, 0, &row_kinds);
             // The fullscreen surface is already active; blocking overlays
             // (Task Browser, rich dialogs) render inside it without any
-            // physical transition.
-            return TerminalFrame::new(lines, None);
+            // physical transition. Frames continue only while a pending
+            // frame-selection press needs the cadence for long-press
+            // activation.
+            let animation_deadline = self
+                .frame_selection
+                .requests_animation()
+                .then(|| now.checked_add(ANIMATION_INTERVAL).unwrap_or(now));
+            return TerminalFrame::with_animation_deadline(lines, None, animation_deadline);
         }
 
         self.transcript.set_theme(self.chrome.theme());
@@ -241,20 +278,58 @@ impl NeoTui {
         self.last_layout = Some(FrameLayout {
             width,
             body_rows,
-            row_kinds,
+            row_kinds: row_kinds.clone(),
         });
+        self.finalize_frame(&mut lines, width, height, now, body_rows, &row_kinds);
 
-        let animation_deadline = (self.chrome.working_label().is_some()
-            || self.transcript.has_visible_animation()
-            || self.transcript.has_live_entries()
-            || self.transcript.selection_requests_animation())
-        .then(|| now.checked_add(ANIMATION_INTERVAL).unwrap_or(now));
+        let animation_deadline = self.animation_deadline_at(now);
         let next_animation_deadline = match (animation_deadline, self.clipboard_notice_until) {
             (Some(animation), Some(clipboard)) => Some(animation.min(clipboard)),
             (animation, clipboard) => animation.or(clipboard),
         };
 
         TerminalFrame::with_animation_deadline(lines, cursor, next_animation_deadline)
+    }
+
+    /// Whether the frame loop must keep rendering at the 100 ms cadence:
+    /// activity/live entries, the transcript's own selection needs, or a
+    /// pending frame-selection press waiting for long-press activation.
+    fn animation_deadline_at(&self, now: Instant) -> Option<Instant> {
+        (self.chrome.working_label().is_some()
+            || self.transcript.has_visible_animation()
+            || self.transcript.has_live_entries()
+            || self.transcript.selection_requests_animation()
+            || self.frame_selection.requests_animation())
+        .then(|| now.checked_add(ANIMATION_INTERVAL).unwrap_or(now))
+    }
+
+    /// Shared final-frame pass for both render entry points: record the
+    /// final frame into the text map, drive long-press activation, invalidate
+    /// a frame selection whose visual state changed, then paint the selection
+    /// background over the frame. Runs after cursor extraction and the gutter
+    /// on both paths (the clipboard notice is applied before it on the
+    /// normal path only).
+    fn finalize_frame(
+        &mut self,
+        lines: &mut [String],
+        width: usize,
+        height: usize,
+        now: Instant,
+        body_rows: usize,
+        row_kinds: &[ChromeRowKind],
+    ) {
+        self.frame_map.record(
+            width,
+            height,
+            self.chrome.focused_overlay_id(),
+            lines,
+            body_rows,
+            row_kinds,
+        );
+        self.frame_selection.tick(now);
+        self.frame_selection.validate_against(&self.frame_map);
+        self.frame_selection
+            .paint_into(lines, self.chrome.theme().selection_bg);
     }
 
     pub fn advance_animation_at(&mut self, _now: Instant) {
@@ -305,32 +380,25 @@ impl NeoTui {
     }
 
     /// Route one screen-space mouse event by region: the transcript body
-    /// (rows above the chrome), the prompt input box, or the Todo panel.
-    /// Column coordinates are the screen column minus the gutter. Wheel
-    /// events and Shift-modified drags are not consumed here; the runtime
-    /// routes wheels and the terminal emulator owns Shift selection.
+    /// (rows above the chrome), the prompt input box, or the frame surface
+    /// (todo panel, footer, rich dialogs, full-screen overlays). Column
+    /// coordinates are the screen column minus the gutter. Wheel events and
+    /// Shift-modified drags are not consumed here; the runtime routes wheels
+    /// and the terminal emulator owns Shift selection.
     pub fn handle_mouse_event(&mut self, event: MouseEvent) {
         if !event.is_selection_event() || event.is_shift_modified() {
-            return;
-        }
-        if self.chrome.focused_overlay_blocks_prompt()
-            && !self.chrome.approval_is_pending()
-            && !self.chrome.question_dialog_is_focused()
-        {
-            // Pending approvals and question dialogs own keyboard selection
-            // and submission only — the transcript body stays visible behind
-            // them, so left-button selection events keep reaching the
-            // document. Full-screen overlays (Task Browser, Theme Manager)
-            // still own the whole frame.
             return;
         }
         let row = usize::from(event.row);
         let col = usize::from(event.column).saturating_sub(CHROME_GUTTER);
 
-        // A release always ends an in-progress widget gesture, wherever the
-        // pointer lands (a drag may cross out of the widget's rows).
+        // A release always ends an in-progress gesture, wherever the pointer
+        // lands (a drag may cross out of the widget's rows). Frame releases
+        // are no-ops outside an open frame gesture, so a standing selection
+        // survives unrelated releases.
         if event.kind == crate::transcript::MouseKind::Release {
             self.finish_widget_gesture();
+            self.frame_selection.release(&self.frame_map);
         }
 
         let Some(layout) = self.last_layout.clone() else {
@@ -362,27 +430,26 @@ impl NeoTui {
             ChromeRowKind::Prompt => {
                 self.handle_prompt_mouse_event(event, &layout, chrome_row, col);
             }
-            ChromeRowKind::Todo => {
-                self.handle_todo_mouse_event(event, &layout, chrome_row, col);
+            ChromeRowKind::Other => {
+                self.handle_frame_mouse_event(event, &layout, chrome_row);
             }
-            ChromeRowKind::Other => {}
         }
     }
 
     /// Whether any region currently has a selection (transcript, prompt, or
-    /// Todo panel) — drives the selection hint line.
+    /// the frame surface) — drives the selection hint line.
     #[must_use]
     pub fn has_any_selection(&self) -> bool {
         self.transcript.has_transcript_selection()
             || self.chrome.prompt().selection_range().is_some()
-            || self.chrome.todo_selection().is_some()
+            || self.frame_selection.is_active()
     }
 
-    /// Clear every region's selection (transcript, prompt, Todo).
+    /// Clear every region's selection (transcript, prompt, frame).
     pub fn clear_all_selections(&mut self) {
         self.transcript.clear_transcript_selection();
         self.chrome.prompt_mut().clear_selection();
-        self.chrome.set_todo_selection(None);
+        self.frame_selection.clear();
     }
 
     /// Plain text a right-click requested to copy, drained by the controller
@@ -391,9 +458,20 @@ impl NeoTui {
         self.pending_copy.take()
     }
 
+    /// Plain text of the current frame selection, materialized from the
+    /// final frame's visible rows, or `None` when no frame selection is
+    /// active. The selection is validated against the frame map first, so
+    /// the copy always matches the painted highlight; returns a clone and
+    /// keeps the selection (a stale selection is cleared instead of copied).
+    #[must_use]
+    pub fn frame_selection_text(&mut self) -> Option<String> {
+        self.frame_selection.validate_against(&self.frame_map);
+        self.frame_map.materialize(&self.frame_selection)
+    }
+
     fn clear_widget_selections(&mut self) {
         self.chrome.prompt_mut().clear_selection();
-        self.chrome.set_todo_selection(None);
+        self.frame_selection.clear();
     }
 
     fn handle_prompt_mouse_event(
@@ -413,7 +491,7 @@ impl NeoTui {
                 };
                 let body_width = prompt_body_width(frame_content_width(layout.width));
                 self.transcript.clear_transcript_selection();
-                self.chrome.set_todo_selection(None);
+                self.frame_selection.clear();
                 let char_pos = self.chrome.prompt().char_index_at_content_position(
                     row_in_prompt,
                     prompt_content_col(col),
@@ -487,75 +565,44 @@ impl NeoTui {
         }
     }
 
-    fn handle_todo_mouse_event(
+    /// Route one selection event on a frame row (todo panel, footer, rich
+    /// dialog, full-screen overlay) to the frame selection gesture. Frame
+    /// releases are handled before region routing so a drag crossing out of
+    /// the frame rows still ends cleanly.
+    fn handle_frame_mouse_event(
         &mut self,
         event: MouseEvent,
         layout: &FrameLayout,
         chrome_row: usize,
-        col: usize,
     ) {
+        // Frame-selection endpoints are full-line display cells (the frame
+        // map is recorded after the gutter), i.e. the raw screen column.
+        let row = layout.body_rows + chrome_row;
+        let cell = usize::from(event.column);
         match event.kind {
             crate::transcript::MouseKind::Press
                 if event.button == crossterm::event::MouseButton::Left =>
             {
-                let Some(row_in_panel) = layout.region_row(ChromeRowKind::Todo, chrome_row) else {
-                    return;
-                };
                 self.transcript.clear_transcript_selection();
                 self.chrome.prompt_mut().clear_selection();
-                self.chrome.set_todo_selection(None);
-                self.widget_gesture = Some(WidgetGesture {
-                    region: WidgetRegion::Todo,
-                    press_row: row_in_panel,
-                    press_col: col,
-                    anchor_char: None,
-                    dragging: false,
-                });
+                self.frame_selection.press(row, cell, Instant::now());
             }
             crate::transcript::MouseKind::Press
                 if event.button == crossterm::event::MouseButton::Right =>
             {
-                self.pending_copy = self.chrome.copy_todo_selection_text();
-                // Mirror the transcript: right-click copy also collapses the
-                // selection.
-                self.chrome.set_todo_selection(None);
+                // Validate before materializing so a selection whose visual
+                // state changed since the last frame is never copied with
+                // text that differs from its highlight.
+                self.frame_selection.validate_against(&self.frame_map);
+                self.pending_copy = self.frame_map.materialize(&self.frame_selection);
+                // Mirror the prompt: right-click copy also collapses the
+                // selection (the transcript keeps its highlight instead).
+                self.frame_selection.clear();
             }
             crate::transcript::MouseKind::Drag
                 if event.button == crossterm::event::MouseButton::Left =>
             {
-                let Some(row_in_panel) = layout.region_row(ChromeRowKind::Todo, chrome_row) else {
-                    return;
-                };
-                let crossing = {
-                    let Some(gesture) = &self.widget_gesture else {
-                        return;
-                    };
-                    if !matches!(gesture.region, WidgetRegion::Todo) {
-                        return;
-                    }
-                    gesture.dragging
-                        || row_in_panel.abs_diff(gesture.press_row)
-                            > usize::from(MOVEMENT_THRESHOLD)
-                        || col.abs_diff(gesture.press_col) > usize::from(MOVEMENT_THRESHOLD)
-                };
-                if !crossing {
-                    return;
-                }
-                if let Some(gesture) = &mut self.widget_gesture {
-                    gesture.dragging = true;
-                }
-                let anchor = self
-                    .widget_gesture
-                    .as_ref()
-                    .map(|gesture| (gesture.press_row, gesture.press_col));
-                if let Some((anchor_row, anchor_cell)) = anchor {
-                    self.chrome.set_todo_selection(Some(TodoSelection {
-                        anchor_row,
-                        anchor_cell,
-                        active_row: row_in_panel,
-                        active_cell: col,
-                    }));
-                }
+                self.frame_selection.drag(row, cell);
             }
             _ => {}
         }
@@ -571,18 +618,6 @@ impl NeoTui {
                 // leaves the selected range materialized for copy.
                 if !gesture.dragging {
                     self.chrome.prompt_mut().clear_selection();
-                }
-            }
-            WidgetRegion::Todo => {
-                let Some(selection) = self.chrome.todo_selection() else {
-                    return;
-                };
-                if !gesture.dragging || selection.collapsed() {
-                    self.chrome.set_todo_selection(None);
-                } else if let Some(layout) = &self.last_layout {
-                    let content_width = frame_content_width(layout.width);
-                    let text = materialize_todo_selection(&self.chrome, selection, content_width);
-                    self.chrome.set_todo_selection_text(text);
                 }
             }
         }

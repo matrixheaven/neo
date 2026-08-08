@@ -33,7 +33,7 @@ pub use prompt::{PromptEdit, PromptState};
 pub(crate) use prompt::{visual_col_at_char_index, wrap_prompt_lines};
 pub use select_list::{SelectItem, SelectListState, VisibleSelectItem};
 pub use session_picker::{SessionPickerItem, SessionPickerScope, SessionPickerState};
-pub use state::{NeoChromeState, TodoSelection};
+pub use state::NeoChromeState;
 pub use stream::{StreamUpdate, ToolStatusKind};
 pub use theme_manager::{
     ThemeCatalogEntrySnapshot, ThemeConflictPolicy, ThemeManagerAction, ThemeManagerFocus,
