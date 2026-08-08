@@ -348,9 +348,16 @@ impl FrameSelection {
             .is_some_and(|(min_row, max_row)| row >= min_row && row <= max_row)
     }
 
-    /// Display-cell span of `row` inside the selection: the min row is cut by
-    /// its endpoint cell, the max row by the other endpoint cell, and rows
-    /// between stay whole.
+    /// Display-cell span of `row` inside the selection: every selected row
+    /// shares the same column range between the two endpoint cells — a
+    /// rectangular selection — so a drag over a split layout (task browser,
+    /// theme manager) never pulls in columns beyond the drag columns. Rows
+    /// shorter than the range are clamped to their line end by
+    /// [`slice_text_by_cells`](crate::transcript::slice_text_by_cells) and
+    /// [`paint_selection_range`](crate::transcript::paint_selection_range),
+    /// never padded. A single-row selection keeps its endpoint range
+    /// `min(anchor_cell, active_cell)..max(anchor_cell, active_cell) + 1`,
+    /// so a click-drag behaves exactly as before.
     #[must_use]
     pub fn cell_span(&self, row: usize) -> (usize, usize) {
         let Some((anchor_row, anchor_cell)) = self.anchor else {
@@ -367,31 +374,9 @@ impl FrameSelection {
         if row < min_row || row > max_row {
             return (0, 0);
         }
-        match anchor_row.cmp(&active_row) {
-            std::cmp::Ordering::Equal => {
-                let start = anchor_cell.min(active_cell);
-                let end = anchor_cell.max(active_cell).saturating_add(1);
-                (start, end)
-            }
-            std::cmp::Ordering::Less => {
-                if row == min_row {
-                    (anchor_cell, usize::MAX)
-                } else if row == max_row {
-                    (0, active_cell.saturating_add(1))
-                } else {
-                    (0, usize::MAX)
-                }
-            }
-            std::cmp::Ordering::Greater => {
-                if row == min_row {
-                    (active_cell, usize::MAX)
-                } else if row == max_row {
-                    (0, anchor_cell.saturating_add(1))
-                } else {
-                    (0, usize::MAX)
-                }
-            }
-        }
+        let start = anchor_cell.min(active_cell);
+        let end = anchor_cell.max(active_cell).saturating_add(1);
+        (start, end)
     }
 
     /// Start a tentative press at `(row, cell)`. A press never confirms a

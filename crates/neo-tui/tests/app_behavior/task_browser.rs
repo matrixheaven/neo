@@ -428,7 +428,7 @@ fn browser_opens_non_workflow_details_and_scrolls_its_output() {
     // Wide split: the inspector is always visible and follows the selection.
     let wide = render_plain(&state, 120, 20).join("\n");
     assert!(wide.contains(" DETAILS "));
-    assert!(wide.contains(" LATEST OUTPUT · Preview 7/24 "));
+    assert!(wide.contains(" LATEST OUTPUT · Preview 6/24 "));
     assert!(wide.contains("running  bash"));
     assert!(wide.contains("output 0"));
 
@@ -493,6 +493,62 @@ fn browser_opens_non_workflow_details_and_scrolls_its_output() {
     assert_eq!(
         state.handle_action(TaskBrowserAction::Cancel),
         Some("__close__".to_owned())
+    );
+}
+
+#[test]
+fn split_inspector_sections_are_fully_bordered() {
+    let mut task = browser_item("bash", TaskBrowserStatus::Running);
+    task.detail_lines = vec!["Task: bash".to_owned(), "Second detail".to_owned()];
+    task.preview_lines = vec!["preview line".to_owned(), "second preview".to_owned()];
+    let mut state = TaskBrowserState::new();
+    state.apply_snapshot(&TaskBrowserSnapshot::new(vec![task]));
+    let lines = render_plain(&state, 120, 20);
+
+    // Details and Output content rows carry both side borders: the left
+    // pane's right `│`, the joiner space, then the bordered inspector row.
+    let details_row = lines
+        .iter()
+        .find(|line| line.contains("│ │ Task: bash"))
+        .unwrap_or_else(|| panic!("no bordered details row: {lines:#?}"));
+    assert!(
+        details_row.trim_end().ends_with('│'),
+        "details row must end on the right border: {details_row:?}"
+    );
+    let output_row = lines
+        .iter()
+        .find(|line| line.contains("│ │ preview line"))
+        .unwrap_or_else(|| panic!("no bordered output row: {lines:#?}"));
+    assert!(
+        output_row.trim_end().ends_with('│'),
+        "output row must end on the right border: {output_row:?}"
+    );
+
+    // Each section ends with its own `└──┘` bottom row in the inspector
+    // column: exactly two frame lines end with `┘` and carry their `└` in
+    // the inspector column (the left pane's own bottom border at the pane
+    // edge is not a section bottom).
+    let right_left = (120 / 3).clamp(30, 42) + 1;
+    let section_bottoms = lines
+        .iter()
+        .filter(|line| {
+            line.trim_end().ends_with('\u{2518}')
+                && line
+                    .rfind('\u{2514}')
+                    .is_some_and(|byte| line[..byte].chars().count() >= right_left)
+        })
+        .count();
+    assert_eq!(
+        section_bottoms, 2,
+        "one bottom row per inspector section: {lines:#?}"
+    );
+    assert!(
+        lines
+            .iter()
+            .filter(|line| line.contains('\u{250c}'))
+            .count()
+            >= 3,
+        "the pane and section dividers stay: {lines:#?}"
     );
 }
 

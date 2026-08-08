@@ -10,7 +10,7 @@ use neo_tui::NeoTui;
 use neo_tui::dialogs::ApiKeyInputOptions;
 use neo_tui::input::InputEvent;
 use neo_tui::primitive::text_layout::visible_width;
-use neo_tui::primitive::{TuiTheme, bg_to_ansi, strip_ansi};
+use neo_tui::primitive::{Color, TuiTheme, bg_to_ansi, strip_ansi};
 use neo_tui::shell::{NeoChromeState, OverlayKind};
 use neo_tui::tasks_browser::{
     TaskBrowserItem, TaskBrowserKind, TaskBrowserSnapshot, TaskBrowserState, TaskBrowserStatus,
@@ -719,8 +719,10 @@ fn frame_selection_skips_prompt_rows_when_crossing() {
 
     // Drag from the todo panel down into the prompt box: the crossing drag
     // stays with the frame owner, but prompt rows are excluded from both
-    // the highlight and the materialized copy.
-    drag_select(&mut tui, todo_row, todo_col, prompt_row, prompt_col + 6);
+    // the highlight and the materialized copy. The endpoint lands well
+    // inside the prompt text so the rectangular selection still covers the
+    // whole first todo row.
+    drag_select(&mut tui, todo_row, todo_col, prompt_row, prompt_col + 12);
     assert!(tui.has_any_selection(), "the crossing drag selects");
 
     let frame = tui.render_terminal_frame_at(80, 24, now).lines;
@@ -807,6 +809,100 @@ fn frame_selection_cjk_row_keeps_full_content_and_highlight() {
     assert!(
         !copied.contains('\u{2502}'),
         "column separators must never be copied: {copied:?}"
+    );
+}
+
+#[test]
+fn frame_selection_cross_column_drag_stays_in_press_column() {
+    // Split task browser at 120 columns: a multi-row drag that stays inside
+    // the left task column selects a rectangle over the press column, so the
+    // split separator and the inspector column stay out of both the
+    // highlight and the copied text.
+    let mut tui = new_tui();
+    let mut state = TaskBrowserState::new();
+    let item = |id: &str, title: &str| TaskBrowserItem {
+        id: id.to_owned(),
+        kind: TaskBrowserKind::Bash,
+        status: TaskBrowserStatus::Running,
+        title: title.to_owned(),
+        description: String::new(),
+        elapsed: "00:01".to_owned(),
+        detail_lines: vec!["D-right-column-detail".to_owned()],
+        preview_lines: vec!["P-right-column-preview".to_owned()],
+        can_stop: true,
+        human_handle: None,
+        list_cursor: None,
+        workflow: None,
+    };
+    state.apply_snapshot(&TaskBrowserSnapshot::new(vec![
+        item("task-1", "task one"),
+        item("task-2", "task two"),
+    ]));
+    tui.chrome_mut().push_task_browser_overlay(state);
+    let now = Instant::now();
+    let frame = tui.render_terminal_frame_at(120, 24, now).lines;
+    let (row1, col1) = locate(&frame, "task one");
+    let (row2, col2) = locate(&frame, "task two");
+    let end_col = col2 + "task two".len();
+    // The drag must stay inside the left column. The anchor row's last `│`
+    // is the split separator (the inspector identity rows carry no border).
+    let middle_col = {
+        let plain = strip_ansi(&frame[row1]);
+        let byte = plain.rfind('\u{2502}').expect("split column separator");
+        plain[..byte].chars().count()
+    };
+    assert!(
+        end_col < middle_col,
+        "the drag must stay inside the left column: end_col={end_col}, middle={middle_col}"
+    );
+    drag_select(&mut tui, row1, col1, row2, end_col);
+    assert!(tui.has_any_selection(), "the left-column drag selects");
+
+    // The highlight covers the left column only: the selection paint is one
+    // contiguous run, so its trailing background reset marks where it ends.
+    // On every selected row the reset lands inside the left column — the
+    // split separator and the inspector text after it stay unpainted.
+    let bg_reset = bg_to_ansi(Color::Reset);
+    let frame = tui.render_terminal_frame_at(120, 24, now).lines;
+    for row in row1..=row2 {
+        let painted = &frame[row];
+        let reset = painted
+            .rfind(&bg_reset)
+            .expect("the painted run ends with a background reset");
+        let after = strip_ansi(&painted[reset + bg_reset.len()..]);
+        assert!(
+            after.contains('\u{2502}'),
+            "the split separator must not be highlighted: {after:?}"
+        );
+        assert!(
+            after.contains("task one") || after.contains("DETAILS"),
+            "the inspector column must not be highlighted: {after:?}"
+        );
+    }
+
+    // Right-click copy materializes the same rectangle: the left column task
+    // texts come along, the inspector column never does.
+    tui.handle_mouse_event(right_mouse(MouseKind::Press, cell(col1), cell(row1)));
+    let copied = tui.take_pending_copy().expect("left-column copy");
+    assert!(copied.contains("task one"), "{copied}");
+    assert!(copied.contains("task two"), "{copied}");
+    assert!(
+        !copied.contains("D-right-column-detail") && !copied.contains("P-right-column-preview"),
+        "the inspector content must never be copied: {copied:?}"
+    );
+    assert!(
+        !copied.contains(" DETAILS ") && !copied.contains("LATEST OUTPUT"),
+        "the inspector dividers must never be copied: {copied:?}"
+    );
+    assert!(
+        !copied.contains("running"),
+        "the inspector identity must never be copied: {copied:?}"
+    );
+    assert!(
+        copied
+            .chars()
+            .all(|ch| !('\u{2500}'..='\u{257F}').contains(&ch)),
+        "box-drawing borders must never be copied: {copied:?}"
     );
 }
 

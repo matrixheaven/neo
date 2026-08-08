@@ -1048,20 +1048,26 @@ impl<'a> TaskBrowserRenderer<'a> {
     }
 
     /// Wide-mode inspector column: identity rows, a Details section, and a
-    /// Latest output preview section. Not boxed; follows the selection even
-    /// when `task_details_open` is false. The section split comes from the
-    /// single `BrowserLayout` geometry so hit testing and rendering agree.
+    /// Latest output preview section. Not boxed as one pane, but each section
+    /// is fully bordered — `│`-ed content rows and a `└──┘` bottom — and
+    /// follows the selection even when `task_details_open` is false. The
+    /// section split comes from the single `BrowserLayout` geometry so hit
+    /// testing and rendering agree.
     fn inspector(&self, layout: &BrowserLayout, width: usize, height: usize) -> Vec<String> {
         let Some(item) = self.state.selected_item() else {
             return vec![pad_to_width("No task selected.", width)];
         };
         let mut lines = Self::identity_rows(item, width);
-        let remaining = height.saturating_sub(4);
+        // Two identity rows, one divider and one bottom row per section:
+        // 2 + 1 + details + 1 + 1 + output + 1 = height.
+        let remaining = height.saturating_sub(6);
         // The LATEST OUTPUT divider starts at `inspector_output_top`; the
-        // Details section is everything between it and the identity rows.
+        // Details section is everything between it and the identity rows,
+        // minus the section's bottom border row.
         let details_rows = layout
             .inspector_output_top
-            .saturating_sub(layout.content_top + 3);
+            .saturating_sub(layout.content_top + 3)
+            .saturating_sub(1);
         let output_rows = remaining - details_rows;
         let details_color = if self.state.focus() == TaskBrowserFocus::Tasks {
             self.theme.brand
@@ -1075,11 +1081,12 @@ impl<'a> TaskBrowserRenderer<'a> {
         };
         lines.push(Self::divider(" DETAILS ", width, details_color));
         lines.extend(
-            Self::wrapped_details(item, width)
+            Self::bordered_wrap(&item.detail_lines, width, details_color)
                 .into_iter()
                 .take(details_rows),
         );
-        let output_all = Self::wrapped_output(item, width);
+        lines.push(Self::bottom(width, details_color));
+        let output_all = Self::bordered_wrap(&item.preview_lines, width, output_color);
         let output_total = output_all.len();
         let skipped = output_all.iter().skip(self.state.output_scroll());
         let shown = skipped.len().min(output_rows);
@@ -1095,6 +1102,7 @@ impl<'a> TaskBrowserRenderer<'a> {
                 .skip(self.state.output_scroll())
                 .take(output_rows),
         );
+        lines.push(Self::bottom(width, output_color));
         lines
     }
 
@@ -1173,6 +1181,36 @@ impl<'a> TaskBrowserRenderer<'a> {
             .flat_map(|line| wrap_text(line, width.saturating_sub(1)))
             .map(|line| format!(" {line}"))
             .collect()
+    }
+
+    /// Wrap `source` lines to the bordered body width and render each wrapped
+    /// line as a `pane()`-style content row — `│ {line}` padded to `width - 1`
+    /// then `│`, exactly `width` columns wide. Wrapping never ellipsizes;
+    /// viewport slicing happens after wrapping.
+    fn bordered_wrap(source: &[String], width: usize, color: Color) -> Vec<String> {
+        let body = width.saturating_sub(4);
+        let style = Style::default().fg(color);
+        source
+            .iter()
+            .flat_map(|line| wrap_text(line, body))
+            .map(|line| {
+                format!(
+                    "{} {}{} {}",
+                    paint("│", style),
+                    line,
+                    " ".repeat(body.saturating_sub(visible_width(&line))),
+                    paint("│", style)
+                )
+            })
+            .collect()
+    }
+
+    /// `└──...──┘` bottom border of a section, exactly `width` columns wide.
+    fn bottom(width: usize, color: Color) -> String {
+        paint(
+            &format!("└{}┘", "─".repeat(width.saturating_sub(2))),
+            Style::default().fg(color),
+        )
     }
 
     /// `┌{title}─...─┐` divider painted with the section color, exactly
