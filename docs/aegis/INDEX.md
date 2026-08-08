@@ -576,3 +576,14 @@ Entries are workspace records, not authoritative runtime decisions.
 | 2026-08-08 | work | docs/aegis/work/2026-08-08-bounded-runtime-memory/proof-bundle.md | Bound Neo runtime memory proof bundle |
 | 2026-08-08 | artifact | docs/aegis/work/2026-08-08-bounded-runtime-memory/gate-input-pack.json | 2026-08-08-bounded-runtime-memory gate input pack |
 | 2026-08-08 | work | docs/aegis/work/2026-08-08-bounded-runtime-memory/proof-bundle.md | 2026-08-08-bounded-runtime-memory proof bundle |
+| 2026-08-08 | work | docs/aegis/work/2026-08-08-delegate-result-delivery/10-intent.md | Delegate 系列结果交付实施 intent |
+| 2026-08-08 | work | docs/aegis/work/2026-08-08-delegate-result-delivery/20-checkpoint.md | Delegate 系列结果交付实施 checkpoint |
+| 2026-08-08 | work | docs/aegis/work/2026-08-08-delegate-result-delivery/90-evidence.md | Delegate 系列结果交付实施 evidence |
+| 2026-08-08 | work | docs/aegis/work/2026-08-08-delegate-result-delivery/99-reflection.md | Delegate 系列结果交付实施 reflection |
+| 2026-08-08 | artifact | docs/aegis/work/2026-08-08-delegate-result-delivery/task-intent-draft.json | Delegate 系列结果交付实施 task intent draft |
+| 2026-08-08 | artifact | docs/aegis/work/2026-08-08-delegate-result-delivery/baseline-read-set-hint.json | Delegate 系列结果交付实施 baseline read-set hint |
+| 2026-08-08 | artifact | docs/aegis/work/2026-08-08-delegate-result-delivery/baseline-usage-draft.json | Delegate 系列结果交付实施 baseline usage draft |
+| 2026-08-08 | artifact | docs/aegis/work/2026-08-08-delegate-result-delivery/impact-statement-draft.json | Delegate 系列结果交付实施 impact statement draft |
+| 2026-08-08 | artifact | docs/aegis/work/2026-08-08-delegate-result-delivery/todo-checkpoint-draft.json | Delegate 系列结果交付实施 todo checkpoint draft |
+| 2026-08-08 | artifact | docs/aegis/work/2026-08-08-delegate-result-delivery/drift-check-draft.json | Delegate 系列结果交付实施 drift check draft |
+| 2026-08-08 | artifact | docs/aegis/work/2026-08-08-delegate-result-delivery/resume-state-hint.json | 2026-08-08-delegate-result-delivery resume state hint |
