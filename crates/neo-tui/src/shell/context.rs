@@ -152,8 +152,9 @@ fn format_cache_hit_rate(input: u64, read: u64, write: u64) -> Option<String> {
     if denominator == 0 || read == 0 {
         return None;
     }
-    let percent = read.saturating_mul(100) / denominator;
-    Some(format!("hit {percent}%"))
+    #[allow(clippy::cast_precision_loss)]
+    let percent = read as f64 * 100.0 / denominator as f64;
+    Some(format!("hit {percent:.1}%"))
 }
 
 #[must_use]
@@ -196,9 +197,12 @@ mod tests {
     fn format_cache_hit_rate_uses_effective_input_as_denominator() {
         assert_eq!(
             format_cache_hit_rate(4_200_000, 4_100_000, 0),
-            Some("hit 97%".to_owned())
+            Some("hit 97.6%".to_owned())
         );
-        assert_eq!(format_cache_hit_rate(10, 8, 2), Some("hit 80%".to_owned()));
+        assert_eq!(
+            format_cache_hit_rate(10, 8, 2),
+            Some("hit 80.0%".to_owned())
+        );
         assert_eq!(format_cache_hit_rate(10, 0, 0), None);
     }
 }
