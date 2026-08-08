@@ -864,8 +864,7 @@ fn frame_selection_cross_column_drag_stays_in_press_column() {
     // split separator and the inspector text after it stay unpainted.
     let bg_reset = bg_to_ansi(Color::Reset);
     let frame = tui.render_terminal_frame_at(120, 24, now).lines;
-    for row in row1..=row2 {
-        let painted = &frame[row];
+    for painted in &frame[row1..=row2] {
         let reset = painted
             .rfind(&bg_reset)
             .expect("the painted run ends with a background reset");
