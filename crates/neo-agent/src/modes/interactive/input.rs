@@ -114,10 +114,6 @@ impl InteractiveController {
             } else {
                 self.scroll_transcript_down(WHEEL_SCROLL_ROWS);
             }
-            return;
-        }
-        if mouse.is_shift_modified() {
-            return;
         }
     }
 
