@@ -815,13 +815,13 @@ impl Tool for WaitDelegateTool {
                     .map(|id| wait_target_snapshot(ctx, id))
                     .collect::<Vec<_>>();
                 if snapshots.iter().any(|snapshot| !snapshot.found) {
-                    return Ok(wait_delegate_result(ctx, snapshots, "not_found").await?);
+                    return wait_delegate_result(ctx, snapshots, "not_found").await;
                 }
                 if snapshots.iter().all(|snapshot| snapshot.terminal) {
-                    return Ok(wait_delegate_result(ctx, snapshots, "all_terminal").await?);
+                    return wait_delegate_result(ctx, snapshots, "all_terminal").await;
                 }
                 if std::time::Instant::now() >= deadline {
-                    return Ok(wait_delegate_result(ctx, snapshots, "wait_timed_out").await?);
+                    return wait_delegate_result(ctx, snapshots, "wait_timed_out").await;
                 }
                 tokio::time::sleep(Duration::from_millis(100)).await;
             }

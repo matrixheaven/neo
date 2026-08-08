@@ -3035,14 +3035,14 @@ fn apply_activity_event(
                 && latest_text_activity(activity.as_slice(), false).as_deref()
                     != Some(canonical_text.as_str())
             {
-                let _ = append_text_activity(activity, attempt_start, &text, false);
+                append_text_activity(activity, attempt_start, &text, false);
             }
         }
         AgentEvent::ThinkingDelta { text, .. } => {
-            let _ = append_text_activity(activity, attempt_start, text, true);
+            append_text_activity(activity, attempt_start, text, true);
         }
         AgentEvent::TextDelta { text, .. } => {
-            let _ = append_text_activity(activity, attempt_start, text, false);
+            append_text_activity(activity, attempt_start, text, false);
         }
         _ => {}
     }

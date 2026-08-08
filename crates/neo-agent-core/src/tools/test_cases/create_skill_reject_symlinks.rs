@@ -2,6 +2,9 @@ use super::*;
 use crate::ToolContext;
 use serde_json::json;
 
+type SetupFn = Box<dyn FnOnce(&Path, &Path) -> serde_json::Value>;
+type ExtraFn = Box<dyn FnOnce(&Path, &Path)>;
+
 fn make_ctx() -> ToolContext {
     let dir = tempfile::tempdir().unwrap();
     ToolContext::new(dir.path()).unwrap()
@@ -14,9 +17,9 @@ async fn create_skill_rejects_symlinked_directory_in_skill_or_backup_paths() {
         name: &'static str,
         /// Creates the on-disk state (including the symlink) and returns the
         /// input payload for the rejected invocation.
-        setup: Box<dyn FnOnce(&Path, &Path) -> serde_json::Value>,
+        setup: SetupFn,
         /// Case-specific assertions after the shared rejection check.
-        extra: Box<dyn FnOnce(&Path, &Path)>,
+        extra: ExtraFn,
     }
 
     let cases = vec![
@@ -90,9 +93,9 @@ async fn create_skill_rejects_symlinked_or_dangling_skill_file() {
         name: &'static str,
         /// Creates the on-disk state (including the symlink) and returns the
         /// input payload for the rejected invocation.
-        setup: Box<dyn FnOnce(&Path, &Path) -> serde_json::Value>,
+        setup: SetupFn,
         /// Case-specific assertions after the shared rejection check.
-        extra: Box<dyn FnOnce(&Path, &Path)>,
+        extra: ExtraFn,
     }
 
     let cases = vec![
