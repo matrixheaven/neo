@@ -519,10 +519,11 @@ pub fn prompt_body_width(content_width: usize) -> usize {
 }
 
 /// Render the rounded prompt input box. The first content line carries the
-/// `> ` prompt symbol; continuation lines use a 4-space hanging indent so
-/// wrapped/explicit-newline text aligns under the body (matching Neo's
-/// `paddingX: 4` editor). Border color is weak by default and switches to
-/// the brand color when text is present or plan mode is active.
+/// `> ` prompt symbol (or `↓ ` when the input spans multiple lines);
+/// continuation lines use a 4-space hanging indent so wrapped/explicit-newline
+/// text aligns under the body (matching Neo's `paddingX: 4` editor). Border
+/// color is weak by default and switches to the brand color when text is
+/// present or plan mode is active.
 fn render_prompt_lines(app: &NeoChromeState, width: usize) -> (Vec<String>, Option<CursorPos>) {
     let theme = app.theme();
     let prompt = app.prompt();
@@ -574,6 +575,9 @@ fn render_prompt_lines(app: &NeoChromeState, width: usize) -> (Vec<String>, Opti
     for (idx, line) in logical_lines.iter().enumerate() {
         let prefix = if idx == 0 && app.shell_mode_active() {
             " ! "
+        } else if idx == 0 && total_lines > 1 {
+            // Multi-line input: point down at the continuation instead of `>`.
+            " ↓ "
         } else if idx == 0 {
             " > "
         } else {
@@ -988,6 +992,23 @@ mod tests {
                 "line: {line:?}"
             );
         }
+    }
+
+    #[test]
+    fn prompt_marker_points_down_when_input_multiline() {
+        let mut app = NeoChromeState::new("neo", "s", "m", "/tmp");
+
+        app.prompt_mut().set_text("single line");
+        let (lines, _) = render_prompt_lines(&app, 80);
+        let first_content = crate::primitive::strip_ansi(&lines[1]);
+        assert!(first_content.contains(" > "), "{first_content:?}");
+        assert!(!first_content.contains(" ↓ "), "{first_content:?}");
+
+        app.prompt_mut().set_text("line one\nline two");
+        let (lines, _) = render_prompt_lines(&app, 80);
+        let first_content = crate::primitive::strip_ansi(&lines[1]);
+        assert!(first_content.contains(" ↓ "), "{first_content:?}");
+        assert!(!first_content.contains(" > "), "{first_content:?}");
     }
 
     #[test]
