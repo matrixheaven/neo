@@ -200,3 +200,67 @@ execution, model context, and tool-execution semantics were not touched.
   graphical terminal — macOS Terminal/iTerm2 mouse-drag highlight and
   `Ctrl+C` clipboard verification, and a Windows Terminal logged-in desktop
   session, were not runnable from this headless/automated session.
+
+### Final-Frame Text Selection (2026-08-08)
+
+Landed in task order (plan `docs/aegis/plans/2026-08-07-tui-mouse-text-selection.md`):
+
+- `c6838f11` — `feat(tui): select text from final frames`
+  (`FrameTextMap`/`FrameSelection` in new `frame_selection.rs`: screen-coordinate
+  endpoints, press-time gesture ownership candidates, selected-row plain-text
+  snapshots, surface identity from `focused_overlay_id`; both render entry
+  points share one final-frame pass recorded after the gutter and cursor
+  extraction and before selection painting; copy materializes from the same
+  plain visible rows and display cells; invalidation on size/surface/selected-row
+  change only; long-press activation rides the existing 100 ms frame cadence;
+  `TodoSelection`, `todo_selection_text`, `materialize_todo_selection`,
+  `paint_todo_selection_rows`, `todo_selection_cell_span`, `ChromeRowKind::Todo`,
+  and the controller Todo copy branch deleted without aliases).
+- `a8be8931` — `fix(tui): keep mouse selection gesture ownership`
+  (press locks the owner Transcript/Prompt/Frame; drag and release always
+  return to the press owner; transcript drags crossing into chrome rows reach
+  `TranscriptPane` with real screen rows so `body_row >= body_height` triggers
+  downward edge auto-scroll, and release closes the gesture from any region;
+  prompt drag endpoints clamp to the visible character boundary; events before
+  the first rendered frame are ignored).
+- `f35cc9b4` — `fix(tui): route selection before overlays`
+  (non-Shift left/right selection events reach `NeoTui` before blocking
+  entries, Task Browser, and rich dialogs; `pending_copy` drained immediately;
+  Task Browser press keeps its pointer click navigation (user decision —
+  ordinary clicks still reach the browser, drags/long-presses form frame
+  selections); `Ctrl+C` uses one current-selection query transcript → frame →
+  prompt; `ctrl_c_copies_todo_selection` renamed
+  `ctrl_c_copies_frame_selection_from_todo_rows`; the parallel pointer test
+  assertion migrated with user authorization).
+- `314c11ba` — `fix(tui): gate ctrl+c copy on materialized selection`
+  (Ctrl+C falls through to clear/exit when the selection no longer
+  materializes, instead of swallowing the key with no feedback).
+
+### Verification (2026-08-08)
+
+- macOS host: all 11 new regressions pass (one package, one target selector,
+  one test-name filter each) across `--test input_behavior`,
+  `--test transcript_behavior`, and `--bin neo`; retained boundary regressions
+  `selection_crosses_entries_autoscrolls_and_materializes_text`,
+  `blocking_overlays_render_inside_the_active_fullscreen_frame`,
+  `non_workflow_delegate_family_cards_remain_unchanged`,
+  `ctrl_c_prefers_prompt_selection_over_whole_text`,
+  `mouse_selection_works_while_approval_owns_keyboard`,
+  `mouse_selection_works_while_question_owns_keyboard`, and the Task Browser
+  pointer navigation test pass; negative `rg
+  "TodoSelection|todo_selection|materialize_todo_selection"
+  crates/neo-tui/src crates/neo-agent/src` empty; rustfmt and
+  `git diff --check` clean.
+- Fedora 43 aarch64 (Parallels VM, root via SSH, real PTY, 80x24): the same
+  16 precise tests pass natively plus `cargo fmt --all --check`; real-PTY
+  lifecycle smoke: one balanced `\x1b[?1049h`/`\x1b[?1049l` pair and balanced
+  mouse enable/disable (5/5 sequences), double-Ctrl+C exit prints the static
+  projection ("Bye") after restoration.
+- Windows 11 aarch64 (Parallels VM): **not executed** — no remote execution
+  channel was available (prlctl exec does not pass command arguments, SSH keys
+  are not authenticated for the VM, SMB/shared-folder unreachable), so no
+  native Windows automation evidence exists for this change.
+- Residual risk (unchanged in kind, no new evidence): real graphical-terminal
+  mouse hardware, system clipboard side effects, and Shift-drag bypass need a
+  human in a graphical terminal — macOS Terminal/iTerm2 and a Windows Terminal
+  logged-in desktop session were not runnable from this automated session.

@@ -174,6 +174,86 @@ human in a graphical terminal (macOS Terminal/iTerm2 and a Windows Terminal
 logged-in desktop session); they remain residual risk as in the original
 landing. Full evidence record in the landed baseline.
 
+## Final-Frame Text Selection (2026-08-08)
+
+Status: `accepted` (design `docs/aegis/specs/2026-08-07-tui-mouse-text-selection-design.md`).
+
+Three disjoint selection owners replace the previous transcript/prompt/Todo
+split: `TranscriptPane` keeps document-coordinate selection, `PromptState`
+keeps editable chat-input character selection, and `NeoTui` owns a
+`FrameSelection` over the final rendered frame (`frame_selection.rs`) for
+every other visible row — normal chrome, standalone/rich dialogs, Task
+Browser, Theme Manager, and full-screen overlays. Both render entry points
+(`render_frame`, `render_terminal_frame_at`) share one final-frame pass that
+records a `FrameTextMap` (plain visible rows, row ownership, surface identity
+from `focused_overlay_id`) after the gutter and cursor extraction and before
+selection painting; copy materializes from the same plain rows and display
+cells, so masked inputs copy only their rendered mask and hidden values never
+enter the map. The map is derived presentation state and never enters
+`TranscriptStore`, session JSONL, model context, provider requests,
+compaction, or cache-prefix bytes.
+
+Gesture ownership is locked at press time (Transcript/Prompt/Frame); drag and
+release always return to the press owner, which fixes transcript drags that
+cross into chrome (release always closes the gesture) and makes the existing
+downward edge auto-scroll reachable through the real routing path. Prompt
+drag endpoints clamp to the visible character boundary outside the input box.
+Frame invalidation clears only on terminal size change, surface replacement,
+or selected-row content/mapping change; unselected-row refreshes keep the
+selection. Long-press activation rides the existing 100 ms frame cadence.
+Selection mouse events are routed to `NeoTui` before blocking entries, Task
+Browser, and rich dialogs; wheel events and Shift-drag keep their existing
+paths. The Task Browser pointer click navigation (parallel commit `bdb00ee4`)
+is preserved: a press still reaches the browser after `NeoTui` records the
+frame gesture, so ordinary clicks keep row navigation while drags and
+long-presses form frame selections. `Ctrl+C` copies through one
+current-selection query (transcript → frame → prompt) and never arms the exit
+confirmation while a selection materializes; right-click copy keeps its
+existing per-region behavior.
+
+Retired delete-first without aliases or fallback branches: `TodoSelection`,
+`todo_selection_text`, `materialize_todo_selection`,
+`paint_todo_selection_rows`, `todo_selection_cell_span`, `ChromeRowKind::Todo`,
+and the Todo-specific copy branches in the controller and prompt editor.
+Production references to the old Todo selection path are zero across
+`crates/neo-tui/src` and `crates/neo-agent/src` (negative `rg` check).
+
+Landed implementation commits, in task order:
+
+- `c6838f11` — `feat(tui): select text from final frames`;
+- `a8be8931` — `fix(tui): keep mouse selection gesture ownership`;
+- `f35cc9b4` — `fix(tui): route selection before overlays`;
+- `314c11ba` — `fix(tui): gate ctrl+c copy on materialized selection`.
+
+Verification split by platform (evidence record in the landed baseline):
+
+- macOS host automation: all 11 new regressions (final-frame coverage,
+  Unicode/ANSI cell preservation, click/drag/long-press thresholds,
+  invalidation, masked overlay, transcript cross-chrome auto-scroll, prompt
+  cross-region release, first-frame ignore, selection-before-overlays
+  routing, Ctrl+C frame copy, right-click frame copy) plus the retained
+  boundary regressions (`selection_crosses_entries_autoscrolls_and_materializes_text`,
+  `blocking_overlays_render_inside_the_active_fullscreen_frame`,
+  `non_workflow_delegate_family_cards_remain_unchanged`,
+  `ctrl_c_prefers_prompt_selection_over_whole_text`, approval/question
+  keyboard tests, Task Browser pointer navigation) pass; negative `rg` and
+  rustfmt/`git diff --check` clean.
+- Fedora 43 aarch64 (Parallels VM, non-root user, real PTY): the same 16
+  precise tests pass natively plus `cargo fmt --all --check`; real-PTY
+  lifecycle smoke shows balanced alternate-screen and mouse capture
+  enter/restore (`\x1b[?1049h`/`l` and `\x1b[?1000h`/`l` each exactly once)
+  with normal exit and the bounded static projection ("Bye") after restore.
+- Windows 11 aarch64 (Parallels VM): **not executed** — no remote execution
+  channel was available (prlctl exec does not pass command arguments, SSH
+  keys are not authenticated for the VM, and the SMB/shared-folder path was
+  unreachable), so no native Windows automation evidence exists for this
+  change. Windows Terminal graphical mouse and system clipboard require a
+  logged-in desktop session and remain residual risk.
+- Graphical-terminal manual verification (macOS Terminal/iTerm2 and Windows
+  Terminal desktop): not executed — no human-in-the-loop evidence exists, so
+  real-terminal mouse hardware behavior, system clipboard side effects, and
+  Shift-drag bypass remain residual risk as before.
+
 ## Consequences
 
 - Neo owns one fullscreen transcript document and one terminal lifecycle.
