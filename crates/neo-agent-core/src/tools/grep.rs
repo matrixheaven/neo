@@ -4,7 +4,10 @@ use regex::RegexBuilder;
 use schemars::JsonSchema;
 use serde::Deserialize;
 
-use super::{Tool, ToolContext, ToolError, ToolFuture, ToolResult, parse_input, schema};
+use super::{
+    Tool, ToolContext, ToolError, ToolFuture, ToolResult, parse_input, schema,
+    text_encoding::decode_text,
+};
 
 const DEFAULT_HEAD_LIMIT: usize = 250;
 
@@ -108,7 +111,7 @@ impl Tool for GrepTool {
     }
 
     fn description(&self) -> &'static str {
-        "Search workspace text files using regular expressions.\n\
+        "Search UTF-8 or UTF-16 workspace text files using regular expressions.\n\
         \n\
         Use Grep when the task is to find unknown content or unknown file locations. Do not use \
         shell `grep` or `rg` directly; this tool applies workspace path policy, output limits, and \
@@ -206,7 +209,10 @@ impl Tool for GrepTool {
                             continue;
                         }
 
-                        let Ok(content) = std::fs::read_to_string(entry.path()) else {
+                        let Ok(bytes) = std::fs::read(entry.path()) else {
+                            continue;
+                        };
+                        let Some(content) = decode_text(&bytes) else {
                             continue;
                         };
                         let display = entry

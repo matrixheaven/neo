@@ -26,6 +26,7 @@ mod shell_guard;
 mod skills_manager;
 mod sleep;
 mod terminal;
+mod text_encoding;
 mod todo;
 mod write;
 

@@ -76,6 +76,49 @@ async fn file_tools_read_search_write_and_edit_inside_workspace() {
 }
 
 #[tokio::test]
+async fn grep_transcodes_utf16_text() {
+    let workspace = tempfile::tempdir().expect("workspace");
+    let registry = ToolRegistry::with_builtin_tools();
+    let context = ToolContext::new(workspace.path())
+        .expect("context")
+        .with_access(ToolAccess::all());
+
+    let text = "first line\n第二行目标\n";
+    let mut utf16_le_bom = vec![0xff, 0xfe];
+    let mut utf16_le = Vec::new();
+    let mut utf16_be_bom = vec![0xfe, 0xff];
+    for unit in text.encode_utf16() {
+        utf16_le_bom.extend_from_slice(&unit.to_le_bytes());
+        utf16_le.extend_from_slice(&unit.to_le_bytes());
+        utf16_be_bom.extend_from_slice(&unit.to_be_bytes());
+    }
+    for (name, bytes) in [
+        ("utf16le-bom.txt", utf16_le_bom),
+        ("utf16le.txt", utf16_le),
+        ("utf16be-bom.txt", utf16_be_bom),
+    ] {
+        std::fs::write(workspace.path().join(name), bytes).expect("write UTF-16 text");
+    }
+
+    let grep = registry
+        .run(
+            "Grep",
+            &context,
+            json!({ "path": ".", "pattern": "第二行目标", "output_mode": "content" }),
+        )
+        .await
+        .expect("Grep");
+
+    for name in ["utf16le-bom.txt", "utf16le.txt", "utf16be-bom.txt"] {
+        assert!(
+            grep.content.contains(&format!("{name}:2:第二行目标")),
+            "{}",
+            grep.content
+        );
+    }
+}
+
+#[tokio::test]
 async fn edit_match_mismatch_reports_path_and_writes_nothing() {
     let workspace = tempfile::tempdir().expect("workspace");
     let registry = neo_agent_core::ToolRegistry::with_builtin_tools();

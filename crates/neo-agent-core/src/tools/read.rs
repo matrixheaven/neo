@@ -4,7 +4,12 @@ use schemars::JsonSchema;
 use serde::Deserialize;
 use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncSeekExt, BufReader};
 
-use super::{Tool, ToolContext, ToolError, ToolFuture, ToolResult, parse_input, schema};
+use super::{
+    Tool, ToolContext, ToolError, ToolFuture, ToolResult, parse_input, schema,
+    text_encoding::{
+        ENCODING_DETECTION_SAMPLE_BYTES, Utf16ByteOrder, Utf16Decoder, detect_utf16_byte_order,
+    },
+};
 use crate::workspace_policy::normalize_path;
 
 const MAX_LINES: usize = 1000;
@@ -12,8 +17,6 @@ const DEFAULT_LINES: usize = 400;
 const MAX_LINE_LENGTH: usize = 2000;
 const MAX_BYTES: usize = 100 * 1024;
 const READ_CHUNK_SIZE: usize = 64 * 1024;
-const ENCODING_DETECTION_SAMPLE_BYTES: usize = 512;
-const MIN_UTF16_ZERO_BYTES: usize = 2;
 
 #[derive(Debug, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
@@ -513,19 +516,13 @@ impl TextLineReader {
     }
 }
 
-#[derive(Clone, Copy)]
-enum Utf16ByteOrder {
-    LittleEndian,
-    BigEndian,
-}
-
 struct Utf16LineReader {
     file: tokio::fs::File,
     byte_order: Utf16ByteOrder,
     byte_buffer: Vec<u8>,
     decoded: String,
     pending_byte: Option<u8>,
-    pending_high_surrogate: Option<u16>,
+    decoder: Utf16Decoder,
     eof: bool,
 }
 
@@ -537,7 +534,7 @@ impl Utf16LineReader {
             byte_buffer: vec![0; READ_CHUNK_SIZE],
             decoded: String::new(),
             pending_byte: None,
-            pending_high_surrogate: None,
+            decoder: Utf16Decoder::new(),
             eof: false,
         }
     }
@@ -585,34 +582,11 @@ impl Utf16LineReader {
             Utf16ByteOrder::LittleEndian => u16::from_le_bytes([first, byte]),
             Utf16ByteOrder::BigEndian => u16::from_be_bytes([first, byte]),
         };
-        self.push_unit(unit);
-    }
-
-    fn push_unit(&mut self, unit: u16) {
-        if let Some(high) = self.pending_high_surrogate.take() {
-            if (0xdc00..=0xdfff).contains(&unit) {
-                let scalar =
-                    0x1_0000 + (((u32::from(high) - 0xd800) << 10) | (u32::from(unit) - 0xdc00));
-                self.decoded
-                    .push(char::from_u32(scalar).expect("valid UTF-16 surrogate pair"));
-                return;
-            }
-            self.decoded.push(char::REPLACEMENT_CHARACTER);
-        }
-
-        match unit {
-            0xd800..=0xdbff => self.pending_high_surrogate = Some(unit),
-            0xdc00..=0xdfff => self.decoded.push(char::REPLACEMENT_CHARACTER),
-            _ => self
-                .decoded
-                .push(char::from_u32(u32::from(unit)).expect("non-surrogate UTF-16 unit is valid")),
-        }
+        self.decoder.push_unit(&mut self.decoded, unit);
     }
 
     fn finish_decoding(&mut self) {
-        if self.pending_high_surrogate.take().is_some() {
-            self.decoded.push(char::REPLACEMENT_CHARACTER);
-        }
+        self.decoder.finish(&mut self.decoded);
         if self.pending_byte.take().is_some() {
             self.decoded.push(char::REPLACEMENT_CHARACTER);
         }
@@ -624,43 +598,15 @@ async fn open_text_line_reader(path: &std::path::Path) -> Result<TextLineReader,
     let mut sample = [0; ENCODING_DETECTION_SAMPLE_BYTES];
     let sample_len = file.read(&mut sample).await?;
     let (byte_order, bom_len) = detect_utf16_byte_order(&sample[..sample_len]);
-    file.seek(SeekFrom::Start(bom_len)).await?;
+    file.seek(SeekFrom::Start(
+        u64::try_from(bom_len).expect("BOM length fits in u64"),
+    ))
+    .await?;
 
     Ok(match byte_order {
         Some(byte_order) => TextLineReader::Utf16(Utf16LineReader::new(file, byte_order)),
         None => TextLineReader::Utf8(BufReader::with_capacity(READ_CHUNK_SIZE, file)),
     })
-}
-
-fn detect_utf16_byte_order(bytes: &[u8]) -> (Option<Utf16ByteOrder>, u64) {
-    if bytes.starts_with(&[0xff, 0xfe]) {
-        return (Some(Utf16ByteOrder::LittleEndian), 2);
-    }
-    if bytes.starts_with(&[0xfe, 0xff]) {
-        return (Some(Utf16ByteOrder::BigEndian), 2);
-    }
-
-    let (zeros_at_even, zeros_at_odd) =
-        bytes
-            .iter()
-            .enumerate()
-            .fold((0, 0), |(even, odd), (index, byte)| {
-                if *byte != 0 {
-                    (even, odd)
-                } else if index % 2 == 0 {
-                    (even + 1, odd)
-                } else {
-                    (even, odd + 1)
-                }
-            });
-
-    if zeros_at_even == 0 && zeros_at_odd >= MIN_UTF16_ZERO_BYTES {
-        (Some(Utf16ByteOrder::LittleEndian), 0)
-    } else if zeros_at_odd == 0 && zeros_at_even >= MIN_UTF16_ZERO_BYTES {
-        (Some(Utf16ByteOrder::BigEndian), 0)
-    } else {
-        (None, 0)
-    }
 }
 
 fn not_readable_error(path: &std::path::Path) -> ReadError {
