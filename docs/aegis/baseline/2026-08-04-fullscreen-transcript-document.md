@@ -286,3 +286,24 @@ Landed in task order (plan `docs/aegis/plans/2026-08-07-tui-mouse-text-selection
   fault-injection guard for the border-run edge shape; negative `rg`,
   rustfmt, and `git diff --check` clean. Windows and graphical-terminal
   verification remain unexecuted residual risk as above.
+
+### Frame Selection Column Rect + Inspector Borders (2026-08-08, user-reported round 2)
+
+- `b2a7ddac` — `fix(tui): keep frame selection in press column`
+  (user feedback: in split-column layouts — Task Browser and Theme Manager —
+  multi-row frame drags selected the middle column separator and the other
+  column's content, and the Task Browser inspector rendered only divider top
+  borders without side or bottom lines). Frame selection `cell_span` is now a
+  true rectangle: every row uses the same display-cell range between the
+  anchor and active columns, so a left-column drag stays in the left column
+  (single-row behavior unchanged, short rows clamp to their tail, the
+  content-span purification intersection is preserved). The Task Browser
+  inspector DETAILS and LATEST OUTPUT sections now render complete borders
+  (`│` content rows and `└─┘` bottom rows) with the row budget adjusted so
+  the `inspector_output_top` layout geometry is unchanged; the "N/total"
+  preview counters and affected pointer-test assertions were updated to the
+  new row counts.
+- macOS host: `--test input_behavior` 17/17, `--test app_behavior` 107/107,
+  `--test rendering_behavior` 98/98, transcript and neo-agent frame-selection
+  filters pass; negative `rg`, rustfmt, and `git diff --check` clean. Windows
+  and graphical-terminal verification remain unexecuted residual risk.

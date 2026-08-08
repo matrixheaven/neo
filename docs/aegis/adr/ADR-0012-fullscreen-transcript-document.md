@@ -234,7 +234,15 @@ Landed implementation commits, in task order:
   their newline (visible-row semantics), so highlight and copied cells remain
   identical. The footer "copied"/"selected" notice never overwrites a
   selected last line, and the fullscreen-overlay frame deadline merges the
-  clipboard notice so the notice expires on cadence).
+  clipboard notice so the notice expires on cadence);
+- `b2a7ddac` — `fix(tui): keep frame selection in press column`
+  (user-reported round 2: frame-selection `cell_span` is a true rectangle —
+  every row uses the same display-cell range between the anchor and active
+  columns, so split-column layouts (Task Browser, Theme Manager) keep a
+  left-column drag inside the left column; single-row behavior is unchanged.
+  The Task Browser inspector DETAILS and LATEST OUTPUT sections render
+  complete `│`/`└─┘` borders with the row budget adjusted so
+  `inspector_output_top` geometry is unchanged).
 
 Verification split by platform (evidence record in the landed baseline):
 
