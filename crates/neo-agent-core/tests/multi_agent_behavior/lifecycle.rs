@@ -805,7 +805,8 @@ async fn wait_delegate_timeout_preserves_completed_partial_results() {
     assert_eq!(details["items"][0]["summary"], "finished summary");
     assert_eq!(details["items"][1]["id"], running.id.as_str());
     assert_eq!(details["items"][1]["status"], "running");
-    assert!(result.content.contains("Call WaitDelegate again"));
+    let content: serde_json::Value = serde_json::from_str(&result.content).expect("wait JSON");
+    assert_eq!(content["next_actions"][0]["tool"], "WaitDelegate");
     assert!(!result.content.contains("Sleep"));
     assert!(!result.content.contains("ListDelegates"));
 }

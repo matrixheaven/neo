@@ -410,6 +410,58 @@ impl MultiAgentRuntime {
         self
     }
 
+    /// Read a bounded page from a terminal delegate's final assistant text.
+    pub async fn agent_result_page(
+        &self,
+        agent_id: &str,
+        offset: usize,
+        max_bytes: usize,
+    ) -> Result<Option<AgentResultPage>, String> {
+        let Some(snapshot) = self.agent_snapshot(agent_id) else {
+            return Ok(None);
+        };
+        let fallback =
+            || assistant_result_page_from_messages(&snapshot.prior_messages, offset, max_bytes);
+        let Some(path) = self.child_wire_path(agent_id) else {
+            return fallback();
+        };
+        match crate::session::JsonlSessionReader::latest_turn_assistant_text_page(
+            &path, offset, max_bytes,
+        )
+        .await
+        {
+            Ok(page) => Ok(page.map(|page| AgentResultPage {
+                offset,
+                ..page.into()
+            })),
+            Err(crate::session::SessionError::Io(error))
+                if error.kind() == std::io::ErrorKind::NotFound =>
+            {
+                fallback()
+            }
+            Err(error) => Err(format!(
+                "failed to read delegate `{agent_id}` result from {}: {error}",
+                path.display()
+            )),
+        }
+    }
+
+    /// Read the first bounded result page for every swarm child in input order.
+    pub async fn swarm_result_pages(
+        &self,
+        swarm: &super::SwarmSnapshot,
+        max_bytes: usize,
+    ) -> Result<Vec<Option<AgentResultPage>>, String> {
+        let mut pages = Vec::with_capacity(swarm.children.len());
+        for child in &swarm.children {
+            pages.push(
+                self.agent_result_page(child.agent.id.as_str(), 0, max_bytes)
+                    .await?,
+            );
+        }
+        Ok(pages)
+    }
+
     #[must_use]
     pub fn start_foreground_delegate_for_test(&self, task: &str) -> AgentSnapshot {
         let mut state = self.state.lock().expect("multi-agent state poisoned");
@@ -1426,6 +1478,14 @@ pub struct ChildRunOutput {
     pub actual_usage: Option<AgentTokenUsage>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AgentResultPage {
+    pub offset: usize,
+    pub text: String,
+    pub total_chars: usize,
+    pub next_offset: Option<usize>,
+}
+
 #[derive(Default)]
 struct ChildRunSummary {
     messages: Vec<AgentMessage>,
@@ -1448,6 +1508,48 @@ pub fn child_final_assistant_text(output: &ChildRunOutput) -> String {
     } else {
         output.snapshot.latest_text.clone().unwrap_or_default()
     }
+}
+
+impl From<crate::session::AssistantTextPage> for AgentResultPage {
+    fn from(page: crate::session::AssistantTextPage) -> Self {
+        Self {
+            offset: 0,
+            text: page.text,
+            total_chars: page.total_chars,
+            next_offset: page.next_offset,
+        }
+    }
+}
+
+fn assistant_result_page_from_messages(
+    messages: &[AgentMessage],
+    offset: usize,
+    max_bytes: usize,
+) -> Result<Option<AgentResultPage>, String> {
+    let mut latest_text = None;
+    for message in messages {
+        match message {
+            AgentMessage::User { .. } => latest_text = None,
+            AgentMessage::Assistant { .. } => {
+                let text = message.text();
+                if !text.trim().is_empty() {
+                    latest_text = Some(text);
+                }
+            }
+            _ => {}
+        }
+    }
+    latest_text
+        .as_deref()
+        .map(|text| {
+            crate::session::assistant_text_page(text, offset, max_bytes)
+                .map(|page| AgentResultPage {
+                    offset,
+                    ..page.into()
+                })
+                .map_err(|error| error.to_string())
+        })
+        .transpose()
 }
 
 /// Outcome of an atomic live-steer delivery attempt.

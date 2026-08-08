@@ -63,6 +63,10 @@ pub enum SessionError {
     InvalidId(String),
     #[error("session {0:?} does not exist")]
     MissingSession(String),
+    #[error("result page offset {0} is not a UTF-8 boundary in the assistant text")]
+    InvalidResultPageOffset(usize),
+    #[error("result page byte limit {0} is too small")]
+    InvalidResultPageSize(usize),
 }
 
 pub struct JsonlSessionWriter {
@@ -188,6 +192,15 @@ async fn acquire_session_lock(path: &Path) -> Result<fs::File, SessionError> {
 
 pub struct JsonlSessionReader;
 
+/// One bounded page of the last non-empty assistant response after the most
+/// recent user message.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AssistantTextPage {
+    pub text: String,
+    pub total_chars: usize,
+    pub next_offset: Option<usize>,
+}
+
 impl JsonlSessionReader {
     pub async fn read_all(path: impl AsRef<Path>) -> Result<Vec<AgentEvent>, SessionError> {
         let file = File::open(path).await?;
@@ -251,6 +264,103 @@ impl JsonlSessionReader {
         let events = Self::read_all(path).await?;
         Ok(AgentContext::from_replay(events.iter()))
     }
+
+    /// Read a bounded page from the final assistant text without accumulating
+    /// the complete session event log.
+    pub async fn latest_turn_assistant_text_page(
+        path: impl AsRef<Path>,
+        offset: usize,
+        max_bytes: usize,
+    ) -> Result<Option<AssistantTextPage>, SessionError> {
+        let file = File::open(path).await?;
+        let mut reader = BufReader::new(file);
+        let mut line_number = 0;
+        let mut raw_line = Vec::new();
+        let mut latest_text = None;
+
+        loop {
+            raw_line.clear();
+            let bytes_read = reader.read_until(b'\n', &mut raw_line).await?;
+            if bytes_read == 0 {
+                break;
+            }
+            line_number += 1;
+            let terminated = raw_line.ends_with(b"\n");
+            while raw_line
+                .last()
+                .is_some_and(|byte| matches!(byte, b'\n' | b'\r'))
+            {
+                raw_line.pop();
+            }
+            if raw_line.iter().all(u8::is_ascii_whitespace) {
+                continue;
+            }
+            for value in
+                serde_json::Deserializer::from_slice(&raw_line).into_iter::<serde_json::Value>()
+            {
+                let value = match value {
+                    Ok(value) => value,
+                    Err(_source) if !terminated => break,
+                    Err(source) => {
+                        return Err(SessionError::Json {
+                            line: line_number,
+                            source,
+                        });
+                    }
+                };
+                if read_session_metadata_value(&value, line_number)? {
+                    continue;
+                }
+                let event = serde_json::from_value(value).map_err(|source| SessionError::Json {
+                    line: line_number,
+                    source,
+                })?;
+                match event {
+                    AgentEvent::MessageAppended {
+                        message: AgentMessage::User { .. },
+                    } => latest_text = None,
+                    AgentEvent::MessageAppended {
+                        message: message @ AgentMessage::Assistant { .. },
+                    } => {
+                        let text = message.text();
+                        if !text.trim().is_empty() {
+                            latest_text = Some(text);
+                        }
+                    }
+                    _ => {}
+                }
+            }
+        }
+
+        latest_text
+            .as_deref()
+            .map(|text| assistant_text_page(text, offset, max_bytes))
+            .transpose()
+    }
+}
+
+pub fn assistant_text_page(
+    text: &str,
+    offset: usize,
+    max_bytes: usize,
+) -> Result<AssistantTextPage, SessionError> {
+    if max_bytes < 4 {
+        return Err(SessionError::InvalidResultPageSize(max_bytes));
+    }
+    if offset > text.len() || !text.is_char_boundary(offset) {
+        return Err(SessionError::InvalidResultPageOffset(offset));
+    }
+    let remaining = &text[offset..];
+    let mut end = remaining.len().min(max_bytes);
+    while end > 0 && !remaining.is_char_boundary(end) {
+        end -= 1;
+    }
+    let next_offset = (offset + end < text.len()).then_some(offset + end);
+    Ok(AssistantTextPage {
+        text: remaining[..end].to_owned(),
+        total_chars: text.chars().count(),
+        next_offset,
+    })
 }
 
 fn read_session_metadata_value(

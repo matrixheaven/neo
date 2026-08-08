@@ -1,6 +1,6 @@
 # 子 Agent
 
-Neo 可以把一个任务派生（delegate）给一个或多个独立的子 Agent 并发执行。子 Agent 拥有自己的角色、工具集、上下文窗口和对话历史，完成后向主 Agent 返回摘要。核心实现见 `crates/neo-agent-core/src/multi_agent/` 与 `crates/neo-agent-core/src/tools/delegate.rs`。
+Neo 可以把一个任务派生（delegate）给一个或多个独立的子 Agent 并发执行。子 Agent 拥有自己的角色、工具集、上下文窗口和对话历史，完成后向主 Agent 返回完整结果；结果过大时会附带精确的 `TaskOutput(view="result")` 下一步动作。核心实现见 `crates/neo-agent-core/src/multi_agent/` 与 `crates/neo-agent-core/src/tools/delegate.rs`。
 
 ## 基本概念
 
@@ -65,7 +65,14 @@ Explorer / Reviewer 的 Bash 仅允许只读命令（`ls`、`rg`、`git status/d
 | `summary` | 只传入父级的紧凑摘要 |
 | `none` | 仅任务文本 + 角色提示，完全隔离 |
 
-子 Agent 拥有独立对话历史，返回主 Agent 的只是结果摘要，不会把整段历史回灌。续跑（`resume`）会在同一子 Agent 的历史之上继续。
+子 Agent 拥有独立对话历史，返回主 Agent 的是最终结果而不是整段历史；结果过大时按游标分段读取。续跑（`resume`）会在同一子 Agent 的历史之上继续。
+
+## 读取结果
+
+- 前台 `Delegate` 和 `DelegateSwarm` 完成后，直接使用工具内容中的完整结果。
+- 后台任务或等待完成后，使用 `WaitDelegate`；需要主动读取时调用 `TaskOutput` 并传入 `view="result"`。
+- 返回 `next_actions` 时，原样执行其中的 `TaskOutput` 参数，直到 `has_more` 为 `false`。
+- `ListDelegates` 只用于发现和查看状态，不用于恢复最终正文；不要用 `Sleep` 加列表轮询替代 `WaitDelegate`。
 
 ## 权限继承
 

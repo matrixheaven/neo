@@ -1,6 +1,6 @@
 # Sub-agents
 
-Neo can delegate a task to one or more independent sub-agents for concurrent execution. A sub-agent has its own role, tool set, context window, and conversation history, and returns a summary to the main agent when finished. The core implementation lives in `crates/neo-agent-core/src/multi_agent/` and `crates/neo-agent-core/src/tools/delegate.rs`.
+Neo can delegate a task to one or more independent sub-agents for concurrent execution. A sub-agent has its own role, tool set, context window, and conversation history, and returns its complete final result to the main agent. Oversized results include an exact `TaskOutput(view="result")` next action. The core implementation lives in `crates/neo-agent-core/src/multi_agent/` and `crates/neo-agent-core/src/tools/delegate.rs`.
 
 ## Sub-agent Concepts
 
@@ -65,7 +65,14 @@ The `context` field determines how much parent context a sub-agent receives, and
 | `summary` | Passes only a compact summary of the parent |
 | `none` | Only the task text + role prompt; fully isolated |
 
-A sub-agent has its own independent conversation history; only the result summary is returned to the main agent — the full history is not piped back. Resuming (`resume`) continues on top of the same sub-agent's history.
+A sub-agent has its own independent conversation history; the final result is returned without piping the full history back. Oversized results are read in cursor-bound pages. Resuming (`resume`) continues on top of the same sub-agent's history.
+
+## Reading Results
+
+- Use the complete result in the tool content returned by foreground `Delegate` and `DelegateSwarm`.
+- For background work or an explicit wait, use `WaitDelegate`; to read proactively, call `TaskOutput` with `view="result"`.
+- When `next_actions` is present, execute its `TaskOutput` arguments unchanged until `has_more` is `false`.
+- `ListDelegates` is for discovery and status only. Do not replace `WaitDelegate` with `Sleep` plus list polling.
 
 ## Permission Inheritance
 

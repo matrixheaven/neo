@@ -16,6 +16,8 @@ mod cancellation;
 mod event_routing;
 #[path = "multi_agent_behavior/lifecycle.rs"]
 mod lifecycle;
+#[path = "multi_agent_behavior/model_visible_results.rs"]
+mod model_visible_results;
 #[path = "multi_agent_behavior/progress.rs"]
 mod progress;
 #[path = "multi_agent_behavior/roles.rs"]

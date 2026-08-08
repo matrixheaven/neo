@@ -16,9 +16,9 @@ pub use progress::{
     SwarmProgressInput, estimate_swarm_progress,
 };
 pub use runtime::{
-    AgentPathKind, ChildPlan, ChildRunOutput, ChildRuntimeDeps, ChildWorktreePolicy,
-    DelegateRequest, DelegateSwarmItem, DelegateSwarmRequest, MultiAgentRuntime,
-    SwarmResourceLimits, apply_swarm_template, child_final_assistant_text,
+    AgentPathKind, AgentResultPage, ChildPlan, ChildRunOutput, ChildRuntimeDeps,
+    ChildWorktreePolicy, DelegateRequest, DelegateSwarmItem, DelegateSwarmRequest,
+    MultiAgentRuntime, SwarmResourceLimits, apply_swarm_template, child_final_assistant_text,
     child_plans_from_delegate_swarm, child_plans_serialized_bytes, seed_child_instruction_baseline,
 };
 pub use scheduler::{SwarmItemState, SwarmRetryState, SwarmScheduler, SwarmSchedulerConfig};

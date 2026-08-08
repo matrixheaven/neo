@@ -89,7 +89,7 @@ async fn swarm_text_deltas_are_bounded_and_background_updates_stay_ordered() {
         .await
         .expect("background swarm should complete");
     assert!(
-        waited.content.contains("status: completed"),
+        waited.content.contains("\"status\":\"completed\""),
         "{}",
         waited.content
     );
@@ -742,12 +742,18 @@ async fn wait_and_task_output_return_swarm_aggregate_and_items() {
         .await
         .expect("wait succeeds");
     assert!(
-        waited.content.contains("kind: delegate_swarm"),
+        waited
+            .content
+            .contains("\"kind\":\"delegate_swarm_result\""),
         "{}",
         waited.content
     );
-    assert!(waited.content.contains("aggregate:"), "{}", waited.content);
-    assert!(waited.content.contains("items:"), "{}", waited.content);
+    assert!(
+        waited.content.contains("\"aggregate\":"),
+        "{}",
+        waited.content
+    );
+    assert!(waited.content.contains("\"items\":"), "{}", waited.content);
 
     let output = registry
         .run(
@@ -795,7 +801,7 @@ async fn background_worker_panics_terminalize_delegate_and_swarm() {
         .await
         .expect("WaitDelegate should resolve after panic terminalization");
     assert!(
-        waited.content.contains("status: failed"),
+        waited.content.contains("\"status\":\"failed\""),
         "delegate wait content: {}",
         waited.content
     );
@@ -879,7 +885,7 @@ async fn background_worker_panics_terminalize_delegate_and_swarm() {
         .await
         .expect("WaitDelegate should resolve after swarm panic terminalization");
     assert!(
-        waited.content.contains("status: failed"),
+        waited.content.contains("\"status\":\"failed\""),
         "swarm wait content: {}",
         waited.content
     );

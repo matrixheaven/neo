@@ -10,6 +10,8 @@ mod instructions_admission;
 mod jsonl_append;
 #[path = "session_behavior/jsonl_recovery.rs"]
 mod jsonl_recovery;
+#[path = "session_behavior/result_page.rs"]
+mod result_page;
 #[path = "session_behavior/schema_compatibility.rs"]
 mod schema_compatibility;
 #[path = "session_behavior/state.rs"]

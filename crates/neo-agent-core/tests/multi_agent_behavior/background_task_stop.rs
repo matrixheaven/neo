@@ -211,7 +211,7 @@ async fn task_stop_completed_delegate_returns_already_completed_error() {
         .await
         .expect("completed delegate remains queryable");
     assert!(
-        waited.content.contains("status: completed"),
+        waited.content.contains("\"status\":\"completed\""),
         "{}",
         waited.content
     );
@@ -315,7 +315,7 @@ async fn task_stop_stops_background_delegate_stream_before_finalizing_record() {
         .await
         .expect("wait should return result");
     assert!(
-        waited.content.contains("status: cancelled"),
+        waited.content.contains("\"status\":\"cancelled\""),
         "{}",
         waited.content
     );

@@ -73,8 +73,9 @@ async fn task_output_tool_reads_runtime_delegate_without_background_record() {
         .expect("execute");
 
     assert!(!result.is_error);
-    assert!(result.content.contains("agent_id:"));
-    assert!(result.content.contains(agent.id.as_str()));
+    let content: serde_json::Value = serde_json::from_str(&result.content).expect("JSON result");
+    assert_eq!(content["kind"], "delegate_result");
+    assert_eq!(content["target"]["id"], agent.id.as_str());
     assert_eq!(result.details.as_ref().unwrap()["kind"], "delegate");
     assert_eq!(
         result.details.as_ref().unwrap()["agent_id"],
@@ -101,6 +102,7 @@ async fn task_output_tool_preserves_runtime_delegate_context_mode() {
         .expect("execute");
 
     assert!(!result.is_error);
-    assert!(result.content.contains("context_mode: summary"));
+    let content: serde_json::Value = serde_json::from_str(&result.content).expect("JSON result");
+    assert_eq!(content["context_mode"], "summary");
     assert_eq!(result.details.as_ref().unwrap()["context_mode"], "summary");
 }

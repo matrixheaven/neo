@@ -2371,14 +2371,14 @@ struct TaskOutputInput {
         description = "Maximum bytes of the complete ToolResult including text and structured details. Defaults to the runtime limit when omitted."
     )]
     max_output_bytes: Option<usize>,
-    /// Workflow TaskOutput view: summary | journal | result | artifacts | artifact_content.
+    /// TaskOutput view: summary | journal | result | artifacts | artifact_content.
     #[schemars(
-        description = "Workflow TaskOutput view. One of summary, journal, result, artifacts, artifact_content. Defaults to summary. Ignored for non-workflow tasks."
+        description = "TaskOutput view. Delegates and swarms support result; workflows also support summary, journal, artifacts, and artifact_content. Defaults to summary."
     )]
     view: Option<String>,
-    /// Opaque cursor from a previous workflow TaskOutput page (run/view/query bound).
+    /// Opaque cursor from a previous TaskOutput result page.
     #[schemars(
-        description = "Opaque cursor from a previous workflow TaskOutput page. Bound to run, view, and query; wrong cursors are rejected."
+        description = "Opaque cursor from a previous TaskOutput page. It is bound to its target and view; wrong cursors are rejected."
     )]
     cursor: Option<String>,
     /// Artifact content-address id (sha256) for artifact_content view.
@@ -2465,7 +2465,7 @@ impl Tool for TaskOutputTool {
          - Use `block=true` only when you intentionally want to wait for completion or timeout.\n\
          - This tool returns structured task metadata and an output preview.\n\
          - A workflow waiting for input exposes request_id, prompt, answer_schema, optional default, answer_policy, and next_action in every view. Call TaskAnswer with those exact IDs only when next_action is TaskAnswer; never guess a request_id or read the journal just to answer.\n\
-         - For delegate agent IDs and swarm IDs, this tool returns the canonical multi-agent result shape used by Delegate, DelegateSwarm, and WaitDelegate.\n\
+         - For a terminal delegate or swarm, use view=\"result\". Read the returned result directly; when next_actions is present, call the exact TaskOutput action it contains.\n\
          - For a terminal task, check `status` and `exit_code` to understand why it ended.\n\
          - This tool works with the generic background task system and should remain the primary read path for future task types.\n\n\
          Return fields:\n\
@@ -2491,12 +2491,53 @@ impl Tool for TaskOutputTool {
                 .min(ctx.shell_runtime.limits().max_output_bytes);
 
             if let Some(agent) = ctx.multi_agent.agent_snapshot(&input.task_id) {
-                return Ok(
-                    ToolResult::ok(super::multi_agent_format::delegate_result_content(
-                        &agent,
-                        agent.context,
-                    ))
-                    .with_details(super::multi_agent_format::agent_details(
+                let wants_result = input.view.as_deref() == Some("result");
+                if input.cursor.is_some() && !wants_result {
+                    return Ok(ToolResult::error(
+                        "result cursor requires view=\"result\" for a delegate target",
+                    ));
+                }
+                if wants_result && !agent.state.is_terminal() {
+                    return Ok(ToolResult::error(format!(
+                        "delegate `{}` is still {}; wait for terminal completion before reading view=\"result\"",
+                        agent.id.as_str(),
+                        agent.state.as_str()
+                    )));
+                }
+                let offset = input
+                    .cursor
+                    .as_deref()
+                    .map(|cursor| {
+                        super::multi_agent_format::parse_agent_result_cursor(
+                            agent.id.as_str(),
+                            cursor,
+                        )
+                    })
+                    .transpose()
+                    .map_err(|message| ToolError::InvalidInput {
+                        tool: self.name().to_owned(),
+                        message,
+                    })?
+                    .unwrap_or(0);
+                let result_page = if wants_result {
+                    ctx.multi_agent
+                        .agent_result_page(agent.id.as_str(), offset, max_output_bytes)
+                        .await
+                        .map_err(|message| ToolError::InvalidInput {
+                            tool: self.name().to_owned(),
+                            message: format!("failed to read delegate result: {message}"),
+                        })?
+                } else {
+                    None
+                };
+                let content = super::multi_agent_format::delegate_model_result_content(
+                    &agent,
+                    agent.context,
+                    result_page,
+                    max_output_bytes,
+                );
+                return Ok(ToolResult::ok(content).with_details(
+                    super::multi_agent_format::agent_details(
                         "delegate",
                         &agent,
                         Some(agent.context),
@@ -2504,14 +2545,50 @@ impl Tool for TaskOutputTool {
                         true,
                         true,
                         false,
-                    )),
-                );
+                    ),
+                ));
             }
 
             // Route swarm IDs to rich swarm output from the runtime.
             if input.task_id.starts_with("swarm_")
                 && let Some(swarm) = ctx.multi_agent.swarm_snapshot(&input.task_id)
             {
+                let wants_result = input.view.as_deref() == Some("result");
+                if input.cursor.is_some() && !wants_result {
+                    return Ok(ToolResult::error(
+                        "result cursor requires view=\"result\" for a swarm target",
+                    ));
+                }
+                if wants_result {
+                    if !swarm.state.is_terminal() {
+                        return Ok(ToolResult::error(format!(
+                            "swarm `{}` is still {}; wait for terminal completion before reading view=\"result\"",
+                            swarm.swarm_id,
+                            swarm.state.as_str()
+                        )));
+                    }
+                    if input.cursor.is_some() {
+                        return Ok(ToolResult::error(
+                            "swarm result cursors target individual agent IDs; use the exact TaskOutput action returned for that item",
+                        ));
+                    }
+                    let pages = ctx
+                        .multi_agent
+                        .swarm_result_pages(&swarm, max_output_bytes)
+                        .await
+                        .map_err(|message| ToolError::InvalidInput {
+                            tool: self.name().to_owned(),
+                            message: format!("failed to read swarm result: {message}"),
+                        })?;
+                    return Ok(
+                        ToolResult::ok(super::multi_agent_format::swarm_result_content(
+                            &swarm,
+                            &pages,
+                            max_output_bytes,
+                        ))
+                        .with_details(super::multi_agent_format::swarm_details(&swarm)),
+                    );
+                }
                 let mut content = format!(
                     "kind: swarm\nswarm_id: {}\nstatus: {}\naggregate: total={} queued={} running={} completed={} failed={} cancelled={} timed_out={}\nitems:",
                     swarm.swarm_id,

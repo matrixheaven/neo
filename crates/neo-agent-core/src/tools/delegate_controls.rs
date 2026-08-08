@@ -481,7 +481,8 @@ impl Tool for ListDelegatesTool {
          Defaults to newest-first, active-only, all kinds, and meta-only rows. \
          Pass include_completed=true to see completed, failed, cancelled, or timed_out history. \
          Use include=[\"task\"], include=[\"summary\"], or include=[\"activity\"] only when that extra context is needed. \
-         Pagination cursors are valid only with the same query parameters that produced them."
+         Pagination cursors are valid only with the same query parameters that produced them. \
+         This tool is for discovery and status only; use Delegate, WaitDelegate, or TaskOutput(view=\"result\") to read final responses."
     }
 
     fn input_schema(&self) -> serde_json::Value {
@@ -659,7 +660,11 @@ fn wait_target_snapshot(ctx: &ToolContext, id: &str) -> WaitTargetSnapshot {
     }
 }
 
-fn wait_delegate_result(snapshots: Vec<WaitTargetSnapshot>, outcome: &'static str) -> ToolResult {
+async fn wait_delegate_result(
+    ctx: &ToolContext,
+    snapshots: Vec<WaitTargetSnapshot>,
+    outcome: &'static str,
+) -> Result<ToolResult, ToolError> {
     let total = snapshots.len();
     let terminal = snapshots
         .iter()
@@ -667,31 +672,81 @@ fn wait_delegate_result(snapshots: Vec<WaitTargetSnapshot>, outcome: &'static st
         .count();
     let not_found = snapshots.iter().filter(|snapshot| !snapshot.found).count();
     let pending = total.saturating_sub(terminal + not_found);
-    let items = snapshots
-        .into_iter()
-        .map(|snapshot| snapshot.details)
-        .collect::<Vec<_>>();
-    let mut content = format!(
-        "kind: delegate_wait\noutcome: {outcome}\naggregate: total={total} terminal={terminal} pending={pending} not_found={not_found}\nitems:"
-    );
-    for item in &items {
-        let id = item.get("id").and_then(Value::as_str).unwrap_or("unknown");
-        let kind = item
-            .get("kind")
+    let mut items = Vec::with_capacity(snapshots.len());
+    let mut detail_items = Vec::with_capacity(snapshots.len());
+    let mut pending_ids = Vec::with_capacity(pending);
+    for snapshot in snapshots {
+        let details = snapshot.details;
+        let id = details
+            .get("id")
             .and_then(Value::as_str)
-            .unwrap_or("delegate_target");
-        let status = item
+            .unwrap_or_default()
+            .to_owned();
+        if snapshot.found && !snapshot.terminal {
+            pending_ids.push(id.clone());
+        }
+        let status = details
             .get("status")
             .and_then(Value::as_str)
-            .unwrap_or("unknown");
-        let _ = write!(content, "\n- id: {id}\n  kind: {kind}\n  status: {status}");
+            .unwrap_or_default();
+        detail_items.push(details.clone());
+        if outcome == "all_terminal"
+            && id.starts_with("swarm_")
+            && let Some(swarm) = ctx.multi_agent.swarm_snapshot(&id)
+            && swarm.state.as_str() == status
+        {
+            let pages = ctx
+                .multi_agent
+                .swarm_result_pages(&swarm, ctx.max_output_bytes)
+                .await
+                .map_err(|message| ToolError::InvalidInput {
+                    tool: "WaitDelegate".to_owned(),
+                    message: format!("failed to read swarm result: {message}"),
+                })?;
+            let content = super::multi_agent_format::swarm_result_content(
+                &swarm,
+                &pages,
+                ctx.max_output_bytes,
+            );
+            items.push(serde_json::from_str(&content).unwrap_or(details));
+            continue;
+        }
+        if outcome == "all_terminal"
+            && id.starts_with("agent_")
+            && let Some(agent) = ctx.multi_agent.agent_snapshot(&id)
+            && agent.state.as_str() == status
+        {
+            let page = ctx
+                .multi_agent
+                .agent_result_page(&id, 0, ctx.max_output_bytes)
+                .await
+                .map_err(|message| ToolError::InvalidInput {
+                    tool: "WaitDelegate".to_owned(),
+                    message: format!("failed to read delegate result: {message}"),
+                })?;
+            let content = super::multi_agent_format::delegate_model_result_content(
+                &agent,
+                agent.context,
+                page,
+                ctx.max_output_bytes,
+            );
+            items.push(serde_json::from_str(&content).unwrap_or(details));
+        } else {
+            items.push(details);
+        }
     }
+    let mut next_actions = Vec::new();
     if outcome == "wait_timed_out" {
-        content.push_str(
-            "\nnext_step: Some targets are still running. Call WaitDelegate again with the unfinished IDs and a larger timeout_ms.",
-        );
+        next_actions.push(json!({
+            "tool": "WaitDelegate",
+            "arguments": {
+                "ids": pending_ids,
+                "timeout_ms": 30_000,
+            },
+        }));
     }
-    ToolResult::ok(content).with_details(json!({
+    let content = serde_json::to_string(&json!({
+        "ok": outcome == "all_terminal",
         "kind": "delegate_wait",
         "outcome": outcome,
         "aggregate": {
@@ -701,7 +756,20 @@ fn wait_delegate_result(snapshots: Vec<WaitTargetSnapshot>, outcome: &'static st
             "not_found": not_found,
         },
         "items": items,
+        "next_actions": next_actions,
     }))
+    .expect("delegate wait JSON serializes");
+    Ok(ToolResult::ok(content).with_details(json!({
+        "kind": "delegate_wait",
+        "outcome": outcome,
+        "aggregate": {
+            "total": total,
+            "terminal": terminal,
+            "pending": pending,
+            "not_found": not_found,
+        },
+        "items": detail_items,
+    })))
 }
 
 pub struct WaitDelegateTool;
@@ -715,7 +783,8 @@ impl Tool for WaitDelegateTool {
         "Canonical blocking wait for one or more known delegate agents or swarms. Pass every target in ids; \
          the call returns when all targets are terminal (completed, failed, cancelled, timed_out) or one global \
          timeout expires. A wait timeout returns outcome=\"wait_timed_out\" with completed results and current \
-         unfinished snapshots; this differs from a case where the delegate itself reached timed_out."
+         unfinished snapshots; this differs from a case where the delegate itself reached timed_out. \
+         When all targets are terminal, the result content includes each complete response or an exact TaskOutput(view=\"result\") action for an oversized response."
     }
 
     fn input_schema(&self) -> serde_json::Value {
@@ -746,13 +815,13 @@ impl Tool for WaitDelegateTool {
                     .map(|id| wait_target_snapshot(ctx, id))
                     .collect::<Vec<_>>();
                 if snapshots.iter().any(|snapshot| !snapshot.found) {
-                    return Ok(wait_delegate_result(snapshots, "not_found"));
+                    return Ok(wait_delegate_result(ctx, snapshots, "not_found").await?);
                 }
                 if snapshots.iter().all(|snapshot| snapshot.terminal) {
-                    return Ok(wait_delegate_result(snapshots, "all_terminal"));
+                    return Ok(wait_delegate_result(ctx, snapshots, "all_terminal").await?);
                 }
                 if std::time::Instant::now() >= deadline {
-                    return Ok(wait_delegate_result(snapshots, "wait_timed_out"));
+                    return Ok(wait_delegate_result(ctx, snapshots, "wait_timed_out").await?);
                 }
                 tokio::time::sleep(Duration::from_millis(100)).await;
             }

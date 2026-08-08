@@ -35,7 +35,10 @@ async fn foreground_delegate_runs_child_model_turn_and_reports_child_summary() {
         .iter()
         .find_map(|event| match event {
             AgentEvent::ToolExecutionFinished { result, .. }
-                if result.content.contains("agent_id:") =>
+                if serde_json::from_str::<serde_json::Value>(&result.content)
+                    .ok()
+                    .and_then(|content| content.get("kind").cloned())
+                    == Some(serde_json::json!("delegate_result")) =>
             {
                 Some(result)
             }
@@ -177,7 +180,7 @@ async fn swarm_result_shape_matches_between_foreground_wait_and_task_output() {
         .run(
             "TaskOutput",
             &ctx,
-            serde_json::json!({ "task_id": swarm_id }),
+            serde_json::json!({ "task_id": swarm_id, "view": "result" }),
         )
         .await
         .expect("task output should read completed swarm");
@@ -185,6 +188,21 @@ async fn swarm_result_shape_matches_between_foreground_wait_and_task_output() {
     let foreground_details = foreground.details.as_ref().unwrap();
     let waited_details = waited.details.as_ref().unwrap();
     let output_details = output.details.as_ref().unwrap();
+    let foreground_content: serde_json::Value =
+        serde_json::from_str(&foreground.content).expect("foreground result JSON");
+    let waited_content: serde_json::Value =
+        serde_json::from_str(&waited.content).expect("wait result JSON");
+    let output_content: serde_json::Value =
+        serde_json::from_str(&output.content).expect("TaskOutput result JSON");
+    assert_eq!(foreground_content["kind"], "delegate_swarm_result");
+    assert_eq!(
+        foreground_content["items"].as_array().map(Vec::len),
+        Some(2)
+    );
+    assert_eq!(waited_content["kind"], "delegate_wait");
+    assert_eq!(waited_content["items"][0]["kind"], "delegate_swarm_result");
+    assert_eq!(output_content["kind"], "delegate_swarm_result");
+    assert_eq!(output_content["items"].as_array().map(Vec::len), Some(2));
     assert_eq!(waited_details["kind"], "delegate_wait");
     assert_eq!(waited_details["outcome"], "all_terminal");
     assert_eq!(waited_details["aggregate"]["total"], 1);

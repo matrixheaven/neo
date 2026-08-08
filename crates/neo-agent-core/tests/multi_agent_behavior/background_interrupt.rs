@@ -75,7 +75,7 @@ async fn interrupt_delegate_rejects_completed_agent_without_mutating_state() {
         .await
         .expect("completed delegate remains queryable");
     assert!(
-        waited.content.contains("status: completed"),
+        waited.content.contains("\"status\":\"completed\""),
         "{}",
         waited.content
     );
@@ -138,7 +138,7 @@ async fn interrupt_delegate_stops_background_child_stream() {
         .expect("wait should return result");
 
     assert!(
-        waited.content.contains("status: cancelled"),
+        waited.content.contains("\"status\":\"cancelled\""),
         "{}",
         waited.content
     );
@@ -217,7 +217,7 @@ async fn interrupt_delegate_stops_running_swarm_children() {
         .expect("wait should return result");
 
     assert!(
-        waited.content.contains("status: cancelled"),
+        waited.content.contains("\"status\":\"cancelled\""),
         "{}",
         waited.content
     );

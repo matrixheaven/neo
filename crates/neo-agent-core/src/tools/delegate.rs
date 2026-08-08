@@ -8,8 +8,8 @@ use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
 use super::multi_agent_format::{
-    SummaryScope, agent_details, context_mode_label, delegate_result_content,
-    model_safe_swarm_snapshot, swarm_details,
+    SummaryScope, agent_details, context_mode_label, delegate_model_result_content,
+    model_safe_swarm_snapshot, swarm_details, swarm_result_content,
 };
 use super::{
     Tool, ToolContext, ToolError, ToolEventCallback, ToolFuture, ToolResult, parse_input, schema,
@@ -101,7 +101,8 @@ impl Tool for DelegateTool {
          Use mode=\"background\" only when the main agent should continue in parallel. \
          To continue an existing completed/failed/cancelled/timed_out agent, pass resume=\"agent_xxx\" and a new task; this starts a new run on the same agent. \
          When resume is set, role must be omitted because the resumed agent keeps its original role/profile/name/history. \
-         context controls parent context passed to the child: inherit passes selected parent context, summary passes a compact parent summary, and none passes only the task plus role/profile prompt."
+         context controls parent context passed to the child: inherit passes selected parent context, summary passes a compact parent summary, and none passes only the task plus role/profile prompt. \
+         A terminal foreground result includes the complete final response in tool content. If it returns next_actions, call the exact TaskOutput(view=\"result\") action before deciding from an incomplete page."
     }
 
     fn input_schema(&self) -> serde_json::Value {
@@ -227,9 +228,19 @@ async fn execute_delegate(
             details[k] = v.clone();
         }
     }
-    let content = details.get("structured_output").map_or_else(
-        || delegate_result_content(&completed, request.context),
-        ToString::to_string,
+    let result_page = ctx
+        .multi_agent
+        .agent_result_page(completed.id.as_str(), 0, ctx.max_output_bytes)
+        .await
+        .map_err(|message| ToolError::InvalidInput {
+            tool: tool.to_owned(),
+            message: format!("failed to read delegate result: {message}"),
+        })?;
+    let content = delegate_model_result_content(
+        &completed,
+        request.context,
+        result_page,
+        ctx.max_output_bytes,
     );
     Ok(ToolResult::ok(content).with_details(details))
 }
@@ -338,7 +349,8 @@ impl Tool for DelegateSwarmTool {
         "Run many related bounded tasks in subagents and return an ordered aggregate result. \
          Default mode is foreground; background returns immediately and exposes the same structured swarm result through WaitDelegate and TaskOutput. \
          Required: description, and either items with prompt_template containing {{item}}, resume_agent_ids, or both. \
-         Optional {{description}} inserts the swarm description. Only {{item}} and {{description}} placeholders are supported."
+         Optional {{description}} inserts the swarm description. Only {{item}} and {{description}} placeholders are supported. \
+         A terminal foreground result contains every child in input order with its complete response or an exact TaskOutput(view=\"result\") action for that child."
     }
 
     fn input_schema(&self) -> serde_json::Value {
@@ -466,30 +478,32 @@ async fn execute_delegate_swarm(
         swarm: final_snapshot.clone(),
         workflow_origin: None,
     });
-    Ok(swarm_run_result(final_snapshot, output.actual_usage))
+    swarm_run_result(ctx, final_snapshot, output.actual_usage).await
 }
 
-fn swarm_run_result(
+async fn swarm_run_result(
+    ctx: &ToolContext,
     final_snapshot: SwarmSnapshot,
     actual_usage: Option<crate::AgentTokenUsage>,
-) -> ToolResult {
+) -> Result<ToolResult, ToolError> {
     let mut details = swarm_details(&final_snapshot);
     if let Some(usage) = actual_usage {
         details["actual_usage"] = json!(usage);
     }
-    ToolResult::ok(format!(
-                "swarm_id: {}\nstatus: {}\nsummary_scope: swarm_items\naggregate: total={} queued={} running={} completed={} failed={} cancelled={} timed_out={}",
-                final_snapshot.swarm_id,
-                final_snapshot.state.as_str(),
-                final_snapshot.aggregate.total,
-                final_snapshot.aggregate.queued,
-                final_snapshot.aggregate.running,
-                final_snapshot.aggregate.completed,
-                final_snapshot.aggregate.failed,
-                final_snapshot.aggregate.cancelled,
-                final_snapshot.aggregate.timed_out,
-            ))
-            .with_details(details)
+    let result_pages = ctx
+        .multi_agent
+        .swarm_result_pages(&final_snapshot, ctx.max_output_bytes)
+        .await
+        .map_err(|message| ToolError::InvalidInput {
+            tool: "DelegateSwarm".to_owned(),
+            message: format!("failed to read swarm result: {message}"),
+        })?;
+    Ok(ToolResult::ok(swarm_result_content(
+        &final_snapshot,
+        &result_pages,
+        ctx.max_output_bytes,
+    ))
+    .with_details(details))
 }
 
 fn parse_delegate_swarm_input(
