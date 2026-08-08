@@ -596,6 +596,20 @@ fn upsert_progress_text(activity: &mut Vec<AgentActivityEntry>, text: &str, thin
     if trimmed.is_empty() {
         return;
     }
+    if let Some(AgentActivityEntry {
+        kind:
+            AgentActivityKind::Text {
+                text: current,
+                thinking: current_thinking,
+            },
+    }) = activity.last_mut()
+        && *current_thinking == thinking
+    {
+        if current.trim() != trimmed {
+            *current = text.to_owned();
+        }
+        return;
+    }
     if activity.iter().rev().any(|entry| {
         matches!(&entry.kind, AgentActivityKind::Text { text, thinking: existing } if *existing == thinking && text.trim() == trimmed)
     }) {
@@ -627,4 +641,48 @@ fn truncate_progress_text(text: &str, max_chars: usize) -> String {
     let mut truncated = text.chars().take(keep).collect::<String>();
     truncated.push_str("...");
     truncated
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn progress_text_replaces_only_the_adjacent_same_kind_snapshot() {
+        let mut activity = vec![AgentActivityEntry {
+            kind: AgentActivityKind::Text {
+                text: "Rich dialogs handle".to_owned(),
+                thinking: true,
+            },
+        }];
+
+        upsert_progress_text(&mut activity, "Rich dialogs handle mouse events", true);
+
+        assert_eq!(activity.len(), 1);
+        assert!(matches!(
+            &activity[0].kind,
+            AgentActivityKind::Text { text, thinking: true }
+                if text == "Rich dialogs handle mouse events"
+        ));
+
+        activity.push(AgentActivityEntry {
+            kind: AgentActivityKind::Tool {
+                id: "read-1".to_owned(),
+                name: "Read".to_owned(),
+                summary: None,
+                phase: AgentToolActivityPhase::Done,
+                output: None,
+                files: Vec::new(),
+                output_ref: None,
+            },
+        });
+        upsert_progress_text(&mut activity, "A new thinking segment", true);
+
+        assert_eq!(activity.len(), 3);
+        assert!(matches!(
+            &activity[2].kind,
+            AgentActivityKind::Text { text, thinking: true }
+                if text == "A new thinking segment"
+        ));
+    }
 }
