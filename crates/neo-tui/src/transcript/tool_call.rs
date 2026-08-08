@@ -73,6 +73,10 @@ pub struct ToolCallComponent {
     /// Frozen streamed tail for Bash tools that reached a terminal state with
     /// live rows on screen (see [`FrozenTail`]).
     final_tail: Option<FrozenTail>,
+    /// Whether the muted live tail was ever painted while Running. Only
+    /// commands the user actually saw streaming freeze their tail on
+    /// completion; instantly-delivered results keep the white preview.
+    live_rendered: bool,
 }
 
 const MAX_LIVE_OUTPUT_LINES: usize = 6;
@@ -94,6 +98,7 @@ impl ToolCallComponent {
             workflow_activity_route_error: false,
             output_ref: None,
             final_tail: None,
+            live_rendered: false,
         }
     }
 
@@ -238,10 +243,11 @@ impl ToolCallComponent {
 
     /// Freeze the live tail for Bash tools that streamed output, so the
     /// terminal state keeps the same body rows instead of swapping to the
-    /// white head preview.
+    /// white head preview. Only tails the user actually saw painted on screen
+    /// are frozen; instantly-delivered results keep the white preview.
     fn capture_final_tail(&mut self) {
         let (lines, dropped) = self.live_output.finalize();
-        if self.state.name == "Bash" && !lines.is_empty() {
+        if self.state.name == "Bash" && self.live_rendered && !lines.is_empty() {
             self.final_tail = Some(FrozenTail { lines, dropped });
         }
     }
@@ -560,6 +566,9 @@ impl ToolCallComponent {
                     format!("  ... ({} earlier lines)", self.live_output.dropped_lines()),
                     Style::default().fg(theme.text_muted),
                 ));
+            }
+            if !self.live_output.is_empty() {
+                self.live_rendered = true;
             }
             rows.extend(wrap_live_rows(&self.live_output.tail(), width, live_style));
         } else if let Some(frozen) = frozen {
@@ -968,6 +977,8 @@ mod tests {
         });
         component.append_live_output("line one\nline two\nline three\n");
         component.append_live_output("line four\nline five\nline six\nline seven\n");
+        // The muted tail must have been painted while Running for the freeze.
+        component.render(120);
         assert!(component.set_result(
             Some(
                 "line one\nline two\nline three\nline four\nline five\nline six\nline seven\nline eight\nline nine\n"
@@ -998,7 +1009,7 @@ mod tests {
     }
 
     #[test]
-    fn bash_without_stream_keeps_white_head_preview() {
+    fn bash_unrendered_stream_keeps_white_head_preview() {
         let mut component = ToolCallComponent::new(ToolCallState {
             id: "bash-2".to_owned(),
             name: "Bash".to_owned(),
@@ -1008,6 +1019,9 @@ mod tests {
             status: ToolStatusKind::Running,
             exit_code: None,
         });
+        // Output arrives and completes before any frame painted the tail: the
+        // user never saw streaming, so the white head preview stays.
+        component.append_live_output("line one\nline two\nline three\nline four\n");
         assert!(component.set_result(
             Some("line one\nline two\nline three\nline four\n".to_owned()),
             None,
@@ -1040,6 +1054,7 @@ mod tests {
             exit_code: None,
         });
         component.append_live_output("line one\nline two\nline three\n");
+        component.render(120);
         assert!(component.set_result(
             Some("line one\nline two\nline three\nline four\n".to_owned()),
             None,
