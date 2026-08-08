@@ -111,6 +111,14 @@ fn edit_header_chip(state: &ToolCallState, theme: &TuiTheme) -> Option<Vec<Span>
             .and_then(serde_json::Value::as_u64)
             .unwrap_or(0)
     };
+    let files = number("files");
+    let replacements = number("replacements");
+    let file_unit = if files == 1 { "file" } else { "files" };
+    let replacement_unit = if replacements == 1 {
+        "replacement"
+    } else {
+        "replacements"
+    };
     let committed = state.status == ToolStatusKind::Succeeded
         && kind == Some("edit")
         && details.get("status").and_then(serde_json::Value::as_str) == Some("committed");
@@ -119,9 +127,7 @@ fn edit_header_chip(state: &ToolCallState, theme: &TuiTheme) -> Option<Vec<Span>
     {
         return Some(vec![Span::styled(
             format!(
-                " · {} files · {} replacements · unverified intent",
-                number("files"),
-                number("replacements")
+                " · {files} {file_unit} · {replacements} {replacement_unit} · unverified intent"
             ),
             Style::default().fg(theme.text_muted),
         )]);
@@ -142,11 +148,7 @@ fn edit_header_chip(state: &ToolCallState, theme: &TuiTheme) -> Option<Vec<Span>
     }
     Some(vec![
         Span::styled(
-            format!(
-                " · {} files · {} replacements · ",
-                number("files"),
-                number("replacements")
-            ),
+            format!(" · {files} {file_unit} · {replacements} {replacement_unit} · "),
             Style::default().fg(theme.text_muted),
         ),
         Span::styled(

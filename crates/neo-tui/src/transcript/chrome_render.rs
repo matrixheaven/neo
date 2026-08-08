@@ -69,6 +69,10 @@ pub(super) fn render_ordered_tools(
         {
             j += 1;
         }
+        if mutation_groupable && ordered[i..j].iter().all(is_coalesced_edit) {
+            i = j;
+            continue;
+        }
         if j - i >= 2 {
             if mutation_groupable {
                 let projected = aggregate_mutation_state(&ordered[i..j], &current_name);
@@ -123,6 +127,17 @@ fn is_tree_groupable(name: &str) -> bool {
 
 fn is_mutation_groupable(name: &str) -> bool {
     matches!(name, "Edit" | "Write")
+}
+
+fn is_coalesced_edit(tool: &ToolCallComponent) -> bool {
+    tool.name() == "Edit"
+        && tool
+            .state()
+            .details
+            .as_ref()
+            .and_then(|details| details.get("coalesced"))
+            .and_then(Value::as_bool)
+            .unwrap_or(false)
 }
 
 fn aggregate_mutation_state(tools: &[ToolCallComponent], name: &str) -> ToolCallState {
@@ -1267,7 +1282,7 @@ mod tests {
     }
 
     #[test]
-    fn coalesced_edit_followers_do_not_create_zero_stat_rows() {
+    fn coalesced_edit_followers_do_not_render_without_primary_change() {
         use crate::shell::ToolStatusKind;
 
         let primary = ToolCallComponent::new(ToolCallState {
@@ -1314,9 +1329,8 @@ mod tests {
         };
 
         let tools = vec![primary, follower("follower-1"), follower("follower-2")];
-        let details = aggregate_mutation_state(&tools, "Edit")
-            .details
-            .expect("projected details");
+        let projected = aggregate_mutation_state(&tools, "Edit");
+        let details = projected.details.as_ref().expect("projected details");
         let changes = details["changes"].as_array().expect("changes");
 
         assert_eq!(details["files"], 1);
@@ -1326,5 +1340,24 @@ mod tests {
         assert_eq!(changes.len(), 1);
         assert_eq!(changes[0]["replacements"], 3);
         assert_eq!(changes[0]["removed"], 10);
+        let header = crate::transcript::tool_renderers::tool_header_spans(
+            &projected,
+            &TuiTheme::default(),
+            None,
+            120,
+        )
+        .iter()
+        .map(|span| span.text())
+        .collect::<String>();
+        assert!(
+            header.contains("1 file · 3 replacements"),
+            "header should use singular file: {header}"
+        );
+
+        let mut followers = vec![follower("follower-3"), follower("follower-4")];
+        assert!(
+            render_ordered_tools(&mut followers, 120, &TuiTheme::default()).is_empty(),
+            "coalesced followers without their primary must not render a zero-stat card"
+        );
     }
 }
