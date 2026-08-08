@@ -5,6 +5,8 @@ Entries are workspace records, not authoritative runtime decisions.
 
 | Date | Kind | Path | Title |
 | --- | --- | --- | --- |
+| 2026-08-08 | plan | docs/aegis/plans/2026-08-08-delegate-result-delivery.md | Delegate 系列结果交付实施计划 |
+| 2026-08-08 | spec | docs/aegis/specs/2026-08-08-delegate-result-delivery-design.md | Delegate 系列结果交付设计 |
 | 2026-08-04 | adr | docs/aegis/adr/ADR-0012-fullscreen-transcript-document.md | ADR-0012: Fullscreen Transcript Document |
 | 2026-08-04 | baseline | docs/aegis/baseline/2026-08-04-fullscreen-transcript-document.md | Fullscreen Transcript Document Landed Baseline |
 | 2026-08-04 | handoff | docs/aegis/handoffs/2026-08-04-fullscreen-transcript-document.md | Fullscreen Transcript Document Implementation Handoff |
