@@ -55,7 +55,13 @@ pub fn format_elapsed(seconds: u64) -> String {
     if seconds < 60 {
         format!("{seconds}s")
     } else {
-        format!("{}m {}s", seconds / 60, seconds % 60)
+        let minutes = seconds / 60;
+        let remaining_seconds = seconds % 60;
+        if minutes < 60 {
+            format!("{minutes}m {remaining_seconds}s")
+        } else {
+            format!("{}h {}m {remaining_seconds}s", minutes / 60, minutes % 60)
+        }
     }
 }
 
@@ -985,7 +991,16 @@ fn tail_non_empty_lines(text: &str, limit: usize) -> Vec<String> {
 mod tests {
     use neo_agent_core::multi_agent::AgentToolActivityPhase;
 
-    use super::{ChildToolStatus, child_tool_status_spans, format_token_count};
+    use super::{ChildToolStatus, child_tool_status_spans, format_elapsed, format_token_count};
+
+    #[test]
+    fn format_elapsed_uses_hours_after_sixty_minutes() {
+        assert_eq!(format_elapsed(59), "59s");
+        assert_eq!(format_elapsed(60), "1m 0s");
+        assert_eq!(format_elapsed(3_599), "59m 59s");
+        assert_eq!(format_elapsed(3_600), "1h 0m 0s");
+        assert_eq!(format_elapsed(9_619), "2h 40m 19s");
+    }
 
     #[test]
     fn format_token_count_uses_millions_for_large_agent_usage() {
