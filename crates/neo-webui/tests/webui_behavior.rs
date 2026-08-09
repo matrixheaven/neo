@@ -6,6 +6,8 @@
 //! `webui_behavior::relay::…`) stable.
 
 mod webui_behavior {
+    #[path = "assets.rs"]
+    mod assets;
     #[path = "auth.rs"]
     mod auth;
     #[path = "relay.rs"]

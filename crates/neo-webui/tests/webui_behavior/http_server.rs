@@ -12,10 +12,11 @@ use neo_agent_core::session::ToolOutputRange;
 use neo_agent_core::{AgentEvent, TodoEventData};
 use neo_webui::Relay;
 use neo_webui::protocol::{
-    WebUiBootstrap, WebUiCommand, WebUiCursor, WebUiError, WebUiErrorCode, WebUiEventBody,
-    WebUiHistoryEntry, WebUiHost, WebUiPendingApproval, WebUiPendingQuestion, WebUiPhase,
-    WebUiReply, WebUiSessionMetadata, WebUiSessionPage, WebUiSessionScope, WebUiSessionState,
-    WebUiSessionSummary, WebUiSnapshot, WebUiSummaryState, WebUiWorkspaceSnapshot,
+    WebUiBootstrap, WebUiChangeStatus, WebUiCommand, WebUiCursor, WebUiError, WebUiErrorCode,
+    WebUiEventBody, WebUiHistoryEntry, WebUiHost, WebUiPendingApproval, WebUiPendingQuestion,
+    WebUiPhase, WebUiReply, WebUiSessionMetadata, WebUiSessionPage, WebUiSessionScope,
+    WebUiSessionState, WebUiSessionSummary, WebUiSnapshot, WebUiSummaryState, WebUiWorkspaceChange,
+    WebUiWorkspaceChangeDetail, WebUiWorkspaceChanges, WebUiWorkspaceSnapshot,
 };
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
@@ -428,6 +429,33 @@ impl WebUiHost for FakeHost {
                     next_line: start_line + u64::from(max_lines),
                     reached_end: true,
                 }))
+            }
+            WebUiCommand::WorkspaceChanges => {
+                Ok(WebUiReply::WorkspaceChanges(WebUiWorkspaceChanges {
+                    branch: Some("fake-branch".to_string()),
+                    dirty: true,
+                    changes: vec![WebUiWorkspaceChange {
+                        change_id: "fake-change".to_string(),
+                        path: "src/fake.rs".to_string(),
+                        status: WebUiChangeStatus::Modified,
+                        added: 1,
+                        deleted: 0,
+                    }],
+                }))
+            }
+            WebUiCommand::WorkspaceChangeDetail { change_id } => {
+                if change_id != "fake-change" {
+                    return Err(WebUiError::new(WebUiErrorCode::NotFound));
+                }
+                Ok(WebUiReply::WorkspaceChangeDetail(
+                    WebUiWorkspaceChangeDetail {
+                        change_id,
+                        path: "src/fake.rs".to_string(),
+                        status: WebUiChangeStatus::Modified,
+                        diff: "@@ fake @@\n+fake\n".to_string(),
+                        truncated: false,
+                    },
+                ))
             }
         }
     }

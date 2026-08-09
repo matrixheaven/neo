@@ -14,9 +14,10 @@ use std::sync::{Arc, Mutex};
 use neo_agent_core::session::{JsonlSessionReader, SessionMetadataStore, validate_session_id};
 use neo_agent_core::{AgentEvent, Content, PendingQuestion};
 use neo_webui::protocol::{
-    WebUiBootstrap, WebUiCommand, WebUiComposer, WebUiDevelopmentMode, WebUiError, WebUiErrorCode,
-    WebUiHost, WebUiReply, WebUiSessionMetadata, WebUiSessionPage, WebUiSessionScope,
-    WebUiSessionSummary, WebUiSnapshot, WebUiSummaryState, WebUiWorkspaceSnapshot,
+    WebUiBootstrap, WebUiChangeStatus, WebUiCommand, WebUiComposer, WebUiDevelopmentMode,
+    WebUiError, WebUiErrorCode, WebUiHost, WebUiReply, WebUiSessionMetadata, WebUiSessionPage,
+    WebUiSessionScope, WebUiSessionSummary, WebUiSnapshot, WebUiSummaryState, WebUiWorkspaceChange,
+    WebUiWorkspaceChangeDetail, WebUiWorkspaceChanges, WebUiWorkspaceSnapshot,
 };
 use neo_webui::relay::{Relay, SESSION_PAGE_LIMIT};
 use tokio::sync::{mpsc, oneshot};
@@ -466,6 +467,96 @@ impl WebSessionHost {
             super::session::read_owned_tool_output(state, output_ref, start_line, max_lines)?;
         Ok(WebUiReply::ToolOutput(range))
     }
+
+    /// Structured workspace change summary, read on demand (overlay open).
+    /// Uses the shared git collector off the async runtime; any git failure
+    /// yields the "no status" body instead of error text or paths.
+    async fn workspace_changes(&self) -> Result<WebUiReply, WebUiError> {
+        let root = self.config.project_dir.clone();
+        let status =
+            tokio::task::spawn_blocking(move || crate::git_status::collect_workspace_status(&root))
+                .await
+                .map_err(|_| Self::internal())?;
+        Ok(WebUiReply::WorkspaceChanges(web_workspace_changes(status)))
+    }
+
+    /// Bounded unified-diff preview for one opaque change reference. Forged,
+    /// absolute, outside, stale or otherwise unresolvable references all get
+    /// the same `not_found` (the opaque output-reference rejection style);
+    /// no absolute path or error text ever leaves the service.
+    async fn workspace_change_detail(&self, change_id: &str) -> Result<WebUiReply, WebUiError> {
+        let path = crate::git_status::decode_change_id(change_id)
+            .ok_or_else(|| WebUiError::new(WebUiErrorCode::NotFound))?;
+        let root = self.config.project_dir.clone();
+        let resolved = tokio::task::spawn_blocking(move || {
+            // The reference must resolve to a change of the *current*
+            // workspace status, never to an arbitrary browser-supplied path.
+            let status = crate::git_status::collect_workspace_status(&root)?;
+            let change = status
+                .changes
+                .iter()
+                .find(|change| change.path == path)
+                .cloned()?;
+            let diff = crate::git_status::change_diff_preview(&root, &change)?;
+            Some((change, diff))
+        })
+        .await
+        .map_err(|_| Self::internal())?;
+        let (change, diff) = resolved.ok_or_else(|| WebUiError::new(WebUiErrorCode::NotFound))?;
+        Ok(WebUiReply::WorkspaceChangeDetail(
+            WebUiWorkspaceChangeDetail {
+                change_id: crate::git_status::encode_change_id(&change.path)
+                    .ok_or_else(|| WebUiError::new(WebUiErrorCode::NotFound))?,
+                path: change.path.to_string_lossy().into_owned(),
+                status: web_change_status(change.kind),
+                diff: diff.diff,
+                truncated: diff.truncated,
+            },
+        ))
+    }
+}
+
+/// Project the collected workspace status into the web wire form. Git
+/// failure ("no status") maps to the empty body: no branch, not dirty, no
+/// changes. Paths stay workspace-relative; unencodable entries are dropped.
+fn web_workspace_changes(
+    status: Option<crate::git_status::GitWorkspaceStatus>,
+) -> WebUiWorkspaceChanges {
+    let Some(status) = status else {
+        return WebUiWorkspaceChanges {
+            branch: None,
+            dirty: false,
+            changes: Vec::new(),
+        };
+    };
+    let changes: Vec<WebUiWorkspaceChange> = status
+        .changes
+        .iter()
+        .filter_map(|change| {
+            Some(WebUiWorkspaceChange {
+                change_id: crate::git_status::encode_change_id(&change.path)?,
+                path: change.path.to_string_lossy().into_owned(),
+                status: web_change_status(change.kind),
+                added: change.added,
+                deleted: change.deleted,
+            })
+        })
+        .collect();
+    WebUiWorkspaceChanges {
+        branch: Some(status.branch),
+        dirty: !changes.is_empty(),
+        changes,
+    }
+}
+
+fn web_change_status(kind: crate::git_status::GitChangeKind) -> WebUiChangeStatus {
+    match kind {
+        crate::git_status::GitChangeKind::Modified => WebUiChangeStatus::Modified,
+        crate::git_status::GitChangeKind::Added => WebUiChangeStatus::Added,
+        crate::git_status::GitChangeKind::Deleted => WebUiChangeStatus::Deleted,
+        crate::git_status::GitChangeKind::Renamed => WebUiChangeStatus::Renamed,
+        crate::git_status::GitChangeKind::Untracked => WebUiChangeStatus::Untracked,
+    }
 }
 
 /// Keyset pagination cursor: `pinned`, `updated_at` and `id` of the last item
@@ -652,6 +743,10 @@ impl WebUiHost for WebSessionHost {
                     }
                     drop(guard);
                 }
+            }
+            WebUiCommand::WorkspaceChanges => self.workspace_changes().await,
+            WebUiCommand::WorkspaceChangeDetail { change_id } => {
+                self.workspace_change_detail(&change_id).await
             }
         }
     }

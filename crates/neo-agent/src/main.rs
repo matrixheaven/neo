@@ -1,6 +1,7 @@
 mod cli;
 mod clipboard;
 mod config;
+mod git_status;
 mod image_blob;
 mod json_store;
 mod log_capture;

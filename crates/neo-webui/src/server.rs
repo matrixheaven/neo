@@ -1,10 +1,7 @@
 //! Axum HTTP service: loopback listener, request guard (Host/Origin/Cookie +
-//! security headers), stable error responses, command routes, and the web
-//! long connection with snapshot-plus-resume.
-//!
-//! No static resources are registered yet: the frontend `web/dist` has not
-//! been delivered, so `GET /` intentionally 404s and no placeholder page is
-//! created.
+//! security headers), stable error responses, command routes, the web long
+//! connection with snapshot-plus-resume, and the compile-time embedded static
+//! assets (exact-path allowlist, anonymous GET, no SPA fallback).
 
 use std::collections::HashMap;
 use std::future::{Future, IntoFuture};
@@ -15,7 +12,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use axum::body::{Body, to_bytes};
 use axum::extract::ws::{CloseCode, CloseFrame, Message, WebSocket, WebSocketUpgrade};
 use axum::extract::{Path, Query, Request, State};
-use axum::http::{Method, StatusCode, header};
+use axum::http::{Method, StatusCode, Uri, header};
 use axum::middleware::{self, Next};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, patch, post};
@@ -121,6 +118,11 @@ fn build_router(app: AppState) -> Router {
         .route(
             "/api/sessions/{session_id}/tool-output/{output_ref}",
             get(read_tool_output),
+        )
+        .route("/api/workspace/changes", get(workspace_changes))
+        .route(
+            "/api/workspace/changes/{change_id}",
+            get(workspace_change_detail),
         )
         .route("/api/events", get(events_ws))
         .fallback(fallback)
@@ -229,7 +231,15 @@ async fn parse_body<T: DeserializeOwned>(body: Body) -> Result<T, Response> {
     serde_json::from_slice(&bytes).map_err(|_| invalid_request())
 }
 
-async fn fallback() -> Response {
+async fn fallback(method: Method, uri: Uri) -> Response {
+    // Embedded static assets: exact-path allowlist for anonymous GET reads
+    // (the guard already applied the host check and security headers apply
+    // to this response too). No SPA fallback, no traversal resolution.
+    if method == Method::GET
+        && let Some(asset) = crate::assets::asset_for_path(uri.path())
+    {
+        return asset.into_response();
+    }
     error_response(StatusCode::NOT_FOUND, WebUiErrorCode::NotFound)
 }
 
@@ -269,6 +279,8 @@ fn reply_response(app: &AppState, reply: WebUiReply) -> Response {
         WebUiReply::Resolved => StatusCode::NO_CONTENT.into_response(),
         WebUiReply::MetadataUpdated(value) => json(StatusCode::OK, &value),
         WebUiReply::ToolOutput(value) => json(StatusCode::OK, &value),
+        WebUiReply::WorkspaceChanges(value) => json(StatusCode::OK, &value),
+        WebUiReply::WorkspaceChangeDetail(value) => json(StatusCode::OK, &value),
     }
 }
 
@@ -421,6 +433,53 @@ async fn read_tool_output(
         start_line,
         max_lines,
     };
+    match app.host.execute(command).await {
+        Ok(reply) => reply_response(&app, reply),
+        Err(error) => host_error_response(error),
+    }
+}
+
+// ── Workspace change routes ──────────────────────────────────────────────
+
+/// Reject any query parameter: the workspace change routes accept none, and
+/// misspelled keys are rejected instead of silently ignored. Returns the
+/// rejection response when the query is non-empty or malformed.
+fn query_rejection(
+    params: &Result<Query<HashMap<String, String>>, axum::extract::rejection::QueryRejection>,
+) -> Option<Response> {
+    match params {
+        Ok(Query(params)) if params.is_empty() => None,
+        _ => Some(invalid_request()),
+    }
+}
+
+/// `GET /api/workspace/changes` — branch label plus the structured change
+/// summary, read on demand (no git polling).
+async fn workspace_changes(
+    State(app): State<AppState>,
+    params: Result<Query<HashMap<String, String>>, axum::extract::rejection::QueryRejection>,
+) -> Response {
+    if let Some(response) = query_rejection(&params) {
+        return response;
+    }
+    match app.host.execute(WebUiCommand::WorkspaceChanges).await {
+        Ok(reply) => reply_response(&app, reply),
+        Err(error) => host_error_response(error),
+    }
+}
+
+/// `GET /api/workspace/changes/<change_id>` — bounded unified-diff preview
+/// for one opaque change reference. The reference is validated host-side;
+/// forged, outside, absolute or stale references all get the same 404.
+async fn workspace_change_detail(
+    State(app): State<AppState>,
+    Path(change_id): Path<String>,
+    params: Result<Query<HashMap<String, String>>, axum::extract::rejection::QueryRejection>,
+) -> Response {
+    if let Some(response) = query_rejection(&params) {
+        return response;
+    }
+    let command = WebUiCommand::WorkspaceChangeDetail { change_id };
     match app.host.execute(command).await {
         Ok(reply) => reply_response(&app, reply),
         Err(error) => host_error_response(error),

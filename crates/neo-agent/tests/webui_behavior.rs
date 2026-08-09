@@ -18,6 +18,8 @@ mod webui_behavior {
     pub mod session_reconnect;
     #[path = "session_turns.rs"]
     pub mod session_turns;
+    #[path = "workspace_changes.rs"]
+    pub mod workspace_changes;
     #[path = "ws.rs"]
     pub mod ws;
 }

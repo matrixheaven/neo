@@ -294,6 +294,54 @@ pub enum WebUiWatchRequest {
     },
 }
 
+/// Status of one workspace change row.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WebUiChangeStatus {
+    Modified,
+    Added,
+    Deleted,
+    Renamed,
+    Untracked,
+}
+
+/// One workspace change row. `path` is always workspace-relative (never
+/// absolute); `change_id` is the opaque detail reference, generated only by
+/// the service and passed back verbatim by the browser.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WebUiWorkspaceChange {
+    pub change_id: String,
+    pub path: String,
+    pub status: WebUiChangeStatus,
+    pub added: u32,
+    pub deleted: u32,
+}
+
+/// Body of `GET /api/workspace/changes`: the branch label, whether the
+/// workspace has changes, and every change row. When the workspace is not a
+/// repository (or git fails) the body is the "no status" form: no branch,
+/// not dirty, no changes — never error text or paths.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WebUiWorkspaceChanges {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub branch: Option<String>,
+    #[serde(default)]
+    pub dirty: bool,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub changes: Vec<WebUiWorkspaceChange>,
+}
+
+/// Body of `GET /api/workspace/changes/<change_id>`: a length-bounded
+/// unified-diff preview for one change.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WebUiWorkspaceChangeDetail {
+    pub change_id: String,
+    pub path: String,
+    pub status: WebUiChangeStatus,
+    pub diff: String,
+    pub truncated: bool,
+}
+
 /// Strong-typed commands executed against the host.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum WebUiCommand {
@@ -350,6 +398,10 @@ pub enum WebUiCommand {
         output_ref: String,
         start_line: u64,
         max_lines: u32,
+    },
+    WorkspaceChanges,
+    WorkspaceChangeDetail {
+        change_id: String,
     },
 }
 
@@ -427,6 +479,8 @@ pub enum WebUiReply {
     Resolved,
     MetadataUpdated(WebUiSessionMetadata),
     ToolOutput(ToolOutputRange),
+    WorkspaceChanges(WebUiWorkspaceChanges),
+    WorkspaceChangeDetail(WebUiWorkspaceChangeDetail),
 }
 
 /// Stable short error codes returned by every web API surface. Error

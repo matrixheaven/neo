@@ -4,12 +4,12 @@ use std::{collections::VecDeque, fs, process::Command};
 
 use neo_agent_core::{AgentEvent, ToolResult};
 
-use super::super::git_status::{
+use super::super::*;
+use super::*;
+use crate::git_status::{
     count_untracked_changes, git_status_label_with_program, parse_git_numstat,
     parse_git_status_porcelain, parse_git_untracked_files_z,
 };
-use super::super::*;
-use super::*;
 
 #[test]
 fn git_status_badge_formats_dirty_and_sync() {

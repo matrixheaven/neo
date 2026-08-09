@@ -66,8 +66,7 @@ mod prompt_history;
 mod frame_scheduler;
 use frame_scheduler::{FrameDue, FrameRequest, FrameScheduler};
 
-mod git_status;
-use git_status::{event_should_refresh_git_status, git_status_label};
+use crate::git_status::{event_should_refresh_git_status, git_status_label};
 
 mod clipboard;
 use clipboard::write_system_clipboard;
