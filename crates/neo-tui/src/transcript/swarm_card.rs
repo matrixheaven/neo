@@ -10,10 +10,13 @@ use crate::primitive::{
 use crate::transcript::{
     MAX_CHILD_TOOL_ROWS, child_activity_view, compact_chars, display_elapsed,
     format_cache_token_usage, format_elapsed, format_token_count, one_line, render_child_body,
-    render_child_final, render_child_thinking, render_child_tool_row, role_badge_style, role_label,
+    render_child_final, render_child_instruction_row, render_child_thinking, render_child_tool_row,
+    role_badge_style, role_label,
 };
 
-use super::child_activity::{ChildToolStatus, child_tool_status_spans};
+use super::child_activity::{
+    ChildToolStatus, child_instruction_status_spans, child_tool_status_spans,
+};
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct SwarmCardComponent {
@@ -380,6 +383,11 @@ impl SwarmCardComponent {
                     self.now_ms,
                 ));
             }
+            for outcome in &view.instructions {
+                lines.extend(render_child_instruction_row(
+                    *outcome, width, &indent, theme,
+                ));
+            }
             if let Some(thinking) = view.thinking.as_deref() {
                 lines.extend(render_child_thinking(thinking, width, &indent, theme));
             }
@@ -589,6 +597,11 @@ fn child_activity_summary(
         return primary(compact_chars(&one_line(fallback_item), 96));
     }
     let now = now_ms.unwrap_or_else(|| child_activity_time_ms(agent));
+    if let Some(AgentActivityKind::Instruction { outcome, .. }) =
+        agent.activity.last().map(|entry| &entry.kind)
+    {
+        return child_instruction_status_spans(*outcome, max_tool_width, theme);
+    }
     if let Some((name, summary, phase, files)) =
         agent
             .activity
@@ -608,7 +621,9 @@ fn child_activity_summary(
                 {
                     Some((name.as_str(), summary.as_deref(), *phase, files.as_slice()))
                 }
-                AgentActivityKind::Tool { .. } | AgentActivityKind::Text { .. } => None,
+                AgentActivityKind::Tool { .. }
+                | AgentActivityKind::Text { .. }
+                | AgentActivityKind::Instruction { .. } => None,
             })
     {
         return child_tool_status_spans(ChildToolStatus {
@@ -654,7 +669,7 @@ fn child_activity_summary(
                     files,
                     ..
                 } => Some((name.as_str(), summary.as_deref(), *phase, files.as_slice())),
-                AgentActivityKind::Text { .. } => None,
+                AgentActivityKind::Text { .. } | AgentActivityKind::Instruction { .. } => None,
             })
     {
         return child_tool_status_spans(ChildToolStatus {
@@ -716,7 +731,7 @@ fn progress_meter(progress: f32, theme: &TuiTheme) -> Span {
 fn child_tool_ids(agent: &AgentSnapshot) -> impl Iterator<Item = &str> {
     agent.activity.iter().filter_map(|entry| match &entry.kind {
         AgentActivityKind::Tool { id, .. } => Some(id.as_str()),
-        AgentActivityKind::Text { .. } => None,
+        AgentActivityKind::Text { .. } | AgentActivityKind::Instruction { .. } => None,
     })
 }
 

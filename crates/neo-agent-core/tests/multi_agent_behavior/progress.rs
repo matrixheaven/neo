@@ -36,6 +36,90 @@ fn agent_tool_activity_uses_explicit_phase_and_output_preview() {
 }
 
 #[test]
+fn child_instruction_epoch_projects_through_compact_progress() {
+    let runtime = MultiAgentRuntime::new();
+    let child = runtime.start_foreground_delegate_for_test("reload instructions");
+    let started_at = std::time::Instant::now();
+
+    runtime
+        .apply_child_event(
+            &child.id,
+            started_at,
+            &AgentEvent::ToolExecutionStarted {
+                turn: 0,
+                id: "bash-1".to_owned(),
+                name: "Bash".to_owned(),
+                arguments: json!({ "command": "printf ready" }),
+                workflow_origin: None,
+                output_ref: None,
+            },
+        )
+        .expect("bash activity");
+
+    runtime
+        .apply_child_event(
+            &child.id,
+            started_at,
+            &AgentEvent::InstructionEpoch {
+                epoch: neo_agent_core::instructions::InstructionEpochData {
+                    agent_id: child.id.as_str().to_owned(),
+                    generation: 4,
+                    outcome: neo_agent_core::instructions::InstructionEpochOutcome::Updated,
+                    scopes: Vec::new(),
+                    selected_bundles: Vec::new(),
+                    ignored_bundles: Vec::new(),
+                    replacements: Vec::new(),
+                    failure: None,
+                    deferred_tool_ids: Vec::new(),
+                    budget: neo_agent_core::instructions::InstructionBudget {
+                        nominal: 65_536,
+                        actual: 65_536,
+                    },
+                    body_revisions: None,
+                    model_content: Some("private instruction body".to_owned()),
+                },
+            },
+        )
+        .expect("instruction activity");
+
+    let snapshot = runtime.snapshot(&child.id).expect("child snapshot");
+    assert!(matches!(
+        snapshot.activity.last().map(|entry| &entry.kind),
+        Some(AgentActivityKind::Instruction {
+            generation: 4,
+            outcome: neo_agent_core::instructions::InstructionEpochOutcome::Updated,
+        })
+    ));
+    let mut progress = snapshot.progress_snapshot();
+    progress.latest_text = Some("earlier answer".to_owned());
+    assert_eq!(
+        progress.last_instruction,
+        Some(neo_agent_core::multi_agent::AgentInstructionProgress {
+            generation: 4,
+            outcome: neo_agent_core::instructions::InstructionEpochOutcome::Updated,
+        })
+    );
+    assert!(
+        !serde_json::to_string(&progress)
+            .expect("serialize compact progress")
+            .contains("private instruction body"),
+        "child progress must not duplicate instruction bodies"
+    );
+
+    let mut restored = snapshot.clone();
+    restored.activity.clear();
+    restored.updated_at_ms = 0;
+    assert!(apply_agent_progress(&mut restored, &progress));
+    assert!(matches!(
+        restored.activity.last().map(|entry| &entry.kind),
+        Some(AgentActivityKind::Instruction {
+            generation: 4,
+            outcome: neo_agent_core::instructions::InstructionEpochOutcome::Updated,
+        })
+    ));
+}
+
+#[test]
 fn compact_delegate_progress_restores_and_resumes() {
     use neo_agent_core::multi_agent::{DelegateContext, DelegateRequest};
 
@@ -234,7 +318,7 @@ fn compact_progress_preserves_live_shell_output() {
         .iter()
         .find_map(|entry| match &entry.kind {
             AgentActivityKind::Tool { output, .. } => output.as_ref(),
-            AgentActivityKind::Text { .. } => None,
+            AgentActivityKind::Text { .. } | AgentActivityKind::Instruction { .. } => None,
         });
     assert_eq!(
         output.map(|preview| preview.text.as_str()),
@@ -546,7 +630,7 @@ async fn child_activity_keeps_same_name_tool_failures_on_their_own_ids() {
             AgentActivityKind::Tool {
                 id, summary, phase, ..
             } => Some((id.as_str(), summary.as_deref(), *phase)),
-            AgentActivityKind::Text { .. } => None,
+            AgentActivityKind::Text { .. } | AgentActivityKind::Instruction { .. } => None,
         })
         .collect::<Vec<_>>();
     assert_eq!(
@@ -758,7 +842,7 @@ fn child_tool_events_preserve_ongoing_done_and_failed_phase() {
                 output,
                 ..
             } => Some((*phase, summary.clone(), output.clone())),
-            AgentActivityKind::Text { .. } => None,
+            AgentActivityKind::Text { .. } | AgentActivityKind::Instruction { .. } => None,
         })
         .expect("tool row");
 
@@ -889,7 +973,7 @@ fn child_shell_activity_keeps_command_and_output_with_or_without_queue() {
                     output,
                     ..
                 } => Some((summary, phase, output)),
-                AgentActivityKind::Text { .. } => None,
+                AgentActivityKind::Text { .. } | AgentActivityKind::Instruction { .. } => None,
             })
             .collect::<Vec<_>>();
         assert_eq!(tools.len(), 1);

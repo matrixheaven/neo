@@ -5,7 +5,8 @@ use crate::primitive::{Component, Finalization, Line, Span, Style};
 use crate::transcript::{
     MAX_CHILD_TOOL_ROWS, can_detach, child_activity_view, display_elapsed,
     format_cache_token_usage, format_elapsed, format_token_count, render_child_body,
-    render_child_final, render_child_thinking, render_child_tool_row, role_badge_style, role_label,
+    render_child_final, render_child_instruction_row, render_child_thinking, render_child_tool_row,
+    role_badge_style, role_label,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -119,6 +120,9 @@ impl DelegateCardComponent {
         let activity = child_activity_view(&self.snapshot, MAX_CHILD_TOOL_ROWS);
         for tool in &activity.tools {
             lines.extend(render_child_tool_row(tool, width, "  ", theme, self.now_ms));
+        }
+        for outcome in &activity.instructions {
+            lines.extend(render_child_instruction_row(*outcome, width, "  ", theme));
         }
         if let Some(thinking) = activity.thinking.as_deref() {
             lines.extend(render_child_thinking(thinking, width, "  ", theme));

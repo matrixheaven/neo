@@ -1,5 +1,6 @@
 use std::time::Duration;
 
+use neo_agent_core::instructions::InstructionEpochOutcome;
 use neo_agent_core::multi_agent::{
     AgentActivityEntry, AgentActivityKind, AgentLifecycleState, AgentProfile, AgentRole,
     AgentRunMode, AgentSnapshot, AgentToolActivityPhase, AgentToolFileChange,
@@ -20,6 +21,7 @@ const FINAL_TEXT_CHARS: usize = 110;
 
 pub struct ChildActivityView<'a> {
     pub tools: Vec<ChildToolRow<'a>>,
+    pub instructions: Vec<InstructionEpochOutcome>,
     pub thinking: Option<String>,
     pub body_text: Option<String>,
     pub final_text: Option<String>,
@@ -150,8 +152,17 @@ pub fn child_activity_view(
         latest_body
     };
     let tools = visible_tool_rows(&snapshot.activity, max_tool_rows);
+    let instructions = snapshot
+        .activity
+        .iter()
+        .filter_map(|entry| match &entry.kind {
+            AgentActivityKind::Instruction { outcome, .. } => Some(*outcome),
+            AgentActivityKind::Tool { .. } | AgentActivityKind::Text { .. } => None,
+        })
+        .collect();
     ChildActivityView {
         tools,
+        instructions,
         thinking,
         body_text,
         final_text,
@@ -164,6 +175,74 @@ pub fn child_activity_view(
                 AgentLifecycleState::Failed | AgentLifecycleState::TimedOut
             ),
     }
+}
+
+pub(super) fn child_instruction_status_spans(
+    outcome: InstructionEpochOutcome,
+    max_width: usize,
+    theme: &TuiTheme,
+) -> Vec<Span> {
+    compact_styled_chars(
+        vec![Span::styled(
+            instruction_header(outcome),
+            instruction_style(outcome, theme),
+        )],
+        max_width,
+    )
+}
+
+pub fn render_child_instruction_row(
+    outcome: InstructionEpochOutcome,
+    width: usize,
+    indent: &str,
+    theme: &TuiTheme,
+) -> Vec<Line> {
+    let muted = Style::default().fg(theme.text_muted);
+    let mut lines = vec![
+        Line::from_spans(vec![
+            Span::styled(indent.to_owned(), muted),
+            Span::styled(
+                instruction_header(outcome),
+                instruction_style(outcome, theme),
+            ),
+        ])
+        .truncate_to_width(width),
+    ];
+    if outcome == InstructionEpochOutcome::Updated {
+        lines.push(
+            Line::from_spans(vec![
+                Span::styled(format!("{indent}  "), muted),
+                Span::styled("Applied to current session", muted),
+            ])
+            .truncate_to_width(width),
+        );
+    }
+    lines
+}
+
+pub(super) fn instruction_header(outcome: InstructionEpochOutcome) -> &'static str {
+    match outcome {
+        InstructionEpochOutcome::Ready => "◆ Instructions ready",
+        InstructionEpochOutcome::Activated => "◆ Instructions loaded",
+        InstructionEpochOutcome::Updated => "↻ Instructions reloaded · AGENTS.md",
+        InstructionEpochOutcome::Removed => "− Instructions removed",
+        InstructionEpochOutcome::Reactivated => "◆ Instructions reactivated",
+        InstructionEpochOutcome::PartiallyLoaded => "⚠ Instructions partially loaded",
+        InstructionEpochOutcome::Blocked => "✕ Instructions blocked",
+    }
+}
+
+fn instruction_style(outcome: InstructionEpochOutcome, theme: &TuiTheme) -> Style {
+    let color = match outcome {
+        InstructionEpochOutcome::Ready
+        | InstructionEpochOutcome::Activated
+        | InstructionEpochOutcome::Updated
+        | InstructionEpochOutcome::Reactivated => theme.brand,
+        InstructionEpochOutcome::PartiallyLoaded => theme.status_warn,
+        InstructionEpochOutcome::Blocked => theme.status_error,
+        InstructionEpochOutcome::Removed => theme.text_muted,
+    };
+    Style::default().fg(color)
 }
 
 const fn child_tool_verb(phase: AgentToolActivityPhase) -> &'static str {
@@ -860,7 +939,7 @@ fn tool_row(entry: &AgentActivityEntry) -> Option<ChildToolRow<'_>> {
             output: output.as_ref(),
             files,
         }),
-        AgentActivityKind::Text { .. } => None,
+        AgentActivityKind::Text { .. } | AgentActivityKind::Instruction { .. } => None,
     }
 }
 

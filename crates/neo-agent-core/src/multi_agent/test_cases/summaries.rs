@@ -212,7 +212,7 @@ fn replayed_unfinished_edit_is_interrupted_and_not_resumed() {
     assert!(
         activity.iter().all(|entry| match &entry.kind {
             AgentActivityKind::Tool { phase, .. } => *phase == AgentToolActivityPhase::Ongoing,
-            AgentActivityKind::Text { .. } => true,
+            AgentActivityKind::Text { .. } | AgentActivityKind::Instruction { .. } => true,
         }),
         "progress alone must not invent a completed commit"
     );
@@ -400,7 +400,7 @@ fn replayed_unfinished_write_is_interrupted_and_not_resumed() {
     assert!(
         activity.iter().all(|entry| match &entry.kind {
             AgentActivityKind::Tool { phase, .. } => *phase == AgentToolActivityPhase::Ongoing,
-            AgentActivityKind::Text { .. } => true,
+            AgentActivityKind::Text { .. } | AgentActivityKind::Instruction { .. } => true,
         }),
         "progress alone must not invent a completed commit"
     );

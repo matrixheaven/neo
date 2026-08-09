@@ -1703,6 +1703,15 @@ fn apply_child_progress_event(
         AgentEvent::MessageAppended {
             message: AgentMessage::Assistant { content, .. },
         } => apply_assistant_message(snapshot, *attempt_start, content),
+        AgentEvent::InstructionEpoch { epoch } => {
+            snapshot.activity.push(AgentActivityEntry {
+                kind: AgentActivityKind::Instruction {
+                    generation: epoch.generation,
+                    outcome: epoch.outcome,
+                },
+            });
+            true
+        }
         AgentEvent::TokenUsage { usage, .. } => {
             snapshot.token_count = snapshot
                 .token_count
@@ -3250,7 +3259,12 @@ fn apply_retry_activity(
             retry, max_retries, ..
         } => {
             let mut current_attempt = activity.split_off(start);
-            current_attempt.retain(|entry| matches!(&entry.kind, AgentActivityKind::Tool { .. }));
+            current_attempt.retain(|entry| {
+                matches!(
+                    &entry.kind,
+                    AgentActivityKind::Tool { .. } | AgentActivityKind::Instruction { .. }
+                )
+            });
             activity.append(&mut current_attempt);
             let reconnecting = bounded_latest_text(&format!("Reconnecting {retry}/{max_retries}"));
             activity.push(AgentActivityEntry {
@@ -3281,7 +3295,12 @@ fn apply_retry_activity(
         }
         AgentEvent::RetryExhausted { message, .. } | AgentEvent::Error { message, .. } => {
             let mut current_attempt = activity.split_off(start);
-            current_attempt.retain(|entry| matches!(&entry.kind, AgentActivityKind::Tool { .. }));
+            current_attempt.retain(|entry| {
+                matches!(
+                    &entry.kind,
+                    AgentActivityKind::Tool { .. } | AgentActivityKind::Instruction { .. }
+                )
+            });
             activity.append(&mut current_attempt);
             let error = bounded_latest_text(message);
             if latest_text_activity(activity, false).as_deref() != Some(error.as_str()) {
@@ -3305,7 +3324,12 @@ fn apply_retry_activity(
         } => {
             let mut current_attempt = activity.split_off(start);
             let previous_len = current_attempt.len();
-            current_attempt.retain(|entry| matches!(&entry.kind, AgentActivityKind::Tool { .. }));
+            current_attempt.retain(|entry| {
+                matches!(
+                    &entry.kind,
+                    AgentActivityKind::Tool { .. } | AgentActivityKind::Instruction { .. }
+                )
+            });
             let cleared = current_attempt.len() != previous_len;
             activity.append(&mut current_attempt);
             *attempt_start = activity.len();

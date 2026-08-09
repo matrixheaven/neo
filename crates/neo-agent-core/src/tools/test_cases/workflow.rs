@@ -71,6 +71,7 @@ fn live_workflow_agent_for_test(
             files: Vec::new(),
             output_ref: None,
         }),
+        last_instruction: None,
         outcome: None,
     }
 }

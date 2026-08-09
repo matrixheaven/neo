@@ -110,6 +110,7 @@ fn agent_progress(agent: &AgentSnapshot, state: AgentLifecycleState) -> AgentPro
         latest_text: Some("progress merged".to_owned()),
         latest_thinking: None,
         last_tool: None,
+        last_instruction: None,
         outcome: None,
     }
 }

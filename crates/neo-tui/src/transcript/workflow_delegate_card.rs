@@ -5,6 +5,7 @@ use neo_agent_core::multi_agent::{
 use crate::primitive::theme::TuiTheme;
 use crate::primitive::{Line, Span, Style};
 
+use super::child_activity::instruction_header;
 use super::{display_elapsed, format_elapsed, one_line, role_badge_style, role_label};
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -228,6 +229,11 @@ fn agent_activity(agent: &AgentSnapshot) -> Option<String> {
             .filter(|summary| !summary.is_empty())
             .or_else(|| agent.latest_text.as_deref().map(one_line))
             .filter(|summary| !summary.is_empty());
+    }
+    if let Some(AgentActivityKind::Instruction { outcome, .. }) =
+        agent.activity.last().map(|entry| &entry.kind)
+    {
+        return Some(instruction_header(*outcome).to_owned());
     }
     let tool = agent
         .activity

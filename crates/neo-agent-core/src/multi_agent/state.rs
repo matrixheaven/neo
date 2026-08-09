@@ -4,6 +4,7 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
 use crate::AgentMessage;
+use crate::instructions::InstructionEpochOutcome;
 use crate::session::ToolOutputRef;
 
 use super::{AgentDisplayName, AgentId, AgentPath, AgentRole};
@@ -152,6 +153,10 @@ pub enum AgentActivityKind {
         text: String,
         thinking: bool,
     },
+    Instruction {
+        generation: u64,
+        outcome: InstructionEpochOutcome,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
@@ -263,6 +268,12 @@ pub struct DelegateToolProgress {
     pub output_ref: Option<ToolOutputRef>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct AgentInstructionProgress {
+    pub generation: u64,
+    pub outcome: InstructionEpochOutcome,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct AgentProgressSnapshot {
     pub agent_id: AgentId,
@@ -294,6 +305,8 @@ pub struct AgentProgressSnapshot {
     pub latest_thinking: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_tool: Option<DelegateToolProgress>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_instruction: Option<AgentInstructionProgress>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub outcome: Option<AgentTerminalOutcome>,
 }
@@ -330,7 +343,8 @@ impl AgentProgressSnapshot {
                 AgentActivityKind::Text {
                     thinking: false, ..
                 }
-                | AgentActivityKind::Tool { .. } => None,
+                | AgentActivityKind::Tool { .. }
+                | AgentActivityKind::Instruction { .. } => None,
             }),
             last_tool: agent
                 .activity
@@ -356,8 +370,18 @@ impl AgentProgressSnapshot {
                         files: files.clone(),
                         output_ref: output_ref.clone(),
                     }),
-                    AgentActivityKind::Text { .. } => None,
+                    AgentActivityKind::Text { .. } | AgentActivityKind::Instruction { .. } => None,
                 }),
+            last_instruction: agent.activity.last().and_then(|entry| match &entry.kind {
+                AgentActivityKind::Instruction {
+                    generation,
+                    outcome,
+                } => Some(AgentInstructionProgress {
+                    generation: *generation,
+                    outcome: *outcome,
+                }),
+                AgentActivityKind::Tool { .. } | AgentActivityKind::Text { .. } => None,
+            }),
             outcome: agent.outcome.as_ref().map(|outcome| AgentTerminalOutcome {
                 summary: truncate_progress_text(&outcome.summary, MAX_PROGRESS_TEXT_CHARS),
                 is_error: outcome.is_error,
@@ -382,6 +406,7 @@ impl AgentProgressSnapshot {
             latest_text: self.latest_text.clone(),
             latest_thinking: self.latest_thinking.clone(),
             last_tool: self.last_tool.clone(),
+            last_instruction: self.last_instruction,
             outcome: self.outcome.clone(),
         }
     }
@@ -409,6 +434,7 @@ pub struct AgentProgressSignature {
     pub latest_text: Option<String>,
     pub latest_thinking: Option<String>,
     pub last_tool: Option<DelegateToolProgress>,
+    pub last_instruction: Option<AgentInstructionProgress>,
     pub outcome: Option<AgentTerminalOutcome>,
 }
 
@@ -527,6 +553,9 @@ pub fn apply_agent_progress(
     if let Some(thinking) = &progress.latest_thinking {
         upsert_progress_text(&mut snapshot.activity, thinking, true);
     }
+    if let Some(instruction) = progress.last_instruction {
+        upsert_progress_instruction(&mut snapshot.activity, instruction);
+    }
     trim_progress_activity(&mut snapshot.activity);
     true
 }
@@ -576,6 +605,32 @@ fn upsert_progress_tool(activity: &mut Vec<AgentActivityEntry>, tool: &DelegateT
             output: tool.output.clone(),
             files: tool.files.clone(),
             output_ref: tool.output_ref.clone(),
+        },
+    });
+}
+
+fn upsert_progress_instruction(
+    activity: &mut Vec<AgentActivityEntry>,
+    instruction: AgentInstructionProgress,
+) {
+    if let Some(index) = activity.iter().rposition(|entry| {
+        matches!(
+            &entry.kind,
+            AgentActivityKind::Instruction { generation, .. } if *generation == instruction.generation
+        )
+    }) {
+        let mut entry = activity.remove(index);
+        entry.kind = AgentActivityKind::Instruction {
+            generation: instruction.generation,
+            outcome: instruction.outcome,
+        };
+        activity.push(entry);
+        return;
+    }
+    activity.push(AgentActivityEntry {
+        kind: AgentActivityKind::Instruction {
+            generation: instruction.generation,
+            outcome: instruction.outcome,
         },
     });
 }

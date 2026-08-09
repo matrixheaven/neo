@@ -1,4 +1,5 @@
 use neo_agent_core::AgentEvent;
+use neo_agent_core::instructions::InstructionEpochOutcome;
 use neo_agent_core::multi_agent::{
     AgentActivityEntry, AgentActivityKind, AgentDisplayName, AgentId, AgentLifecycleState,
     AgentPath, AgentProgressSnapshot, AgentRole, AgentRunMode, AgentSnapshot, AgentTerminalOutcome,
@@ -94,6 +95,50 @@ fn completed_delegate() -> AgentSnapshot {
         ..running_delegate()
     }
 }
+
+#[test]
+fn instruction_activity_has_a_distinct_transcript_row_in_delegate_and_swarm() {
+    let mut child = running_delegate();
+    child.activity.push(AgentActivityEntry {
+        kind: AgentActivityKind::Instruction {
+            generation: 4,
+            outcome: InstructionEpochOutcome::Updated,
+        },
+    });
+
+    let delegate_lines = plain(
+        DelegateCardComponent::new(child.clone()).render_with_theme(120, &TuiTheme::default()),
+    );
+    assert!(
+        delegate_lines
+            .iter()
+            .any(|line| line.contains("Instructions reloaded")),
+        "{delegate_lines:?}"
+    );
+
+    let swarm = SwarmSnapshot {
+        swarm_id: "instruction-swarm".to_owned(),
+        description: "instruction update".to_owned(),
+        role: AgentRole::Coder,
+        mode: AgentRunMode::Foreground,
+        state: AgentLifecycleState::Running,
+        max_concurrency: 1,
+        aggregate: SwarmAggregate::from_states([AgentLifecycleState::Running]),
+        children: vec![SwarmChildSnapshot {
+            item_index: 0,
+            item: "reload".to_owned(),
+            agent: child,
+        }],
+    };
+    let swarm_lines =
+        plain(SwarmCardComponent::new(swarm).render_with_theme(160, &TuiTheme::default()));
+    let child_line = swarm_lines
+        .iter()
+        .find(|line| line.contains("Instructions reloaded"))
+        .expect("swarm child instruction status");
+    assert!(!child_line.contains("Using Bash"), "{child_line}");
+}
+
 fn swarm_with_child_states(states: Vec<AgentLifecycleState>) -> SwarmSnapshot {
     let aggregate = SwarmAggregate::from_states(states.iter().copied());
     SwarmSnapshot {

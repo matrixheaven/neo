@@ -23,10 +23,10 @@ pub use runtime::{
 };
 pub use scheduler::{SwarmItemState, SwarmRetryState, SwarmScheduler, SwarmSchedulerConfig};
 pub use state::{
-    AgentActivityEntry, AgentActivityKind, AgentLifecycleState, AgentProgressSignature,
-    AgentProgressSnapshot, AgentRunMode, AgentSnapshot, AgentTerminalOutcome, AgentTerminalReason,
-    AgentToolActivityPhase, AgentToolFileChange, AgentToolFileOperation, AgentToolFileStatus,
-    AgentToolOutputPreview, DelegateContext, DelegateToolProgress, SwarmAggregate,
-    SwarmChildProgress, SwarmChildSnapshot, SwarmSnapshot, apply_agent_progress,
-    apply_swarm_child_progress,
+    AgentActivityEntry, AgentActivityKind, AgentInstructionProgress, AgentLifecycleState,
+    AgentProgressSignature, AgentProgressSnapshot, AgentRunMode, AgentSnapshot,
+    AgentTerminalOutcome, AgentTerminalReason, AgentToolActivityPhase, AgentToolFileChange,
+    AgentToolFileOperation, AgentToolFileStatus, AgentToolOutputPreview, DelegateContext,
+    DelegateToolProgress, SwarmAggregate, SwarmChildProgress, SwarmChildSnapshot, SwarmSnapshot,
+    apply_agent_progress, apply_swarm_child_progress,
 };

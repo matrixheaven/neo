@@ -84,6 +84,7 @@ fn compact_delegate_progress_events_deserialize_and_do_not_replay_messages() {
             }],
             output_ref: None,
         }),
+        last_instruction: None,
         outcome: None,
     };
     let event = AgentEvent::DelegateProgressUpdated {
@@ -119,6 +120,7 @@ fn compact_delegate_progress_events_deserialize_and_do_not_replay_messages() {
     };
     assert_eq!(progress.started_at_ms, None);
     assert_eq!(progress.input_token_count, 0);
+    assert_eq!(progress.last_instruction, None);
     assert!(
         progress.last_tool.is_some_and(|tool| tool.files.is_empty()),
         "old progress events must default to no file rows"
@@ -161,6 +163,7 @@ fn compact_swarm_progress_events_deserialize_and_do_not_replay_messages() {
                 latest_text: None,
                 latest_thinking: None,
                 last_tool: None,
+                last_instruction: None,
                 outcome: None,
             },
         },

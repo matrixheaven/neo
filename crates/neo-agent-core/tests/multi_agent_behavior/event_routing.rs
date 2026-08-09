@@ -867,7 +867,9 @@ async fn child_tool_output_reference_survives_wire_replay() {
                 phase,
                 ..
             } if id == "call-wire" => Some((output_ref, *phase)),
-            AgentActivityKind::Text { .. } | AgentActivityKind::Tool { .. } => None,
+            AgentActivityKind::Text { .. }
+            | AgentActivityKind::Tool { .. }
+            | AgentActivityKind::Instruction { .. } => None,
         })
         .expect("tool row");
     assert_eq!(entry_ref.0, &Some(reference.clone()));
