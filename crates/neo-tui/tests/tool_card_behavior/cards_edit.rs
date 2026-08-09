@@ -593,12 +593,12 @@ fn edit_tool_card_renders_finalized_real_line_diff_from_details() {
     let rendered = card.render_with_theme(80, &theme);
     let rows = plain(rendered.clone());
     assert!(
-        rows[0].contains("Used Edit · 1 files · 1 replacements · +1 -1"),
+        rows[0].contains("Used Edit · 1 file · 1 replacement · +1 -1"),
         "batch summary missing: {rows:?}"
     );
     assert_eq!(
         rows.iter()
-            .filter(|line| line.contains("1 files · 1 replacements"))
+            .filter(|line| line.contains("1 file · 1 replacement"))
             .count(),
         1,
         "batch summary should only appear in the header: {rows:?}"
