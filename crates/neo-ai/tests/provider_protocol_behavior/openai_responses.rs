@@ -37,6 +37,10 @@ async fn openai_responses_client_posts_responses_payload_and_streams_events() {
             "type": "response.completed",
             "response": {
                 "status": "completed",
+                "output": [{
+                    "type": "message",
+                    "content": [{ "type": "output_text", "text": "hi " }]
+                }],
                 "usage": { "input_tokens": 9, "output_tokens": 4 }
             }
         }),
@@ -102,6 +106,76 @@ async fn openai_responses_client_posts_responses_payload_and_streams_events() {
     assert_eq!(sent.body["max_output_tokens"], 64);
     assert_eq!(sent.body["tools"][0]["name"], "read_file");
     assert_eq!(sent.body["input"][0]["role"], "user");
+}
+
+#[tokio::test]
+async fn openai_responses_client_uses_final_text_when_provider_omits_deltas() {
+    let cases = [
+        (
+            "output text done",
+            json!({ "type": "response.output_text.done", "text": "Generated title" }),
+        ),
+        (
+            "content part done",
+            json!({
+                "type": "response.content_part.done",
+                "part": { "type": "output_text", "text": "Generated title" }
+            }),
+        ),
+        (
+            "output item done",
+            json!({
+                "type": "response.output_item.done",
+                "item": {
+                    "type": "message",
+                    "content": [{ "type": "output_text", "text": "Generated title" }]
+                }
+            }),
+        ),
+        (
+            "response completed output",
+            json!({
+                "type": "response.completed",
+                "response": {
+                    "status": "completed",
+                    "output": [{
+                        "type": "message",
+                        "content": [{ "type": "output_text", "text": "Generated title" }]
+                    }]
+                }
+            }),
+        ),
+    ];
+
+    for (case, final_event) in cases {
+        let mut stream_events = vec![
+            json!({ "type": "response.created", "response": { "id": "resp-final" } }),
+            final_event,
+        ];
+        if stream_events[1]["type"] != "response.completed" {
+            stream_events.push(json!({
+                "type": "response.completed",
+                "response": { "status": "completed" }
+            }));
+        }
+        let server = MockServer::start(vec![sse_response(&stream_events)]);
+        let client = OpenAiResponsesClient::new(server.url.clone(), "test-key");
+
+        let events = client
+            .stream_chat(request(ApiKind::OpenAiResponse))
+            .collect::<Vec<_>>()
+            .await
+            .into_iter()
+            .collect::<Result<Vec<_>, _>>()
+            .expect("stream should succeed");
+
+        assert!(
+            events.contains(&AiStreamEvent::TextDelta {
+                text: "Generated title".to_owned(),
+            }),
+            "{case}"
+        );
+    }
 }
 
 #[tokio::test]

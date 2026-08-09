@@ -96,7 +96,9 @@ fn request_body(request: &ChatRequest) -> Result<Value, ProviderError> {
     if let Some(max_tokens) = request.options.max_tokens {
         body["max_output_tokens"] = json!(max_tokens);
     }
-    if let Some(effort) = openai_responses_reasoning(&request.options.reasoning)? {
+    if request.options.disable_reasoning {
+        body["reasoning"] = json!({ "effort": "none" });
+    } else if let Some(effort) = openai_responses_reasoning(&request.options.reasoning)? {
         body["reasoning"] = json!({
             "effort": effort.as_str(),
             "summary": "auto",
@@ -441,6 +443,7 @@ struct ParseState {
     last_stop_reason: StopReason,
     usage: Option<TokenUsage>,
     saw_tool_call: bool,
+    saw_output_text: bool,
     terminal: bool,
     finished: bool,
 }
@@ -474,6 +477,7 @@ impl Default for ParseState {
             last_stop_reason: StopReason::EndTurn,
             usage: None,
             saw_tool_call: false,
+            saw_output_text: false,
             terminal: false,
             finished: false,
         }
@@ -497,11 +501,26 @@ impl ParseState {
                 if let Some(text) = value.get("delta").and_then(Value::as_str)
                     && !text.is_empty()
                 {
+                    self.saw_output_text = true;
                     self.queue_event(AiStreamEvent::TextDelta {
                         text: text.to_owned(),
                     });
                 }
             }
+            Some("response.output_text.done") => self.ingest_final_output_text(
+                value
+                    .get("text")
+                    .and_then(Value::as_str)
+                    .unwrap_or_default(),
+            ),
+            Some("response.content_part.done") => self.ingest_final_output_text(
+                value
+                    .get("part")
+                    .filter(|part| part.get("type").and_then(Value::as_str) == Some("output_text"))
+                    .and_then(|part| part.get("text"))
+                    .and_then(Value::as_str)
+                    .unwrap_or_default(),
+            ),
             Some("response.reasoning_summary_part.added") => self.ingest_thinking_started(value),
             Some("response.reasoning_summary_text.delta") => self.ingest_thinking_delta(value),
             Some("response.reasoning_summary_text.done") => self.ingest_thinking_text_done(value),
@@ -588,6 +607,17 @@ impl ParseState {
         } else {
             self.ensure_started_with_phase("response".to_owned(), phase);
         }
+    }
+
+    fn ingest_final_output_text(&mut self, text: &str) {
+        if self.saw_output_text || text.is_empty() {
+            return;
+        }
+        self.defer_start("response".to_owned());
+        self.saw_output_text = true;
+        self.queue_event(AiStreamEvent::TextDelta {
+            text: text.to_owned(),
+        });
     }
 
     fn tool_index_for_item(&mut self, item_id: &str) -> u64 {
@@ -729,6 +759,7 @@ impl ParseState {
 
         if item.get("type").and_then(Value::as_str) == Some("message") {
             self.ingest_message_item(item);
+            self.ingest_final_output_text(&message_output_text(item));
             return Ok(());
         }
 
@@ -836,8 +867,16 @@ impl ParseState {
     }
 
     fn ingest_completed(&mut self, value: &Value) {
-        self.ensure_started("response".to_owned());
         let response = value.get("response").unwrap_or(&Value::Null);
+        if let Some(output) = response.get("output").and_then(Value::as_array) {
+            for item in output {
+                if item.get("type").and_then(Value::as_str) == Some("message") {
+                    self.ingest_message_item(item);
+                    self.ingest_final_output_text(&message_output_text(item));
+                }
+            }
+        }
+        self.ensure_started("response".to_owned());
         self.usage = response
             .get("usage")
             .and_then(|v| token_usage_from(v, "input_tokens", "output_tokens"));
@@ -1038,6 +1077,16 @@ fn message_phase_from_item(item: &Value) -> MessagePhase {
         Some("final_answer") => MessagePhase::FinalAnswer,
         _ => MessagePhase::Unknown,
     }
+}
+
+fn message_output_text(item: &Value) -> String {
+    item.get("content")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter(|part| part.get("type").and_then(Value::as_str) == Some("output_text"))
+        .filter_map(|part| part.get("text").and_then(Value::as_str))
+        .collect()
 }
 
 fn thinking_id(value: &Value) -> String {

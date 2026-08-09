@@ -40,6 +40,32 @@ async fn openai_responses_client_serializes_reasoning_selection_with_encrypted_h
 }
 
 #[tokio::test]
+async fn openai_responses_client_explicitly_disables_reasoning_for_background_requests() {
+    let server = MockServer::start(vec![sse_response(&[
+        json!({ "type": "response.created", "response": { "id": "resp-no-reasoning" } }),
+        json!({
+            "type": "response.completed",
+            "response": { "status": "completed" }
+        }),
+    ])]);
+    let client = OpenAiResponsesClient::new(server.url.clone(), "test-key");
+    let mut request = request(ApiKind::OpenAiResponse);
+    request.options.disable_reasoning = true;
+
+    client
+        .stream_chat(request)
+        .collect::<Vec<_>>()
+        .await
+        .into_iter()
+        .collect::<Result<Vec<_>, _>>()
+        .expect("request should succeed");
+
+    let sent = server.requests().pop().expect("request should be recorded");
+    assert_eq!(sent.body["reasoning"], json!({ "effort": "none" }));
+    assert!(sent.body.get("include").is_none());
+}
+
+#[tokio::test]
 async fn openai_responses_client_rejects_budget_reasoning_selection_without_posting() {
     let server = MockServer::start(Vec::new());
     let client = OpenAiResponsesClient::new(server.url.clone(), "test-key");

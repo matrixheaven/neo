@@ -430,6 +430,8 @@ async fn run_prompt_in_session(
         show_retry_notices,
     )
     .await?;
+    record_initial_session_title(config, &turn.session_id, &turn.assistant_text, &prompt_text)
+        .await;
     let notification_queue = config.workflow_runtime.notification_queue();
     let notification_ids =
         neo_agent_core::session::workflow_notification_projection_ids(&turn.events);
@@ -476,15 +478,18 @@ pub async fn run_prompt_streaming(
         Some(&channels),
     )
     .await?;
+    let compaction_only = request.compaction_only;
     let turn = run_prepared_streaming_turn(
         prepared,
         runtime,
         channels.events,
         channels.cancel_token,
-        request.compaction_only,
+        compaction_only,
     )
     .await?;
-    record_initial_session_title(config, &turn.session_id, &turn.assistant_text, &prompt).await;
+    if !compaction_only {
+        record_initial_session_title(config, &turn.session_id, &turn.assistant_text, &prompt).await;
+    }
     Ok(turn)
 }
 
@@ -518,14 +523,20 @@ pub async fn run_prompt_in_session_streaming(
         &prepared.user_message,
     )?;
     runtime.restore_plan_mode(&prepared.context);
-    run_prepared_streaming_turn(
+    let prompt = prepared.prompt.clone();
+    let compaction_only = request.compaction_only;
+    let turn = run_prepared_streaming_turn(
         prepared,
         runtime,
         channels.events,
         channels.cancel_token,
-        request.compaction_only,
+        compaction_only,
     )
-    .await
+    .await?;
+    if !compaction_only {
+        record_initial_session_title(config, &turn.session_id, &turn.assistant_text, &prompt).await;
+    }
+    Ok(turn)
 }
 
 async fn prepare_new_streaming_turn(

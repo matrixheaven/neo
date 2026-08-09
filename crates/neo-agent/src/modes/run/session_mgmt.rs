@@ -129,7 +129,7 @@ pub(super) async fn record_initial_session_title(
     else {
         return;
     };
-    if record.name.is_some() || record.title_updated_at.is_some() {
+    if record.name.is_some() || record.title_model.is_some() {
         return;
     }
 
