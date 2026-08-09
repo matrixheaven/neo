@@ -1,0 +1,32 @@
+{
+  "name": "neo-webui",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "scripts": {
+    "build": "vite build",
+    "test": "vitest run",
+    "test:browser": "npm run build && playwright test",
+    "mock": "node test/browser/mock-server.mjs"
+  },
+  "dependencies": {
+    "lucide-react": "0.454.0",
+    "react": "18.3.1",
+    "react-dom": "18.3.1",
+    "react-markdown": "9.0.1"
+  },
+  "devDependencies": {
+    "@playwright/test": "1.48.2",
+    "@testing-library/react": "16.0.1",
+    "@testing-library/user-event": "14.5.2",
+    "@types/react": "18.3.12",
+    "@types/react-dom": "18.3.1",
+    "@types/ws": "^8.5.13",
+    "@vitejs/plugin-react": "4.3.3",
+    "jsdom": "25.0.1",
+    "typescript": "5.6.3",
+    "vite": "5.4.11",
+    "vitest": "2.1.4",
+    "ws": "^8.18.0"
+  }
+}
