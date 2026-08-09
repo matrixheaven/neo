@@ -608,3 +608,6 @@ Entries are workspace records, not authoritative runtime decisions.
 | 2026-08-09 | work | docs/aegis/work/2026-08-09-neo-webui/proof-bundle.md | 2026-08-09-neo-webui proof bundle |
 | 2026-08-09 | artifact | docs/aegis/work/2026-08-09-neo-webui/evidence-bundle-draft-document-validation.json | 2026-08-09-neo-webui evidence document-validation |
 | 2026-08-09 | artifact | docs/aegis/work/2026-08-09-neo-webui/evidence-bundle-draft-design-self-review.json | 2026-08-09-neo-webui evidence design-self-review |
+| 2026-08-09 | artifact | docs/aegis/work/2026-08-09-neo-webui/evidence-bundle-draft-scoped-commit.json | 2026-08-09-neo-webui evidence scoped-commit |
+| 2026-08-09 | plan | docs/aegis/plans/2026-08-09-neo-webui.md | Neo WebUI 实施计划 |
+| 2026-08-09 | artifact | docs/aegis/work/2026-08-09-neo-webui/evidence-bundle-draft-implementation-plan-validation.json | 2026-08-09-neo-webui evidence implementation-plan-validation |
