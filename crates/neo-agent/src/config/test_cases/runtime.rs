@@ -2,9 +2,7 @@
 
 use super::*;
 
-use crate::config::{
-    AppConfig, ConfigOverrides, PermissionMode, RuntimeCompactionConfig, RuntimeConfig,
-};
+use crate::config::{AppConfig, ConfigOverrides, PermissionMode, RuntimeConfig};
 
 #[test]
 fn config_defaults_to_ask_permission_mode() {

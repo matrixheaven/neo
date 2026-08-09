@@ -1124,8 +1124,6 @@ fn append_queued_messages(emitter: &mut EventEmitter, messages: Vec<AgentMessage
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::CompactionSettings;
-    use crate::harness::fake_model;
     use neo_ai::{ApiKind, ModelCapabilities, ModelSpec, ProviderId};
     use tokio::sync::mpsc;
 
