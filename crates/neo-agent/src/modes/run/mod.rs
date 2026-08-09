@@ -317,8 +317,7 @@ async fn run_prompt_streaming_with_retry_notices(
         streaming,
     )
     .await?;
-    record_initial_session_title(config, &turn.session_id, &turn.assistant_text, &prompt_text)
-        .await;
+    record_initial_session_title(config, &turn.session_id, &prompt_text).await;
     Ok(turn)
 }
 
@@ -370,8 +369,7 @@ async fn run_prompt_with_retry_notices(
         show_retry_notices,
     )
     .await?;
-    record_initial_session_title(config, &turn.session_id, &turn.assistant_text, &prompt_text)
-        .await;
+    record_initial_session_title(config, &turn.session_id, &prompt_text).await;
     Ok(turn)
 }
 
@@ -430,8 +428,7 @@ async fn run_prompt_in_session(
         show_retry_notices,
     )
     .await?;
-    record_initial_session_title(config, &turn.session_id, &turn.assistant_text, &prompt_text)
-        .await;
+    record_initial_session_title(config, &turn.session_id, &prompt_text).await;
     let notification_queue = config.workflow_runtime.notification_queue();
     let notification_ids =
         neo_agent_core::session::workflow_notification_projection_ids(&turn.events);
@@ -488,7 +485,7 @@ pub async fn run_prompt_streaming(
     )
     .await?;
     if !compaction_only {
-        record_initial_session_title(config, &turn.session_id, &turn.assistant_text, &prompt).await;
+        record_initial_session_title(config, &turn.session_id, &prompt).await;
     }
     Ok(turn)
 }
@@ -534,7 +531,7 @@ pub async fn run_prompt_in_session_streaming(
     )
     .await?;
     if !compaction_only {
-        record_initial_session_title(config, &turn.session_id, &turn.assistant_text, &prompt).await;
+        record_initial_session_title(config, &turn.session_id, &prompt).await;
     }
     Ok(turn)
 }
