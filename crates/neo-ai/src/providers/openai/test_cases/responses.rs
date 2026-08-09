@@ -1,6 +1,7 @@
 //! `OpenAI` responses behavior (moved from `responses.rs`).
 
 use super::*;
+use crate::effective_media_capability;
 
 #[test]
 fn oversized_sse_frame_is_rejected() {
@@ -403,4 +404,38 @@ fn historical_message_end_without_phase_defaults_to_unknown() {
             phase: MessagePhase::Unknown,
         }
     );
+}
+
+#[test]
+fn declared_video_and_tool_media_are_rejected_by_responses_transport() {
+    use crate::{EffectiveMediaCapability, MediaKind, MediaPosition, ModelCapabilities};
+
+    let client = OpenAiResponsesClient::new("https://example.invalid", "key");
+    let model = ModelCapabilities {
+        images: true,
+        videos: true,
+        ..ModelCapabilities::chat()
+    };
+    let transport = client.media_transport();
+
+    assert_eq!(
+        effective_media_capability(
+            MediaKind::Image,
+            MediaPosition::UserMessage,
+            &model,
+            transport
+        ),
+        EffectiveMediaCapability::Sendable(MediaTransportMode::Url)
+    );
+    for (kind, position) in [
+        (MediaKind::Video, MediaPosition::UserMessage),
+        (MediaKind::Image, MediaPosition::ToolResult),
+        (MediaKind::Video, MediaPosition::ToolResult),
+    ] {
+        assert_eq!(
+            effective_media_capability(kind, position, &model, transport),
+            EffectiveMediaCapability::TransportUnsupported,
+            "{kind:?} at {position:?}"
+        );
+    }
 }

@@ -9,8 +9,9 @@ use crate::providers::common::sse::{SseFramer, StreamChunk, parse_sse_frame};
 
 use crate::tool_assembly::{StreamingToolCallAssembler, ToolCallAssemblyEvent, ToolCallChunk};
 use crate::{
-    AiError, AiStreamEvent, CacheRetention, ChatMessage, ChatRequest, ContentPart, ModelClient,
-    ReasoningSelection, StopReason, TokenUsage, ToolSpec,
+    AiError, AiStreamEvent, CacheRetention, ChatMessage, ChatRequest, ContentPart,
+    MediaTransportCapabilities, MediaTransportMode, ModelClient, ReasoningSelection, StopReason,
+    TokenUsage, ToolSpec,
 };
 
 const EMPTY_STRUCTURED_TOOL_CALLS_MESSAGE: &str =
@@ -82,6 +83,16 @@ impl ModelClient for OpenAiCompatibleClient {
                 Err(err) => stream::iter(vec![Err(err)]).boxed(),
             })
             .boxed()
+    }
+
+    fn media_transport(&self) -> MediaTransportCapabilities {
+        // `image_url` parts accept both data URIs (base64) and http(s) URLs,
+        // but only in user messages: videos are replaced by placeholder text
+        // today, and tool results go through `reject_images`.
+        MediaTransportCapabilities {
+            user_image: MediaTransportMode::Url,
+            ..MediaTransportCapabilities::default()
+        }
     }
 }
 
@@ -728,7 +739,10 @@ fn reasoning_delta(delta: &Value) -> Option<&str> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::ToolCall;
+    use crate::{
+        EffectiveMediaCapability, MediaKind, MediaPosition, ModelCapabilities, ToolCall,
+        effective_media_capability,
+    };
 
     #[test]
     fn reasoning_selection_preserves_max_effort() {
@@ -857,5 +871,37 @@ mod tests {
         };
         let body = request_body(&request).expect("body");
         assert!(body.get("response_format").is_none());
+    }
+
+    #[test]
+    fn declared_video_and_tool_media_are_rejected_by_compatible_transport() {
+        let client = OpenAiCompatibleClient::new("https://example.invalid", "key");
+        let model = ModelCapabilities {
+            images: true,
+            videos: true,
+            ..ModelCapabilities::chat()
+        };
+        let transport = client.media_transport();
+
+        assert_eq!(
+            effective_media_capability(
+                MediaKind::Image,
+                MediaPosition::UserMessage,
+                &model,
+                transport
+            ),
+            EffectiveMediaCapability::Sendable(MediaTransportMode::Url)
+        );
+        for (kind, position) in [
+            (MediaKind::Video, MediaPosition::UserMessage),
+            (MediaKind::Image, MediaPosition::ToolResult),
+            (MediaKind::Video, MediaPosition::ToolResult),
+        ] {
+            assert_eq!(
+                effective_media_capability(kind, position, &model, transport),
+                EffectiveMediaCapability::TransportUnsupported,
+                "{kind:?} at {position:?}"
+            );
+        }
     }
 }

@@ -138,6 +138,101 @@ mod tests {
         assert!(message.contains("has been removed"), "{message}");
         assert!(message.contains("openai_response"), "{message}");
     }
+
+    #[test]
+    fn effective_capability_intersects_kind_position_model_and_transport() {
+        let model = ModelCapabilities {
+            images: true,
+            videos: true,
+            ..ModelCapabilities::chat()
+        };
+        let transport = MediaTransportCapabilities {
+            user_image: MediaTransportMode::Inline,
+            user_video: MediaTransportMode::Url,
+            tool_image: MediaTransportMode::Unsupported,
+            tool_video: MediaTransportMode::AttachAfterResult,
+        };
+        let cases = [
+            (
+                "user image with inline transport",
+                MediaKind::Image,
+                MediaPosition::UserMessage,
+                EffectiveMediaCapability::Sendable(MediaTransportMode::Inline),
+            ),
+            (
+                "user video with url transport",
+                MediaKind::Video,
+                MediaPosition::UserMessage,
+                EffectiveMediaCapability::Sendable(MediaTransportMode::Url),
+            ),
+            (
+                "tool image without transport",
+                MediaKind::Image,
+                MediaPosition::ToolResult,
+                EffectiveMediaCapability::TransportUnsupported,
+            ),
+            (
+                "tool video with attach-after-result transport",
+                MediaKind::Video,
+                MediaPosition::ToolResult,
+                EffectiveMediaCapability::Sendable(MediaTransportMode::AttachAfterResult),
+            ),
+        ];
+        for (name, kind, position, expected) in cases {
+            assert_eq!(
+                effective_media_capability(kind, position, &model, transport),
+                expected,
+                "case {name}"
+            );
+        }
+    }
+
+    #[test]
+    fn model_semantic_capability_gates_media_before_transport() {
+        let model = ModelCapabilities::chat(); // images = videos = false
+        let transport = MediaTransportCapabilities {
+            user_image: MediaTransportMode::Inline,
+            user_video: MediaTransportMode::Inline,
+            ..MediaTransportCapabilities::default()
+        };
+        assert_eq!(
+            effective_media_capability(
+                MediaKind::Image,
+                MediaPosition::UserMessage,
+                &model,
+                transport
+            ),
+            EffectiveMediaCapability::ModelRejectsMediaKind
+        );
+        assert_eq!(
+            effective_media_capability(
+                MediaKind::Video,
+                MediaPosition::UserMessage,
+                &model,
+                transport
+            ),
+            EffectiveMediaCapability::ModelRejectsMediaKind
+        );
+    }
+
+    #[test]
+    fn undeclared_transport_cells_default_to_unsupported() {
+        let model = ModelCapabilities {
+            images: true,
+            videos: true,
+            ..ModelCapabilities::chat()
+        };
+        let transport = MediaTransportCapabilities::default();
+        for kind in [MediaKind::Image, MediaKind::Video] {
+            for position in [MediaPosition::UserMessage, MediaPosition::ToolResult] {
+                assert_eq!(
+                    effective_media_capability(kind, position, &model, transport),
+                    EffectiveMediaCapability::TransportUnsupported,
+                    "{kind:?} at {position:?} without declaration"
+                );
+            }
+        }
+    }
 }
 
 #[allow(clippy::struct_excessive_bools)]
@@ -235,6 +330,110 @@ impl ModelCapabilities {
     #[must_use]
     pub fn supports_reasoning(&self) -> bool {
         self.reasoning.supports_reasoning()
+    }
+}
+
+/// Media kind carried by `ContentPart::Image` / `ContentPart::Video`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MediaKind {
+    Image,
+    Video,
+}
+
+/// Message position where media can appear.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MediaPosition {
+    UserMessage,
+    ToolResult,
+}
+
+/// How a provider adapter transports one media kind at one message position.
+///
+/// Declared by the wire client, never derived from model or catalog flags:
+/// a model declaring `images`/`videos` means it is willing to receive the
+/// media, not that the protocol can carry it at every position.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum MediaTransportMode {
+    /// Base64 content embedded directly in the request.
+    Inline,
+    /// URL reference (http(s) or data URI) embedded in the request.
+    Url,
+    /// Provider-native file reference (e.g. an uploaded file handle).
+    FileRef,
+    /// Media embedded in the tool result content itself.
+    InPlace,
+    /// Media appended as a new user message after the tool result.
+    AttachAfterResult,
+    /// This media kind cannot be transported at this position.
+    #[default]
+    Unsupported,
+}
+
+/// Transport capabilities declared by a provider adapter for every
+/// (media kind × message position) cell.
+///
+/// The default is all-unsupported: an undeclared cell is never treated as a
+/// transport guarantee.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct MediaTransportCapabilities {
+    /// Image transport in user messages.
+    pub user_image: MediaTransportMode,
+    /// Video transport in user messages.
+    pub user_video: MediaTransportMode,
+    /// Image transport in tool results.
+    pub tool_image: MediaTransportMode,
+    /// Video transport in tool results.
+    pub tool_video: MediaTransportMode,
+}
+
+impl MediaTransportCapabilities {
+    /// Transport mode declared for one (kind, position) cell.
+    #[must_use]
+    pub const fn mode(&self, kind: MediaKind, position: MediaPosition) -> MediaTransportMode {
+        match (kind, position) {
+            (MediaKind::Image, MediaPosition::UserMessage) => self.user_image,
+            (MediaKind::Video, MediaPosition::UserMessage) => self.user_video,
+            (MediaKind::Image, MediaPosition::ToolResult) => self.tool_image,
+            (MediaKind::Video, MediaPosition::ToolResult) => self.tool_video,
+        }
+    }
+}
+
+/// Typed result of the effective-capability intersection for one
+/// (media kind × message position) cell. Unsendable media always yields a
+/// typed reason — never a silent drop.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EffectiveMediaCapability {
+    /// The media can be sent; the transport mode tells projection how to encode it.
+    Sendable(MediaTransportMode),
+    /// The model's declared semantic capabilities reject this media kind.
+    ModelRejectsMediaKind,
+    /// The model accepts this media kind but the provider cannot transport
+    /// it at this position.
+    TransportUnsupported,
+}
+
+/// Effective capability for one (kind, position) cell: the intersection of
+/// the model's semantic capabilities (willing to receive the media kind) and
+/// the provider adapter's transport capabilities (able to carry it at the
+/// position). A catalog declaration alone is never a transport guarantee.
+#[must_use]
+pub fn effective_media_capability(
+    kind: MediaKind,
+    position: MediaPosition,
+    model: &ModelCapabilities,
+    transport: MediaTransportCapabilities,
+) -> EffectiveMediaCapability {
+    let model_accepts = match kind {
+        MediaKind::Image => model.images,
+        MediaKind::Video => model.videos,
+    };
+    if !model_accepts {
+        return EffectiveMediaCapability::ModelRejectsMediaKind;
+    }
+    match transport.mode(kind, position) {
+        MediaTransportMode::Unsupported => EffectiveMediaCapability::TransportUnsupported,
+        mode => EffectiveMediaCapability::Sendable(mode),
     }
 }
 
@@ -453,4 +652,15 @@ pub trait ModelClient: Send + Sync {
         &self,
         request: ChatRequest,
     ) -> BoxStream<'static, Result<AiStreamEvent, AiError>>;
+
+    /// Transport capabilities declared by this provider adapter for each
+    /// (media kind × message position) cell. This is a transport guarantee,
+    /// never derived from model or catalog flags: a model declaring
+    /// `images`/`videos` does not make the wire protocol able to carry media.
+    ///
+    /// Implementers that do not declare a mode default to all-unsupported:
+    /// unknown transport is never treated as a guarantee.
+    fn media_transport(&self) -> MediaTransportCapabilities {
+        MediaTransportCapabilities::default()
+    }
 }

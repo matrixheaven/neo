@@ -2,6 +2,7 @@
 
 use super::*;
 use crate::ToolCall;
+use crate::effective_media_capability;
 
 #[test]
 fn api_key_header_is_sensitive() {
@@ -335,4 +336,38 @@ fn google_omits_response_format_wire_hint() {
     assert!(body.pointer("/text/format").is_none());
     assert!(body.pointer("/generationConfig/responseSchema").is_none());
     assert!(body.pointer("/generationConfig/responseMimeType").is_none());
+}
+
+#[test]
+fn declared_video_and_tool_media_are_rejected_by_google_transport() {
+    use crate::{EffectiveMediaCapability, MediaKind, MediaPosition, ModelCapabilities};
+
+    let client = GoogleGenerativeAiClient::new("https://example.invalid", "key");
+    let model = ModelCapabilities {
+        images: true,
+        videos: true,
+        ..ModelCapabilities::chat()
+    };
+    let transport = client.media_transport();
+
+    assert_eq!(
+        effective_media_capability(
+            MediaKind::Image,
+            MediaPosition::UserMessage,
+            &model,
+            transport
+        ),
+        EffectiveMediaCapability::Sendable(MediaTransportMode::Inline)
+    );
+    for (kind, position) in [
+        (MediaKind::Video, MediaPosition::UserMessage),
+        (MediaKind::Image, MediaPosition::ToolResult),
+        (MediaKind::Video, MediaPosition::ToolResult),
+    ] {
+        assert_eq!(
+            effective_media_capability(kind, position, &model, transport),
+            EffectiveMediaCapability::TransportUnsupported,
+            "{kind:?} at {position:?}"
+        );
+    }
 }

@@ -2,7 +2,10 @@ use std::sync::{Arc, Mutex};
 
 use futures::{StreamExt, stream};
 
-use crate::{AiError, AiStreamEvent, ChatRequest, ModelClient};
+use crate::{
+    AiError, AiStreamEvent, ChatRequest, MediaTransportCapabilities, MediaTransportMode,
+    ModelClient,
+};
 
 #[derive(Clone, Default)]
 pub struct FakeModelClient {
@@ -36,5 +39,16 @@ impl ModelClient for FakeModelClient {
             .push(request);
         let events = self.events.lock().expect("events lock poisoned").clone();
         stream::iter(events.into_iter().map(Ok)).boxed()
+    }
+
+    fn media_transport(&self) -> MediaTransportCapabilities {
+        // Test double: accepts any media at any position so deterministic
+        // tests exercise projection without a real wire protocol.
+        MediaTransportCapabilities {
+            user_image: MediaTransportMode::Inline,
+            user_video: MediaTransportMode::Inline,
+            tool_image: MediaTransportMode::InPlace,
+            tool_video: MediaTransportMode::InPlace,
+        }
     }
 }

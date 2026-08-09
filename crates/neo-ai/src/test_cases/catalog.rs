@@ -230,6 +230,52 @@ fn catalog_model_capabilities_respects_disabled_tools_and_optional_features() {
 }
 
 #[test]
+fn catalog_model_capabilities_reads_video_input_modality() {
+    let model = CatalogModel {
+        id: "video-vision".to_owned(),
+        name: None,
+        family: None,
+        limit: None,
+        tool_call: None,
+        reasoning: None,
+        reasoning_options: Vec::new(),
+        interleaved: None,
+        modalities: Some(CatalogModalities {
+            input: vec!["text".to_owned(), "image".to_owned(), "video".to_owned()],
+            output: vec!["text".to_owned()],
+        }),
+    };
+
+    assert_eq!(
+        catalog_model_capabilities(&model),
+        ["streaming", "tools", "images", "videos"]
+    );
+}
+
+#[test]
+fn catalog_model_without_video_modality_stays_video_off() {
+    let model = CatalogModel {
+        id: "image-only".to_owned(),
+        name: None,
+        family: None,
+        limit: None,
+        tool_call: None,
+        reasoning: None,
+        reasoning_options: Vec::new(),
+        interleaved: None,
+        modalities: Some(CatalogModalities {
+            input: vec!["text".to_owned(), "image".to_owned()],
+            output: vec!["text".to_owned()],
+        }),
+    };
+
+    assert_eq!(
+        catalog_model_capabilities(&model),
+        ["streaming", "tools", "images"]
+    );
+}
+
+#[test]
 fn catalog_model_capability_reads_effort_reasoning_options() {
     let model: CatalogModel = serde_json::from_value(serde_json::json!({
         "id": "gpt-test",

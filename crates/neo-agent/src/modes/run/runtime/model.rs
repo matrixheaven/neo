@@ -139,6 +139,7 @@ fn parse_model_capabilities(
             "streaming" => mc.streaming = true,
             "tools" | "tool_use" => mc.tools = true,
             "images" | "image_in" | "vision" => mc.images = true,
+            "videos" | "video_in" | "video" => mc.videos = true,
             "reasoning" | "thinking" if !mc.reasoning.supports_reasoning() => {
                 mc.reasoning = neo_ai::ReasoningCapability::Toggle {
                     disable_supported: true,
@@ -290,5 +291,41 @@ model = "claude"
             resolver.resolve(&anthropic_model).is_err(),
             "anthropic does not inherit openai's key"
         );
+    }
+
+    fn parsed_capabilities(caps: &[&str]) -> neo_ai::ModelCapabilities {
+        parse_model_capabilities(
+            &caps.iter().map(|c| (*c).to_owned()).collect::<Vec<_>>(),
+            neo_ai::ReasoningCapability::None,
+            None,
+            None,
+        )
+    }
+
+    #[test]
+    fn unknown_capabilities_default_to_all_media_off() {
+        let mc = parsed_capabilities(&["streaming", "tools"]);
+        assert!(mc.streaming && mc.tools, "known flags still parse");
+        assert!(!mc.images && !mc.videos, "undeclared media stays off");
+    }
+
+    #[test]
+    fn image_capabilities_parse_without_enabling_video() {
+        let mc = parsed_capabilities(&["images", "image_in", "vision"]);
+        assert!(mc.images);
+        assert!(!mc.videos, "image strings never enable video");
+    }
+
+    #[test]
+    fn video_capabilities_parse_without_enabling_image() {
+        let mc = parsed_capabilities(&["videos", "video_in", "video"]);
+        assert!(mc.videos);
+        assert!(!mc.images, "video strings never enable image");
+    }
+
+    #[test]
+    fn dual_media_capabilities_parse_together() {
+        let mc = parsed_capabilities(&["images", "videos"]);
+        assert!(mc.images && mc.videos);
     }
 }

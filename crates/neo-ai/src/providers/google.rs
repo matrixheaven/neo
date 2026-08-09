@@ -9,8 +9,9 @@ use super::common::helpers::{InputTokenAccounting, reject_images, rounded_f64, t
 use super::common::sse::{SseFramer, StreamChunk};
 
 use crate::{
-    AiError, AiStreamEvent, ChatMessage, ChatRequest, ContentPart, ImageData, ModelClient,
-    ReasoningEffort, ReasoningSelection, StopReason, TokenUsage, ToolSpec,
+    AiError, AiStreamEvent, ChatMessage, ChatRequest, ContentPart, ImageData,
+    MediaTransportCapabilities, MediaTransportMode, ModelClient, ReasoningEffort,
+    ReasoningSelection, StopReason, TokenUsage, ToolSpec,
 };
 
 #[derive(Clone)]
@@ -73,6 +74,16 @@ impl ModelClient for GoogleGenerativeAiClient {
                 Err(err) => stream::iter(vec![Err(err)]).boxed(),
             })
             .boxed()
+    }
+
+    fn media_transport(&self) -> MediaTransportCapabilities {
+        // Base64 inlineData images only, and only in user messages: URL images
+        // and any video raise typed errors in the serializer, and tool results
+        // go through `reject_images`.
+        MediaTransportCapabilities {
+            user_image: MediaTransportMode::Inline,
+            ..MediaTransportCapabilities::default()
+        }
     }
 }
 

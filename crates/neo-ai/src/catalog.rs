@@ -257,6 +257,9 @@ fn catalog_model_capabilities(model: &CatalogModel) -> Vec<String> {
     if catalog_model_accepts_images(model) {
         caps.push("images".to_owned());
     }
+    if catalog_model_accepts_videos(model) {
+        caps.push("videos".to_owned());
+    }
     caps
 }
 
@@ -269,6 +272,13 @@ fn catalog_model_accepts_images(model: &CatalogModel) -> bool {
         .modalities
         .as_ref()
         .is_some_and(|modalities| modalities.input.iter().any(|m| m == "image"))
+}
+
+fn catalog_model_accepts_videos(model: &CatalogModel) -> bool {
+    model
+        .modalities
+        .as_ref()
+        .is_some_and(|modalities| modalities.input.iter().any(|m| m == "video"))
 }
 
 fn catalog_model_reasoning(model: &CatalogModel) -> ReasoningCapability {

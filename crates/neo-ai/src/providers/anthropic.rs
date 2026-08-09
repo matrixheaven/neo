@@ -11,7 +11,8 @@ use super::common::sse::{SseFramer, StreamChunk};
 use crate::tool_assembly::{StreamingToolCallAssembler, ToolCallAssemblyEvent, ToolCallChunk};
 use crate::{
     AiError, AiStreamEvent, CacheRetention, ChatMessage, ChatRequest, ContentPart, ImageData,
-    ModelClient, ReasoningEffort, ReasoningSelection, StopReason, TokenUsage, ToolSpec,
+    MediaTransportCapabilities, MediaTransportMode, ModelClient, ReasoningEffort,
+    ReasoningSelection, StopReason, TokenUsage, ToolSpec,
 };
 
 #[derive(Clone)]
@@ -74,6 +75,16 @@ impl ModelClient for AnthropicMessagesClient {
                 Err(err) => stream::iter(vec![Err(err)]).boxed(),
             })
             .boxed()
+    }
+
+    fn media_transport(&self) -> MediaTransportCapabilities {
+        // Base64 images only, and only in user messages: URL images and any
+        // video raise typed errors in the serializer, and tool results go
+        // through `reject_images`.
+        MediaTransportCapabilities {
+            user_image: MediaTransportMode::Inline,
+            ..MediaTransportCapabilities::default()
+        }
     }
 }
 
@@ -863,7 +874,10 @@ fn stop_reason(reason: &str) -> StopReason {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{ApiKind, ModelCapabilities, ModelSpec, ProviderId, RequestOptions, ToolCall};
+    use crate::{
+        ApiKind, EffectiveMediaCapability, MediaKind, MediaPosition, ModelCapabilities, ModelSpec,
+        ProviderId, RequestOptions, ToolCall, effective_media_capability,
+    };
 
     #[test]
     fn api_key_header_remains_sensitive_when_overridden() {
@@ -1107,5 +1121,37 @@ mod tests {
         let first_messages = first_body["messages"].as_array().expect("first messages");
         let second_messages = second_body["messages"].as_array().expect("second messages");
         assert_eq!(first_messages, &second_messages[..first_messages.len()]);
+    }
+
+    #[test]
+    fn declared_video_and_tool_media_are_rejected_by_anthropic_transport() {
+        let client = AnthropicMessagesClient::new("https://example.invalid", "key");
+        let model = ModelCapabilities {
+            images: true,
+            videos: true,
+            ..ModelCapabilities::chat()
+        };
+        let transport = client.media_transport();
+
+        assert_eq!(
+            effective_media_capability(
+                MediaKind::Image,
+                MediaPosition::UserMessage,
+                &model,
+                transport
+            ),
+            EffectiveMediaCapability::Sendable(MediaTransportMode::Inline)
+        );
+        for (kind, position) in [
+            (MediaKind::Video, MediaPosition::UserMessage),
+            (MediaKind::Image, MediaPosition::ToolResult),
+            (MediaKind::Video, MediaPosition::ToolResult),
+        ] {
+            assert_eq!(
+                effective_media_capability(kind, position, &model, transport),
+                EffectiveMediaCapability::TransportUnsupported,
+                "{kind:?} at {position:?}"
+            );
+        }
     }
 }

@@ -11,8 +11,9 @@ use crate::providers::common::sse::{SseFramer, StreamChunk};
 use crate::tool_assembly::{StreamingToolCallAssembler, ToolCallAssemblyEvent, ToolCallChunk};
 
 use crate::{
-    AiError, AiStreamEvent, CacheRetention, ChatMessage, ChatRequest, ContentPart, MessagePhase,
-    ModelClient, ReasoningEffort, ReasoningSelection, StopReason, TokenUsage, ToolSpec,
+    AiError, AiStreamEvent, CacheRetention, ChatMessage, ChatRequest, ContentPart,
+    MediaTransportCapabilities, MediaTransportMode, MessagePhase, ModelClient, ReasoningEffort,
+    ReasoningSelection, StopReason, TokenUsage, ToolSpec,
 };
 
 #[derive(Clone)]
@@ -79,6 +80,16 @@ impl ModelClient for OpenAiResponsesClient {
                 Err(err) => stream::iter(vec![Err(err)]).boxed(),
             })
             .boxed()
+    }
+
+    fn media_transport(&self) -> MediaTransportCapabilities {
+        // `input_image` parts accept both data URIs (base64) and http(s) URLs,
+        // but only in user messages: videos are replaced by placeholder text
+        // today, and tool results go through `reject_images`.
+        MediaTransportCapabilities {
+            user_image: MediaTransportMode::Url,
+            ..MediaTransportCapabilities::default()
+        }
     }
 }
 
