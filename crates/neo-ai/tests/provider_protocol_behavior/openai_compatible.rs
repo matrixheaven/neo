@@ -110,7 +110,10 @@ async fn openai_compatible_client_posts_typed_options_and_normalizes_sse_events(
             "usage": {
                 "prompt_tokens": 7,
                 "completion_tokens": 5,
-                "prompt_tokens_details": { "cached_tokens": 4 }
+                "prompt_tokens_details": {
+                    "cached_tokens": 4,
+                    "cache_write_tokens": 2
+                }
             }
         }),
     ])]);
@@ -491,7 +494,7 @@ fn expected_tool_events() -> Vec<AiStreamEvent> {
                 input_tokens: 7,
                 output_tokens: 5,
                 input_cache_read_tokens: 4,
-                input_cache_write_tokens: 0,
+                input_cache_write_tokens: 2,
             }),
         },
     ]

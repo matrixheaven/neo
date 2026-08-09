@@ -76,10 +76,19 @@ fn app_shell_footer_shows_main_agent_token_usage_and_cache() {
     app.apply_agent_event(neo_agent_core::AgentEvent::TokenUsage {
         turn: 1,
         usage: neo_agent_core::AgentTokenUsage {
-            input_tokens: 40_800,
-            output_tokens: 1_234,
-            input_cache_read_tokens: 37_200,
-            input_cache_write_tokens: 1_100,
+            input_tokens: 3_200_000,
+            output_tokens: 40_000,
+            input_cache_read_tokens: 3_170_000,
+            input_cache_write_tokens: 0,
+        },
+    });
+    app.apply_agent_event(neo_agent_core::AgentEvent::TokenUsage {
+        turn: 2,
+        usage: neo_agent_core::AgentTokenUsage {
+            input_tokens: 3_190_000,
+            output_tokens: 38_100,
+            input_cache_read_tokens: 3_130_000,
+            input_cache_write_tokens: 0,
         },
     });
 
@@ -89,9 +98,10 @@ fn app_shell_footer_shows_main_agent_token_usage_and_cache() {
         .expect("footer contains context usage");
 
     assert!(footer.contains("ctx 12k/200k"));
-    assert!(footer.contains("↑40.8k"));
-    assert!(footer.contains("↓1.2k"));
-    assert!(footer.contains("cache 37.2k read / 1.1k write"));
+    assert!(footer.contains("↑6.4M"));
+    assert!(footer.contains("↓78.1k"));
+    assert!(footer.contains("cache 6.3M read"));
+    assert!(footer.contains("hit 98.6%"));
 }
 
 #[test]

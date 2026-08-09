@@ -50,6 +50,7 @@ fn running_agent(id: &str, activity: Vec<AgentActivityEntry>) -> AgentSnapshot {
             .filter(|entry| matches!(entry.kind, AgentActivityKind::Tool { .. }))
             .count(),
         token_count: 0,
+        input_token_count: 0,
         cache_read_token_count: 0,
         cache_write_token_count: 0,
         elapsed: std::time::Duration::ZERO,
@@ -384,6 +385,7 @@ fn ordinary_delegate_commits_one_complete_card_with_header_before_child_tools() 
         resumed_from: None,
         tool_count: 1,
         token_count: 0,
+        input_token_count: 0,
         cache_read_token_count: 0,
         cache_write_token_count: 0,
         elapsed: std::time::Duration::ZERO,

@@ -75,6 +75,15 @@ fn retry_exhaustion_fold_matches_live_and_preserves_error() {
         turn: 1,
         text: "failed partial one".to_owned(),
     });
+    record(AgentEvent::TokenUsage {
+        turn: 1,
+        usage: AgentTokenUsage {
+            input_tokens: 13,
+            output_tokens: 5,
+            input_cache_read_tokens: 9,
+            input_cache_write_tokens: 2,
+        },
+    });
     record(AgentEvent::RetryScheduled {
         turn: 1,
         retry: 1,
@@ -115,6 +124,10 @@ fn retry_exhaustion_fold_matches_live_and_preserves_error() {
 
     assert_eq!(live.activity, terminal.activity);
     assert_eq!(live.latest_text, terminal.latest_text);
+    assert_eq!(live.token_count, 18);
+    assert_eq!(live.input_token_count, 13);
+    assert_eq!(terminal.token_count, 18);
+    assert_eq!(terminal.input_token_count, 13);
     assert_eq!(
         terminal.latest_text.as_deref(),
         Some("transport error: connection reset")
@@ -125,6 +138,61 @@ fn retry_exhaustion_fold_matches_live_and_preserves_error() {
         AgentActivityKind::Text { text, .. }
             if text.contains("failed") || text.starts_with("Reconnecting ")
     )));
+}
+
+#[test]
+fn failed_child_run_preserves_live_usage() {
+    let runtime = MultiAgentRuntime::new();
+    let child = runtime.start_foreground_delegate_for_test("preserve failed usage");
+    let started_at = Instant::now();
+    let _ = runtime.apply_child_event(
+        &child.id,
+        started_at,
+        &AgentEvent::TextDelta {
+            turn: 1,
+            text: "partial answer".to_owned(),
+        },
+    );
+    let _ = runtime.apply_child_event(
+        &child.id,
+        started_at,
+        &AgentEvent::TokenUsage {
+            turn: 1,
+            usage: AgentTokenUsage {
+                input_tokens: 13,
+                output_tokens: 5,
+                input_cache_read_tokens: 9,
+                input_cache_write_tokens: 2,
+            },
+        },
+    );
+
+    let failed = runtime.finish_child_run(&child, started_at, Err("writer failed".to_owned()));
+
+    assert_eq!(failed.snapshot.state, AgentLifecycleState::Failed);
+    assert_eq!(failed.snapshot.token_count, 18);
+    assert_eq!(failed.snapshot.input_token_count, 13);
+    assert_eq!(failed.snapshot.cache_read_token_count, 9);
+    assert_eq!(failed.snapshot.cache_write_token_count, 2);
+    assert_eq!(
+        failed.snapshot.latest_text.as_deref(),
+        Some("partial answer")
+    );
+    assert!(!failed.snapshot.activity.is_empty());
+
+    let pristine = runtime.start_foreground_delegate_for_test("prestart failure");
+    let prestart_failed =
+        runtime.finish_child_run(&pristine, Instant::now(), Err("setup failed".to_owned()));
+    assert_eq!(
+        (
+            prestart_failed.snapshot.tool_count,
+            prestart_failed.snapshot.token_count,
+            prestart_failed.snapshot.input_token_count,
+            prestart_failed.snapshot.cache_read_token_count,
+            prestart_failed.snapshot.cache_write_token_count,
+        ),
+        (0, 0, 0, 0, 0)
+    );
 }
 
 #[test]

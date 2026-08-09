@@ -5,7 +5,7 @@ use reqwest::header::{HeaderMap, HeaderName, HeaderValue};
 use serde_json::{Value, json};
 
 use super::common::error::{ProviderError, stream_failure};
-use super::common::helpers::{reject_images, rounded_f64, token_usage_from};
+use super::common::helpers::{InputTokenAccounting, reject_images, rounded_f64, token_usage_from};
 use super::common::sse::{SseFramer, StreamChunk};
 
 use crate::{
@@ -577,7 +577,14 @@ impl ParseState {
 
         self.usage = value
             .get("usageMetadata")
-            .and_then(|v| token_usage_from(v, "promptTokenCount", "candidatesTokenCount"))
+            .and_then(|v| {
+                token_usage_from(
+                    v,
+                    "promptTokenCount",
+                    "candidatesTokenCount",
+                    InputTokenAccounting::IncludesCache,
+                )
+            })
             .or(self.usage.clone());
 
         for candidate in value

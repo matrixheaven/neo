@@ -5,7 +5,7 @@ use reqwest::header::{HeaderMap, HeaderName, HeaderValue};
 use serde_json::{Value, json};
 
 use super::common::error::{ProviderError, stream_failure};
-use super::common::helpers::{merge_token_usage, reject_images, rounded_f64};
+use super::common::helpers::{InputTokenAccounting, merge_token_usage, reject_images, rounded_f64};
 use super::common::sse::{SseFramer, StreamChunk};
 
 use crate::tool_assembly::{StreamingToolCallAssembler, ToolCallAssemblyEvent, ToolCallChunk};
@@ -596,6 +596,7 @@ impl ParseState {
                         usage,
                         "input_tokens",
                         "output_tokens",
+                        InputTokenAccounting::ExcludesCache,
                     );
                 }
             }
@@ -784,8 +785,13 @@ impl ParseState {
             self.last_stop_reason = stop_reason(reason);
         }
         if let Some(usage) = value.get("usage") {
-            self.usage =
-                merge_token_usage(self.usage.take(), usage, "input_tokens", "output_tokens");
+            self.usage = merge_token_usage(
+                self.usage.take(),
+                usage,
+                "input_tokens",
+                "output_tokens",
+                InputTokenAccounting::ExcludesCache,
+            );
         }
     }
 

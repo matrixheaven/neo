@@ -41,7 +41,14 @@ async fn openai_responses_client_posts_responses_payload_and_streams_events() {
                     "type": "message",
                     "content": [{ "type": "output_text", "text": "hi " }]
                 }],
-                "usage": { "input_tokens": 9, "output_tokens": 4 }
+                "usage": {
+                    "input_tokens": 9,
+                    "output_tokens": 4,
+                    "input_tokens_details": {
+                        "cached_tokens": 4,
+                        "cache_write_tokens": 2
+                    }
+                }
             }
         }),
     ])]);
@@ -86,8 +93,8 @@ async fn openai_responses_client_posts_responses_payload_and_streams_events() {
                 usage: Some(neo_ai::TokenUsage {
                     input_tokens: 9,
                     output_tokens: 4,
-                    input_cache_read_tokens: 0,
-                    input_cache_write_tokens: 0,
+                    input_cache_read_tokens: 4,
+                    input_cache_write_tokens: 2,
                 }),
                 phase: MessagePhase::Unknown,
             },

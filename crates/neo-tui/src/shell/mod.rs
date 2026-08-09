@@ -19,6 +19,7 @@ pub use crate::primitive::theme::{ChromeMode, DevelopmentMode, GoalModeStatus, T
 
 pub use approval::ApprovalRequestModal;
 pub use command_palette::{CommandPaletteState, CommandSpec};
+pub(crate) use context::format_cache_hit_rate;
 pub use context::{ContextWindow, MainAgentTokenUsage};
 pub use neo_agent_core::{
     ApprovalAction, ApprovalCancelReason, ApprovalOption, ApprovalPresentation, ApprovalRequest,

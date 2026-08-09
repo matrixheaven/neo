@@ -34,6 +34,7 @@ fn running_delegate() -> AgentSnapshot {
         resumed_from: None,
         tool_count: 3,
         token_count: 25_600,
+        input_token_count: 0,
         cache_read_token_count: 0,
         cache_write_token_count: 0,
         elapsed: Duration::from_secs(24),
@@ -103,6 +104,7 @@ fn option_b_delegate(
         resumed_from: None,
         tool_count: 0,
         token_count: 0,
+        input_token_count: 0,
         cache_read_token_count: 0,
         cache_write_token_count: 0,
         elapsed: Duration::from_secs(0),
@@ -185,6 +187,9 @@ fn terminal_reason_for_state(state: AgentLifecycleState) -> Option<AgentTerminal
 fn delegate_group_child_rows_keep_left_border_muted() {
     let theme = TuiTheme::default();
     let mut nova = option_b_running_delegate();
+    nova.token_count = 6_468_100;
+    nova.input_token_count = 6_390_000;
+    nova.cache_read_token_count = 6_300_000;
     nova.state = AgentLifecycleState::Completed;
     nova.terminal_at_ms = Some(31_000);
     nova.terminal_reason = Some(AgentTerminalReason::Completed);
@@ -239,6 +244,14 @@ fn delegate_group_child_rows_keep_left_border_muted() {
     assert_eq!(spans[0].style().fg, Some(theme.text_muted));
     assert_eq!(spans[1].text(), "└ ");
     assert_eq!(spans[1].style().fg, Some(theme.text_muted));
+
+    let text = lines
+        .iter()
+        .map(neo_tui::primitive::Line::text)
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(text.contains("6.5M tok"), "{text}");
+    assert!(text.contains("cache 6.3M read · hit 98.6%"), "{text}");
 }
 
 #[test]

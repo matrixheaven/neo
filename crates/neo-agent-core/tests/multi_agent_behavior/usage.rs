@@ -62,6 +62,7 @@ async fn foreground_delegate_runs_child_model_turn_and_reports_child_summary() {
     assert_eq!(finished_agent.0, 1);
     assert_eq!(finished_agent.1.tool_count, 0);
     assert_eq!(finished_agent.1.token_count, 18);
+    assert_eq!(finished_agent.1.input_token_count, 13);
     assert_eq!(finished_agent.1.cache_read_token_count, 9);
     assert_eq!(finished_agent.1.cache_write_token_count, 2);
     assert_eq!(

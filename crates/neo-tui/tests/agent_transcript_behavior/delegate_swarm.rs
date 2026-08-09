@@ -41,6 +41,7 @@ fn option_b_delegate(
         resumed_from: None,
         tool_count: 0,
         token_count: 0,
+        input_token_count: 0,
         cache_read_token_count: 0,
         cache_write_token_count: 0,
         elapsed: Duration::from_secs(0),
@@ -241,6 +242,7 @@ fn swarm_with_child_states(states: Vec<AgentLifecycleState>) -> SwarmSnapshot {
                         resumed_from: None,
                         tool_count: 0,
                         token_count: 0,
+                        input_token_count: 0,
                         cache_read_token_count: 0,
                         cache_write_token_count: 0,
                         elapsed: Duration::from_secs(0),
@@ -289,6 +291,7 @@ fn running_delegate() -> AgentSnapshot {
         resumed_from: None,
         tool_count: 3,
         token_count: 25_600,
+        input_token_count: 0,
         cache_read_token_count: 0,
         cache_write_token_count: 0,
         elapsed: Duration::from_secs(24),
@@ -398,7 +401,9 @@ fn option_b_collapsed_swarm_shows_names_badges_and_progress() {
         "planner item",
     );
     iris.tool_count = 3;
-    iris.token_count = 8_200;
+    iris.token_count = 6_468_100;
+    iris.input_token_count = 6_390_000;
+    iris.cache_read_token_count = 6_300_000;
     iris.elapsed = Duration::from_secs(12);
     iris.terminal_at_ms = Some(12_000);
     iris.terminal_reason = Some(AgentTerminalReason::Completed);
@@ -474,6 +479,8 @@ fn option_b_collapsed_swarm_shows_names_badges_and_progress() {
     assert!(text.contains("Rune  [Coder]"), "{text}");
     assert!(text.contains("Using Bash"), "{text}");
     assert!(text.contains("queued"), "{text}");
+    assert!(text.contains("6.5M tok"), "{text}");
+    assert!(text.contains("cache 6.3M read · hit 98.6%"), "{text}");
     assert!(
         !text.contains("001 "),
         "index numbers are not the primary visual language: {text}"

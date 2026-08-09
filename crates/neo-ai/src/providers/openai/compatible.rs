@@ -2,7 +2,9 @@ use futures::{StreamExt, future, stream};
 use serde_json::{Value, json};
 
 use crate::providers::common::error::{ProviderError, stream_failure};
-use crate::providers::common::helpers::{reject_images, rounded_f64, token_usage_from};
+use crate::providers::common::helpers::{
+    InputTokenAccounting, reject_images, rounded_f64, token_usage_from,
+};
 use crate::providers::common::sse::{SseFramer, StreamChunk, parse_sse_frame};
 
 use crate::tool_assembly::{StreamingToolCallAssembler, ToolCallAssemblyEvent, ToolCallChunk};
@@ -524,7 +526,12 @@ impl ParseState {
 
         self.ensure_started(value);
         if let Some(usage) = value.get("usage") {
-            self.usage = token_usage_from(usage, "prompt_tokens", "completion_tokens");
+            self.usage = token_usage_from(
+                usage,
+                "prompt_tokens",
+                "completion_tokens",
+                InputTokenAccounting::IncludesCache,
+            );
         }
 
         let Some(choice) = value

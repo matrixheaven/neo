@@ -187,6 +187,8 @@ pub struct AgentSnapshot {
     pub tool_count: usize,
     pub token_count: usize,
     #[serde(default)]
+    pub input_token_count: usize,
+    #[serde(default)]
     pub cache_read_token_count: usize,
     #[serde(default)]
     pub cache_write_token_count: usize,
@@ -280,6 +282,8 @@ pub struct AgentProgressSnapshot {
     pub tool_count: usize,
     pub token_count: usize,
     #[serde(default)]
+    pub input_token_count: usize,
+    #[serde(default)]
     pub cache_read_token_count: usize,
     #[serde(default)]
     pub cache_write_token_count: usize,
@@ -310,6 +314,7 @@ impl AgentProgressSnapshot {
             live_messages_received: agent.live_messages_received,
             tool_count: agent.tool_count,
             token_count: agent.token_count,
+            input_token_count: agent.input_token_count,
             cache_read_token_count: agent.cache_read_token_count,
             cache_write_token_count: agent.cache_write_token_count,
             elapsed_ms: duration_millis_u64(agent.elapsed),
@@ -371,6 +376,7 @@ impl AgentProgressSnapshot {
             live_messages_received: self.live_messages_received,
             tool_count: self.tool_count,
             token_count: self.token_count,
+            input_token_count: self.input_token_count,
             cache_read_token_count: self.cache_read_token_count,
             cache_write_token_count: self.cache_write_token_count,
             latest_text: self.latest_text.clone(),
@@ -397,6 +403,7 @@ pub struct AgentProgressSignature {
     pub live_messages_received: usize,
     pub tool_count: usize,
     pub token_count: usize,
+    pub input_token_count: usize,
     pub cache_read_token_count: usize,
     pub cache_write_token_count: usize,
     pub latest_text: Option<String>,
@@ -505,6 +512,7 @@ pub fn apply_agent_progress(
     snapshot.live_messages_received = progress.live_messages_received;
     snapshot.tool_count = progress.tool_count;
     snapshot.token_count = progress.token_count;
+    snapshot.input_token_count = progress.input_token_count;
     snapshot.cache_read_token_count = progress.cache_read_token_count;
     snapshot.cache_write_token_count = progress.cache_write_token_count;
     snapshot.elapsed = Duration::from_millis(progress.elapsed_ms);

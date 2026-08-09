@@ -34,6 +34,7 @@ fn running_delegate() -> AgentSnapshot {
         resumed_from: None,
         tool_count: 3,
         token_count: 25_600,
+        input_token_count: 0,
         cache_read_token_count: 0,
         cache_write_token_count: 0,
         elapsed: Duration::from_secs(24),
@@ -103,6 +104,7 @@ fn option_b_delegate(
         resumed_from: None,
         tool_count: 0,
         token_count: 0,
+        input_token_count: 0,
         cache_read_token_count: 0,
         cache_write_token_count: 0,
         elapsed: Duration::from_secs(0),
@@ -177,6 +179,7 @@ fn swarm_with_child_states(states: Vec<AgentLifecycleState>) -> SwarmSnapshot {
                         resumed_from: None,
                         tool_count: 0,
                         token_count: 0,
+                        input_token_count: 0,
                         cache_read_token_count: 0,
                         cache_write_token_count: 0,
                         elapsed: Duration::from_secs(0),
@@ -431,9 +434,10 @@ fn swarm_card_renders_child_cache_usage_when_reported() {
 
     let child = AgentSnapshot {
         state: AgentLifecycleState::Completed,
-        token_count: 40_800,
-        cache_read_token_count: 37_200,
-        cache_write_token_count: 1_100,
+        token_count: 6_468_100,
+        input_token_count: 6_390_000,
+        cache_read_token_count: 6_300_000,
+        cache_write_token_count: 0,
         ..running_delegate()
     };
     let children = vec![SwarmChildSnapshot {
@@ -457,8 +461,8 @@ fn swarm_card_renders_child_cache_usage_when_reported() {
     let rows = plain(card.render(140));
     let text = rows.join("\n");
 
-    assert!(text.contains("40.8k tok"), "{text}");
-    assert!(text.contains("cache 37.2k read / 1.1k write"), "{text}");
+    assert!(text.contains("6.5M tok"), "{text}");
+    assert!(text.contains("cache 6.3M read · hit 98.6%"), "{text}");
 }
 
 #[test]

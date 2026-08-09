@@ -61,6 +61,7 @@ fn compact_delegate_progress_events_deserialize_and_do_not_replay_messages() {
         live_messages_received: 0,
         tool_count: 1,
         token_count: 128,
+        input_token_count: 120,
         cache_read_token_count: 0,
         cache_write_token_count: 0,
         elapsed_ms: 500,
@@ -102,6 +103,11 @@ fn compact_delegate_progress_events_deserialize_and_do_not_replay_messages() {
         .expect("progress object")
         .remove("started_at_ms");
     legacy
+        .pointer_mut("/DelegateProgressUpdated/progress")
+        .and_then(serde_json::Value::as_object_mut)
+        .expect("progress object")
+        .remove("input_token_count");
+    legacy
         .pointer_mut("/DelegateProgressUpdated/progress/last_tool")
         .and_then(serde_json::Value::as_object_mut)
         .expect("last tool object")
@@ -112,6 +118,7 @@ fn compact_delegate_progress_events_deserialize_and_do_not_replay_messages() {
         panic!("expected delegate progress event");
     };
     assert_eq!(progress.started_at_ms, None);
+    assert_eq!(progress.input_token_count, 0);
     assert!(
         progress.last_tool.is_some_and(|tool| tool.files.is_empty()),
         "old progress events must default to no file rows"
@@ -147,6 +154,7 @@ fn compact_swarm_progress_events_deserialize_and_do_not_replay_messages() {
                 live_messages_received: 0,
                 tool_count: 0,
                 token_count: 0,
+                input_token_count: 0,
                 cache_read_token_count: 0,
                 cache_write_token_count: 0,
                 elapsed_ms: 0,

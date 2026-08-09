@@ -56,6 +56,7 @@ fn live_workflow_agent_for_test(
         live_messages_received: 1,
         tool_count: 1,
         token_count: 10,
+        input_token_count: 7,
         cache_read_token_count: 2,
         cache_write_token_count: 3,
         elapsed_ms: 1_000,

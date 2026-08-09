@@ -350,6 +350,7 @@ fn running_agent_snapshot(id: &str) -> AgentSnapshot {
         resumed_from: None,
         tool_count: 0,
         token_count: 0,
+        input_token_count: 0,
         cache_read_token_count: 0,
         cache_write_token_count: 0,
         elapsed: Duration::from_secs(0),

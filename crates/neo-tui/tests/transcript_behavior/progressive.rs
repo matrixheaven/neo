@@ -51,6 +51,7 @@ fn running_agent(id: &str, activity: Vec<AgentActivityEntry>) -> AgentSnapshot {
             .filter(|entry| matches!(entry.kind, AgentActivityKind::Tool { .. }))
             .count(),
         token_count: 0,
+        input_token_count: 0,
         cache_read_token_count: 0,
         cache_write_token_count: 0,
         elapsed: std::time::Duration::ZERO,

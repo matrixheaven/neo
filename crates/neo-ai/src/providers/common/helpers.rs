@@ -5,6 +5,14 @@ use serde_json::Value;
 
 use super::error::ProviderError;
 
+#[derive(Clone, Copy)]
+pub(crate) enum InputTokenAccounting {
+    /// The upstream input field already includes cache read and write tokens.
+    IncludesCache,
+    /// The upstream input field excludes cache read and write tokens.
+    ExcludesCache,
+}
+
 /// Round an `f64` to six decimal places.
 pub(crate) fn rounded_f64(value: f64) -> f64 {
     (value * 1_000_000.0).round() / 1_000_000.0
@@ -17,10 +25,11 @@ pub(crate) fn token_usage_from(
     value: &Value,
     input_key: &str,
     output_key: &str,
+    input_accounting: InputTokenAccounting,
 ) -> Option<TokenUsage> {
     token_count(value.get(input_key))?;
     token_count(value.get(output_key))?;
-    merge_token_usage(None, value, input_key, output_key)
+    merge_token_usage(None, value, input_key, output_key, input_accounting)
 }
 
 pub(crate) fn merge_token_usage(
@@ -28,6 +37,7 @@ pub(crate) fn merge_token_usage(
     value: &Value,
     input_key: &str,
     output_key: &str,
+    input_accounting: InputTokenAccounting,
 ) -> Option<TokenUsage> {
     let input_tokens = token_count(value.get(input_key));
     let output_tokens = token_count(value.get(output_key));
@@ -42,14 +52,14 @@ pub(crate) fn merge_token_usage(
         input_cache_write_tokens: 0,
     });
     if let Some(input_tokens) = input_tokens {
-        usage.input_tokens = input_tokens;
-        usage.input_cache_read_tokens = token_count_from_any(
+        let cache_read_tokens = token_count_from_any(
             value,
             &[
                 "cache_read_input_tokens",
                 "input_cache_read",
                 "input_cache_read_tokens",
                 "cache_read_tokens",
+                "cachedContentTokenCount",
             ],
             &[
                 ("input_tokens_details", "cached_tokens"),
@@ -58,7 +68,7 @@ pub(crate) fn merge_token_usage(
                 ("prompt_tokens_details", "cache_read_tokens"),
             ],
         );
-        usage.input_cache_write_tokens = token_count_from_any(
+        let cache_write_tokens = token_count_from_any(
             value,
             &[
                 "cache_creation_input_tokens",
@@ -68,9 +78,19 @@ pub(crate) fn merge_token_usage(
             ],
             &[
                 ("input_tokens_details", "cache_creation_tokens"),
+                ("input_tokens_details", "cache_write_tokens"),
                 ("prompt_tokens_details", "cache_creation_tokens"),
+                ("prompt_tokens_details", "cache_write_tokens"),
             ],
         );
+        usage.input_tokens = match input_accounting {
+            InputTokenAccounting::IncludesCache => input_tokens,
+            InputTokenAccounting::ExcludesCache => input_tokens
+                .saturating_add(cache_read_tokens)
+                .saturating_add(cache_write_tokens),
+        };
+        usage.input_cache_read_tokens = cache_read_tokens;
+        usage.input_cache_write_tokens = cache_write_tokens;
     }
     if let Some(output_tokens) = output_tokens {
         usage.output_tokens = output_tokens;

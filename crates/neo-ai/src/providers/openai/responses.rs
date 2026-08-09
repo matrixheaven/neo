@@ -4,7 +4,9 @@ use futures::{StreamExt, future, stream};
 use serde_json::{Value, json};
 
 use crate::providers::common::error::{ProviderError, stream_failure};
-use crate::providers::common::helpers::{reject_images, rounded_f64, token_usage_from};
+use crate::providers::common::helpers::{
+    InputTokenAccounting, reject_images, rounded_f64, token_usage_from,
+};
 use crate::providers::common::sse::{SseFramer, StreamChunk};
 use crate::tool_assembly::{StreamingToolCallAssembler, ToolCallAssemblyEvent, ToolCallChunk};
 
@@ -877,9 +879,14 @@ impl ParseState {
             }
         }
         self.ensure_started("response".to_owned());
-        self.usage = response
-            .get("usage")
-            .and_then(|v| token_usage_from(v, "input_tokens", "output_tokens"));
+        self.usage = response.get("usage").and_then(|v| {
+            token_usage_from(
+                v,
+                "input_tokens",
+                "output_tokens",
+                InputTokenAccounting::IncludesCache,
+            )
+        });
         self.last_stop_reason = if self.item_call_ids.is_empty() {
             StopReason::EndTurn
         } else {

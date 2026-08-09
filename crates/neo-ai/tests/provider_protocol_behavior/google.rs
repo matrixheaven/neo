@@ -39,7 +39,8 @@ async fn google_generative_ai_client_posts_generate_content_payload_and_streams_
             }],
             "usageMetadata": {
                 "promptTokenCount": 9,
-                "candidatesTokenCount": 4
+                "candidatesTokenCount": 4,
+                "cachedContentTokenCount": 4
             }
         }),
     ])]);
@@ -95,7 +96,7 @@ async fn google_generative_ai_client_posts_generate_content_payload_and_streams_
             usage: Some(neo_ai::TokenUsage {
                 input_tokens: 9,
                 output_tokens: 4,
-                input_cache_read_tokens: 0,
+                input_cache_read_tokens: 4,
                 input_cache_write_tokens: 0,
             }),
             phase: MessagePhase::Unknown,

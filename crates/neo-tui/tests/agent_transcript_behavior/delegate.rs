@@ -39,6 +39,7 @@ fn running_delegate() -> AgentSnapshot {
         resumed_from: None,
         tool_count: 3,
         token_count: 25_600,
+        input_token_count: 0,
         cache_read_token_count: 0,
         cache_write_token_count: 0,
         elapsed: Duration::from_secs(24),
@@ -134,6 +135,7 @@ fn swarm_with_child_states(states: Vec<AgentLifecycleState>) -> SwarmSnapshot {
                         resumed_from: None,
                         tool_count: 0,
                         token_count: 0,
+                        input_token_count: 0,
                         cache_read_token_count: 0,
                         cache_write_token_count: 0,
                         elapsed: Duration::from_secs(0),
@@ -735,6 +737,21 @@ fn lost_background_delegate_renders_failed_reason_not_completed() {
     assert!(header.contains("· lost ·"), "{text}");
     assert!(text.contains("Background agent lost"), "{text}");
     assert!(!header.contains("· done ·"), "{text}");
+}
+
+#[test]
+fn delegate_card_terminal_summary_renders_cache_usage_and_hit_rate() {
+    let mut snapshot = completed_delegate();
+    snapshot.token_count = 6_468_100;
+    snapshot.input_token_count = 6_390_000;
+    snapshot.cache_read_token_count = 6_300_000;
+
+    let text =
+        plain(DelegateCardComponent::new(snapshot).terminal_summary(160, &TuiTheme::default()))
+            .join("\n");
+
+    assert!(text.contains("6.5M tok"), "{text}");
+    assert!(text.contains("cache 6.3M read · hit 98.6%"), "{text}");
 }
 
 #[test]

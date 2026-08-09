@@ -9,6 +9,7 @@ use unicode_segmentation::UnicodeSegmentation;
 
 use crate::primitive::theme::TuiTheme;
 use crate::primitive::{Line, Span, Style, clip_plain_to_width, visible_width};
+use crate::shell::format_cache_hit_rate;
 
 use super::tool_renderers::hard_wrap_line;
 
@@ -79,7 +80,7 @@ pub fn format_token_count(tokens: usize) -> String {
 pub fn format_cache_token_usage(snapshot: &AgentSnapshot) -> Option<String> {
     let read = snapshot.cache_read_token_count;
     let write = snapshot.cache_write_token_count;
-    match (read, write) {
+    let cache = match (read, write) {
         (0, 0) => None,
         (read, 0) => Some(format!("cache {} read", format_token_count(read))),
         (0, write) => Some(format!("cache {} write", format_token_count(write))),
@@ -88,7 +89,13 @@ pub fn format_cache_token_usage(snapshot: &AgentSnapshot) -> Option<String> {
             format_token_count(read),
             format_token_count(write)
         )),
-    }
+    }?;
+    Some(
+        match format_cache_hit_rate(snapshot.input_token_count as u64, read as u64) {
+            Some(hit) => format!("{cache} · {hit}"),
+            None => cache,
+        },
+    )
 }
 
 #[must_use]

@@ -35,6 +35,7 @@ fn running_delegate() -> AgentSnapshot {
         resumed_from: None,
         tool_count: 3,
         token_count: 25_600,
+        input_token_count: 0,
         cache_read_token_count: 0,
         cache_write_token_count: 0,
         elapsed: Duration::from_secs(24),
@@ -104,6 +105,7 @@ fn option_b_delegate(
         resumed_from: None,
         tool_count: 0,
         token_count: 0,
+        input_token_count: 0,
         cache_read_token_count: 0,
         cache_write_token_count: 0,
         elapsed: Duration::from_secs(0),
@@ -246,6 +248,7 @@ fn swarm_with_child_states(states: Vec<AgentLifecycleState>) -> SwarmSnapshot {
                         resumed_from: None,
                         tool_count: 0,
                         token_count: 0,
+                        input_token_count: 0,
                         cache_read_token_count: 0,
                         cache_write_token_count: 0,
                         elapsed: Duration::from_secs(0),
@@ -632,6 +635,7 @@ fn delegate_card_does_not_regress_cancelled_to_done() {
         resumed_from: None,
         tool_count: 0,
         token_count: 0,
+        input_token_count: 0,
         cache_read_token_count: 0,
         cache_write_token_count: 0,
         elapsed: Duration::from_secs(1),
@@ -926,7 +930,11 @@ fn delegate_card_marks_ongoing_tool_as_using_with_active_color() {
 
 #[test]
 fn delegate_card_renders_kimi_style_running_summary() {
-    let mut card = DelegateCardComponent::new(running_delegate());
+    let mut snapshot = running_delegate();
+    snapshot.token_count = 6_468_100;
+    snapshot.input_token_count = 6_390_000;
+    snapshot.cache_read_token_count = 6_300_000;
+    let mut card = DelegateCardComponent::new(snapshot);
 
     let rows = plain(card.render(180));
     let text = rows.join("\n");
@@ -935,7 +943,8 @@ fn delegate_card_renders_kimi_style_running_summary() {
     assert!(text.contains("running"), "{text}");
     assert!(text.contains("3 tools"), "{text}");
     assert!(text.contains("24s"), "{text}");
-    assert!(text.contains("25.6k tok"), "{text}");
+    assert!(text.contains("6.5M tok"), "{text}");
+    assert!(text.contains("cache 6.3M read · hit 98.6%"), "{text}");
     assert!(text.contains("Press Ctrl+B to run in background"), "{text}");
     assert!(text.contains("• Used Read"), "{text}");
     assert!(text.contains("✗ Failed Grep"), "{text}");

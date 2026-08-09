@@ -1463,6 +1463,7 @@ pub struct AgentRunUpdate {
     pub summary: String,
     pub tool_count: usize,
     pub token_count: usize,
+    pub input_token_count: usize,
     pub cache_read_token_count: usize,
     pub cache_write_token_count: usize,
     pub elapsed: Duration,
@@ -1706,6 +1707,9 @@ fn apply_child_progress_event(
             snapshot.token_count = snapshot
                 .token_count
                 .saturating_add((usage.input_tokens + usage.output_tokens) as usize);
+            snapshot.input_token_count = snapshot
+                .input_token_count
+                .saturating_add(usage.input_tokens as usize);
             snapshot.cache_read_token_count = snapshot
                 .cache_read_token_count
                 .saturating_add(usage.input_cache_read_tokens as usize);
@@ -1885,6 +1889,7 @@ fn new_agent_snapshot(seed: AgentSnapshotSeed<'_>) -> AgentSnapshot {
         resumed_from: None,
         tool_count: 0,
         token_count: 0,
+        input_token_count: 0,
         cache_read_token_count: 0,
         cache_write_token_count: 0,
         elapsed: Duration::ZERO,
@@ -2290,6 +2295,10 @@ impl MultiAgentRuntime {
                     summary,
                     tool_count: run.tool_count,
                     token_count: run.token_count,
+                    input_token_count: run
+                        .actual_usage
+                        .as_ref()
+                        .map_or(0, |usage| usage.input_tokens as usize),
                     cache_read_token_count: run.cache_read_token_count,
                     cache_write_token_count: run.cache_write_token_count,
                     elapsed: started_at.elapsed(),
@@ -2318,16 +2327,20 @@ impl MultiAgentRuntime {
                 }
             }
             Err(error) => {
-                let messages = snapshot.prior_messages.clone();
+                let current = self
+                    .agent_snapshot(snapshot.id.as_str())
+                    .unwrap_or_else(|| snapshot.clone());
+                let messages = current.prior_messages.clone();
                 let update = AgentRunUpdate {
                     summary: error,
-                    tool_count: 0,
-                    token_count: 0,
-                    cache_read_token_count: 0,
-                    cache_write_token_count: 0,
+                    tool_count: current.tool_count,
+                    token_count: current.token_count,
+                    input_token_count: current.input_token_count,
+                    cache_read_token_count: current.cache_read_token_count,
+                    cache_write_token_count: current.cache_write_token_count,
                     elapsed: started_at.elapsed(),
-                    latest_text: None,
-                    activity: Vec::new(),
+                    latest_text: current.latest_text,
+                    activity: current.activity,
                 };
                 let failed = self.finalize_child_run_with_messages(
                     &snapshot.id,
@@ -2501,6 +2514,7 @@ fn apply_terminal_delegate_update(
     snapshot.state = state;
     snapshot.tool_count = update.tool_count;
     snapshot.token_count = update.token_count;
+    snapshot.input_token_count = update.input_token_count;
     snapshot.cache_read_token_count = update.cache_read_token_count;
     snapshot.cache_write_token_count = update.cache_write_token_count;
     snapshot.elapsed = update.elapsed;
@@ -2946,6 +2960,13 @@ fn summarize_child_events(events: &[AgentEvent], elapsed: Duration) -> AgentRunU
                 AgentEvent::TokenUsage { usage, .. } => {
                     Some((usage.input_tokens + usage.output_tokens) as usize)
                 }
+                _ => None,
+            })
+            .sum(),
+        input_token_count: events
+            .iter()
+            .filter_map(|event| match event {
+                AgentEvent::TokenUsage { usage, .. } => Some(usage.input_tokens as usize),
                 _ => None,
             })
             .sum(),

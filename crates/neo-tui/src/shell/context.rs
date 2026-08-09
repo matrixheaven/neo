@@ -121,11 +121,9 @@ impl MainAgentTokenUsage {
         {
             parts.push(cache);
         }
-        if let Some(hit_rate) = format_cache_hit_rate(
-            self.input_tokens,
-            self.input_cache_read_tokens,
-            self.input_cache_write_tokens,
-        ) {
+        if let Some(hit_rate) =
+            format_cache_hit_rate(self.input_tokens, self.input_cache_read_tokens)
+        {
             parts.push(hit_rate);
         }
         Some(parts.join(" · "))
@@ -147,13 +145,12 @@ fn format_cache_usage(read: u64, write: u64) -> Option<String> {
 }
 
 #[must_use]
-fn format_cache_hit_rate(input: u64, read: u64, write: u64) -> Option<String> {
-    let denominator = input.max(read.saturating_add(write));
-    if denominator == 0 || read == 0 {
+pub(crate) fn format_cache_hit_rate(full_input: u64, read: u64) -> Option<String> {
+    if full_input == 0 || read == 0 {
         return None;
     }
     #[allow(clippy::cast_precision_loss)]
-    let percent = read as f64 * 100.0 / denominator as f64;
+    let percent = read as f64 * 100.0 / full_input as f64;
     Some(format!("hit {percent:.1}%"))
 }
 
@@ -194,15 +191,12 @@ mod tests {
     }
 
     #[test]
-    fn format_cache_hit_rate_uses_effective_input_as_denominator() {
+    fn format_cache_hit_rate_uses_full_input_as_denominator() {
         assert_eq!(
-            format_cache_hit_rate(4_200_000, 4_100_000, 0),
-            Some("hit 97.6%".to_owned())
+            format_cache_hit_rate(6_390_000, 6_300_000),
+            Some("hit 98.6%".to_owned())
         );
-        assert_eq!(
-            format_cache_hit_rate(10, 8, 2),
-            Some("hit 80.0%".to_owned())
-        );
-        assert_eq!(format_cache_hit_rate(10, 0, 0), None);
+        assert_eq!(format_cache_hit_rate(0, 6_300_000), None);
+        assert_eq!(format_cache_hit_rate(6_390_000, 0), None);
     }
 }

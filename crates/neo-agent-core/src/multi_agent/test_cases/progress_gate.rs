@@ -66,3 +66,35 @@ fn child_text_updates_are_rate_limited_without_delaying_boundaries() {
         MAX_LATEST_MODEL_TEXT_CHARS
     );
 }
+
+#[test]
+fn input_usage_changes_progress_signature() {
+    let runtime = MultiAgentRuntime::new();
+    let child = runtime.start_foreground_delegate_for_test("usage progress");
+    let before = runtime
+        .agent_snapshot(child.id.as_str())
+        .expect("child")
+        .progress_snapshot()
+        .signature();
+
+    let _ = runtime.apply_child_event(
+        &child.id,
+        Instant::now(),
+        &AgentEvent::TokenUsage {
+            turn: 1,
+            usage: AgentTokenUsage {
+                input_tokens: 13,
+                output_tokens: 5,
+                input_cache_read_tokens: 9,
+                input_cache_write_tokens: 2,
+            },
+        },
+    );
+
+    let after = runtime
+        .agent_snapshot(child.id.as_str())
+        .expect("child")
+        .progress_snapshot();
+    assert_eq!(after.input_token_count, 13);
+    assert_ne!(before, after.signature());
+}

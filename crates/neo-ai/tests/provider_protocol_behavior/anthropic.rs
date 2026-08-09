@@ -94,7 +94,7 @@ async fn anthropic_messages_client_posts_messages_payload_and_streams_events() {
             AiStreamEvent::MessageEnd {
                 stop_reason: StopReason::ToolUse,
                 usage: Some(neo_ai::TokenUsage {
-                    input_tokens: 11,
+                    input_tokens: 21,
                     output_tokens: 3,
                     input_cache_read_tokens: 8,
                     input_cache_write_tokens: 2,

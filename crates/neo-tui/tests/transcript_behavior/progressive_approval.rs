@@ -217,6 +217,7 @@ fn pending_approval_defers_later_facts_in_canonical_order() {
         resumed_from: None,
         tool_count: 1,
         token_count: 0,
+        input_token_count: 0,
         cache_read_token_count: 0,
         cache_write_token_count: 0,
         elapsed: std::time::Duration::ZERO,
