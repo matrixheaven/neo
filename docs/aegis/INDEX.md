@@ -600,6 +600,8 @@ Entries are workspace records, not authoritative runtime decisions.
 | 2026-08-09 | spec | docs/aegis/specs/2026-08-09-neo-webui-design.md | Neo WebUI 设计 |
 | 2026-08-09 | handoff | docs/aegis/handoffs/2026-08-09-neo-webui-frontend.md | Neo WebUI 前端实施交接 |
 | 2026-08-09 | handoff | docs/aegis/handoffs/2026-08-09-neo-webui-runtime.md | Neo WebUI 底层实施交接 |
+| 2026-08-09 | handoff | docs/aegis/handoffs/2026-08-09-neo-webui-frontend-remaining.md | Neo WebUI 前端剩余实施交接 |
+| 2026-08-09 | handoff | docs/aegis/handoffs/2026-08-09-neo-webui-backend-remaining.md | Neo WebUI 后端剩余实施交接 |
 | 2026-08-09 | artifact | docs/aegis/work/2026-08-09-neo-webui/evidence-bundle-draft-approved-design.json | 2026-08-09-neo-webui evidence approved-design |
 | 2026-08-09 | artifact | docs/aegis/work/2026-08-09-neo-webui/evidence-bundle-draft-source-boundaries.json | 2026-08-09-neo-webui evidence source-boundaries |
 | 2026-08-09 | artifact | docs/aegis/work/2026-08-09-neo-webui/evidence-bundle-draft-design-and-handoffs.json | 2026-08-09-neo-webui evidence design-and-handoffs |

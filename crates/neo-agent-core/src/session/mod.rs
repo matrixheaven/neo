@@ -469,6 +469,10 @@ pub struct SessionRecord {
     pub updated_at: Option<String>,
     #[serde(default)]
     pub children: Vec<String>,
+    #[serde(default)]
+    pub pinned: bool,
+    #[serde(default)]
+    pub archived: bool,
 }
 
 /// Lightweight summary of a session for picker UIs.
@@ -551,6 +555,10 @@ pub(crate) struct StoredSessionMetadata {
     last_user_prompt: Option<String>,
     #[serde(default)]
     updated_at: Option<String>,
+    #[serde(default)]
+    pinned: bool,
+    #[serde(default)]
+    archived: bool,
 }
 
 impl SessionMetadataStore {
@@ -608,6 +616,43 @@ impl SessionMetadataStore {
             .into_iter()
             .find(|session| session.id == session_id)
             .expect("renamed session should be listable"))
+    }
+
+    /// Update only the display title, pinned, and archived state of an
+    /// existing session. Each `None` input leaves the stored value unchanged.
+    /// Invalid or missing session ids return a [`SessionError`] and never
+    /// create metadata.
+    pub fn update_metadata(
+        &self,
+        session_id: &str,
+        title: Option<String>,
+        pinned: Option<bool>,
+        archived: Option<bool>,
+    ) -> Result<SessionRecord, SessionError> {
+        validate_session_id(session_id)?;
+        self.ensure_session_exists(session_id)?;
+
+        self.mutate_metadata(|metadata| {
+            let stored = metadata.sessions.entry(session_id.to_owned()).or_default();
+            if let Some(title) = title {
+                // A user-set title is the display name and takes priority over
+                // the model-generated title (existing name/title semantics).
+                stored.name = Some(title);
+            }
+            if let Some(pinned) = pinned {
+                stored.pinned = pinned;
+            }
+            if let Some(archived) = archived {
+                stored.archived = archived;
+            }
+            Ok(())
+        })?;
+
+        Ok(self
+            .list()?
+            .into_iter()
+            .find(|session| session.id == session_id)
+            .expect("updated session should be listable"))
     }
 
     pub fn summarize(
@@ -780,6 +825,8 @@ impl SessionMetadataStore {
                 workspace: parent_stored.workspace.clone(),
                 last_user_prompt: parent_stored.last_user_prompt.clone(),
                 updated_at: Some(now),
+                pinned: false,
+                archived: false,
             },
         );
         self.write_metadata(&metadata)?;
@@ -1057,6 +1104,8 @@ fn records_from_metadata(
                 workspace: stored.and_then(|record| record.workspace.clone()),
                 last_user_prompt: stored.and_then(|record| record.last_user_prompt.clone()),
                 updated_at: stored.and_then(|record| record.updated_at.clone()),
+                pinned: stored.is_some_and(|record| record.pinned),
+                archived: stored.is_some_and(|record| record.archived),
             }
         })
         .collect()
@@ -1302,4 +1351,9 @@ mod tests {
             "stable sidecar must remain across metadata atomic replacement"
         );
     }
+}
+
+#[cfg(test)]
+mod test_cases {
+    mod metadata;
 }

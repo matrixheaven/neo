@@ -74,6 +74,12 @@ pub enum Command {
     },
     /// JSONL RPC server mode
     Rpc,
+    /// Local web interface (loopback only)
+    Webui {
+        /// Do not automatically open the browser
+        #[arg(long)]
+        no_open: bool,
+    },
     /// Workspace trust management
     Trust {
         #[command(subcommand)]

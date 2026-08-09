@@ -391,6 +391,8 @@ impl SessionIndex {
                 last_user_prompt: stored.last_user_prompt.clone(),
                 updated_at: stored.updated_at.clone(),
                 children: Vec::new(),
+                pinned: stored.pinned,
+                archived: stored.archived,
             };
             summaries.push(SessionSummary::from_record(record, &entry.workdir));
         }

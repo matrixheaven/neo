@@ -71,6 +71,8 @@ fn session_metadata_lists_existing_jsonl_sessions_with_names_and_children() {
             last_user_prompt: None,
             updated_at: None,
             children: vec![child.id.clone()],
+            pinned: false,
+            archived: false,
         },
         child,
     ];

@@ -228,6 +228,10 @@ async fn dispatch_command(
             rpc::server::execute(config).await?;
             Ok(String::new())
         }
+        Some(Command::Webui { no_open }) => {
+            modes::webui::execute(config, no_open).await?;
+            Ok(String::new())
+        }
         Some(Command::Trust { command }) => trust_commands::execute(config, &command),
         Some(Command::Workflow { command }) => modes::workflow::execute(command, config).await,
         None => {

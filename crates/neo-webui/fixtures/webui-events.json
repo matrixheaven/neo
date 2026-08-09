@@ -1,0 +1,1079 @@
+{
+  "_comment": "Fixed, read-only web event samples for the frontend. Shape matches crates/neo-webui/src/protocol.rs (B1 wire): every long-connection message is a tagged WebUiServerMessage (session_snapshot / workspace_snapshot / session_summary_changed / session_event / session_state / session_metadata_changed); the event payload is the canonical AgentEvent (externally tagged, e.g. {\"TextDelta\":{...}}) with structured ToolOutputRef stripped — full tool and terminal output travels only as the opaque envelope/history-level `output` ({id, byte_len, line_count, complete}) and is read via GET tool-output/<id>. Two sessions, user MessageAppended as the only user-bubble source, full tool lifecycle, Delegate and DelegateSwarm series, snapshot watermark + resume, snapshot replacement under a different stream_id, thinking, queued tools, approval/question, retry retraction, task updates, workflow change statistics, the two-tier (workspace summary + full session) subscription wire, slow-consumer close, and stale-control rejection. Path metadata is workspace-relative or `.`; absolute paths never appear.",
+  "stream_id": "webui_sample_aaaaaaaa",
+  "sessions": [
+    {
+      "session_id": "session_0001",
+      "snapshot": {
+        "stream_id": "webui_sample_aaaaaaaa",
+        "session_id": "session_0001",
+        "watermark": 8,
+        "session": {
+          "phase": "running",
+          "waiting_approval": true,
+          "waiting_question": false,
+          "current_turn_id": "turn_01"
+        },
+        "metadata": {
+          "title": "初始标题",
+          "pinned": false,
+          "archived": false,
+          "updated_at": "2026-08-09T09:59:00+00:00"
+        },
+        "history": [
+          {
+            "sequence": 1,
+            "event": {
+              "MessageAppended": {
+                "message": {
+                  "User": {
+                    "content": [
+                      {
+                        "Text": {
+                          "text": "检查有界中继的行为测试并修复慢连接。"
+                        }
+                      }
+                    ]
+                  }
+                }
+              }
+            }
+          },
+          {
+            "sequence": 2,
+            "event": {
+              "MessageStarted": {
+                "turn": 1,
+                "id": "msg_01",
+                "phase": "commentary"
+              }
+            }
+          },
+          {
+            "sequence": 3,
+            "event": {
+              "ThinkingStarted": {
+                "turn": 1,
+                "id": "think_01",
+                "kind": "full"
+              }
+            }
+          },
+          {
+            "sequence": 4,
+            "event": {
+              "ThinkingDelta": {
+                "turn": 1,
+                "text": "先检查有界中继的边界条件。"
+              }
+            }
+          },
+          {
+            "sequence": 5,
+            "event": {
+              "ThinkingFinished": {
+                "turn": 1,
+                "redacted": false
+              }
+            }
+          },
+          {
+            "sequence": 6,
+            "event": {
+              "TextDelta": {
+                "turn": 1,
+                "text": "我来检查一下有界中继的行为测试。"
+              }
+            }
+          },
+          {
+            "sequence": 7,
+            "event": {
+              "ToolExecutionQueued": {
+                "turn": 1,
+                "id": "tool_01",
+                "name": "bash",
+                "arguments": {
+                  "command": "cargo test -p neo-webui"
+                }
+              }
+            }
+          },
+          {
+            "sequence": 8,
+            "event": {
+              "ApprovalRequested": {
+                "request": {
+                  "turn": 1,
+                  "id": "approval_01",
+                  "operation": "Tool",
+                  "presentation": {
+                    "kind": "command",
+                    "title": "运行测试",
+                    "command": "cargo test -p neo-webui",
+                    "cwd": "."
+                  },
+                  "options": [
+                    {
+                      "label": "允许一次",
+                      "description": "只运行这一次",
+                      "action": {
+                        "kind": "permit_once"
+                      }
+                    }
+                  ]
+                }
+              }
+            }
+          }
+        ],
+        "pending_approval": {
+          "request_id": "approval_01",
+          "turn_id": "turn_01",
+          "presentation": {
+            "kind": "command",
+            "title": "运行测试",
+            "command": "cargo test -p neo-webui",
+            "cwd": "."
+          },
+          "options": [
+            {
+              "label": "允许一次",
+              "description": "只运行这一次",
+              "action": {
+                "kind": "permit_once"
+              }
+            }
+          ]
+        }
+      },
+      "after_snapshot": [
+        {
+          "type": "session_event",
+          "stream_id": "webui_sample_aaaaaaaa",
+          "session_id": "session_0001",
+          "sequence": 9,
+          "event": {
+            "ToolExecutionQueueUpdated": {
+              "turn": 1,
+              "id": "tool_01",
+              "position": 1,
+              "waiting_ms": 320
+            }
+          }
+        },
+        {
+          "type": "session_event",
+          "stream_id": "webui_sample_aaaaaaaa",
+          "session_id": "session_0001",
+          "sequence": 10,
+          "event": {
+            "QuestionRequested": {
+              "turn": 1,
+              "id": "question_01",
+              "questions": [
+                {
+                  "question": "继续运行测试吗？",
+                  "header": "测试",
+                  "body": "neo-webui 的行为测试",
+                  "options": [
+                    {
+                      "label": "继续"
+                    },
+                    {
+                      "label": "停止"
+                    }
+                  ],
+                  "multi_select": false
+                }
+              ]
+            }
+          }
+        },
+        {
+          "type": "session_event",
+          "stream_id": "webui_sample_aaaaaaaa",
+          "session_id": "session_0001",
+          "sequence": 11,
+          "event": {
+            "TodoUpdated": {
+              "turn": 1,
+              "todos": [
+                {
+                  "title": "建立 neo-webui 包",
+                  "status": "done"
+                },
+                {
+                  "title": "编写行为测试",
+                  "status": "in_progress"
+                }
+              ]
+            }
+          }
+        },
+        {
+          "type": "session_event",
+          "stream_id": "webui_sample_aaaaaaaa",
+          "session_id": "session_0001",
+          "sequence": 12,
+          "event": {
+            "ApprovalResolved": {
+              "turn": 1,
+              "request_id": "approval_01",
+              "resolution": {
+                "kind": "selected",
+                "action": {
+                  "kind": "permit_once"
+                },
+                "label": "允许一次",
+                "feedback": null
+              }
+            }
+          }
+        },
+        {
+          "type": "session_event",
+          "stream_id": "webui_sample_aaaaaaaa",
+          "session_id": "session_0001",
+          "sequence": 13,
+          "event": {
+            "ToolExecutionStarted": {
+              "turn": 1,
+              "id": "tool_01",
+              "name": "bash",
+              "arguments": {
+                "command": "cargo test -p neo-webui"
+              }
+            }
+          },
+          "output": {
+            "id": "eyJhZ2VudF9pZCI6Im1haW4iLCJ0YXNrX2lkIjoidGFza18wMSJ9",
+            "byte_len": 12048,
+            "line_count": 132,
+            "complete": false
+          }
+        },
+        {
+          "type": "session_event",
+          "stream_id": "webui_sample_aaaaaaaa",
+          "session_id": "session_0001",
+          "sequence": 14,
+          "event": {
+            "ToolExecutionFinished": {
+              "turn": 1,
+              "id": "tool_01",
+              "name": "bash",
+              "result": {
+                "content": "test result: ok. 42 passed",
+                "is_error": false,
+                "details": null,
+                "terminate": false
+              }
+            }
+          },
+          "output": {
+            "id": "eyJhZ2VudF9pZCI6Im1haW4iLCJ0YXNrX2lkIjoidGFza18wMSJ9",
+            "byte_len": 12048,
+            "line_count": 132,
+            "complete": true
+          }
+        },
+        {
+          "type": "session_event",
+          "stream_id": "webui_sample_aaaaaaaa",
+          "session_id": "session_0001",
+          "sequence": 15,
+          "event": {
+            "MessageAppended": {
+              "message": {
+                "Assistant": {
+                  "content": [
+                    {
+                      "Text": {
+                        "text": "42 个行为测试全部通过，慢连接现在会先收到 1013 再被注销。"
+                      }
+                    }
+                  ],
+                  "tool_calls": [],
+                  "stop_reason": "EndTurn"
+                }
+              }
+            }
+          }
+        },
+        {
+          "type": "session_state",
+          "stream_id": "webui_sample_aaaaaaaa",
+          "session_id": "session_0001",
+          "sequence": 16,
+          "event": {
+            "phase": "running",
+            "waiting_approval": false,
+            "waiting_question": true,
+            "current_turn_id": "turn_01"
+          }
+        },
+        {
+          "type": "session_metadata_changed",
+          "stream_id": "webui_sample_aaaaaaaa",
+          "session_id": "session_0001",
+          "sequence": 17,
+          "event": {
+            "title": "有界中继测试",
+            "pinned": true,
+            "archived": false,
+            "updated_at": "2026-08-09T10:00:00+00:00"
+          }
+        }
+      ],
+      "replay_after_cursor": {
+        "after": {
+          "stream_id": "webui_sample_aaaaaaaa",
+          "sequence": 7
+        },
+        "envelopes": [
+          {
+            "type": "session_event",
+            "stream_id": "webui_sample_aaaaaaaa",
+            "session_id": "session_0001",
+            "sequence": 8,
+            "event": {
+              "ApprovalRequested": {
+                "request": {
+                  "turn": 1,
+                  "id": "approval_01",
+                  "operation": "Tool",
+                  "presentation": {
+                    "kind": "command",
+                    "title": "运行测试",
+                    "command": "cargo test -p neo-webui",
+                    "cwd": "."
+                  },
+                  "options": [
+                    {
+                      "label": "允许一次",
+                      "description": "只运行这一次",
+                      "action": {
+                        "kind": "permit_once"
+                      }
+                    }
+                  ]
+                }
+              }
+            }
+          },
+          {
+            "type": "session_event",
+            "stream_id": "webui_sample_aaaaaaaa",
+            "session_id": "session_0001",
+            "sequence": 9,
+            "event": {
+              "ToolExecutionQueueUpdated": {
+                "turn": 1,
+                "id": "tool_01",
+                "position": 1,
+                "waiting_ms": 320
+              }
+            }
+          }
+        ]
+      }
+    },
+    {
+      "session_id": "session_0002",
+      "snapshot": {
+        "stream_id": "webui_sample_aaaaaaaa",
+        "session_id": "session_0002",
+        "watermark": 3,
+        "session": {
+          "phase": "running",
+          "waiting_approval": false,
+          "waiting_question": false,
+          "current_turn_id": "turn_02"
+        },
+        "metadata": {
+          "title": "并行格式化",
+          "pinned": false,
+          "archived": false,
+          "updated_at": "2026-08-09T09:58:00+00:00"
+        },
+        "history": [
+          {
+            "sequence": 1,
+            "event": {
+              "MessageAppended": {
+                "message": {
+                  "User": {
+                    "content": [
+                      {
+                        "Text": {
+                          "text": "另一个会话并行跑格式化。"
+                        }
+                      }
+                    ]
+                  }
+                }
+              }
+            }
+          },
+          {
+            "sequence": 2,
+            "event": {
+              "MessageStarted": {
+                "turn": 1,
+                "id": "msg_02",
+                "phase": "commentary"
+              }
+            }
+          },
+          {
+            "sequence": 3,
+            "event": {
+              "TextDelta": {
+                "turn": 1,
+                "text": "另一个会话在并行跑格式化。"
+              }
+            }
+          }
+        ]
+      },
+      "after_snapshot": [
+        {
+          "type": "session_event",
+          "stream_id": "webui_sample_aaaaaaaa",
+          "session_id": "session_0002",
+          "sequence": 4,
+          "event": {
+            "RetryScheduled": {
+              "turn": 1,
+              "retry": 1,
+              "max_retries": 3,
+              "delay_ms": 400,
+              "error_code": "provider.rate_limit",
+              "message": "服务限流"
+            }
+          }
+        },
+        {
+          "type": "session_event",
+          "stream_id": "webui_sample_aaaaaaaa",
+          "session_id": "session_0002",
+          "sequence": 5,
+          "event": {
+            "TextDelta": {
+              "turn": 1,
+              "text": "这次尝试的输出会在重试时被撤回。"
+            }
+          }
+        },
+        {
+          "type": "session_event",
+          "stream_id": "webui_sample_aaaaaaaa",
+          "session_id": "session_0002",
+          "sequence": 6,
+          "event": {
+            "RetryResumed": {
+              "turn": 1,
+              "retry": 1
+            }
+          }
+        },
+        {
+          "type": "session_event",
+          "stream_id": "webui_sample_aaaaaaaa",
+          "session_id": "session_0002",
+          "sequence": 7,
+          "event": {
+            "TextDelta": {
+              "turn": 1,
+              "text": "重试后的稳定正文。"
+            }
+          }
+        },
+        {
+          "type": "session_event",
+          "stream_id": "webui_sample_aaaaaaaa",
+          "session_id": "session_0002",
+          "sequence": 8,
+          "event": {
+            "DelegateSwarmStarted": {
+              "turn": 1,
+              "swarm": {
+                "swarm_id": "swarm_02",
+                "description": "并行检查两个模块的测试覆盖",
+                "role": "explorer",
+                "mode": "background",
+                "state": "running",
+                "max_concurrency": 2,
+                "aggregate": {
+                  "total": 2,
+                  "queued": 1,
+                  "running": 1,
+                  "completed": 0,
+                  "failed": 0,
+                  "cancelled": 0,
+                  "timed_out": 0
+                },
+                "children": [
+                  {
+                    "item_index": 0,
+                    "item": "检查 relay 测试覆盖",
+                    "agent": {
+                      "id": "agent_02",
+                      "display_name": "explorer",
+                      "path": "/root/explorer",
+                      "role": "explorer",
+                      "mode": "background",
+                      "context": "inherit",
+                      "state": "running",
+                      "task": "检查 relay 测试覆盖",
+                      "task_title": "检查测试覆盖",
+                      "created_at_ms": 1723000001000,
+                      "updated_at_ms": 1723000001200,
+                      "started_at_ms": 1723000001100,
+                      "detached_from_foreground": true,
+                      "run_count": 1,
+                      "live_messages_received": 2,
+                      "tool_count": 0,
+                      "token_count": 0,
+                      "elapsed": {
+                        "secs": 5,
+                        "nanos": 0
+                      }
+                    }
+                  },
+                  {
+                    "item_index": 1,
+                    "item": "检查 server 测试覆盖",
+                    "agent": {
+                      "id": "agent_03",
+                      "display_name": "explorer",
+                      "path": "/root/explorer-2",
+                      "role": "explorer",
+                      "mode": "background",
+                      "context": "inherit",
+                      "state": "queued",
+                      "task": "检查 server 测试覆盖",
+                      "task_title": "检查测试覆盖",
+                      "created_at_ms": 1723000001000,
+                      "updated_at_ms": 1723000001200,
+                      "started_at_ms": null,
+                      "detached_from_foreground": true,
+                      "run_count": 0,
+                      "live_messages_received": 0,
+                      "tool_count": 0,
+                      "token_count": 0,
+                      "elapsed": {
+                        "secs": 0,
+                        "nanos": 0
+                      }
+                    }
+                  }
+                ]
+              }
+            }
+          }
+        },
+        {
+          "type": "session_event",
+          "stream_id": "webui_sample_aaaaaaaa",
+          "session_id": "session_0002",
+          "sequence": 9,
+          "event": {
+            "DelegateSwarmUpdated": {
+              "turn": 1,
+              "swarm": {
+                "swarm_id": "swarm_02",
+                "description": "并行检查两个模块的测试覆盖",
+                "role": "explorer",
+                "mode": "background",
+                "state": "running",
+                "max_concurrency": 2,
+                "aggregate": {
+                  "total": 2,
+                  "queued": 0,
+                  "running": 2,
+                  "completed": 0,
+                  "failed": 0,
+                  "cancelled": 0,
+                  "timed_out": 0
+                },
+                "children": [
+                  {
+                    "item_index": 0,
+                    "item": "检查 relay 测试覆盖",
+                    "agent": {
+                      "id": "agent_02",
+                      "display_name": "explorer",
+                      "path": "/root/explorer",
+                      "role": "explorer",
+                      "mode": "background",
+                      "context": "inherit",
+                      "state": "running",
+                      "task": "检查 relay 测试覆盖",
+                      "task_title": "检查测试覆盖",
+                      "created_at_ms": 1723000001000,
+                      "updated_at_ms": 1723000001400,
+                      "started_at_ms": 1723000001100,
+                      "detached_from_foreground": true,
+                      "run_count": 1,
+                      "live_messages_received": 4,
+                      "tool_count": 1,
+                      "token_count": 12,
+                      "elapsed": {
+                        "secs": 6,
+                        "nanos": 0
+                      }
+                    }
+                  },
+                  {
+                    "item_index": 1,
+                    "item": "检查 server 测试覆盖",
+                    "agent": {
+                      "id": "agent_03",
+                      "display_name": "explorer",
+                      "path": "/root/explorer-2",
+                      "role": "explorer",
+                      "mode": "background",
+                      "context": "inherit",
+                      "state": "running",
+                      "task": "检查 server 测试覆盖",
+                      "task_title": "检查测试覆盖",
+                      "created_at_ms": 1723000001000,
+                      "updated_at_ms": 1723000001400,
+                      "started_at_ms": 1723000001300,
+                      "detached_from_foreground": true,
+                      "run_count": 1,
+                      "live_messages_received": 1,
+                      "tool_count": 0,
+                      "token_count": 4,
+                      "elapsed": {
+                        "secs": 3,
+                        "nanos": 0
+                      }
+                    }
+                  }
+                ]
+              }
+            }
+          }
+        },
+        {
+          "type": "session_event",
+          "stream_id": "webui_sample_aaaaaaaa",
+          "session_id": "session_0002",
+          "sequence": 10,
+          "event": {
+            "DelegateSwarmFinished": {
+              "turn": 1,
+              "swarm": {
+                "swarm_id": "swarm_02",
+                "description": "并行检查两个模块的测试覆盖",
+                "role": "explorer",
+                "mode": "background",
+                "state": "completed",
+                "max_concurrency": 2,
+                "aggregate": {
+                  "total": 2,
+                  "queued": 0,
+                  "running": 0,
+                  "completed": 2,
+                  "failed": 0,
+                  "cancelled": 0,
+                  "timed_out": 0
+                },
+                "children": [
+                  {
+                    "item_index": 0,
+                    "item": "检查 relay 测试覆盖",
+                    "agent": {
+                      "id": "agent_02",
+                      "display_name": "explorer",
+                      "path": "/root/explorer",
+                      "role": "explorer",
+                      "mode": "background",
+                      "context": "inherit",
+                      "state": "completed",
+                      "task": "检查 relay 测试覆盖",
+                      "task_title": "检查测试覆盖",
+                      "created_at_ms": 1723000001000,
+                      "updated_at_ms": 1723000001600,
+                      "started_at_ms": 1723000001100,
+                      "detached_from_foreground": true,
+                      "terminal_reason": "completed",
+                      "run_count": 1,
+                      "live_messages_received": 6,
+                      "tool_count": 1,
+                      "token_count": 20,
+                      "elapsed": {
+                        "secs": 7,
+                        "nanos": 0
+                      }
+                    }
+                  },
+                  {
+                    "item_index": 1,
+                    "item": "检查 server 测试覆盖",
+                    "agent": {
+                      "id": "agent_03",
+                      "display_name": "explorer",
+                      "path": "/root/explorer-2",
+                      "role": "explorer",
+                      "mode": "background",
+                      "context": "inherit",
+                      "state": "completed",
+                      "task": "检查 server 测试覆盖",
+                      "task_title": "检查测试覆盖",
+                      "created_at_ms": 1723000001000,
+                      "updated_at_ms": 1723000001650,
+                      "started_at_ms": 1723000001300,
+                      "detached_from_foreground": true,
+                      "terminal_reason": "completed",
+                      "run_count": 1,
+                      "live_messages_received": 5,
+                      "tool_count": 1,
+                      "token_count": 16,
+                      "elapsed": {
+                        "secs": 6,
+                        "nanos": 0
+                      }
+                    }
+                  }
+                ]
+              }
+            }
+          }
+        }
+      ]
+    }
+  ],
+  "snapshot_replacement": {
+    "stream_id": "webui_sample_bbbbbbbb",
+    "session_id": "session_0002",
+    "snapshot": {
+      "stream_id": "webui_sample_bbbbbbbb",
+      "session_id": "session_0002",
+      "watermark": 4,
+      "session": {
+        "phase": "running",
+        "waiting_approval": false,
+        "waiting_question": false,
+        "current_turn_id": "turn_02"
+      },
+      "metadata": {
+        "title": "并行格式化",
+        "pinned": false,
+        "archived": false,
+        "updated_at": "2026-08-09T09:58:30+00:00"
+      },
+      "history": [
+        {
+          "sequence": 1,
+          "event": {
+            "MessageAppended": {
+              "message": {
+                "User": {
+                  "content": [
+                    {
+                      "Text": {
+                        "text": "另一个会话并行跑格式化。"
+                      }
+                    }
+                  ]
+                }
+              }
+            }
+          }
+        },
+        {
+          "sequence": 2,
+          "event": {
+            "MessageStarted": {
+              "turn": 1,
+              "id": "msg_02",
+              "phase": "commentary"
+            }
+          }
+        },
+        {
+          "sequence": 3,
+          "event": {
+            "TextDelta": {
+              "turn": 1,
+              "text": "另一个会话在并行跑格式化。"
+            }
+          }
+        },
+        {
+          "sequence": 4,
+          "event": {
+            "TextDelta": {
+              "turn": 1,
+              "text": "重试后的稳定正文。"
+            }
+          }
+        }
+      ]
+    },
+    "after_snapshot": [
+      {
+        "type": "session_event",
+        "stream_id": "webui_sample_bbbbbbbb",
+        "session_id": "session_0002",
+        "sequence": 5,
+        "event": {
+          "DelegateStarted": {
+            "turn": 1,
+            "agent": {
+              "id": "agent_02",
+              "display_name": "explorer",
+              "path": "/root/explorer",
+              "role": "explorer",
+              "mode": "background",
+              "context": "inherit",
+              "state": "running",
+              "task": "检查 relay 测试覆盖",
+              "task_title": "检查测试覆盖",
+              "created_at_ms": 1723000001000,
+              "updated_at_ms": 1723000001200,
+              "started_at_ms": 1723000001100,
+              "detached_from_foreground": true,
+              "run_count": 1,
+              "live_messages_received": 2,
+              "tool_count": 0,
+              "token_count": 0,
+              "elapsed": {
+                "secs": 5,
+                "nanos": 0
+              }
+            }
+          }
+        }
+      },
+      {
+        "type": "session_event",
+        "stream_id": "webui_sample_bbbbbbbb",
+        "session_id": "session_0002",
+        "sequence": 6,
+        "event": {
+          "DelegateUpdated": {
+            "turn": 1,
+            "agent": {
+              "id": "agent_02",
+              "display_name": "explorer",
+              "path": "/root/explorer",
+              "role": "explorer",
+              "mode": "background",
+              "context": "inherit",
+              "state": "running",
+              "task": "检查 relay 测试覆盖",
+              "task_title": "检查测试覆盖",
+              "created_at_ms": 1723000001000,
+              "updated_at_ms": 1723000001400,
+              "started_at_ms": 1723000001100,
+              "detached_from_foreground": true,
+              "run_count": 1,
+              "live_messages_received": 4,
+              "tool_count": 1,
+              "token_count": 12,
+              "elapsed": {
+                "secs": 6,
+                "nanos": 0
+              }
+            }
+          }
+        }
+      },
+      {
+        "type": "session_event",
+        "stream_id": "webui_sample_bbbbbbbb",
+        "session_id": "session_0002",
+        "sequence": 7,
+        "event": {
+          "DelegateFinished": {
+            "turn": 1,
+            "agent": {
+              "id": "agent_02",
+              "display_name": "explorer",
+              "path": "/root/explorer",
+              "role": "explorer",
+              "mode": "background",
+              "context": "inherit",
+              "state": "completed",
+              "task": "检查 relay 测试覆盖",
+              "task_title": "检查测试覆盖",
+              "created_at_ms": 1723000001000,
+              "updated_at_ms": 1723000001600,
+              "started_at_ms": 1723000001100,
+              "detached_from_foreground": true,
+              "terminal_reason": "completed",
+              "run_count": 1,
+              "live_messages_received": 6,
+              "tool_count": 1,
+              "token_count": 20,
+              "elapsed": {
+                "secs": 7,
+                "nanos": 0
+              }
+            }
+          }
+        }
+      },
+      {
+        "type": "session_event",
+        "stream_id": "webui_sample_bbbbbbbb",
+        "session_id": "session_0002",
+        "sequence": 8,
+        "event": {
+          "WorkflowUpdated": {
+            "turn": 1,
+            "workflow": {
+              "id": "wf_02",
+              "title": "运行测试",
+              "state": "running",
+              "current_phase": "executing",
+              "started_at_ms": 1723000002000,
+              "updated_at_ms": 1723000002500,
+              "invocation_count": 1,
+              "failure_count": 0,
+              "latest_log_summary": "改动 2 个文件：+37 −26",
+              "display_name": "运行测试",
+              "purpose": "验证 neo-webui 行为测试"
+            }
+          }
+        }
+      },
+      {
+        "type": "session_event",
+        "stream_id": "webui_sample_bbbbbbbb",
+        "session_id": "session_0002",
+        "sequence": 9,
+        "event": {
+          "WorkflowFinished": {
+            "turn": 1,
+            "workflow": {
+              "id": "wf_02",
+              "title": "运行测试",
+              "state": "completed",
+              "started_at_ms": 1723000002000,
+              "updated_at_ms": 1723000004000,
+              "invocation_count": 1,
+              "failure_count": 0,
+              "latest_log_summary": "改动 2 个文件：+37 −26",
+              "display_name": "运行测试",
+              "purpose": "验证 neo-webui 行为测试",
+              "terminal_reason": "succeeded"
+            }
+          }
+        }
+      },
+      {
+        "type": "session_event",
+        "stream_id": "webui_sample_bbbbbbbb",
+        "session_id": "session_0002",
+        "sequence": 10,
+        "event": {
+          "TerminalSessionOutput": {
+            "turn": 1,
+            "id": "term_01",
+            "handle": "term-1",
+            "output": "test result: ok. 42 passed",
+            "truncated": false
+          }
+        },
+        "output": {
+          "id": "eyJhZ2VudF9pZCI6Im1haW4iLCJ0YXNrX2lkIjoidGFza18wMSJ9",
+          "byte_len": 4096,
+          "line_count": 84,
+          "complete": true
+        }
+      },
+      {
+        "type": "session_state",
+        "stream_id": "webui_sample_bbbbbbbb",
+        "session_id": "session_0002",
+        "sequence": 11,
+        "event": {
+          "phase": "idle",
+          "waiting_approval": false,
+          "waiting_question": false,
+          "current_turn_id": null
+        }
+      }
+    ]
+  },
+  "long_connection": {
+    "client_messages": [
+      {
+        "type": "watch_workspace"
+      },
+      {
+        "type": "watch_session",
+        "session_id": "session_0001",
+        "after": {
+          "stream_id": "webui_sample_aaaaaaaa",
+          "sequence": 8
+        }
+      }
+    ],
+    "workspace_snapshot": {
+      "type": "workspace_snapshot",
+      "stream_id": "webui_sample_aaaaaaaa",
+      "workspace_sequence": 0,
+      "sessions": [
+        {
+          "session_id": "session_0001",
+          "title": "有界中继测试",
+          "updated_at": "2026-08-09T10:00:00+00:00",
+          "pinned": true,
+          "archived": false,
+          "state": "waiting_question"
+        },
+        {
+          "session_id": "session_0002",
+          "title": "并行格式化",
+          "updated_at": "2026-08-09T09:58:30+00:00",
+          "pinned": false,
+          "archived": false,
+          "state": "running"
+        }
+      ]
+    },
+    "session_summary_changed": {
+      "type": "session_summary_changed",
+      "stream_id": "webui_sample_aaaaaaaa",
+      "workspace_sequence": 1,
+      "event": {
+        "session_id": "session_0002",
+        "title": "并行格式化",
+        "updated_at": "2026-08-09T10:01:00+00:00",
+        "pinned": false,
+        "archived": false,
+        "state": "idle"
+      }
+    }
+  },
+  "errors": [
+    {
+      "code": "unauthorized"
+    },
+    {
+      "code": "stale_control"
+    },
+    {
+      "code": "stale_turn"
+    },
+    {
+      "code": "no_active_turn"
+    },
+    {
+      "code": "output_not_in_session"
+    }
+  ],
+  "close_samples": [
+    {
+      "code": 1013,
+      "reason": "slow_consumer"
+    }
+  ]
+}
