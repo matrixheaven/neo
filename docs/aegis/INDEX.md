@@ -613,3 +613,6 @@ Entries are workspace records, not authoritative runtime decisions.
 | 2026-08-09 | artifact | docs/aegis/work/2026-08-09-neo-webui/evidence-bundle-draft-scoped-commit.json | 2026-08-09-neo-webui evidence scoped-commit |
 | 2026-08-09 | plan | docs/aegis/plans/2026-08-09-neo-webui.md | Neo WebUI 实施计划 |
 | 2026-08-09 | artifact | docs/aegis/work/2026-08-09-neo-webui/evidence-bundle-draft-implementation-plan-validation.json | 2026-08-09-neo-webui evidence implementation-plan-validation |
+| 2026-08-10 | plan | docs/aegis/plans/2026-08-10-media-input-model-cache-lanes.md | Neo 图片视频输入与模型缓存车道实施计划 |
+| 2026-08-10 | handoff | docs/aegis/handoffs/2026-08-10-media-input-model-cache-lanes.md | Neo 图片视频输入与模型缓存车道交接提示 |
+| 2026-08-10 | spec | docs/aegis/specs/2026-08-10-media-input-model-cache-lanes-design.md | Neo 图片与视频输入、模型投影和缓存车道设计 |
