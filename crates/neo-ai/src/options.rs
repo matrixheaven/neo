@@ -357,7 +357,16 @@ pub struct RequestOptions {
     #[serde(default)]
     pub disable_reasoning: bool,
     pub cache: CacheRetention,
+    /// Session-correlation identifier (for example `x-client-request-id`).
+    /// This is NOT a cache lane key: its semantics never change.
     pub session_id: Option<String>,
+    /// Dedicated prompt-cache lane key computed from session + provider +
+    /// model + static projection shape. Providers that support a prompt-cache
+    /// key field map this field onto it (for example `OpenAI` `prompt_cache_key`);
+    /// `session_id` keeps its own correlation semantics and is never reused
+    /// as the cache lane.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub prompt_cache_key: Option<String>,
     pub metadata: RequestMetadata,
     /// Optional provider-native structured-output hint. Host validation remains
     /// authoritative regardless of whether a provider honors this field.
@@ -377,6 +386,7 @@ impl Default for RequestOptions {
             disable_reasoning: false,
             cache: CacheRetention::Short,
             session_id: None,
+            prompt_cache_key: None,
             metadata: RequestMetadata::default(),
             response_format: None,
         }

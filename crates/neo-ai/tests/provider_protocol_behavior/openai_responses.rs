@@ -287,6 +287,7 @@ async fn openai_responses_client_posts_typed_options_cache_and_metadata() {
         },
         cache: CacheRetention::Long,
         session_id: Some("session-1".to_owned()),
+        prompt_cache_key: Some("lane-1".to_owned()),
         metadata: RequestMetadata::from_pairs([("user_id", "u-1"), ("trace_id", "trace-1")]),
         ..RequestOptions::default()
     };
@@ -321,7 +322,10 @@ async fn openai_responses_client_posts_typed_options_cache_and_metadata() {
         sent.body["metadata"],
         json!({ "trace_id": "trace-1", "user_id": "u-1" })
     );
-    assert_eq!(sent.body["prompt_cache_key"], "session-1");
+    assert_eq!(
+        sent.body["prompt_cache_key"], "lane-1",
+        "the dedicated cache-lane field maps to prompt_cache_key"
+    );
     assert_eq!(sent.body["prompt_cache_retention"], "24h");
     assert_eq!(sent.body["tools"][0]["name"], "read_file");
 }

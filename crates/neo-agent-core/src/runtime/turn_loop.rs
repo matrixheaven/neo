@@ -190,7 +190,7 @@ async fn recover_from_overflow(
     rehydrate_instruction_context_after_compaction(emitter, true).await;
 
     // Rebuild request with compacted context and retry once.
-    let retry_request = chat_request(config, &emitter.context).await;
+    let retry_request = chat_request(config, &emitter.context, model.media_transport()).await?;
     run_model_request_with_retries(
         model,
         config,
@@ -249,7 +249,7 @@ async fn run_next_model_turn(
         .update_event_route_turn(config.session_directory.as_deref(), turn)
         .map_err(std::io::Error::other)?;
     prepare_model_request(model, config, emitter, cancel_token, pending_debt).await?;
-    let request = chat_request(config, &emitter.context).await;
+    let request = chat_request(config, &emitter.context, model.media_transport()).await?;
     validate_model_capabilities(&request)?;
     match run_model_turn_with_recovery(model, config, request, turn, emitter, cancel_token).await {
         Ok(message) => Ok(ModelTurnOutcome::Assistant { turn, message }),

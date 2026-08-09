@@ -371,3 +371,158 @@ fn declared_video_and_tool_media_are_rejected_by_google_transport() {
         );
     }
 }
+
+#[test]
+fn request_body_serializes_user_image_as_inline_data() {
+    use crate::{ApiKind, ImageData, ModelCapabilities, ModelSpec, ProviderId};
+
+    let request = ChatRequest {
+        model: ModelSpec {
+            provider: ProviderId("google".to_owned()),
+            model: "gemini-test".to_owned(),
+            api: ApiKind::GoogleGenerativeAi,
+            capabilities: ModelCapabilities::chat(),
+        },
+        messages: vec![ChatMessage::User {
+            content: vec![
+                ContentPart::Text {
+                    text: "look".to_owned(),
+                },
+                ContentPart::Image {
+                    mime_type: "image/png".to_owned(),
+                    data: ImageData::Base64("aGVsbG8=".to_owned()),
+                },
+            ],
+        }],
+        tools: vec![],
+        options: crate::RequestOptions::default(),
+    };
+
+    let body = request_body(&request).expect("body");
+    assert_eq!(
+        body["contents"][0]["parts"][1]["inlineData"],
+        json!({
+            "mimeType": "image/png",
+            "data": "aGVsbG8=",
+        })
+    );
+}
+
+#[test]
+fn request_body_rejects_video_in_user_message() {
+    use crate::{ApiKind, ImageData, ModelCapabilities, ModelSpec, ProviderId};
+
+    let request = ChatRequest {
+        model: ModelSpec {
+            provider: ProviderId("google".to_owned()),
+            model: "gemini-test".to_owned(),
+            api: ApiKind::GoogleGenerativeAi,
+            capabilities: ModelCapabilities::chat(),
+        },
+        messages: vec![ChatMessage::User {
+            content: vec![ContentPart::Video {
+                mime_type: "video/mp4".to_owned(),
+                data: ImageData::Base64("dmlkZW8=".to_owned()),
+            }],
+        }],
+        tools: vec![],
+        options: crate::RequestOptions::default(),
+    };
+
+    let error = request_body(&request).expect_err("video must fail closed, never become text");
+    assert!(matches!(error, ProviderError::Unsupported(_)));
+}
+
+#[test]
+fn request_body_rejects_tool_result_media() {
+    use crate::{ApiKind, ImageData, ModelCapabilities, ModelSpec, ProviderId, ToolCall};
+
+    let request = ChatRequest {
+        model: ModelSpec {
+            provider: ProviderId("google".to_owned()),
+            model: "gemini-test".to_owned(),
+            api: ApiKind::GoogleGenerativeAi,
+            capabilities: ModelCapabilities::chat(),
+        },
+        messages: vec![
+            ChatMessage::Assistant {
+                content: Vec::new(),
+                tool_calls: vec![ToolCall {
+                    id: "call_1".to_owned(),
+                    name: "ReadMediaFile".to_owned(),
+                    raw_arguments: r#"{"path":"shot.png"}"#.to_owned(),
+                }],
+            },
+            ChatMessage::ToolResult {
+                tool_call_id: "call_1".to_owned(),
+                content: vec![
+                    ContentPart::Text {
+                        text: "captured".to_owned(),
+                    },
+                    ContentPart::Image {
+                        mime_type: "image/png".to_owned(),
+                        data: ImageData::Base64("aGVsbG8=".to_owned()),
+                    },
+                ],
+                is_error: false,
+            },
+        ],
+        tools: vec![],
+        options: crate::RequestOptions::default(),
+    };
+
+    let error = request_body(&request).expect_err("tool-result media must fail closed");
+    assert!(matches!(error, ProviderError::Unsupported(_)));
+}
+
+#[test]
+fn request_body_replays_read_media_file_exchange_without_tool_table_entry() {
+    use crate::{ApiKind, ModelCapabilities, ModelSpec, ProviderId, ToolCall};
+
+    let request = ChatRequest {
+        model: ModelSpec {
+            provider: ProviderId("google".to_owned()),
+            model: "gemini-test".to_owned(),
+            api: ApiKind::GoogleGenerativeAi,
+            capabilities: ModelCapabilities::chat(),
+        },
+        messages: vec![
+            ChatMessage::Assistant {
+                content: vec![ContentPart::Text {
+                    text: "calling read".to_owned(),
+                }],
+                tool_calls: vec![ToolCall {
+                    id: "call_1".to_owned(),
+                    name: "ReadMediaFile".to_owned(),
+                    raw_arguments: r#"{"path":"clip.mp4"}"#.to_owned(),
+                }],
+            },
+            ChatMessage::ToolResult {
+                tool_call_id: "call_1".to_owned(),
+                content: vec![ContentPart::Text {
+                    text: "captured the clip".to_owned(),
+                }],
+                is_error: false,
+            },
+        ],
+        tools: vec![],
+        options: crate::RequestOptions::default(),
+    };
+
+    let body = request_body(&request).expect("historical exchange replays");
+    assert!(body.get("tools").is_none(), "the tool table is empty");
+    assert_eq!(body["contents"][0]["role"], "model");
+    assert_eq!(
+        body["contents"][0]["parts"][1]["functionCall"]["name"],
+        "ReadMediaFile"
+    );
+    assert_eq!(body["contents"][1]["role"], "user");
+    assert_eq!(
+        body["contents"][1]["parts"][0]["functionResponse"]["name"],
+        "ReadMediaFile"
+    );
+    assert_eq!(
+        body["contents"][1]["parts"][0]["functionResponse"]["response"]["result"],
+        "captured the clip"
+    );
+}

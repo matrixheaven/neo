@@ -1155,3 +1155,7 @@ mod tests {
         }
     }
 }
+
+#[cfg(test)]
+#[path = "test_cases/anthropic.rs"]
+mod anthropic_media_tests;

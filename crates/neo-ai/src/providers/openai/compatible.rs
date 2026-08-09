@@ -87,8 +87,8 @@ impl ModelClient for OpenAiCompatibleClient {
 
     fn media_transport(&self) -> MediaTransportCapabilities {
         // `image_url` parts accept both data URIs (base64) and http(s) URLs,
-        // but only in user messages: videos are replaced by placeholder text
-        // today, and tool results go through `reject_images`.
+        // but only in user messages: video parts raise a typed error in the
+        // serializer, and tool results go through `reject_images`.
         MediaTransportCapabilities {
             user_image: MediaTransportMode::Url,
             ..MediaTransportCapabilities::default()
@@ -124,8 +124,8 @@ fn request_body(request: &ChatRequest) -> Result<Value, ProviderError> {
     if !request.options.metadata.is_empty() {
         body["metadata"] = json!(request.options.metadata.as_map());
     }
-    if let Some(session_id) = &request.options.session_id {
-        body["prompt_cache_key"] = json!(session_id);
+    if let Some(cache_key) = &request.options.prompt_cache_key {
+        body["prompt_cache_key"] = json!(cache_key);
     }
     match request.options.cache {
         CacheRetention::None => {}
@@ -144,7 +144,7 @@ fn message_body(message: &ChatMessage) -> Result<Value, ProviderError> {
         ChatMessage::System { content } => message_with_text_content("system", content),
         ChatMessage::User { content } => Ok(json!({
             "role": "user",
-            "content": user_content(content),
+            "content": user_content(content)?,
         })),
         ChatMessage::Assistant {
             content,
@@ -249,19 +249,24 @@ fn reasoning_text(content: &[ContentPart]) -> String {
         .join("\n")
 }
 
-fn user_content(content: &[ContentPart]) -> Value {
+fn user_content(content: &[ContentPart]) -> Result<Value, ProviderError> {
     if content
         .iter()
         .any(|part| matches!(part, ContentPart::Image { .. } | ContentPart::Video { .. }))
     {
-        Value::Array(content.iter().map(content_part_body).collect())
+        Ok(Value::Array(
+            content
+                .iter()
+                .map(content_part_body)
+                .collect::<Result<Vec<_>, _>>()?,
+        ))
     } else {
-        json!(text_content(content))
+        Ok(json!(text_content(content)))
     }
 }
 
-fn content_part_body(part: &ContentPart) -> Value {
-    match part {
+fn content_part_body(part: &ContentPart) -> Result<Value, ProviderError> {
+    Ok(match part {
         ContentPart::Text { text } | ContentPart::Thinking { text, .. } => json!({
             "type": "text",
             "text": text,
@@ -272,13 +277,13 @@ fn content_part_body(part: &ContentPart) -> Value {
                 "url": super::image_url(mime_type, data),
             },
         }),
-        ContentPart::Video { mime_type, .. } => json!({
-            "type": "text",
-            "text": format!(
-                "[video not sent: openai-compatible transport has no video support for {mime_type}]"
-            ),
-        }),
-    }
+        ContentPart::Video { .. } => {
+            return Err(ProviderError::Unsupported(
+                "OpenAI-compatible transport does not support video input; video parts must be projected before the request"
+                    .to_owned(),
+            ));
+        }
+    })
 }
 
 fn tool_body(tool: &ToolSpec) -> Value {
@@ -905,3 +910,7 @@ mod tests {
         }
     }
 }
+
+#[cfg(test)]
+#[path = "test_cases/compatible_media.rs"]
+mod compatible_media_tests;

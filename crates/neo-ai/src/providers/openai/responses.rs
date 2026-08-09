@@ -84,8 +84,8 @@ impl ModelClient for OpenAiResponsesClient {
 
     fn media_transport(&self) -> MediaTransportCapabilities {
         // `input_image` parts accept both data URIs (base64) and http(s) URLs,
-        // but only in user messages: videos are replaced by placeholder text
-        // today, and tool results go through `reject_images`.
+        // but only in user messages: video parts raise a typed error in the
+        // serializer, and tool results go through `reject_images`.
         MediaTransportCapabilities {
             user_image: MediaTransportMode::Url,
             ..MediaTransportCapabilities::default()
@@ -121,8 +121,8 @@ fn request_body(request: &ChatRequest) -> Result<Value, ProviderError> {
     if !request.options.metadata.is_empty() {
         body["metadata"] = json!(request.options.metadata.as_map());
     }
-    if let Some(session_id) = &request.options.session_id {
-        body["prompt_cache_key"] = json!(session_id);
+    if let Some(cache_key) = &request.options.prompt_cache_key {
+        body["prompt_cache_key"] = json!(cache_key);
     }
     match request.options.cache {
         CacheRetention::None => {}
@@ -180,7 +180,7 @@ fn message_body(
         }
         ChatMessage::User { content } => Ok(vec![json!({
                 "role": "user",
-                "content": user_content(content),
+                "content": user_content(content)?,
         })]),
         ChatMessage::Assistant {
             content,
@@ -243,8 +243,8 @@ fn openai_reasoning_signature(signature: &str) -> Option<Value> {
     (item.get("type").and_then(Value::as_str) == Some("reasoning")).then_some(item)
 }
 
-fn content_part_body(part: &ContentPart) -> Value {
-    match part {
+fn content_part_body(part: &ContentPart) -> Result<Value, ProviderError> {
+    Ok(match part {
         ContentPart::Text { text } => json!({
             "type": "input_text",
             "text": text,
@@ -260,13 +260,13 @@ fn content_part_body(part: &ContentPart) -> Value {
                 "image_url": image_url,
             })
         }
-        ContentPart::Video { mime_type, .. } => json!({
-            "type": "input_text",
-            "text": format!(
-                "[video not sent: responses transport has no video support for {mime_type}]"
-            ),
-        }),
-    }
+        ContentPart::Video { .. } => {
+            return Err(ProviderError::Unsupported(
+                "OpenAI Responses transport does not support video input; video parts must be projected before the request"
+                    .to_owned(),
+            ));
+        }
+    })
 }
 
 fn content_text(content: &[ContentPart], role: &str) -> Result<String, ProviderError> {
@@ -316,14 +316,19 @@ fn text_content_with_reasoning_replay(content: &[ContentPart], replay_reasoning:
         .join("\n")
 }
 
-fn user_content(content: &[ContentPart]) -> Value {
+fn user_content(content: &[ContentPart]) -> Result<Value, ProviderError> {
     if content
         .iter()
         .any(|part| matches!(part, ContentPart::Image { .. } | ContentPart::Video { .. }))
     {
-        Value::Array(content.iter().map(content_part_body).collect())
+        Ok(Value::Array(
+            content
+                .iter()
+                .map(content_part_body)
+                .collect::<Result<Vec<_>, _>>()?,
+        ))
     } else {
-        json!(text_content(content))
+        Ok(json!(text_content(content)))
     }
 }
 

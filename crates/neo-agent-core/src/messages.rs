@@ -893,7 +893,8 @@ mod tests {
             .block_on(crate::runtime::image_blobs::resolve_media_blobs(
                 vec![message.clone()],
                 None,
-            ));
+            ))
+            .expect("resolve media blobs");
         assert_eq!(resolved, vec![message]);
     }
 
