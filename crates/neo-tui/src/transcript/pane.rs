@@ -3,7 +3,7 @@ use std::path::{Path, PathBuf};
 use std::time::Instant;
 
 use neo_agent_core::instructions::InstructionEpochData;
-use neo_agent_core::{AgentEvent, AgentMessage, Content, ImageRef, skills::SkillStore};
+use neo_agent_core::{AgentEvent, AgentMessage, Content, MediaRef, skills::SkillStore};
 
 use crate::dialogs::question_dialog::{QuestionDisplayData, QuestionStateMachine};
 use crate::primitive::theme::TuiTheme;
@@ -513,6 +513,7 @@ impl TranscriptPane {
                     name: tool_name.to_string(),
                     result: neo_agent_core::ToolResult {
                         content: text,
+                        media: Vec::new(),
                         is_error: *is_error,
                         details: None,
                         terminate: false,
@@ -562,6 +563,11 @@ impl TranscriptPane {
                     self.flush_replayed_assistant_text(&mut text);
                     self.push_image(mime_type, data);
                 }
+                Content::Video { mime_type, data } => {
+                    // Videos are not rendered as inline images; show a stable
+                    // text summary instead.
+                    text.push_str(&media_summary("video", mime_type, data));
+                }
             }
         }
         if !text.is_empty() {
@@ -600,11 +606,11 @@ impl TranscriptPane {
         }
     }
 
-    pub fn push_image(&mut self, mime_type: &str, data: &ImageRef) {
+    pub fn push_image(&mut self, mime_type: &str, data: &MediaRef) {
         self.next_image_id = self.next_image_id.saturating_add(1);
         let id = format!("image-{}", self.next_image_id);
         let entry = match data {
-            ImageRef::Base64(encoded) => {
+            MediaRef::Base64(encoded) => {
                 let bytes = decode_base64(encoded).unwrap_or_else(|| encoded.as_bytes().to_vec());
                 let inline = InlineImage::bytes(
                     id.clone(),
@@ -623,7 +629,7 @@ impl TranscriptPane {
                     inline.into_payload_bytes(),
                 )
             }
-            ImageRef::Url(url) => {
+            MediaRef::Url(url) => {
                 let inline = InlineImage::remote_url(
                     id.clone(),
                     mime_type.to_owned(),
@@ -640,7 +646,7 @@ impl TranscriptPane {
                     None,
                 )
             }
-            ImageRef::Blob(sha256) => {
+            MediaRef::Blob(sha256) => {
                 // Blobs should be resolved to base64 before rendering. If a
                 // blob reference reaches the transcript, render a placeholder.
                 TranscriptEntry::image(
@@ -2463,6 +2469,9 @@ fn user_content_display(
                     text.push_str(&image_summary(mime_type, data));
                 }
             }
+            Content::Video { mime_type, data } => {
+                text.push_str(&media_summary("video", mime_type, data));
+            }
         }
     }
     (text, images)
@@ -2471,9 +2480,9 @@ fn user_content_display(
 fn transcript_attachment_from_content_image(
     image_index: usize,
     mime_type: &str,
-    data: &ImageRef,
+    data: &MediaRef,
 ) -> Option<crate::transcript::TranscriptImageAttachment> {
-    let ImageRef::Base64(encoded) = data else {
+    let MediaRef::Base64(encoded) = data else {
         return None;
     };
     let bytes = decode_base64(encoded)?;
@@ -2494,14 +2503,21 @@ fn content_visible_text(content: &Content) -> Option<String> {
         Content::Text { text } => Some(text.to_string()),
         Content::Thinking { .. } => None,
         Content::Image { mime_type, data } => Some(image_summary(mime_type, data)),
+        Content::Video { mime_type, data } => Some(media_summary("video", mime_type, data)),
     }
 }
 
-fn image_summary(mime_type: &str, data: &ImageRef) -> String {
+fn image_summary(mime_type: &str, data: &MediaRef) -> String {
+    media_summary("image", mime_type, data)
+}
+
+fn media_summary(kind: &str, mime_type: &str, data: &MediaRef) -> String {
     match data {
-        ImageRef::Url(url) => format!("[image: {mime_type} url={}]", sanitized_image_url(url)),
-        ImageRef::Base64(data) => format!("[image: {mime_type} data={} bytes]", data.len()),
-        ImageRef::Blob(sha256) => format!("[image: {mime_type} blob={sha256}]"),
+        MediaRef::Url(url) => {
+            format!("[{kind}: {mime_type} url={}]", sanitized_image_url(url))
+        }
+        MediaRef::Base64(data) => format!("[{kind}: {mime_type} data={} bytes]", data.len()),
+        MediaRef::Blob(sha256) => format!("[{kind}: {mime_type} blob={sha256}]"),
     }
 }
 

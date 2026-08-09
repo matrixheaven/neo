@@ -373,6 +373,12 @@ fn assistant_content(
                         .to_owned(),
                 ));
             }
+            ContentPart::Video { .. } => {
+                return Err(ProviderError::Protocol(
+                    "Anthropic video transport is not implemented; video parts must be projected before the request"
+                        .to_owned(),
+                ));
+            }
             ContentPart::Text { .. } | ContentPart::Thinking { .. } => {}
         }
     }
@@ -416,6 +422,12 @@ fn content_part_body(part: &ContentPart) -> Result<Value, ProviderError> {
                 ));
             }
         },
+        ContentPart::Video { .. } => {
+            return Err(ProviderError::Unsupported(
+                "Anthropic video transport is not implemented; video parts must be projected before the request"
+                    .to_owned(),
+            ));
+        }
     })
 }
 

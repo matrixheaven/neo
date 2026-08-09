@@ -14,6 +14,7 @@ use super::{
 
 pub(super) fn content_to_display_text(content: &[Content]) -> String {
     let mut image_idx = 0;
+    let mut video_idx = 0;
     let mut out = String::new();
     for part in content {
         match part {
@@ -23,6 +24,10 @@ pub(super) fn content_to_display_text(content: &[Content]) -> String {
                 let (w, h) = image_dimensions_from_data(mime_type, data);
                 let _ = write!(out, "[image #{image_idx} ({w}x{h})]");
             }
+            Content::Video { mime_type, .. } => {
+                video_idx += 1;
+                let _ = write!(out, "[video #{video_idx} ({mime_type})]");
+            }
             Content::Thinking { .. } => {}
         }
     }
@@ -31,10 +36,10 @@ pub(super) fn content_to_display_text(content: &[Content]) -> String {
 
 pub(super) fn image_dimensions_from_data(
     mime_type: &str,
-    data: &neo_agent_core::ImageRef,
+    data: &neo_agent_core::MediaRef,
 ) -> (u32, u32) {
     let bytes = match data {
-        neo_agent_core::ImageRef::Base64(b64) => {
+        neo_agent_core::MediaRef::Base64(b64) => {
             base64::Engine::decode(&base64::engine::general_purpose::STANDARD, b64.as_ref()).ok()
         }
         _ => None,

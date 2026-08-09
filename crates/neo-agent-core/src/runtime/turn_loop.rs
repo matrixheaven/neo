@@ -949,10 +949,13 @@ fn append_tool_result_messages(
     emitter: &mut EventEmitter,
 ) {
     for (tool_call, result) in tool_results {
+        let mut content = Vec::with_capacity(1 + result.media.len());
+        content.push(Content::text(result.content.clone()));
+        content.extend(result.media.iter().cloned());
         let message = AgentMessage::tool_result(
             tool_call.id.clone(),
             tool_call.name.clone(),
-            vec![Content::text(result.content.clone())],
+            content,
             result.is_error,
         );
         emitter.emit(AgentEvent::MessageAppended { message });
@@ -1139,6 +1142,51 @@ mod tests {
     fn test_emitter(context: super::super::context::AgentContext) -> EventEmitter {
         let (tx, _rx) = mpsc::unbounded_channel();
         EventEmitter::new(tx, context)
+    }
+
+    #[test]
+    fn append_tool_result_messages_keeps_text_then_structured_media_parts() {
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let mut emitter = EventEmitter::new(tx, super::super::context::AgentContext::new());
+        let media = vec![
+            Content::Image {
+                mime_type: "image/png".into(),
+                data: crate::MediaRef::Base64("aGVsbG8=".into()),
+            },
+            Content::Video {
+                mime_type: "video/mp4".into(),
+                data: crate::MediaRef::Blob("video-sha".into()),
+            },
+        ];
+        let result = ToolResult::ok("read the file").with_media(media.clone());
+        append_tool_result_messages(
+            &[(
+                AgentToolCall {
+                    id: "tc1".into(),
+                    name: "ReadMediaFile".into(),
+                    raw_arguments: "{}".into(),
+                },
+                result,
+            )],
+            &mut emitter,
+        );
+
+        let event = rx.try_recv().expect("message appended").expect("event");
+        let AgentEvent::MessageAppended {
+            message: AgentMessage::ToolResult { content, .. },
+        } = event
+        else {
+            panic!("expected a tool result message");
+        };
+        assert_eq!(
+            content,
+            vec![
+                Content::text("read the file"),
+                media[0].clone(),
+                media[1].clone()
+            ],
+            "tool results keep text first and structured media parts after it"
+        );
     }
 
     #[test]

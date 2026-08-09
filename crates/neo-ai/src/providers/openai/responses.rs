@@ -220,7 +220,9 @@ fn reasoning_items(content: &[ContentPart]) -> Vec<Value> {
             ContentPart::Thinking { signature, .. } => {
                 signature.as_deref().and_then(openai_reasoning_signature)
             }
-            ContentPart::Text { .. } | ContentPart::Image { .. } => None,
+            ContentPart::Text { .. } | ContentPart::Image { .. } | ContentPart::Video { .. } => {
+                None
+            }
         })
         .collect()
 }
@@ -247,6 +249,12 @@ fn content_part_body(part: &ContentPart) -> Value {
                 "image_url": image_url,
             })
         }
+        ContentPart::Video { mime_type, .. } => json!({
+            "type": "input_text",
+            "text": format!(
+                "[video not sent: responses transport has no video support for {mime_type}]"
+            ),
+        }),
     }
 }
 
@@ -289,7 +297,9 @@ fn text_content_with_reasoning_replay(content: &[ContentPart], replay_reasoning:
             {
                 Some(text.as_str())
             }
-            ContentPart::Thinking { .. } | ContentPart::Image { .. } => None,
+            ContentPart::Thinking { .. }
+            | ContentPart::Image { .. }
+            | ContentPart::Video { .. } => None,
         })
         .collect::<Vec<_>>()
         .join("\n")
@@ -298,7 +308,7 @@ fn text_content_with_reasoning_replay(content: &[ContentPart], replay_reasoning:
 fn user_content(content: &[ContentPart]) -> Value {
     if content
         .iter()
-        .any(|part| matches!(part, ContentPart::Image { .. }))
+        .any(|part| matches!(part, ContentPart::Image { .. } | ContentPart::Video { .. }))
     {
         Value::Array(content.iter().map(content_part_body).collect())
     } else {

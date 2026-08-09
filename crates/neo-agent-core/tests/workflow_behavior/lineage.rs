@@ -29,6 +29,7 @@ fn sample_model(provider: &str, model: &str) -> ModelSpec {
             streaming: true,
             tools: true,
             images: false,
+            videos: false,
             reasoning: ReasoningCapability::None,
             embeddings: false,
             max_context_tokens: None,

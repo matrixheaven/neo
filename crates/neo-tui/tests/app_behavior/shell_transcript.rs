@@ -23,7 +23,7 @@ fn replayed_user_image_content_keeps_transcript_attachment() {
         neo_agent_core::Content::text("look "),
         neo_agent_core::Content::Image {
             mime_type: "image/png".into(),
-            data: neo_agent_core::ImageRef::Base64(encoded.into()),
+            data: neo_agent_core::MediaRef::Base64(encoded.into()),
         },
     ]));
 
@@ -52,7 +52,7 @@ fn transcript_pane_inline_images_are_structured_entries() {
     let mut runtime = TranscriptPane::new(100, 12);
     runtime.push_image(
         "image/png",
-        &neo_agent_core::ImageRef::Base64("aGVsbG8=".into()),
+        &neo_agent_core::MediaRef::Base64("aGVsbG8=".into()),
     );
 
     assert!(matches!(

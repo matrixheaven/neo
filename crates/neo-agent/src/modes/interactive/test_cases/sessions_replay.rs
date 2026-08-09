@@ -412,7 +412,7 @@ fn replay_session_into_transcript_keeps_uncovered_image_without_repeating_text()
                     Content::text("image-caption"),
                     Content::Image {
                         mime_type: "image/png".into(),
-                        data: neo_agent_core::ImageRef::Base64("aGVsbG8=".into()),
+                        data: neo_agent_core::MediaRef::Base64("aGVsbG8=".into()),
                     },
                 ],
                 [],

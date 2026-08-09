@@ -648,6 +648,11 @@ fn resolve_authorized_external_path(path: &Path) -> std::io::Result<PathBuf> {
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize, JsonSchema)]
 pub struct ToolResult {
     pub content: String,
+    /// Structured media parts (image/video) produced by the tool. Text stays
+    /// in `content`; the runtime appends both to the canonical tool result
+    /// message instead of flattening media to text.
+    #[serde(default)]
+    pub media: Vec<crate::Content>,
     pub is_error: bool,
     pub details: Option<serde_json::Value>,
     pub terminate: bool,
@@ -658,6 +663,7 @@ impl ToolResult {
     pub fn ok(content: impl Into<String>) -> Self {
         Self {
             content: content.into(),
+            media: Vec::new(),
             is_error: false,
             details: None,
             terminate: false,
@@ -668,10 +674,17 @@ impl ToolResult {
     pub fn error(content: impl Into<String>) -> Self {
         Self {
             content: content.into(),
+            media: Vec::new(),
             is_error: true,
             details: None,
             terminate: false,
         }
+    }
+
+    #[must_use]
+    pub fn with_media(mut self, media: impl Into<Vec<crate::Content>>) -> Self {
+        self.media = media.into();
+        self
     }
 
     #[must_use]

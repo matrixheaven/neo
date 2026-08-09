@@ -11,12 +11,13 @@ fn model(provider: &str, name: &str, capabilities: ModelCapabilities) -> ModelSp
 
 #[test]
 fn model_capabilities_shapes_cover_default_and_helpers() {
-    // (case, capabilities, streaming, tools, images, embeddings, supports_reasoning, max_context_tokens)
+    // (case, capabilities, streaming, tools, images, videos, embeddings, supports_reasoning, max_context_tokens)
     let cases = [
         (
             "default is text chat",
             ModelCapabilities::default(),
             true,
+            false,
             false,
             false,
             false,
@@ -31,11 +32,24 @@ fn model_capabilities_shapes_cover_default_and_helpers() {
             false,
             false,
             false,
+            false,
             Some(128_000),
+        ),
+        (
+            "vision helper",
+            ModelCapabilities::vision_chat(),
+            true,
+            false,
+            true,
+            false,
+            false,
+            false,
+            None,
         ),
         (
             "embedding helper",
             ModelCapabilities::embedding(),
+            false,
             false,
             false,
             false,
@@ -44,11 +58,22 @@ fn model_capabilities_shapes_cover_default_and_helpers() {
             None,
         ),
     ];
-    for (name, caps, streaming, tools, images, embeddings, supports_reasoning, max_context) in cases
+    for (
+        name,
+        caps,
+        streaming,
+        tools,
+        images,
+        videos,
+        embeddings,
+        supports_reasoning,
+        max_context,
+    ) in cases
     {
         assert_eq!(caps.streaming, streaming, "case {name}: streaming");
         assert_eq!(caps.tools, tools, "case {name}: tools");
         assert_eq!(caps.images, images, "case {name}: images");
+        assert_eq!(caps.videos, videos, "case {name}: videos");
         assert_eq!(caps.embeddings, embeddings, "case {name}: embeddings");
         assert_eq!(
             caps.supports_reasoning(),
@@ -64,6 +89,21 @@ fn model_capabilities_shapes_cover_default_and_helpers() {
         ModelCapabilities::chat(),
         ModelCapabilities::default(),
         "chat helper equals default"
+    );
+    let mut video = serde_json::to_value(ModelCapabilities::tool_chat()).expect("serialize");
+    video["images"] = serde_json::json!(true);
+    video["videos"] = serde_json::json!(true);
+    let decoded: ModelCapabilities = serde_json::from_value(video).expect("video capabilities");
+    assert!(
+        decoded.images && decoded.videos,
+        "videos field deserializes"
+    );
+    let mut legacy = serde_json::to_value(ModelCapabilities::chat()).expect("serialize");
+    legacy.as_object_mut().expect("object").remove("videos");
+    let decoded: ModelCapabilities = serde_json::from_value(legacy).expect("legacy capabilities");
+    assert!(
+        !decoded.videos,
+        "catalogs without a videos field default to no video capability"
     );
 }
 

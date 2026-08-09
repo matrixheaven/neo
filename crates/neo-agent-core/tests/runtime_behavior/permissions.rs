@@ -107,6 +107,7 @@ async fn runtime_emits_approval_request_for_ask_permission_and_skips_tool_execut
         name: "echo".to_owned(),
         result: ToolResult {
             content: "approval required for tool: echo".to_owned(),
+            media: Vec::new(),
             is_error: true,
             details: Some(serde_json::json!({"kind": "permission", "decision": "required", "operation": "tool", "subject": "echo", "side_effect_occurred": false})),
             terminate: false,
@@ -339,6 +340,7 @@ async fn runtime_skips_ask_permission_tool_after_approval_hook_denies_it() {
         name: "echo".to_owned(),
         result: ToolResult {
             content: "approval denied for tool: echo".to_owned(),
+            media: Vec::new(),
             is_error: true,
             details: Some(serde_json::json!({
                 "kind": "permission",
@@ -546,6 +548,7 @@ async fn runtime_skips_ask_permission_tool_after_async_approval_wait_denies_it()
         name: "echo".to_owned(),
         result: ToolResult {
             content: "approval denied for tool: echo".to_owned(),
+            media: Vec::new(),
             is_error: true,
             details: Some(serde_json::json!({
                 "kind": "permission",
@@ -610,6 +613,7 @@ async fn runtime_cancels_while_waiting_for_async_approval_decision() {
         name: "echo".to_owned(),
         result: ToolResult {
             content: "tool execution cancelled".to_owned(),
+            media: Vec::new(),
             is_error: true,
             details: Some(serde_json::json!({"kind": "cancelled", "side_effect_occurred": false})),
             terminate: false,

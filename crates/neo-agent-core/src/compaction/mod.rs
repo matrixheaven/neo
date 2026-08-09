@@ -435,6 +435,9 @@ fn render_content_parts(content: &[Content], lines: &mut Vec<String>) {
             Content::Image { mime_type, .. } => {
                 lines.push(format!("  [image: {mime_type}]"));
             }
+            Content::Video { mime_type, .. } => {
+                lines.push(format!("  [video: {mime_type}]"));
+            }
         }
     }
 }

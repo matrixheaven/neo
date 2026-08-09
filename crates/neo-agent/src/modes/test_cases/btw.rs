@@ -290,7 +290,9 @@ fn chat_message_text(message: &neo_ai::ChatMessage) -> String {
         .iter()
         .filter_map(|part| match part {
             ContentPart::Text { text } => Some(text.as_str()),
-            ContentPart::Thinking { .. } | ContentPart::Image { .. } => None,
+            ContentPart::Thinking { .. }
+            | ContentPart::Image { .. }
+            | ContentPart::Video { .. } => None,
         })
         .collect::<Vec<_>>()
         .join("")

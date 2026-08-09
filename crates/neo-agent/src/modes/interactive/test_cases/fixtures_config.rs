@@ -176,7 +176,9 @@ pub fn chat_message_text(message: &neo_ai::ChatMessage) -> String {
         .iter()
         .filter_map(|part| match part {
             neo_ai::ContentPart::Text { text } => Some(text.as_str()),
-            neo_ai::ContentPart::Thinking { .. } | neo_ai::ContentPart::Image { .. } => None,
+            neo_ai::ContentPart::Thinking { .. }
+            | neo_ai::ContentPart::Image { .. }
+            | neo_ai::ContentPart::Video { .. } => None,
         })
         .collect::<Vec<_>>()
         .join("")

@@ -548,6 +548,7 @@ pub(super) fn make_tool_update_callback(
             name: name.clone(),
             partial_result: ToolResult {
                 content: partial.to_owned(),
+                media: Vec::new(),
                 is_error: false,
                 details: None,
                 terminate: false,

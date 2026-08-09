@@ -229,9 +229,10 @@ fn reasoning_text(content: &[ContentPart]) -> String {
                 redacted: false,
                 ..
             } => Some(text.as_str()),
-            ContentPart::Text { .. } | ContentPart::Thinking { .. } | ContentPart::Image { .. } => {
-                None
-            }
+            ContentPart::Text { .. }
+            | ContentPart::Thinking { .. }
+            | ContentPart::Image { .. }
+            | ContentPart::Video { .. } => None,
         })
         .collect::<Vec<_>>()
         .join("\n")
@@ -240,7 +241,7 @@ fn reasoning_text(content: &[ContentPart]) -> String {
 fn user_content(content: &[ContentPart]) -> Value {
     if content
         .iter()
-        .any(|part| matches!(part, ContentPart::Image { .. }))
+        .any(|part| matches!(part, ContentPart::Image { .. } | ContentPart::Video { .. }))
     {
         Value::Array(content.iter().map(content_part_body).collect())
     } else {
@@ -259,6 +260,12 @@ fn content_part_body(part: &ContentPart) -> Value {
             "image_url": {
                 "url": super::image_url(mime_type, data),
             },
+        }),
+        ContentPart::Video { mime_type, .. } => json!({
+            "type": "text",
+            "text": format!(
+                "[video not sent: openai-compatible transport has no video support for {mime_type}]"
+            ),
         }),
     }
 }

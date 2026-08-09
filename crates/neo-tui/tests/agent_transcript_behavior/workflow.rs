@@ -105,6 +105,7 @@ fn agent_snapshot(id: &str) -> AgentSnapshot {
 fn tool_result(content: &str, is_error: bool) -> ToolResult {
     ToolResult {
         content: content.to_owned(),
+        media: Vec::new(),
         is_error,
         details: None,
         terminate: false,

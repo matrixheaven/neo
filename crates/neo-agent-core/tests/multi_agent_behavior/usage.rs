@@ -539,7 +539,7 @@ fn request_text(messages: &[ChatMessage]) -> String {
         })
         .filter_map(|part| match part {
             ContentPart::Text { text } | ContentPart::Thinking { text, .. } => Some(text.as_str()),
-            ContentPart::Image { .. } => None,
+            ContentPart::Image { .. } | ContentPart::Video { .. } => None,
         })
         .collect::<Vec<_>>()
         .join("\n")

@@ -86,6 +86,7 @@ async fn runtime_cancels_in_flight_tool_execution_and_finishes_run() {
         name: "never".to_owned(),
         result: ToolResult {
             content: "tool execution cancelled".to_owned(),
+            media: Vec::new(),
             is_error: true,
             details: Some(serde_json::json!({"kind": "cancelled", "side_effect_occurred": false})),
             terminate: false,
@@ -259,6 +260,7 @@ fn assert_async_hook_cancelled_cleanly(events: &[AgentEvent], context: &AgentCon
         name: "echo".to_owned(),
         result: ToolResult {
             content: "tool execution cancelled".to_owned(),
+            media: Vec::new(),
             is_error: true,
             details: Some(serde_json::json!({"kind": "cancelled", "side_effect_occurred": false})),
             terminate: false,
@@ -365,6 +367,7 @@ async fn runtime_parallel_cancellation_finishes_all_started_tool_wrappers() {
         name: "never".to_owned(),
         result: ToolResult {
             content: "tool execution cancelled".to_owned(),
+            media: Vec::new(),
             is_error: true,
             details: Some(serde_json::json!({"kind": "cancelled", "side_effect_occurred": false})),
             terminate: false,

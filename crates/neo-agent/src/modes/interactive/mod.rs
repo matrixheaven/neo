@@ -888,6 +888,7 @@ fn default_shell_driver() -> ShellDriver {
                         name: "Bash".to_owned(),
                         partial_result: neo_agent_core::ToolResult {
                             content: partial.to_owned(),
+                            media: Vec::new(),
                             is_error: false,
                             details: None,
                             terminate: false,
@@ -3128,6 +3129,9 @@ impl AssistantReplayProjection {
                 // Incremental stream events do not carry image payloads. Keep
                 // image parts for a partial replay after text/thinking matches.
                 Content::Image { .. } => uncovered_content.push(part.clone()),
+                // Incremental stream events never carry video payloads either;
+                // keep video parts for the same partial-replay reason.
+                Content::Video { .. } => uncovered_content.push(part.clone()),
             }
         }
 

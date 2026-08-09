@@ -6,7 +6,7 @@ use std::io::Read as _;
 use std::path::{Component, Path};
 use std::sync::Arc;
 
-use neo_agent_core::{Content, ImageRef};
+use neo_agent_core::{Content, MediaRef};
 use neo_tui::{
     paste::{
         FileReference, FileReferenceKind, FileReferenceStore, ImageAttachmentStore, Marker,
@@ -49,7 +49,7 @@ pub fn expand_prompt_markers(
                     // inline-encode as Base64 to avoid needing a session dir.
                     // Otherwise use a Blob reference (resolved by the runtime).
                     let data = if let Some(bytes) = image_store.pending_bytes(id) {
-                        ImageRef::Base64(Arc::from(
+                        MediaRef::Base64(Arc::from(
                             base64::Engine::encode(
                                 &base64::engine::general_purpose::STANDARD,
                                 bytes,
@@ -57,7 +57,7 @@ pub fn expand_prompt_markers(
                             .as_str(),
                         ))
                     } else {
-                        ImageRef::Blob(att.sha256.as_str().into())
+                        MediaRef::Blob(att.sha256.as_str().into())
                     };
                     parts.push(Content::Image {
                         mime_type: att.mime_type.as_str().into(),

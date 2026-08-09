@@ -48,6 +48,7 @@ fn origin(run_id: &str, invocation_id: &str) -> WorkflowExecutionOrigin {
 fn tool_result(content: &str, is_error: bool) -> ToolResult {
     ToolResult {
         content: content.to_owned(),
+        media: Vec::new(),
         is_error,
         details: None,
         terminate: false,
@@ -180,6 +181,7 @@ fn successful_workflow_launch_replaces_the_generic_tool_card() {
         name: "Workflow".to_owned(),
         result: ToolResult {
             content: "started".to_owned(),
+            media: Vec::new(),
             is_error: false,
             details: Some(serde_json::json!({
                 "action": "run_saved",
@@ -218,6 +220,7 @@ fn successful_workflow_launch_replaces_the_generic_tool_card() {
         name: "Workflow".to_owned(),
         result: ToolResult {
             content: "workflow not found".to_owned(),
+            media: Vec::new(),
             is_error: true,
             details: Some(serde_json::json!({
                 "action": "run_saved",

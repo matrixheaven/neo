@@ -126,10 +126,10 @@ pub(crate) fn reject_images(
 ) -> Result<(), ProviderError> {
     if content
         .iter()
-        .any(|part| matches!(part, ContentPart::Image { .. }))
+        .any(|part| matches!(part, ContentPart::Image { .. } | ContentPart::Video { .. }))
     {
         return Err(ProviderError::Unsupported(format!(
-            "{provider} image content is only supported in user messages, not {role} messages"
+            "{provider} media content is only supported in user messages, not {role} messages"
         )));
     }
     Ok(())

@@ -424,7 +424,7 @@ async fn openai_responses_client_rejects_assistant_image_parts_without_posting()
 
     assert!(
         err.to_string()
-            .contains("OpenAI Responses image content is only supported")
+            .contains("OpenAI Responses media content is only supported")
     );
     assert_eq!(server.requests().len(), 0);
 }

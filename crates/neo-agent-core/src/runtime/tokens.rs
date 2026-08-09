@@ -62,6 +62,7 @@ pub(crate) fn estimate_content_tokens(content: &[Content]) -> usize {
             Content::Text { text } => estimate_text_tokens(text),
             Content::Thinking { .. } => 0,
             Content::Image { .. } => estimate_image_tokens(),
+            Content::Video { .. } => estimate_video_tokens(),
         })
         .sum()
 }
@@ -98,6 +99,10 @@ pub(crate) fn estimate_text_tokens(text: &str) -> usize {
 }
 
 const fn estimate_image_tokens() -> usize {
+    1_200
+}
+
+const fn estimate_video_tokens() -> usize {
     1_200
 }
 

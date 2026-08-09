@@ -45,7 +45,11 @@ pub enum Content {
     },
     Image {
         mime_type: Arc<str>,
-        data: ImageRef,
+        data: MediaRef,
+    },
+    Video {
+        mime_type: Arc<str>,
+        data: MediaRef,
     },
 }
 
@@ -101,13 +105,13 @@ impl Content {
     pub fn as_text(&self) -> Option<&str> {
         match self {
             Self::Text { text } => Some(text),
-            Self::Thinking { .. } | Self::Image { .. } => None,
+            Self::Thinking { .. } | Self::Image { .. } | Self::Video { .. } => None,
         }
     }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
-pub enum ImageRef {
+pub enum MediaRef {
     Base64(Arc<str>),
     Url(Arc<str>),
     /// SHA-256 reference to a blob file stored in the session directory.
@@ -818,22 +822,37 @@ fn to_content_part(content: &Content) -> ContentPart {
             signature: signature.as_ref().map(std::string::ToString::to_string),
             redacted: *redacted,
         },
-        Content::Image { mime_type, data } => match data {
-            ImageRef::Base64(value) => ContentPart::Image {
-                mime_type: mime_type.to_string(),
-                data: ImageData::Base64(value.to_string()),
-            },
-            ImageRef::Url(value) => ContentPart::Image {
-                mime_type: mime_type.to_string(),
-                data: ImageData::Url(value.to_string()),
-            },
-            // Blob references must be resolved to base64 before conversion.
-            // If an unresolved blob reaches here, emit a text placeholder
-            // instead of invalid empty base64 image data.
-            ImageRef::Blob(sha) => ContentPart::Text {
-                text: format!("[unavailable image: blob {sha}]"),
-            },
-        },
+        Content::Image { mime_type, data } => to_media_content_part(false, mime_type, data),
+        Content::Video { mime_type, data } => to_media_content_part(true, mime_type, data),
+    }
+}
+
+fn to_media_content_part(video: bool, mime_type: &str, data: &MediaRef) -> ContentPart {
+    let data = match data {
+        MediaRef::Base64(value) => ImageData::Base64(value.to_string()),
+        MediaRef::Url(value) => ImageData::Url(value.to_string()),
+        // Blob references must be resolved to base64 before conversion.
+        // If an unresolved blob reaches here, emit a text placeholder
+        // instead of invalid empty base64 media data.
+        MediaRef::Blob(sha) => {
+            return ContentPart::Text {
+                text: format!(
+                    "[unavailable {}: blob {sha}]",
+                    if video { "video" } else { "image" }
+                ),
+            };
+        }
+    };
+    if video {
+        ContentPart::Video {
+            mime_type: mime_type.to_string(),
+            data,
+        }
+    } else {
+        ContentPart::Image {
+            mime_type: mime_type.to_string(),
+            data,
+        }
     }
 }
 #[cfg(test)]
@@ -871,7 +890,7 @@ mod tests {
             .enable_all()
             .build()
             .expect("tokio runtime")
-            .block_on(crate::runtime::image_blobs::resolve_image_blobs(
+            .block_on(crate::runtime::image_blobs::resolve_media_blobs(
                 vec![message.clone()],
                 None,
             ));
@@ -1105,5 +1124,61 @@ mod tests {
         assert!(matches!(&out[2], AgentMessage::User { .. }));
         assert!(out[2].text().contains("orphaned tool result"));
         assert!(matches!(&out[3], AgentMessage::User { .. }));
+    }
+
+    #[test]
+    fn video_content_serializes_to_stable_shape_and_image_shape_is_unchanged() {
+        let video = Content::Video {
+            mime_type: "video/mp4".into(),
+            data: MediaRef::Blob("video-sha".into()),
+        };
+        let wire = serde_json::to_string(&video).expect("serialize video content");
+        assert_eq!(
+            wire, r#"{"Video":{"mime_type":"video/mp4","data":{"Blob":"video-sha"}}}"#,
+            "video parts share the image envelope with a distinct variant name"
+        );
+
+        // Historical image serialization must stay byte-identical.
+        let image = Content::Image {
+            mime_type: "image/png".into(),
+            data: MediaRef::Url("https://example.test/cat.png".into()),
+        };
+        assert_eq!(
+            serde_json::to_string(&image).expect("serialize image content"),
+            r#"{"Image":{"mime_type":"image/png","data":{"Url":"https://example.test/cat.png"}}}"#
+        );
+        let decoded: Content = serde_json::from_str(&wire).expect("deserialize video content");
+        assert_eq!(decoded, video);
+    }
+
+    #[test]
+    fn video_content_converts_to_provider_video_part_and_unresolved_blob_never_becomes_empty_media()
+    {
+        let message = AgentMessage::user_content(vec![Content::Video {
+            mime_type: "video/mp4".into(),
+            data: MediaRef::Base64("aGVsbG8=".into()),
+        }]);
+        let ChatMessage::User { content } = message.to_chat_message() else {
+            panic!("expected provider user message");
+        };
+        assert!(matches!(
+            content.as_slice(),
+            [ContentPart::Video { mime_type, data: neo_ai::ImageData::Base64(value) }]
+                if mime_type == "video/mp4" && value == "aGVsbG8="
+        ));
+
+        // An unresolved blob must become a deterministic text placeholder,
+        // never an empty media part.
+        let message = AgentMessage::user_content(vec![Content::Video {
+            mime_type: "video/mp4".into(),
+            data: MediaRef::Blob("video-sha".into()),
+        }]);
+        let ChatMessage::User { content } = message.to_chat_message() else {
+            panic!("expected provider user message");
+        };
+        assert!(matches!(
+            content.as_slice(),
+            [ContentPart::Text { text }] if text == "[unavailable video: blob video-sha]"
+        ));
     }
 }

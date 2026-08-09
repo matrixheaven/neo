@@ -390,6 +390,10 @@ fn content_part(
                     .to_owned(),
             )),
         }),
+        ContentPart::Video { .. } => Some(Err(ProviderError::Unsupported(
+            "Google Generative AI video transport is not implemented; video parts must be projected before the request"
+                .to_owned(),
+        ))),
     }
 }
 
@@ -404,6 +408,10 @@ fn text_parts(content: &[ContentPart]) -> Result<Vec<Value>, ProviderError> {
                 "Google Generative AI image content is only supported in user/model messages, not system messages"
                     .to_owned(),
             )),
+            ContentPart::Video { .. } => Err(ProviderError::Unsupported(
+                "Google Generative AI video transport is not implemented; video parts must be projected before the request"
+                    .to_owned(),
+            )),
         })
         .collect()
 }
@@ -413,7 +421,9 @@ fn content_text(content: &[ContentPart]) -> String {
         .iter()
         .filter_map(|part| match part {
             ContentPart::Text { text } => Some(text.as_str()),
-            ContentPart::Thinking { .. } | ContentPart::Image { .. } => None,
+            ContentPart::Thinking { .. }
+            | ContentPart::Image { .. }
+            | ContentPart::Video { .. } => None,
         })
         .collect::<Vec<_>>()
         .join("\n")

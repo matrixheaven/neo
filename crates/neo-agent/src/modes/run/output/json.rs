@@ -712,6 +712,11 @@ fn stable_content(content: &[Content]) -> Vec<Value> {
                 "mimeType": mime_type,
                 "data": data,
             }),
+            Content::Video { mime_type, data } => json!({
+                "type": "video",
+                "mimeType": mime_type,
+                "data": data,
+            }),
         })
         .collect()
 }

@@ -2,7 +2,7 @@ use neo_ai::{AiError, ChatMessage, ChatRequest, ContentPart, RequestOptions};
 
 use super::config::AgentConfig;
 use super::context::AgentContext;
-use super::image_blobs::resolve_image_blobs;
+use super::image_blobs::resolve_media_blobs;
 use crate::{AgentMessage, sanitize_tool_exchange_messages};
 
 pub(super) async fn chat_request(config: &AgentConfig, context: &AgentContext) -> ChatRequest {
@@ -19,7 +19,7 @@ pub(super) async fn chat_request(config: &AgentConfig, context: &AgentContext) -
     }
     // Resolve blob references to inline base64 before sending to the provider.
     let context_messages =
-        resolve_image_blobs(context_messages, config.session_directory.as_deref()).await;
+        resolve_media_blobs(context_messages, config.session_directory.as_deref()).await;
     // Never send a provider request with an assistant message that has pending
     // tool_calls but no matching tool results.  This guards against incomplete
     // trailing tool turns and against compaction boundaries that accidentally

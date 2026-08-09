@@ -147,6 +147,8 @@ pub struct ModelCapabilities {
     pub tools: bool,
     pub images: bool,
     #[serde(default)]
+    pub videos: bool,
+    #[serde(default)]
     pub reasoning: ReasoningCapability,
     pub embeddings: bool,
     pub max_context_tokens: Option<u32>,
@@ -170,6 +172,7 @@ impl ModelCapabilities {
             streaming: true,
             tools: false,
             images: false,
+            videos: false,
             reasoning: ReasoningCapability::None,
             embeddings: false,
             max_context_tokens: None,
@@ -209,6 +212,7 @@ impl ModelCapabilities {
             streaming: false,
             tools: false,
             images: false,
+            videos: false,
             reasoning: ReasoningCapability::None,
             embeddings: true,
             max_context_tokens: None,
@@ -261,6 +265,10 @@ pub enum ContentPart {
         redacted: bool,
     },
     Image {
+        mime_type: String,
+        data: ImageData,
+    },
+    Video {
         mime_type: String,
         data: ImageData,
     },
