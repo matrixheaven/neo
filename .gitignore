@@ -13,3 +13,4 @@ docs/aegis/work/
 docs/node_modules/
 docs/.vitepress/cache/
 docs/.vitepress/dist/
+crates/neo-webui/web/screenshots/
