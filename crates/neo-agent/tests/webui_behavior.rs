@@ -10,8 +10,14 @@ mod webui_behavior {
     pub mod provider;
     #[path = "pty.rs"]
     pub mod pty;
-    #[path = "session_runtime.rs"]
-    pub mod session_runtime;
+    #[path = "session_controls.rs"]
+    pub mod session_controls;
+    #[path = "session_env.rs"]
+    pub mod session_env;
+    #[path = "session_reconnect.rs"]
+    pub mod session_reconnect;
+    #[path = "session_turns.rs"]
+    pub mod session_turns;
     #[path = "ws.rs"]
     pub mod ws;
 }
