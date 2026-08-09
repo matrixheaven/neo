@@ -587,3 +587,24 @@ Entries are workspace records, not authoritative runtime decisions.
 | 2026-08-08 | artifact | docs/aegis/work/2026-08-08-delegate-result-delivery/todo-checkpoint-draft.json | Delegate 系列结果交付实施 todo checkpoint draft |
 | 2026-08-08 | artifact | docs/aegis/work/2026-08-08-delegate-result-delivery/drift-check-draft.json | Delegate 系列结果交付实施 drift check draft |
 | 2026-08-08 | artifact | docs/aegis/work/2026-08-08-delegate-result-delivery/resume-state-hint.json | 2026-08-08-delegate-result-delivery resume state hint |
+| 2026-08-09 | work | docs/aegis/work/2026-08-09-neo-webui/10-intent.md | Neo WebUI 设计与交接 intent |
+| 2026-08-09 | work | docs/aegis/work/2026-08-09-neo-webui/20-checkpoint.md | Neo WebUI 设计与交接 checkpoint |
+| 2026-08-09 | work | docs/aegis/work/2026-08-09-neo-webui/90-evidence.md | Neo WebUI 设计与交接 evidence |
+| 2026-08-09 | work | docs/aegis/work/2026-08-09-neo-webui/99-reflection.md | Neo WebUI 设计与交接 reflection |
+| 2026-08-09 | artifact | docs/aegis/work/2026-08-09-neo-webui/task-intent-draft.json | Neo WebUI 设计与交接 task intent draft |
+| 2026-08-09 | artifact | docs/aegis/work/2026-08-09-neo-webui/baseline-read-set-hint.json | Neo WebUI 设计与交接 baseline read-set hint |
+| 2026-08-09 | artifact | docs/aegis/work/2026-08-09-neo-webui/baseline-usage-draft.json | Neo WebUI 设计与交接 baseline usage draft |
+| 2026-08-09 | artifact | docs/aegis/work/2026-08-09-neo-webui/impact-statement-draft.json | Neo WebUI 设计与交接 impact statement draft |
+| 2026-08-09 | artifact | docs/aegis/work/2026-08-09-neo-webui/todo-checkpoint-draft.json | Neo WebUI 设计与交接 todo checkpoint draft |
+| 2026-08-09 | artifact | docs/aegis/work/2026-08-09-neo-webui/drift-check-draft.json | Neo WebUI 设计与交接 drift check draft |
+| 2026-08-09 | spec | docs/aegis/specs/2026-08-09-neo-webui-design.md | Neo WebUI 设计 |
+| 2026-08-09 | handoff | docs/aegis/handoffs/2026-08-09-neo-webui-frontend.md | Neo WebUI 前端实施交接 |
+| 2026-08-09 | handoff | docs/aegis/handoffs/2026-08-09-neo-webui-runtime.md | Neo WebUI 底层实施交接 |
+| 2026-08-09 | artifact | docs/aegis/work/2026-08-09-neo-webui/evidence-bundle-draft-approved-design.json | 2026-08-09-neo-webui evidence approved-design |
+| 2026-08-09 | artifact | docs/aegis/work/2026-08-09-neo-webui/evidence-bundle-draft-source-boundaries.json | 2026-08-09-neo-webui evidence source-boundaries |
+| 2026-08-09 | artifact | docs/aegis/work/2026-08-09-neo-webui/evidence-bundle-draft-design-and-handoffs.json | 2026-08-09-neo-webui evidence design-and-handoffs |
+| 2026-08-09 | artifact | docs/aegis/work/2026-08-09-neo-webui/resume-state-hint.json | 2026-08-09-neo-webui resume state hint |
+| 2026-08-09 | artifact | docs/aegis/work/2026-08-09-neo-webui/gate-input-pack.json | 2026-08-09-neo-webui gate input pack |
+| 2026-08-09 | work | docs/aegis/work/2026-08-09-neo-webui/proof-bundle.md | 2026-08-09-neo-webui proof bundle |
+| 2026-08-09 | artifact | docs/aegis/work/2026-08-09-neo-webui/evidence-bundle-draft-document-validation.json | 2026-08-09-neo-webui evidence document-validation |
+| 2026-08-09 | artifact | docs/aegis/work/2026-08-09-neo-webui/evidence-bundle-draft-design-self-review.json | 2026-08-09-neo-webui evidence design-self-review |
