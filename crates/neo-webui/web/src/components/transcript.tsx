@@ -547,15 +547,35 @@ function LocalPreview({ change, expanded }: { change: FileChange; expanded: bool
   return (
     <pre className="ft-local-diff">
       {lines.map((line, index) => (
-        <span className={`ft-diff-${line.kind}`} key={`${index}:${line.content}`}>
-          {line.content || " "}
+        <span className={`ft-preview-line ft-diff-${line.kind}`} key={`${index}:${line.content}`}>
+          <span className="ft-line-no" aria-hidden>{index + 1}</span>
+          <span className="ft-line-gutter" aria-hidden />
+          <span className="ft-line-content">{line.content || " "}</span>
         </span>
       ))}
       {lines.length === 0 ? (
-        <span className="ft-diff-empty">{change.created ? "新建空文件" : "没有可显示的局部内容"}</span>
+        <span className="ft-preview-line ft-diff-empty">
+          <span className="ft-line-no" aria-hidden>·</span>
+          <span className="ft-line-gutter" aria-hidden />
+          <span className="ft-line-content">{change.created ? "新建空文件" : "没有可显示的局部内容"}</span>
+        </span>
       ) : null}
-      {omitted ? <span className="ft-diff-omitted">其余内容未显示</span> : null}
+      {omitted ? (
+        <span className="ft-preview-omitted">其余内容未显示</span>
+      ) : null}
     </pre>
+  );
+}
+
+function FilePreviewHeader({ change }: { change: FileChange }) {
+  return (
+    <div className="ft-preview-header">
+      <span className="ft-preview-path" aria-label={change.path}>{change.path}</span>
+      <span className="ft-diff" aria-label={`新增 ${change.added} 行，删除 ${change.removed} 行`}>
+        {change.added > 0 ? <span className="ft-add">+{change.added}</span> : null}
+        {change.removed > 0 ? <span className="ft-del">−{change.removed}</span> : null}
+      </span>
+    </div>
   );
 }
 
@@ -643,6 +663,8 @@ function FileChangeRow({
           aria-controls={previewId}
           aria-expanded={open}
           aria-label={label}
+          onFocus={hasPreview ? () => setHovering(true) : undefined}
+          onBlur={hasPreview ? () => setHovering(false) : undefined}
           onClick={togglePreview}
         >
           {contents}
@@ -655,8 +677,10 @@ function FileChangeRow({
           id={previewId}
           className={`ft-file-preview ${open ? "open" : ""}`}
           hidden={!previewVisible}
-          aria-hidden={open ? undefined : true}
+          role="region"
+          aria-label={`${change.path} 的${change.created ? "文件内容" : "局部差异"}`}
         >
+          <FilePreviewHeader change={change} />
           <LocalPreview change={change} expanded={open} />
         </div>
       ) : null}

@@ -142,9 +142,17 @@ test("08 answer-ft：文件修改列表与复制按钮", async ({ page }) => {
     footer.getByRole("button", { name: "展开 web/src/styles.css 的局部差异" }),
   ).toBeVisible();
   const createdFile = footer.getByRole("button", { name: "展开 web/src/acceptance-notes.md 的新建文件内容" });
+  const createdRow = createdFile.locator("..");
+  const rowBeforeHover = await createdRow.boundingBox();
   await expect(createdFile).toBeVisible();
   await createdFile.hover();
   await expect(footer.getByText("# 验收记录")).toBeVisible();
+  await expect(footer.locator(".ft-preview-header").filter({ hasText: "acceptance-notes.md" })).toBeVisible();
+  await expect(footer.locator(".ft-file-preview:not([hidden]) .ft-line-no").first()).toBeVisible();
+  const rowAfterHover = await createdRow.boundingBox();
+  expect(rowAfterHover?.height).toBe(rowBeforeHover?.height);
+  await createdFile.focus();
+  await expect(footer.locator(".ft-file-preview:not([hidden])")).toBeVisible();
   await createdFile.click();
   const openPreview = footer.locator(".ft-file-preview.open");
   await expect(openPreview).toBeVisible();

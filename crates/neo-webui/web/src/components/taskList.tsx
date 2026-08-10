@@ -4,19 +4,14 @@
  * hidden entirely when there are no tasks.
  */
 
-import { CheckCircle2, ChevronDown, ChevronUp, Circle, Loader2 } from "lucide-react";
+import { Check, ChevronDown, ChevronUp } from "lucide-react";
 import { useState } from "react";
 import type { TodoEventData } from "../protocol";
 
 function todoIcon(status: string) {
-  switch (status) {
-    case "done":
-      return <CheckCircle2 size={14} aria-hidden />;
-    case "in_progress":
-      return <Loader2 size={14} className="spin" aria-hidden />;
-    default:
-      return <Circle size={14} aria-hidden />;
-  }
+  return status === "done"
+    ? <Check size={13} aria-hidden />
+    : <span className="task-status-dot" aria-hidden />;
 }
 
 function todoStatusText(status: string): string {
@@ -54,9 +49,14 @@ export function TaskList({ todos }: { todos: TodoEventData[] }) {
         <ul className="task-items">
           {todos.map((todo, index) => (
             <li key={`${index}-${todo.title}`} className={`task-item status-${todo.status}`}>
-              {todoIcon(todo.status)}
+              <span
+                className="task-status-indicator"
+                aria-label={todoStatusText(todo.status)}
+                title={todoStatusText(todo.status)}
+              >
+                {todoIcon(todo.status)}
+              </span>
               <span className="task-title">{todo.title}</span>
-              <span className="task-state">{todoStatusText(todo.status)}</span>
             </li>
           ))}
         </ul>

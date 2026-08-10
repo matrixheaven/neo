@@ -204,7 +204,8 @@ describe("transcript redesign rows", () => {
     expect(bar.getAttribute("aria-expanded")).toBe("true");
     expect(container.querySelector(".think.live .think-title")).not.toBeNull();
     const runningLine = bar.closest(".think") as HTMLElement;
-    expect(runningLine.querySelector('[data-status-icon="running"]')).not.toBeNull();
+    expect(runningLine.querySelector("[data-status-icon]")).toBeNull();
+    expect(runningLine.querySelector("[data-thinking-icon]")).not.toBeNull();
     expect(runningLine.querySelector(".line-tail")).toBeNull();
     await screen.findByText("实时思考内容");
 
@@ -216,7 +217,8 @@ describe("transcript redesign rows", () => {
     expect(
       within(line).getByRole("button", { name: /思考，状态：已完成/ }).getAttribute("aria-expanded"),
     ).toBe("false");
-    expect(line.querySelector('[data-status-icon="finished"]')).not.toBeNull();
+    expect(line.querySelector("[data-status-icon]")).toBeNull();
+    expect(line.querySelector("[data-thinking-icon]")).not.toBeNull();
     expect(line.querySelector(".line-tail")).toBeNull();
   });
 
@@ -650,15 +652,15 @@ describe("transcript redesign rows", () => {
     const [todoButton, setTodoButton] = within(fold).getAllByRole("button", { name: /更新任务清单/ });
     await user.click(todoButton);
     const todoLine = todoButton.closest(".tool-line") as HTMLElement;
-    expect(within(todoLine).getByText("进行中")).toBeTruthy();
+    expect(within(todoLine).getByLabelText("进行中")).toBeTruthy();
     expect(within(todoLine).getByText("检查展示")).toBeTruthy();
-    expect(within(todoLine).getByText("待处理")).toBeTruthy();
+    expect(within(todoLine).getByLabelText("待处理")).toBeTruthy();
     expect(within(todoButton).getByRole("progressbar", { name: "任务进度：0/2" })).toBeTruthy();
 
     await user.click(setTodoButton);
     const setTodoLine = setTodoButton.closest(".tool-line") as HTMLElement;
     expect(within(setTodoLine).getByText("发布回归")).toBeTruthy();
-    expect(within(setTodoLine).getByText("已完成")).toBeTruthy();
+    expect(within(setTodoLine).getByLabelText("已完成")).toBeTruthy();
     expect(within(setTodoButton).getByRole("progressbar", { name: "任务进度：1/1" })).toBeTruthy();
   });
 
@@ -891,7 +893,7 @@ describe("transcript redesign rows", () => {
     expect(createdPreview.hasAttribute("hidden")).toBe(true);
     await user.hover(createdButton);
     expect(createdPreview.hasAttribute("hidden")).toBe(false);
-    expect(createdPreview.getAttribute("aria-hidden")).toBe("true");
+    expect(createdPreview.getAttribute("aria-hidden")).toBeNull();
     await user.unhover(createdButton);
     expect(createdPreview.hasAttribute("hidden")).toBe(true);
 
@@ -1091,6 +1093,10 @@ describe("session view", () => {
     await screen.findByText("建立 neo-webui 包");
     const titles = await screen.findAllByText("编写行为测试");
     expect(titles.length).toBeGreaterThanOrEqual(2); // collapsed current + expanded list
+    expect(document.querySelectorAll(".task-status-indicator")).toHaveLength(2);
+    expect(document.querySelector(".task-item.status-in_progress .task-status-dot")).not.toBeNull();
+    expect(document.querySelector(".task-item.status-done .task-status-indicator svg")).not.toBeNull();
+    expect(document.querySelectorAll(".task-state")).toHaveLength(0);
   });
 
   it("expands thinking and tool bars to show real content", async () => {

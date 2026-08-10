@@ -17,6 +17,7 @@ html[data-theme="dark"] {
   --p-accent-dim: #4a6db3;
   --p-accent-soft: rgba(122, 162, 247, 0.12);
   --p-accent-soft-strong: rgba(122, 162, 247, 0.18);
+  --p-task-progress: #b78cff;
   --p-danger: #e06c75;
   --p-ok: #7ec699;
   --p-warn: #d8a657;
@@ -49,6 +50,7 @@ html[data-theme="light"] {
   --p-accent-dim: #167ff7;
   --p-accent-soft: rgba(23, 131, 255, 0.12);
   --p-accent-soft-strong: rgba(23, 131, 255, 0.18);
+  --p-task-progress: #7c3aed;
   --p-danger: #c0392b;
   --p-ok: #0e7a38;
   --p-warn: #a9610a;
@@ -83,6 +85,7 @@ html[data-theme="light"] {
   --accent-dim: var(--p-accent-dim);
   --accent-soft: var(--p-accent-soft);
   --accent-soft-strong: var(--p-accent-soft-strong);
+  --task-progress: var(--p-task-progress);
   --danger: var(--p-danger);
   --ok: var(--p-ok);
   --warn: var(--p-warn);
@@ -649,6 +652,12 @@ html.resizing .transcript-scroll * {
   contain-intrinsic-size: auto 120px;
 }
 
+/* Hover previews escape the row's paint containment without changing the
+   virtualization behavior of inactive transcript items. */
+.t-item:has(.ft-file-preview:not([hidden])) {
+  content-visibility: visible;
+}
+
 /* -- User turn: the only bubble -------------------------------------------- */
 
 .u-turn {
@@ -821,6 +830,16 @@ html.resizing .transcript-scroll * {
 
 .think-title {
   color: var(--text-dim);
+}
+
+.think-icon {
+  display: inline-flex;
+  flex: none;
+  color: var(--text-faint);
+}
+
+.think.live .think-icon {
+  color: var(--task-progress);
 }
 
 .think.live .think-title {
@@ -1086,12 +1105,25 @@ html.resizing .transcript-scroll * {
 
 .tl-todo-status {
   flex: none;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 14px;
+  height: 14px;
   color: var(--text-faint);
-  font-size: var(--font-size-micro);
+}
+
+.tl-todo-dot,
+.task-status-dot {
+  display: block;
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: currentColor;
 }
 
 .tl-todo.status-in_progress .tl-todo-status {
-  color: var(--accent);
+  color: var(--task-progress);
 }
 
 .tl-todo.status-done,
@@ -1173,7 +1205,7 @@ html.resizing .transcript-scroll * {
 .ft-changes {
   display: flex;
   flex-direction: column;
-  overflow: hidden;
+  overflow: visible;
   border: 1px solid var(--line-strong);
   border-radius: 6px;
   background: var(--surface);
@@ -1224,10 +1256,15 @@ html.resizing .transcript-scroll * {
 }
 
 .ft-file {
+  position: relative;
   display: flex;
   flex-direction: column;
   font-size: var(--font-size-aux);
   scroll-margin-block-end: 260px;
+}
+
+.ft-file:has(.ft-file-preview:not([hidden])) {
+  z-index: 30;
 }
 
 .ft-file + .ft-file {
@@ -1304,18 +1341,59 @@ button.ft-file-head:focus-visible {
 }
 
 .ft-file-preview {
+  position: absolute;
+  z-index: 20;
+  top: calc(100% - 1px);
+  left: 16px;
+  right: 10px;
+  max-height: min(440px, calc(100vh - 180px));
+  overflow: auto;
   min-width: 0;
-  padding: 0 10px 8px 29px;
+  padding: 0 10px 10px;
   scroll-margin-block-end: 260px;
+  border: 1px solid var(--line-strong);
+  border-radius: 6px;
+  background: var(--surface-raised);
+  box-shadow: var(--shadow-md);
+}
+
+.ft-file-preview.open {
+  position: relative;
+  z-index: auto;
+  top: auto;
+  left: auto;
+  right: auto;
+  max-height: none;
+  margin: 0 10px 10px 29px;
+  padding: 0 8px 8px;
+  box-shadow: none;
+}
+
+.ft-preview-header {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-height: 30px;
+  padding: 6px 8px;
+  border-bottom: 1px solid var(--line);
+  color: var(--text-dim);
+  font-size: var(--font-size-micro);
+}
+
+.ft-preview-path {
+  min-width: 0;
+  flex: 1;
+  overflow: hidden;
+  font-family: ui-monospace, "SF Mono", Menlo, Consolas, "Courier New", monospace;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .ft-local-diff {
   margin: 0;
-  padding: 5px 8px;
-  overflow-x: auto;
-  border: 1px solid var(--line);
-  border-radius: 4px;
-  background: var(--surface-raised);
+  padding: 5px 0;
+  overflow: visible;
+  background: var(--surface);
   color: var(--text-dim);
   font-family: ui-monospace, "SF Mono", Menlo, Consolas, "Courier New", monospace;
   font-size: var(--font-size-micro);
@@ -1327,9 +1405,37 @@ button.ft-file-head:focus-visible {
   white-space: pre;
 }
 
+.ft-preview-line {
+  display: grid !important;
+  grid-template-columns: 30px 3px minmax(0, 1fr);
+  min-height: 19px;
+  line-height: 1.5;
+}
+
+.ft-line-no {
+  padding-right: 8px;
+  color: var(--text-faint);
+  text-align: right;
+  user-select: none;
+}
+
+.ft-line-gutter {
+  background: var(--line);
+}
+
+.ft-line-content {
+  min-width: 0;
+  padding: 0 8px;
+  white-space: pre;
+}
+
 .ft-diff-add {
   color: var(--ok);
   background: color-mix(in srgb, var(--ok) 12%, transparent);
+}
+
+.ft-diff-add .ft-line-gutter {
+  background: var(--ok);
 }
 
 .ft-diff-del {
@@ -1337,9 +1443,23 @@ button.ft-file-head:focus-visible {
   background: color-mix(in srgb, var(--danger) 12%, transparent);
 }
 
+.ft-diff-del .ft-line-gutter {
+  background: var(--danger);
+}
+
+.ft-diff-created .ft-line-gutter {
+  background: var(--accent-dim);
+}
+
 .ft-diff-separator,
-.ft-diff-omitted {
+.ft-preview-omitted {
   color: var(--accent);
+}
+
+.ft-preview-omitted {
+  display: block;
+  padding: 6px 8px 2px 41px;
+  white-space: normal;
 }
 
 .ft-diff-empty {
@@ -2453,14 +2573,27 @@ button.ft-file-head:focus-visible {
   color: var(--text);
 }
 
+.task-status-indicator {
+  display: inline-flex;
+  flex: none;
+  align-items: center;
+  justify-content: center;
+  width: 14px;
+  height: 14px;
+  color: var(--text-faint);
+}
+
+.task-item.status-in_progress .task-status-indicator {
+  color: var(--task-progress);
+}
+
+.task-item.status-done .task-status-indicator {
+  color: var(--ok);
+}
+
 .task-title {
   flex: 1;
   min-width: 0;
-}
-
-.task-state {
-  font-size: var(--font-size-micro);
-  color: var(--text-faint);
 }
 
 /* -- Jump to latest ------------------------------------------------------------------------ */

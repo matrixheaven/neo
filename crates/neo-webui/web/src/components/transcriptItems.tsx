@@ -11,6 +11,7 @@
 import {
   Bot,
   Brain,
+  BookOpen,
   Check,
   ChevronRight,
   CircleHelp,
@@ -22,6 +23,7 @@ import {
   FilePlus,
   FolderSearch,
   ListChecks,
+  Lightbulb,
   Loader2,
   MessageCircle,
   Network,
@@ -212,9 +214,10 @@ function Think({ sessionId, item }: { sessionId: string; item: ThinkingItem }) {
       onToggle={toggle}
       head={
         <>
-          {resultIcon(item.finished ? "finished" : "running")}
           {lineCaret()}
-          <Brain size={14} aria-hidden />
+          <span className="think-icon" data-thinking-icon aria-hidden>
+            <Lightbulb size={14} />
+          </span>
           <span className="think-title">思考</span>
         </>
       }
@@ -528,7 +531,7 @@ function toolIcon(icon: ToolIconName) {
     case "message":
       return <MessageCircle size={13} aria-hidden />;
     case "skill":
-      return <Brain size={13} aria-hidden />;
+      return <BookOpen size={13} aria-hidden />;
     case "question":
       return <ShieldQuestion size={13} aria-hidden />;
     case "workflow":
@@ -735,6 +738,18 @@ function todoStatusText(status: TodoEntry["status"]): string {
   }
 }
 
+function TodoStatusIndicator({ status }: { status: TodoEntry["status"] }) {
+  return (
+    <span
+      className={`tl-todo-status status-${status}`}
+      aria-label={todoStatusText(status)}
+      title={todoStatusText(status)}
+    >
+      {status === "done" ? <Check size={12} aria-hidden /> : <span className="tl-todo-dot" aria-hidden />}
+    </span>
+  );
+}
+
 function TodoProgress({ entries, compact = false }: { entries: TodoEntry[]; compact?: boolean }) {
   const completed = entries.filter((entry) => entry.status === "done").length;
   const total = entries.length;
@@ -870,7 +885,7 @@ function TodoToolDetails({ item, status }: { item: ToolItem; status: string }) {
         <ul className="tl-todos">
           {entries.map((entry, index) => (
             <li className={`tl-todo status-${entry.status}`} key={`${index}:${entry.title}`}>
-              <span className="tl-todo-status">{todoStatusText(entry.status)}</span>
+              <TodoStatusIndicator status={entry.status} />
               <span>{entry.title}</span>
             </li>
           ))}
