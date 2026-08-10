@@ -6,6 +6,48 @@
 import type { WebUiServerMessage } from "../../src/protocol";
 import { loadFixture, type FixtureEnvelope } from "./fixture";
 
+function hasCompleteStorageApi(storage: Storage): boolean {
+  return (
+    typeof storage.getItem === "function" &&
+    typeof storage.setItem === "function" &&
+    typeof storage.removeItem === "function" &&
+    typeof storage.clear === "function" &&
+    typeof storage.key === "function" &&
+    typeof storage.length === "number"
+  );
+}
+
+function installMemoryStorageWhenNeeded(): void {
+  if (hasCompleteStorageApi(window.localStorage)) return;
+
+  // Node can expose localStorage without Storage methods when its backing file is invalid.
+  const values = new Map<string, string>();
+  const storage: Storage = {
+    get length() {
+      return values.size;
+    },
+    clear() {
+      values.clear();
+    },
+    getItem(key) {
+      return values.get(String(key)) ?? null;
+    },
+    key(index) {
+      return Array.from(values.keys())[index] ?? null;
+    },
+    removeItem(key) {
+      values.delete(String(key));
+    },
+    setItem(key, value) {
+      values.set(String(key), String(value));
+    },
+  };
+
+  Object.defineProperty(window, "localStorage", { configurable: true, value: storage });
+}
+
+installMemoryStorageWhenNeeded();
+
 export const fixture = loadFixture();
 
 export interface RecordedRequest {
