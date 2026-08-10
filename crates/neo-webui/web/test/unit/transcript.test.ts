@@ -215,8 +215,12 @@ describe("event application after snapshot", () => {
   it("ignores events at or below the cursor (duplicate sequences)", () => {
     let state = stateWithSnapshot();
     state = applyEnvelopes(state, session1.after_snapshot);
+    // The fixture tail arrives out of order (metadata 17 after events 18-20),
+    // so the first pass defers 18-20 as a gap; the replay applies them.
+    state = applyEnvelopes(state, session1.after_snapshot);
     const before = state.sessions[session1.session_id];
-    // Replay the same envelopes: every sequence is <= cursor.
+    expect(before.cursor).toBe(20);
+    // A third pass is pure duplicates: nothing moves.
     state = applyEnvelopes(state, session1.after_snapshot);
     const after = state.sessions[session1.session_id];
     expect(after.cursor).toBe(before.cursor);
@@ -394,7 +398,7 @@ describe("retry retraction", () => {
     // Later events on the new stream resume at watermark + 1.
     state = applyEnvelopes(state, replacement.after_snapshot);
     const after = state.sessions[session2.session_id];
-    expect(after.cursor).toBe(11);
+    expect(after.cursor).toBe(12);
     expect(after.phase).toBe("idle");
     expect(after.currentTurnId).toBeNull();
     const delegate = after.projection.items.find(
@@ -429,6 +433,188 @@ describe("delegate swarm", () => {
     expect(swarm.swarm.aggregate.completed).toBe(2);
     expect(swarm.swarm.children).toHaveLength(2);
     expect(swarm.swarm.children[1].agent.state).toBe("completed");
+    // The progress payloads merged into the same item: nothing fell through
+    // to the unknown-event record.
+    expect(view.projection.items.some((item) => item.kind === "unknown")).toBe(false);
+  });
+});
+
+describe("delegate progress events", () => {
+  it("merges DelegateProgressUpdated into the existing delegate item", () => {
+    let projection = emptyProjection();
+    projection = applyAgentEvent(projection, {
+      DelegateStarted: {
+        turn: 1,
+        agent: { id: "agent_1", display_name: "explorer", state: "running", task_title: "检查覆盖" },
+      },
+    });
+    projection = applyAgentEvent(projection, {
+      DelegateProgressUpdated: {
+        turn: 1,
+        progress: {
+          agent_id: "agent_1",
+          state: "running",
+          tool_count: 2,
+          token_count: 30,
+          elapsed_ms: 4500,
+          latest_text: "进展中",
+        },
+      },
+    });
+    const delegates = projection.items.filter(
+      (item): item is DelegateItem => item.kind === "delegate",
+    );
+    expect(delegates).toHaveLength(1);
+    // Identity from the full snapshot survives; progress fields win.
+    expect(delegates[0].agent.display_name).toBe("explorer");
+    expect(delegates[0].agent.tool_count).toBe(2);
+    expect(delegates[0].agent.latest_text).toBe("进展中");
+    expect(delegates[0].agent.elapsed?.secs).toBe(4);
+    expect(delegates[0].finished).toBe(false);
+    expect(projection.items.some((item) => item.kind === "unknown")).toBe(false);
+  });
+
+  it("merges DelegateSwarmProgressUpdated into the existing swarm item", () => {
+    let projection = emptyProjection();
+    projection = applyAgentEvent(projection, {
+      DelegateSwarmStarted: {
+        turn: 1,
+        swarm: {
+          swarm_id: "swarm_1",
+          description: "并行检查",
+          state: "running",
+          max_concurrency: 2,
+          aggregate: { total: 2, queued: 1, running: 1, completed: 0, failed: 0, cancelled: 0, timed_out: 0 },
+          children: [
+            { item_index: 0, item: "甲", agent: { id: "a1", display_name: "a1", state: "running" } },
+            { item_index: 1, item: "乙", agent: { id: "a2", display_name: "a2", state: "queued" } },
+          ],
+        },
+      },
+    });
+    projection = applyAgentEvent(projection, {
+      DelegateSwarmProgressUpdated: {
+        turn: 1,
+        swarm_id: "swarm_1",
+        state: "running",
+        aggregate: { total: 2, queued: 0, running: 1, completed: 1, failed: 0, cancelled: 0, timed_out: 0 },
+        child_progress: {
+          item_index: 0,
+          progress: { agent_id: "a1", state: "completed", elapsed_ms: 7000, latest_text: "完成" },
+        },
+      },
+    });
+    const swarms = projection.items.filter((item): item is SwarmItem => item.kind === "swarm");
+    expect(swarms).toHaveLength(1);
+    expect(swarms[0].swarm.aggregate.completed).toBe(1);
+    expect(swarms[0].swarm.children[0].agent.state).toBe("completed");
+    expect(swarms[0].swarm.children[0].agent.latest_text).toBe("完成");
+    expect(swarms[0].swarm.children[1].agent.state).toBe("queued");
+    expect(swarms[0].finished).toBe(false);
+  });
+
+  it("keeps fixture swarm progress updates inside the single swarm item", () => {
+    let state = stateWithSnapshot(session2);
+    state = applyEnvelopes(state, session2.after_snapshot.slice(0, 7)); // through seq 10
+    const view = state.sessions[session2.session_id];
+    const swarms = view.projection.items.filter(
+      (item): item is SwarmItem => item.kind === "swarm",
+    );
+    expect(swarms).toHaveLength(1);
+    expect(swarms[0].swarm.children[0].agent.state).toBe("completed");
+    expect(view.projection.items.some((item) => item.kind === "unknown")).toBe(false);
+  });
+});
+
+describe("usage and context projections", () => {
+  it("projects TokenUsage and ContextWindowUpdated latest-wins, never as rows", () => {
+    let projection = emptyProjection();
+    projection = applyAgentEvent(projection, {
+      TokenUsage: { turn: 1, usage: { input_tokens: 10, output_tokens: 2 } },
+    });
+    projection = applyAgentEvent(projection, {
+      TokenUsage: { turn: 1, usage: { input_tokens: 20, output_tokens: 3 } },
+    });
+    projection = applyAgentEvent(projection, {
+      ContextWindowUpdated: {
+        turn: 1,
+        used_tokens: 23,
+        max_tokens: 200000,
+        remaining_tokens: 199977,
+      },
+    });
+    expect(projection.latestUsage?.input_tokens).toBe(20);
+    expect(projection.latestUsage?.output_tokens).toBe(3);
+    expect(projection.contextWindow?.used_tokens).toBe(23);
+    expect(projection.contextWindow?.max_tokens).toBe(200000);
+    expect(projection.items).toHaveLength(0);
+  });
+
+  it("seeds usage and context window from the snapshot session state", () => {
+    const state = stateWithSnapshot();
+    const view = state.sessions[session1.session_id];
+    expect(view.projection.latestUsage?.input_tokens).toBe(12480);
+    expect(view.projection.contextWindow?.used_tokens).toBe(12792);
+    expect(view.projection.contextWindow?.max_tokens).toBe(200000);
+  });
+
+  it("applies fresher usage fields carried by session_state messages", () => {
+    let state = stateWithSnapshot();
+    // seq 9..16: the session_state at 16 carries no usage → snapshot values survive.
+    state = applyEnvelopes(state, session1.after_snapshot.slice(0, 8));
+    let view = state.sessions[session1.session_id];
+    expect(view.projection.latestUsage?.input_tokens).toBe(12480);
+    state = appReducer(state, {
+      type: "server_message",
+      message: {
+        type: "session_state",
+        stream_id: fixture.stream_id,
+        session_id: session1.session_id,
+        sequence: 17,
+        event: {
+          phase: "running",
+          waiting_approval: false,
+          waiting_question: true,
+          current_turn_id: "turn_01",
+          token_usage: { input_tokens: 13000, output_tokens: 400 },
+          context_window: { used_tokens: 13400, max_tokens: 200000 },
+        },
+      },
+    });
+    view = state.sessions[session1.session_id];
+    expect(view.projection.latestUsage?.input_tokens).toBe(13000);
+    expect(view.projection.contextWindow?.used_tokens).toBe(13400);
+  });
+});
+
+describe("grouped workspace snapshot", () => {
+  it("parses the grouped snapshot, derives the flat list and syncs summary changes", () => {
+    let state = initialAppState(280, "dark");
+    state = appReducer(state, {
+      type: "server_message",
+      message: asServerMessage(fixture.long_connection.workspace_snapshot),
+    });
+    expect(state.workspaces).toHaveLength(2);
+    expect(state.workspaces[0].label).toBe("neo");
+    expect(state.workspaces[0].current).toBe(true);
+    expect(state.workspaces[1].label).toBe("playground");
+    expect(state.summaries.map((summary) => summary.session_id)).toEqual([
+      "session_0001",
+      "session_0002",
+      "session_0003",
+    ]);
+
+    state = appReducer(state, {
+      type: "server_message",
+      message: asServerMessage(fixture.long_connection.session_summary_changed),
+    });
+    expect(
+      state.summaries.find((summary) => summary.session_id === "session_0002")?.state,
+    ).toBe("idle");
+    expect(
+      state.workspaces[0].sessions.find((summary) => summary.session_id === "session_0002")
+        ?.state,
+    ).toBe("idle");
   });
 });
 

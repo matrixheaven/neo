@@ -10,6 +10,7 @@ import type {
   WebUiSessionMetadata,
   WebUiSessionSummary,
   WebUiSessionStarted,
+  WebUiWorkspaceGroup,
 } from "../protocol";
 import type { TranscriptProjection } from "./transcript";
 import { emptyProjection } from "./transcript";
@@ -31,7 +32,10 @@ export interface SessionViewState {
   currentTurnId: string | null;
   metadata: WebUiSessionMetadata | null;
   draft: string;
-  expandedItemIds: string[];
+  /** Explicit per-line expansion overrides. Absent = follow the line's
+   * phase-dependent default (e.g. think streams open and auto-collapses on
+   * finish); once the user clicks, their choice wins across phase changes. */
+  lineOverrides: Record<string, boolean>;
   isAtBottom: boolean;
   /** Set when the cursor cannot resume (gap or stream change); the
    * connection layer re-subscribes without a cursor. */
@@ -55,7 +59,7 @@ export function emptySessionView(sessionId: string): SessionViewState {
     currentTurnId: null,
     metadata: null,
     draft: "",
-    expandedItemIds: [],
+    lineOverrides: {},
     isAtBottom: true,
     resyncNeeded: false,
     submittedApprovalIds: [],
@@ -99,6 +103,9 @@ export interface AppState {
   /** Session id whose context menu is open, if any. */
   activeContextMenu: string | null;
   summaries: WebUiSessionSummary[];
+  /** Grouped cross-workspace aggregation from the latest workspace_snapshot
+   * (flat `summaries` above is derived from it; grouped sidebar UI is R5). */
+  workspaces: WebUiWorkspaceGroup[];
   workspaceStreamId: string | null;
   workspaceCursor: number;
   sessions: Record<string, SessionViewState>;
@@ -118,6 +125,7 @@ export function initialAppState(sidebarWidth: number, theme: Theme): AppState {
     theme,
     activeContextMenu: null,
     summaries: [],
+    workspaces: [],
     workspaceStreamId: null,
     workspaceCursor: 0,
     sessions: {},
@@ -137,7 +145,7 @@ export type AppAction =
   | { type: "theme_changed"; theme: Theme }
   | { type: "set_context_menu"; sessionId: string | null }
   | { type: "draft_changed"; sessionId: string; text: string }
-  | { type: "toggle_item_expanded"; sessionId: string; itemId: string }
+  | { type: "set_line_expanded"; sessionId: string; itemId: string; expanded: boolean }
   | { type: "set_at_bottom"; sessionId: string; atBottom: boolean }
   | { type: "session_started"; started: WebUiSessionStarted }
   | { type: "create_started" }

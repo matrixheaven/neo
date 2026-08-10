@@ -37,6 +37,14 @@ function applySnapshot(view: SessionViewState, snapshot: WebUiSnapshot): Session
   // then rebuild from history, waiting items, tasks and the watermark.
   const base = emptySessionView(snapshot.session_id);
   let projection = buildFromHistory(snapshot.history, snapshot.todos ?? []);
+  // The snapshot's cached usage values are host-side latest-wins; they seed
+  // the projection so a reconnect/switch restores them before new traffic.
+  if (snapshot.session.token_usage) {
+    projection = { ...projection, latestUsage: snapshot.session.token_usage };
+  }
+  if (snapshot.session.context_window) {
+    projection = { ...projection, contextWindow: snapshot.session.context_window };
+  }
   // The snapshot's waiting items are the final arbiter of pending state.
   // History cards stay in place, but a card that is no longer pending (and
   // has no explicit resolution) must not remain actionable.
@@ -64,7 +72,7 @@ function applySnapshot(view: SessionViewState, snapshot: WebUiSnapshot): Session
   return {
     ...base,
     draft: view.draft,
-    expandedItemIds: view.expandedItemIds,
+    lineOverrides: view.lineOverrides,
     isAtBottom: view.isAtBottom,
     streamId: snapshot.stream_id,
     cursor: snapshot.watermark,
@@ -81,9 +89,12 @@ function applySnapshot(view: SessionViewState, snapshot: WebUiSnapshot): Session
 function applySessionMessage(state: AppState, message: WebUiServerMessage): AppState {
   switch (message.type) {
     case "workspace_snapshot":
+      // Grouped cross-workspace aggregation is the only shape; the flat
+      // summary list is derived from it (grouped sidebar UI is R5).
       return {
         ...state,
-        summaries: message.sessions,
+        workspaces: message.workspaces,
+        summaries: message.workspaces.flatMap((group) => group.sessions),
         workspaceStreamId: message.stream_id,
         workspaceCursor: message.workspace_sequence,
       };
@@ -113,9 +124,21 @@ function applySessionMessage(state: AppState, message: WebUiServerMessage): AppS
       } else {
         summaries.push(summary);
       }
+      // Best-effort sync of the grouped view (source of truth for R5): the
+      // session keeps the workspace label recorded on its summary.
+      const workspaces = state.workspaces.map((group) => {
+        const sessionIndex = group.sessions.findIndex(
+          (entry) => entry.session_id === summary.session_id,
+        );
+        if (sessionIndex < 0) return group;
+        const sessions = group.sessions.slice();
+        sessions[sessionIndex] = summary;
+        return { ...group, sessions };
+      });
       return {
         ...state,
         summaries,
+        workspaces,
         workspaceStreamId: message.stream_id,
         workspaceCursor: Math.max(state.workspaceCursor, message.workspace_sequence),
       };
@@ -187,6 +210,15 @@ function applySessionMessage(state: AppState, message: WebUiServerMessage): AppS
         waitingApproval: message.event.waiting_approval,
         waitingQuestion: message.event.waiting_question,
         currentTurnId: message.event.current_turn_id ?? null,
+        projection:
+          message.event.token_usage || message.event.context_window
+            ? {
+                ...current.projection,
+                latestUsage: message.event.token_usage ?? current.projection.latestUsage,
+                contextWindow:
+                  message.event.context_window ?? current.projection.contextWindow,
+              }
+            : current.projection,
       }));
     }
 
@@ -274,13 +306,11 @@ export function appReducer(state: AppState, action: AppAction): AppState {
         draft: action.text,
       }));
 
-    case "toggle_item_expanded":
-      return updateSession(state, action.sessionId, (view) => {
-        const expanded = view.expandedItemIds.includes(action.itemId)
-          ? view.expandedItemIds.filter((id) => id !== action.itemId)
-          : [...view.expandedItemIds, action.itemId];
-        return { ...view, expandedItemIds: expanded };
-      });
+    case "set_line_expanded":
+      return updateSession(state, action.sessionId, (view) => ({
+        ...view,
+        lineOverrides: { ...view.lineOverrides, [action.itemId]: action.expanded },
+      }));
 
     case "set_at_bottom":
       return updateSession(state, action.sessionId, (view) => ({

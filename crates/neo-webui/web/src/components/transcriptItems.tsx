@@ -1,16 +1,19 @@
 /**
- * Transcript item renderers. User messages right, assistant body left (no
- * big cards); thinking/tools/terminals/workflows/delegates are compact
- * collapsible bars with real states; approvals and questions stay in place.
+ * Transcript item renderers (redesign §4): typography is the hierarchy, not
+ * cards. Only the user message is a bubble (.u-turn); thinking, tools,
+ * shells, terminals, workflows, delegates and unknown records are single
+ * 24px lines (.think / .tool-line / .agent-line) that expand in place;
+ * approvals and questions are in-place rows with a 2px accent bar
+ * (.approval-row). State is always conveyed in text, never color alone.
  */
 
 import {
   Bot,
   Brain,
-
+  Check,
+  ChevronRight,
   CircleHelp,
-  Hammer,
-  ListChecks,
+  Clock,
   Loader2,
   Network,
   ShieldQuestion,
@@ -18,7 +21,7 @@ import {
   Workflow,
   XCircle,
 } from "lucide-react";
-import { useState } from "react";
+import { useEffect, useLayoutEffect, useRef, useState } from "react";
 import type { ApprovalOption, QuestionEventData } from "../protocol";
 import { useAppActions, useAppState } from "../state/store";
 import type {
@@ -33,13 +36,14 @@ import type {
   TerminalItem,
   ThinkingItem,
   ToolItem,
+  ToolStatus,
   TranscriptItem,
   UnknownItem,
   UserMessageItem,
   WorkflowItem,
 } from "../state/transcript";
-import { CodeBlock, OutputBlock } from "./codeBlock";
-import { CollapsibleBar } from "./collapsible";
+import { CodeBlock, CopyButton, OutputBlock } from "./codeBlock";
+import { Line, useLineExpanded } from "./collapsible";
 import { FullOutput } from "./fullOutput";
 import { Markdown } from "./markdown";
 
@@ -79,55 +83,178 @@ function toolStatusText(item: ToolItem | ShellItem): string {
   }
 }
 
-// ---------------------------------------------------------------------------
+function statusIcon(status: ToolStatus) {
+  switch (status) {
+    case "queued":
+      return <Clock size={13} aria-hidden />;
+    case "running":
+      return <Loader2 size={13} className="spin" aria-hidden />;
+    case "finished":
+      return <Check size={13} aria-hidden />;
+    case "failed":
+      return <XCircle size={13} aria-hidden />;
+  }
+}
 
-function UserMessage({ item }: { item: UserMessageItem }) {
+function lineCaret() {
   return (
-    <div className="row row-user">
-      <div className="user-bubble">{item.text}</div>
-    </div>
+    <span className="line-caret" aria-hidden>
+      <ChevronRight size={13} />
+    </span>
   );
 }
 
-function AssistantMessage({ item }: { item: AssistantMessageItem }) {
+// ---------------------------------------------------------------------------
+// User turn: the only bubble. Long messages clamp to ~8 lines with a bottom
+// gradient fade and an expand/collapse toggle.
+// ---------------------------------------------------------------------------
+
+const USER_COLLAPSE_LINES = 8;
+
+function UserMessage({ item }: { item: UserMessageItem }) {
+  const textRef = useRef<HTMLDivElement | null>(null);
+  const [expanded, setExpanded] = useState(false);
+  const [overflowing, setOverflowing] = useState(
+    () => item.text.split("\n").length > USER_COLLAPSE_LINES,
+  );
+  // Measure real overflow for long single-paragraph text that wraps past the
+  // clamp. Once overflowing it stays expandable (jsdom has no layout, so the
+  // newline heuristic above is the deterministic path there).
+  useLayoutEffect(() => {
+    const element = textRef.current;
+    if (element && !expanded && element.scrollHeight > element.clientHeight + 1) {
+      setOverflowing(true);
+    }
+  }, [item.text, expanded]);
+  const clamped = overflowing && !expanded;
   return (
-    <div className="row row-assistant">
-      <div className="assistant-body">
-        <Markdown text={item.text} />
-        {!item.finished ? <span className="streaming-caret" aria-label="正在生成" /> : null}
+    <div className="u-turn t-item">
+      <div className="u-bub">
+        <div className={`u-text-wrap ${clamped ? "is-clamped" : ""}`}>
+          <div className="u-text" ref={textRef}>
+            {item.text}
+          </div>
+          {overflowing ? (
+            <button
+              type="button"
+              className="u-text-toggle"
+              aria-expanded={expanded}
+              onClick={() => setExpanded((current) => !current)}
+            >
+              {expanded ? "收起" : "展开"}
+            </button>
+          ) : null}
+        </div>
+      </div>
+      <div className="u-meta">
+        <CopyButton text={item.text} label="复制消息" />
       </div>
     </div>
   );
 }
 
-function Thinking({ sessionId, item }: { sessionId: string; item: ThinkingItem }) {
+// ---------------------------------------------------------------------------
+// Assistant prose body (inside .a-msg, grouping lives in transcript.tsx).
+// ---------------------------------------------------------------------------
+
+export function AssistantBody({ item }: { item: AssistantMessageItem }) {
   return (
-    <CollapsibleBar
-      sessionId={sessionId}
-      itemId={item.id}
-      icon={<Brain size={14} />}
-      title="思考"
-      status={item.finished ? (item.redacted ? "已完成（已隐藏部分内容）" : "已完成") : "思考中"}
-      className="kind-thinking"
-    >
-      <pre className="thinking-text">
-        <code>{item.text}</code>
-      </pre>
-    </CollapsibleBar>
+    <div className={`msg ${item.finished ? "" : "streaming"}`}>
+      <Markdown text={item.text} />
+      {!item.finished ? <span className="streaming-caret" aria-label="正在生成" /> : null}
+    </div>
   );
 }
 
-function Tool({ sessionId, item }: { sessionId: string; item: ToolItem }) {
+// ---------------------------------------------------------------------------
+// Think: single line with breathing title while streaming; expanded by
+// default during streaming, auto-collapses when the stream finishes.
+// ---------------------------------------------------------------------------
+
+function Think({ sessionId, item }: { sessionId: string; item: ThinkingItem }) {
+  // Phase default: streaming opens, finished collapses. A user click during
+  // streaming records an explicit override that the finish must not invert.
+  const [open, toggle] = useLineExpanded(sessionId, item.id, !item.finished);
+  const live = !item.finished;
+  const startRef = useRef<number | null>(null);
+  const [elapsedSecs, setElapsedSecs] = useState(0);
+  useEffect(() => {
+    if (!live) return;
+    if (startRef.current === null) startRef.current = Date.now();
+    const timer = window.setInterval(() => {
+      const start = startRef.current;
+      if (start !== null) {
+        setElapsedSecs(Math.max(0, Math.round((Date.now() - start) / 1000)));
+      }
+    }, 1000);
+    return () => window.clearInterval(timer);
+  }, [live]);
+  const status = item.finished
+    ? item.redacted
+      ? "已完成（已隐藏部分内容）"
+      : "已完成"
+    : `思考中 · ${elapsedSecs}s`;
   return (
-    <CollapsibleBar
-      sessionId={sessionId}
-      itemId={item.id}
-      icon={<Hammer size={14} />}
-      title={`工具 ${item.name}`}
-      status={toolStatusText(item)}
-      className={`kind-tool status-${item.status}`}
+    <Line
+      className={`think ${live ? "live" : ""}`}
+      label={`思考，状态：${status}`}
+      open={open}
+      onToggle={toggle}
+      head={
+        <>
+          {lineCaret()}
+          <Brain size={14} aria-hidden />
+          <span className="think-title">思考</span>
+          <span className="line-tail">{item.finished ? status : `${elapsedSecs}s`}</span>
+        </>
+      }
     >
-      <div className="detail-stack">
+      <pre className="think-text">
+        <code>{item.text}</code>
+      </pre>
+    </Line>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Tool lines: status icon + name + dim mono summary + right status pill;
+// the body carries the command echo, arguments, output and status metadata.
+// ---------------------------------------------------------------------------
+
+function commandEchoOf(args: unknown): string | null {
+  if (args && typeof args === "object") {
+    const command = (args as Record<string, unknown>).command;
+    if (typeof command === "string" && command !== "") return command;
+  }
+  return null;
+}
+
+function Tool({ sessionId, item }: { sessionId: string; item: ToolItem }) {
+  const [open, toggle] = useLineExpanded(sessionId, item.id, false);
+  const status = toolStatusText(item);
+  const echo = commandEchoOf(item.arguments);
+  return (
+    <Line
+      className={`tool-line status-${item.status}`}
+      label={`工具 ${item.name}，状态：${status}`}
+      open={open}
+      onToggle={toggle}
+      head={
+        <>
+          {lineCaret()}
+          <span className="tl-ic">{statusIcon(item.status)}</span>
+          <span className="tl-name">{item.name}</span>
+          <span className="tl-mono">{argumentsPreview(item.arguments)}</span>
+          <span className="line-tail">
+            <span className="tl-status" role="status">
+              {status}
+            </span>
+          </span>
+        </>
+      }
+    >
+      <div className="tl-detail">
+        {echo !== null ? <div className="cmd-echo">$ {echo}</div> : null}
         {item.arguments !== undefined ? (
           <CodeBlock code={argumentsPreview(item.arguments)} language="参数" />
         ) : null}
@@ -135,70 +262,116 @@ function Tool({ sessionId, item }: { sessionId: string; item: ToolItem }) {
           <OutputBlock text={item.partialResult.content} />
         ) : null}
         {item.result ? (
-          <OutputBlock text={item.result.content || (item.result.is_error ? "（错误，无内容）" : "（无内容）")} />
+          <OutputBlock
+            text={
+              item.result.content || (item.result.is_error ? "（错误，无内容）" : "（无内容）")
+            }
+          />
         ) : null}
+        <p className="tl-meta">
+          状态：{status}
+          {item.result?.is_error ? " · 结果标记为错误" : ""}
+        </p>
         {item.output ? (
           <FullOutput sessionId={sessionId} itemId={item.id} outputRef={item.output} />
         ) : null}
       </div>
-    </CollapsibleBar>
+    </Line>
   );
 }
 
 function Shell({ sessionId, item }: { sessionId: string; item: ShellItem }) {
+  const [open, toggle] = useLineExpanded(sessionId, item.id, false);
+  const status = toolStatusText(item);
+  const meta = [
+    `状态：${status}`,
+    item.exitCode !== undefined && item.exitCode !== null ? `退出码 ${item.exitCode}` : null,
+    item.truncated ? "输出已截断" : null,
+  ]
+    .filter((part) => part !== null)
+    .join(" · ");
   return (
-    <CollapsibleBar
-      sessionId={sessionId}
-      itemId={item.id}
-      icon={<SquareTerminal size={14} />}
-      title={`命令 ${item.command || "shell"}`}
-      status={
-        toolStatusText(item) +
-        (item.exitCode !== undefined && item.exitCode !== null
-          ? ` · 退出码 ${item.exitCode}`
-          : "") +
-        (item.truncated ? " · 输出已截断" : "")
+    <Line
+      className={`tool-line kind-shell status-${item.status}`}
+      label={`命令 ${item.command || "shell"}，状态：${status}`}
+      open={open}
+      onToggle={toggle}
+      head={
+        <>
+          {lineCaret()}
+          <span className="tl-ic">{statusIcon(item.status)}</span>
+          <span className="tl-name">shell</span>
+          <span className="tl-mono">{item.command}</span>
+          <span className="line-tail">
+            <span className="tl-status" role="status">
+              {status}
+            </span>
+          </span>
+        </>
       }
-      className={`kind-shell status-${item.status}`}
     >
-      <div className="detail-stack">
-        {item.cwd ? <p className="muted">目录：{item.cwd}</p> : null}
+      <div className="tl-detail">
+        {item.command ? <div className="cmd-echo">$ {item.command}</div> : null}
+        {item.cwd ? <p className="tl-meta">目录：{item.cwd}</p> : null}
         {item.stdout ? <OutputBlock text={item.stdout} /> : null}
         {item.stderr ? <OutputBlock text={item.stderr} /> : null}
-        {item.truncated ? <p className="muted">服务端标记：输出已截断。</p> : null}
+        <p className="tl-meta">{meta}</p>
         {item.output ? (
           <FullOutput sessionId={sessionId} itemId={item.id} outputRef={item.output} />
         ) : null}
       </div>
-    </CollapsibleBar>
+    </Line>
   );
 }
 
 function Terminal({ sessionId, item }: { sessionId: string; item: TerminalItem }) {
-  const status = item.finished
-    ? `已结束${item.exitCode !== undefined && item.exitCode !== null ? ` · 退出码 ${item.exitCode}` : ""}${item.truncated ? " · 输出已截断" : ""}`
-    : `运行中${item.truncated ? " · 输出已截断" : ""}`;
+  const [open, toggle] = useLineExpanded(sessionId, item.id, false);
+  const status = item.finished ? "已结束" : "运行中";
+  const meta = [
+    `状态：${status}`,
+    item.exitCode !== undefined && item.exitCode !== null ? `退出码 ${item.exitCode}` : null,
+    item.statusText ?? null,
+    item.truncated ? "输出已截断" : null,
+  ]
+    .filter((part) => part !== null)
+    .join(" · ");
   return (
-    <CollapsibleBar
-      sessionId={sessionId}
-      itemId={item.id}
-      icon={<SquareTerminal size={14} />}
-      title={`终端 ${item.command ?? item.handle}`}
-      status={status}
-      className="kind-terminal"
+    <Line
+      className={`tool-line kind-terminal ${item.finished ? "status-finished" : "status-running"}`}
+      label={`终端 ${item.command ?? item.handle}，状态：${status}`}
+      open={open}
+      onToggle={toggle}
+      head={
+        <>
+          {lineCaret()}
+          <span className="tl-ic">
+            <SquareTerminal size={13} aria-hidden />
+          </span>
+          <span className="tl-name">终端</span>
+          <span className="tl-mono">{item.command ?? item.handle}</span>
+          <span className="line-tail">
+            <span className="tl-status" role="status">
+              {status}
+            </span>
+          </span>
+        </>
+      }
     >
-      <div className="detail-stack">
-        {item.cwd ? <p className="muted">目录：{item.cwd}</p> : null}
-        {item.output ? <OutputBlock text={item.output} /> : <p className="muted">（暂无输出）</p>}
+      <div className="tl-detail">
+        {item.command ? <div className="cmd-echo">$ {item.command}</div> : null}
+        {item.cwd ? <p className="tl-meta">目录：{item.cwd}</p> : null}
+        {item.output ? <OutputBlock text={item.output} /> : <p className="tl-meta">（暂无输出）</p>}
+        <p className="tl-meta">{meta}</p>
         {item.outputRef ? (
           <FullOutput sessionId={sessionId} itemId={item.id} outputRef={item.outputRef} />
         ) : null}
       </div>
-    </CollapsibleBar>
+    </Line>
   );
 }
 
-function WorkflowCard({ sessionId, item }: { sessionId: string; item: WorkflowItem }) {
+function WorkflowLine({ sessionId, item }: { sessionId: string; item: WorkflowItem }) {
+  const [open, toggle] = useLineExpanded(sessionId, item.id, false);
   const workflow = item.workflow;
   const elapsed = formatElapsed(
     workflow.started_at_ms && workflow.updated_at_ms
@@ -206,29 +379,48 @@ function WorkflowCard({ sessionId, item }: { sessionId: string; item: WorkflowIt
       : undefined,
   );
   const status =
-    (item.finished ? `已完成${workflow.terminal_reason ? `（${workflow.terminal_reason}）` : ""}` : `运行中${workflow.current_phase ? ` · ${workflow.current_phase}` : ""}`) +
+    (item.finished
+      ? `已完成${workflow.terminal_reason ? `（${workflow.terminal_reason}）` : ""}`
+      : `运行中${workflow.current_phase ? ` · ${workflow.current_phase}` : ""}`) +
     (elapsed ? ` · ${elapsed}` : "");
   return (
-    <CollapsibleBar
-      sessionId={sessionId}
-      itemId={item.id}
-      icon={<Workflow size={14} />}
-      title={`工作流 ${workflow.title}`}
-      status={status}
-      className="kind-workflow"
+    <Line
+      className={`tool-line kind-workflow ${item.finished ? "status-finished" : "status-running"}`}
+      label={`工作流 ${workflow.title}，状态：${status}`}
+      open={open}
+      onToggle={toggle}
+      head={
+        <>
+          {lineCaret()}
+          <span className="tl-ic">
+            <Workflow size={13} aria-hidden />
+          </span>
+          <span className="tl-name">{workflow.title}</span>
+          <span className="tl-mono">{workflow.latest_log_summary ?? ""}</span>
+          <span className="line-tail">
+            <span className="tl-status" role="status">
+              {status}
+            </span>
+          </span>
+        </>
+      }
     >
-      <div className="detail-stack">
-        {workflow.purpose ? <p className="muted">{workflow.purpose}</p> : null}
-        {workflow.latest_log_summary ? <p>{workflow.latest_log_summary}</p> : null}
-        <p className="muted">
+      <div className="tl-detail">
+        {workflow.purpose ? <p className="ar-desc">{workflow.purpose}</p> : null}
+        {workflow.latest_log_summary ? <p className="tl-meta">{workflow.latest_log_summary}</p> : null}
+        <p className="tl-meta">
           调用 {workflow.invocation_count ?? 0} 次 · 失败 {workflow.failure_count ?? 0} 次
         </p>
       </div>
-    </CollapsibleBar>
+    </Line>
   );
 }
 
-function ApprovalCard({ sessionId, item }: { sessionId: string; item: ApprovalItem }) {
+// ---------------------------------------------------------------------------
+// Approval / question rows: in place, 2px accent bar, inline buttons/chips.
+// ---------------------------------------------------------------------------
+
+function ApprovalRow({ sessionId, item }: { sessionId: string; item: ApprovalItem }) {
   const state = useAppState();
   const actions = useAppActions();
   const view = state.sessions[sessionId];
@@ -236,30 +428,39 @@ function ApprovalCard({ sessionId, item }: { sessionId: string; item: ApprovalIt
   const resolved = item.resolution !== undefined;
   const disabled = resolved || submitted;
   const presentation = item.request.presentation;
-  const resolutionLabel =
-    item.resolution?.label ??
-    (item.resolution?.kind === "no_longer_pending"
+  const stale = item.resolution?.kind === "no_longer_pending";
+  const resolutionLabel = stale
+    ? "已失效"
+    : (item.resolution?.label ?? item.resolution?.kind ?? "");
+  const stateText = resolved
+    ? stale
       ? "已失效"
-      : (item.resolution?.kind ?? ""));
+      : `已处理：${resolutionLabel}`
+    : submitted
+      ? "已提交，等待确认"
+      : "等待确认";
   return (
-    <div className="card approval-card" role="group" aria-label={`审批请求：${presentation.title ?? item.request.operation}`}>
-      <div className="card-header">
+    <div
+      className={`approval-row ${resolved ? "resolved" : ""}`}
+      role="group"
+      aria-label={`审批请求：${presentation.title ?? item.request.operation}`}
+    >
+      <div className="ar-head">
         <ShieldQuestion size={14} aria-hidden />
-        <span className="card-title">{presentation.title ?? "审批请求"}</span>
-        <span className="card-state">
-          {resolved ? `已处理：${resolutionLabel}` : submitted ? "已提交，等待确认" : "等待确认"}
-        </span>
+        <span className="ar-title">{presentation.title ?? "审批请求"}</span>
+        <span className="ar-state">{stateText}</span>
       </div>
-      {presentation.command ? (
-        <CodeBlock code={presentation.command} language={presentation.cwd ? `目录 ${presentation.cwd}` : "command"} />
+      {presentation.command ? <div className="cmd-echo">$ {presentation.command}</div> : null}
+      {typeof presentation.kind === "string" && presentation.kind !== "command" ? (
+        <p className="ar-desc">{presentation.kind}</p>
       ) : null}
       {!resolved ? (
-        <div className="card-actions">
+        <div className="ar-actions">
           {item.request.options.map((option: ApprovalOption) => (
             <button
               key={option.label}
               type="button"
-              className="action-button"
+              className="chip-button"
               disabled={disabled}
               title={option.description ?? option.label}
               onClick={() => actions.submitApproval(item.request.id, option.action)}
@@ -269,46 +470,12 @@ function ApprovalCard({ sessionId, item }: { sessionId: string; item: ApprovalIt
           ))}
         </div>
       ) : null}
-      {item.resolution?.feedback ? <p className="muted">备注：{item.resolution.feedback}</p> : null}
+      {item.resolution?.feedback ? <p className="ar-desc">备注：{item.resolution.feedback}</p> : null}
     </div>
   );
 }
 
-function QuestionFields({
-  question,
-  selections,
-  onToggle,
-  disabled,
-}: {
-  question: QuestionEventData;
-  selections: string[];
-  onToggle(label: string): void;
-  disabled: boolean;
-}) {
-  return (
-    <fieldset className="question-fields" disabled={disabled}>
-      <legend className="question-title">
-        <CircleHelp size={14} aria-hidden /> {question.question}
-      </legend>
-      {question.body ? <p className="muted">{question.body}</p> : null}
-      {question.options.map((option) => (
-        <label key={option.label} className="question-option">
-          <input
-            type={question.multi_select ? "checkbox" : "radio"}
-            name={question.header}
-            checked={selections.includes(option.label)}
-            disabled={disabled}
-            onChange={() => onToggle(option.label)}
-          />
-          <span>{option.label}</span>
-          {option.description ? <span className="muted">（{option.description}）</span> : null}
-        </label>
-      ))}
-    </fieldset>
-  );
-}
-
-function QuestionCard({ sessionId, item }: { sessionId: string; item: QuestionItem }) {
+function QuestionRow({ sessionId, item }: { sessionId: string; item: QuestionItem }) {
   const state = useAppState();
   const actions = useAppActions();
   const questionId = item.id.replace(/^question:/, "");
@@ -317,10 +484,9 @@ function QuestionCard({ sessionId, item }: { sessionId: string; item: QuestionIt
   const disabled = item.resolved || submitted;
   const [selections, setSelections] = useState<string[]>([]);
   const [note, setNote] = useState("");
-  const multi = item.questions.some((question) => question.multi_select);
-  const toggle = (label: string) => {
+  const toggleSelection = (question: QuestionEventData, label: string) => {
     setSelections((current) =>
-      multi
+      question.multi_select
         ? current.includes(label)
           ? current.filter((entry) => entry !== label)
           : [...current, label]
@@ -328,38 +494,57 @@ function QuestionCard({ sessionId, item }: { sessionId: string; item: QuestionIt
     );
   };
   return (
-    <div className="card question-card" role="group" aria-label="提问">
-      <div className="card-header">
+    <div
+      className={`approval-row question-row ${item.resolved ? "resolved" : ""}`}
+      role="group"
+      aria-label="提问"
+    >
+      <div className="ar-head">
         <CircleHelp size={14} aria-hidden />
-        <span className="card-title">提问</span>
-        <span className="card-state">
+        <span className="ar-title">提问</span>
+        <span className="ar-state">
           {item.resolved ? "已回答" : submitted ? "已提交，等待确认" : "等待回答"}
         </span>
       </div>
       {item.questions.map((question) => (
-        <QuestionFields
-          key={question.header}
-          question={question}
-          selections={selections}
-          onToggle={toggle}
-          disabled={disabled}
-        />
+        <div className="ar-question" key={question.header}>
+          <p className="ar-question-text">{question.question}</p>
+          {question.body ? <p className="ar-desc">{question.body}</p> : null}
+          <div className="ar-chips">
+            {question.options.map((option) => {
+              const selected = selections.includes(option.label);
+              return (
+                <button
+                  key={option.label}
+                  type="button"
+                  className={`chip ${selected ? "on" : ""}`}
+                  aria-pressed={selected}
+                  disabled={disabled}
+                  title={option.description ?? option.label}
+                  onClick={() => toggleSelection(question, option.label)}
+                >
+                  {option.label}
+                </button>
+              );
+            })}
+          </div>
+        </div>
       ))}
       {!item.resolved ? (
         <>
-          <label className="question-note">
-            <span className="muted">补充说明（可选）</span>
-            <input
-              type="text"
-              value={note}
-              disabled={disabled}
-              onChange={(event) => setNote(event.target.value)}
-            />
-          </label>
-          <div className="card-actions">
+          <input
+            type="text"
+            className="ar-other"
+            aria-label="补充说明（可选）"
+            placeholder="补充说明（可选）"
+            value={note}
+            disabled={disabled}
+            onChange={(event) => setNote(event.target.value)}
+          />
+          <div className="ar-actions">
             <button
               type="button"
-              className="action-button primary"
+              className="chip-button primary"
               disabled={disabled || selections.length === 0}
               onClick={() =>
                 actions.submitQuestion(questionId, {
@@ -376,6 +561,11 @@ function QuestionCard({ sessionId, item }: { sessionId: string; item: QuestionIt
     </div>
   );
 }
+
+// ---------------------------------------------------------------------------
+// Delegate / swarm inline rows (R3 basic presentation; the drill-down panel
+// and the full swarm block design land in R4).
+// ---------------------------------------------------------------------------
 
 function agentStateText(state: string): string {
   switch (state) {
@@ -396,7 +586,8 @@ function agentStateText(state: string): string {
   }
 }
 
-function DelegateCard({ sessionId, item }: { sessionId: string; item: DelegateItem }) {
+function DelegateLine({ sessionId, item }: { sessionId: string; item: DelegateItem }) {
+  const [open, toggle] = useLineExpanded(sessionId, item.id, false);
   const agent = item.agent;
   const elapsed = formatElapsed(agent.elapsed?.secs);
   const status =
@@ -404,53 +595,89 @@ function DelegateCard({ sessionId, item }: { sessionId: string; item: DelegateIt
     (elapsed ? ` · ${elapsed}` : "") +
     (agent.terminal_reason ? ` · ${agent.terminal_reason}` : "");
   return (
-    <CollapsibleBar
-      sessionId={sessionId}
-      itemId={item.id}
-      icon={<Bot size={14} />}
-      title={`子代理 ${agent.task_title ?? agent.display_name}`}
-      status={status}
-      className="kind-delegate"
+    <Line
+      className={`agent-line state-${agent.state}`}
+      label={`子代理 ${agent.task_title ?? agent.display_name}，状态：${status}`}
+      open={open}
+      onToggle={toggle}
+      head={
+        <>
+          {lineCaret()}
+          {agent.state === "running" ? <span className="pulse-dot" aria-hidden /> : null}
+          <span className="tl-ic">
+            <Bot size={13} aria-hidden />
+          </span>
+          <span className="tl-name">{agent.task_title ?? agent.display_name}</span>
+          <span className="tl-mono">{agent.latest_text ?? agent.task ?? ""}</span>
+          <span className="line-tail">
+            <span className="tl-status" role="status">
+              {status}
+            </span>
+          </span>
+        </>
+      }
     >
-      <div className="detail-stack">
-        {agent.task ? <p>{agent.task}</p> : null}
-        <p className="muted">
+      <div className="tl-detail">
+        {agent.task ? <p className="ar-desc">{agent.task}</p> : null}
+        {agent.latest_text ? <p className="tl-meta">最新进展：{agent.latest_text}</p> : null}
+        <p className="tl-meta">
           工具 {agent.tool_count ?? 0} 次 · 消息 {agent.live_messages_received ?? 0} 条 · token{" "}
           {agent.token_count ?? 0}
         </p>
       </div>
-    </CollapsibleBar>
+    </Line>
   );
 }
 
-function SwarmCard({ sessionId, item }: { sessionId: string; item: SwarmItem }) {
+function SwarmBlock({ sessionId, item }: { sessionId: string; item: SwarmItem }) {
+  const [open, toggle] = useLineExpanded(sessionId, item.id, false);
   const swarm = item.swarm;
   const aggregate = swarm.aggregate;
-  const status = `${agentStateText(swarm.state)} · 共 ${aggregate.total} 项：运行 ${aggregate.running} · 排队 ${aggregate.queued} · 完成 ${aggregate.completed} · 失败 ${aggregate.failed}`;
+  const status = `${agentStateText(swarm.state)} · 完成 ${aggregate.completed}/${aggregate.total}`;
   return (
-    <CollapsibleBar
-      sessionId={sessionId}
-      itemId={item.id}
-      icon={<Network size={14} />}
-      title={`并行子代理 ${swarm.description}`}
-      status={status}
-      className="kind-swarm"
+    <Line
+      className={`swarm-block state-${swarm.state}`}
+      label={`并行子代理 ${swarm.description}，状态：${status}`}
+      open={open}
+      onToggle={toggle}
+      head={
+        <>
+          {lineCaret()}
+          <span className="tl-ic">
+            <Network size={13} aria-hidden />
+          </span>
+          <span className="tl-name">{swarm.description}</span>
+          <span className="tl-mono">
+            运行 {aggregate.running} · 排队 {aggregate.queued} · 失败 {aggregate.failed}
+          </span>
+          <span className="line-tail">
+            <span className="tl-status" role="status">
+              {status}
+            </span>
+          </span>
+        </>
+      }
     >
-      <ul className="swarm-children">
+      <ul className="swarm-members">
         {swarm.children.map((child) => (
-          <li key={child.item_index} className="swarm-child">
-            <span className="swarm-child-state">{agentStateText(child.agent.state)}</span>
-            <span className="swarm-child-item">{child.item}</span>
-            <span className="muted">
-              {formatElapsed(child.agent.elapsed?.secs) ?? ""}
+          <li key={child.item_index} className="swarm-member">
+            <span className="tl-ic">{statusIcon(child.agent.state === "running" ? "running" : child.agent.state === "failed" || child.agent.state === "timed_out" ? "failed" : child.agent.state === "queued" ? "queued" : "finished")}</span>
+            <span className="swarm-member-item">{child.item}</span>
+            <span className="line-tail">
+              {agentStateText(child.agent.state)}
+              {formatElapsed(child.agent.elapsed?.secs) ? ` · ${formatElapsed(child.agent.elapsed?.secs)}` : ""}
               {child.agent.terminal_reason ? ` · ${child.agent.terminal_reason}` : ""}
             </span>
           </li>
         ))}
       </ul>
-    </CollapsibleBar>
+    </Line>
   );
 }
+
+// ---------------------------------------------------------------------------
+// Status lines and the unknown-event record.
+// ---------------------------------------------------------------------------
 
 function RetryCard({ item }: { item: RetryItem }) {
   const text =
@@ -460,7 +687,10 @@ function RetryCard({ item }: { item: RetryItem }) {
         ? `正在重连（第 ${item.retry}/${item.maxRetries} 次）`
         : `服务暂不可用，${item.delayMs}ms 后重试（第 ${item.retry}/${item.maxRetries} 次）：${item.message}`;
   return (
-    <div className={`status-line ${item.phase === "exhausted" ? "severity-error" : "severity-info"}`} role="status">
+    <div
+      className={`status-line ${item.phase === "exhausted" ? "severity-error" : "severity-info"}`}
+      role="status"
+    >
       <Loader2 size={14} className={item.phase === "exhausted" ? "" : "spin"} aria-hidden />
       <span>{text}</span>
     </div>
@@ -477,19 +707,34 @@ function StatusLine({ item }: { item: StatusLineItem }) {
 }
 
 function Unknown({ sessionId, item }: { sessionId: string; item: UnknownItem }) {
+  const [open, toggle] = useLineExpanded(sessionId, item.id, false);
   return (
-    <CollapsibleBar
-      sessionId={sessionId}
-      itemId={item.id}
-      icon={<ListChecks size={14} />}
-      title={`未识别事件 ${item.tag}`}
-      status="已保留原始内容"
-      className="kind-unknown"
+    <Line
+      className="tool-line kind-unknown"
+      label={`未识别事件 ${item.tag}，状态：已保留原始内容`}
+      open={open}
+      onToggle={toggle}
+      head={
+        <>
+          {lineCaret()}
+          <span className="tl-ic">
+            <CircleHelp size={13} aria-hidden />
+          </span>
+          <span className="tl-name">未识别事件 {item.tag}</span>
+          <span className="line-tail">
+            <span className="tl-status" role="status">
+              已保留原始内容
+            </span>
+          </span>
+        </>
+      }
     >
-      <pre className="unknown-raw">
-        <code>{item.raw}</code>
-      </pre>
-    </CollapsibleBar>
+      <div className="tl-detail">
+        <pre className="unknown-raw">
+          <code>{item.raw}</code>
+        </pre>
+      </div>
+    </Line>
   );
 }
 
@@ -504,9 +749,9 @@ export function TranscriptItemView({
     case "user_message":
       return <UserMessage item={item} />;
     case "assistant_message":
-      return <AssistantMessage item={item} />;
+      return <AssistantBody item={item} />;
     case "thinking":
-      return <Thinking sessionId={sessionId} item={item} />;
+      return <Think sessionId={sessionId} item={item} />;
     case "tool":
       return <Tool sessionId={sessionId} item={item} />;
     case "shell":
@@ -514,15 +759,15 @@ export function TranscriptItemView({
     case "terminal":
       return <Terminal sessionId={sessionId} item={item} />;
     case "workflow":
-      return <WorkflowCard sessionId={sessionId} item={item} />;
+      return <WorkflowLine sessionId={sessionId} item={item} />;
     case "approval":
-      return <ApprovalCard sessionId={sessionId} item={item} />;
+      return <ApprovalRow sessionId={sessionId} item={item} />;
     case "question":
-      return <QuestionCard sessionId={sessionId} item={item} />;
+      return <QuestionRow sessionId={sessionId} item={item} />;
     case "delegate":
-      return <DelegateCard sessionId={sessionId} item={item} />;
+      return <DelegateLine sessionId={sessionId} item={item} />;
     case "swarm":
-      return <SwarmCard sessionId={sessionId} item={item} />;
+      return <SwarmBlock sessionId={sessionId} item={item} />;
     case "retry":
       return <RetryCard item={item} />;
     case "status":

@@ -56,6 +56,22 @@ export interface ToolResult {
   terminate?: boolean;
 }
 
+/** Per-turn model token accounting (AgentTokenUsage in neo-agent-core). */
+export interface AgentTokenUsage {
+  input_tokens: number;
+  output_tokens: number;
+  input_cache_read_tokens?: number;
+  input_cache_write_tokens?: number;
+}
+
+/** Latest context-window occupancy cached from ContextWindowUpdated. */
+export interface WebUiContextWindow {
+  used_tokens: number;
+  projected_tokens?: number | null;
+  max_tokens?: number | null;
+  remaining_tokens?: number | null;
+}
+
 export interface ApprovalAction {
   kind: string;
   [key: string]: unknown;
@@ -128,6 +144,33 @@ export interface AgentSnapshot {
   tool_count?: number | null;
   token_count?: number | null;
   elapsed?: { secs: number; nanos: number } | null;
+  latest_text?: string | null;
+}
+
+/** Live progress payload of DelegateProgressUpdated (AgentProgressSnapshot). */
+export interface AgentProgressSnapshot {
+  agent_id: string;
+  state: string;
+  mode?: string | null;
+  detached_from_foreground?: boolean;
+  started_at_ms?: number | null;
+  updated_at_ms?: number;
+  terminal_at_ms?: number | null;
+  terminal_reason?: string | null;
+  run_count?: number;
+  live_messages_received?: number;
+  tool_count?: number;
+  token_count?: number;
+  elapsed_ms?: number;
+  latest_text?: string | null;
+  latest_thinking?: string | null;
+  last_tool?: {
+    id: string;
+    name: string;
+    summary?: string | null;
+    phase?: string | null;
+  } | null;
+  outcome?: unknown;
 }
 
 export interface SwarmAggregate {
@@ -354,9 +397,29 @@ export type AgentEvent =
   | { DelegateStarted: { turn: number; agent: AgentSnapshot } }
   | { DelegateUpdated: { turn: number; agent: AgentSnapshot } }
   | { DelegateFinished: { turn: number; agent: AgentSnapshot } }
+  | { DelegateProgressUpdated: { turn: number; progress: AgentProgressSnapshot } }
   | { DelegateSwarmStarted: { turn: number; swarm: SwarmSnapshot } }
   | { DelegateSwarmUpdated: { turn: number; swarm: SwarmSnapshot } }
   | { DelegateSwarmFinished: { turn: number; swarm: SwarmSnapshot } }
+  | {
+      DelegateSwarmProgressUpdated: {
+        turn: number;
+        swarm_id: string;
+        state: string;
+        aggregate: SwarmAggregate;
+        child_progress: { item_index: number; progress: AgentProgressSnapshot };
+      };
+    }
+  | { TokenUsage: { turn: number; usage: AgentTokenUsage } }
+  | {
+      ContextWindowUpdated: {
+        turn: number;
+        used_tokens: number;
+        projected_tokens?: number | null;
+        max_tokens?: number | null;
+        remaining_tokens?: number | null;
+      };
+    }
   | { WorkflowUpdated: { turn: number; workflow: WorkflowSnapshot } }
   | { WorkflowFinished: { turn: number; workflow: WorkflowSnapshot } }
   | { TodoUpdated: { turn: number; todos: TodoEventData[] } }
@@ -420,6 +483,7 @@ export interface WebUiSessionSummary {
   pinned: boolean;
   archived: boolean;
   state: WebUiSummaryState;
+  workspace_label?: string;
 }
 
 export interface WebUiSessionPage {
@@ -432,6 +496,8 @@ export interface WebUiSessionState {
   waiting_approval: boolean;
   waiting_question: boolean;
   current_turn_id?: string | null;
+  token_usage?: AgentTokenUsage | null;
+  context_window?: WebUiContextWindow | null;
 }
 
 export interface WebUiSessionMetadata {
@@ -481,12 +547,20 @@ export interface WebUiSnapshot {
   todos?: TodoEventData[];
 }
 
+/** One workspace group of the cross-workspace session aggregation. The
+ * workspace path never leaves the service; `label` is display-only. */
+export interface WebUiWorkspaceGroup {
+  label: string;
+  current: boolean;
+  sessions: WebUiSessionSummary[];
+}
+
 export type WebUiServerMessage =
   | {
       type: "workspace_snapshot";
       stream_id: string;
       workspace_sequence: number;
-      sessions: WebUiSessionSummary[];
+      workspaces: WebUiWorkspaceGroup[];
     }
   | { type: "session_snapshot"; snapshot: WebUiSnapshot }
   | {
@@ -532,9 +606,17 @@ export interface WebUiQuestionAnswer {
   text?: string;
 }
 
+/** One entry of the bootstrap model catalog (WebUiModelInfo). */
+export interface WebUiModelInfo {
+  alias: string;
+  provider: string;
+  context_window?: number | null;
+  capabilities?: string[];
+}
+
 export interface WebUiBootstrap {
   workspace_label?: string | null;
-  models?: string[];
+  models?: WebUiModelInfo[];
   permission_modes?: PermissionMode[];
   development_modes?: WebUiDevelopmentMode[];
   sessions?: WebUiSessionSummary[];

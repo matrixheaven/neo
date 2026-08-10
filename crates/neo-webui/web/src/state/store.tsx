@@ -76,7 +76,7 @@ export interface AppActions {
   setTheme(theme: Theme): void;
   setContextMenu(sessionId: string | null): void;
   setDraft(sessionId: string, text: string): void;
-  toggleItemExpanded(sessionId: string, itemId: string): void;
+  setLineExpanded(sessionId: string, itemId: string, expanded: boolean): void;
   setAtBottom(sessionId: string, atBottom: boolean): void;
   sendMessage(text: string, composer?: WebUiComposer): void;
   steer(text: string): void;
@@ -277,8 +277,8 @@ export function AppProvider({ children }: { children: ReactNode }) {
     setDraft(sessionId, text) {
       dispatch({ type: "draft_changed", sessionId, text });
     },
-    toggleItemExpanded(sessionId, itemId) {
-      dispatch({ type: "toggle_item_expanded", sessionId, itemId });
+    setLineExpanded(sessionId, itemId, expanded) {
+      dispatch({ type: "set_line_expanded", sessionId, itemId, expanded });
     },
     setAtBottom(sessionId, atBottom) {
       dispatch({ type: "set_at_bottom", sessionId, atBottom });

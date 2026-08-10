@@ -22,6 +22,7 @@ export interface FixtureEnvelope {
   output?: WebUiOutputRef | null;
   snapshot?: WebUiSnapshot;
   sessions?: unknown[];
+  workspaces?: Array<{ label: string; current: boolean; sessions: unknown[] }>;
 }
 
 export interface FixtureSession {

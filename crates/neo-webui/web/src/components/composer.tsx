@@ -144,8 +144,8 @@ export function Composer({ centered }: { centered: boolean }) {
                   >
                     <option value="">默认模型</option>
                     {bootstrap?.models?.map((entry) => (
-                      <option key={entry} value={entry}>
-                        {entry}
+                      <option key={entry.alias} value={entry.alias}>
+                        {entry.alias}
                       </option>
                     ))}
                   </select>

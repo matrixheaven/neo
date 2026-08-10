@@ -494,7 +494,7 @@ button {
   background: var(--accent-soft-strong);
 }
 
-/* -- Transcript -------------------------------------------------------------- */
+/* -- Transcript (redesign §4: typography is the hierarchy, not cards) -------- */
 
 .session-view {
   flex: 1;
@@ -513,39 +513,110 @@ button {
 }
 
 .transcript-column {
-  max-width: 860px;
+  max-width: 760px;
   margin: 0 auto;
   padding: 0 24px;
   display: flex;
   flex-direction: column;
-  gap: 10px;
+  gap: var(--chat-block-gap);
 }
 
-.row {
+/* Native virtualization: off-screen items skip rendering (principle 4). */
+.t-item {
+  content-visibility: auto;
+  contain-intrinsic-size: auto 120px;
+}
+
+/* -- User turn: the only bubble -------------------------------------------- */
+
+.u-turn {
   display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  gap: 2px;
+  margin-top: var(--chat-turn-gap);
 }
 
-.row-user {
-  justify-content: flex-end;
-}
-
-.user-bubble {
-  max-width: 72%;
+.u-bub {
+  max-width: 78%;
   background: var(--bubble-user);
-  border: 1px solid var(--line-strong);
   border-radius: var(--radius-bubble);
-  padding: 8px 14px;
+  padding: 10px 14px;
+}
+
+.u-text-wrap {
+  position: relative;
+}
+
+.u-text {
   white-space: pre-wrap;
   word-break: break-word;
 }
 
-.row-assistant {
-  justify-content: flex-start;
+/* ~8 lines at 1.6 line-height, then a bottom gradient fade. */
+.u-text-wrap.is-clamped .u-text {
+  max-height: 12.8em;
+  overflow: hidden;
 }
 
-.assistant-body {
+.u-text-wrap.is-clamped::after {
+  content: "";
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  height: 3.2em;
+  background: linear-gradient(to bottom, transparent, var(--bubble-user));
+  pointer-events: none;
+}
+
+.u-text-toggle {
+  position: relative;
+  z-index: 1;
+  margin-top: 2px;
+  padding: 0;
+  background: transparent;
+  border: none;
+  color: var(--accent);
+  font-size: var(--font-size-aux);
+  cursor: pointer;
+}
+
+.u-meta {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: var(--font-size-micro);
+  color: var(--text-faint);
+}
+
+/* -- Assistant message ------------------------------------------------------- */
+
+.a-msg {
+  display: flex;
+  flex-direction: column;
+  gap: var(--chat-block-gap);
+  margin-top: 4px;
   max-width: 100%;
   min-width: 0;
+}
+
+.msg {
+  min-width: 0;
+}
+
+/* Streaming TextDelta blocks fade in as they mount (no JS animation). */
+.msg.streaming .markdown > * {
+  animation: stream-in var(--duration-base) var(--ease-out);
+}
+
+@keyframes stream-in {
+  from {
+    opacity: 0;
+  }
+  to {
+    opacity: 1;
+  }
 }
 
 .streaming-caret {
@@ -564,6 +635,467 @@ button {
   }
 }
 
+/* -- Fold lines (.think / .tool-line / .agent-line / .swarm-block / unknown) -- */
+
+.line-head {
+  width: 100%;
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  min-height: 24px;
+  padding: 2px 4px;
+  background: transparent;
+  border: none;
+  border-radius: 6px;
+  cursor: pointer;
+  text-align: left;
+  color: var(--text-dim);
+  font-size: var(--font-size-aux);
+  min-width: 0;
+}
+
+.line-head:hover {
+  background: var(--hover);
+}
+
+.line-caret {
+  flex: none;
+  display: inline-flex;
+  transition: transform var(--duration-base) var(--ease-out);
+}
+
+.line.open > .line-head .line-caret {
+  transform: rotate(90deg);
+}
+
+/* Pure-CSS collapse: grid-template-rows 0fr→1fr + overflow hidden. */
+.line-body {
+  display: grid;
+  grid-template-rows: 0fr;
+  transition: grid-template-rows var(--duration-base) var(--ease-out);
+}
+
+.line.open > .line-body {
+  grid-template-rows: 1fr;
+}
+
+.line-body-inner {
+  overflow: hidden;
+  min-height: 0;
+}
+
+.line-tail {
+  margin-left: auto;
+  flex: none;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: var(--font-size-micro);
+  color: var(--text-faint);
+  white-space: nowrap;
+}
+
+/* think */
+
+.think-title {
+  color: var(--text-dim);
+}
+
+.think.live .think-title {
+  animation: breathe 1.6s var(--ease-out) infinite;
+}
+
+@keyframes breathe {
+  0%,
+  100% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0.45;
+  }
+}
+
+.think-text {
+  margin: 0;
+  padding: 6px 8px 8px 26px;
+  white-space: pre-wrap;
+  word-break: break-word;
+  color: var(--text-dim);
+  max-height: 320px;
+  overflow-y: auto;
+}
+
+/* tool-line */
+
+.tl-ic {
+  flex: none;
+  display: inline-flex;
+  color: var(--text-faint);
+}
+
+.status-finished .tl-ic {
+  color: var(--ok);
+}
+
+.status-failed .tl-ic,
+.status-failed .tl-status {
+  color: var(--danger);
+}
+
+.tl-name {
+  flex: none;
+  color: var(--text);
+  font-weight: 500;
+}
+
+.tl-mono {
+  font-family: ui-monospace, "SF Mono", Menlo, Consolas, "Courier New", monospace;
+  font-size: var(--font-size-mono);
+  color: var(--text-faint);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  min-width: 0;
+}
+
+.tl-status {
+  border: 1px solid var(--line);
+  border-radius: var(--radius-pill);
+  padding: 0 8px;
+  font-size: var(--font-size-micro);
+  color: var(--text-faint);
+  white-space: nowrap;
+}
+
+.status-running .tl-status {
+  color: var(--accent);
+  border-color: var(--accent-dim);
+}
+
+.status-failed .tl-status {
+  border-color: var(--danger);
+}
+
+.tl-detail {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 4px 8px 10px 26px;
+}
+
+.cmd-echo {
+  font-family: ui-monospace, "SF Mono", Menlo, Consolas, "Courier New", monospace;
+  font-size: var(--font-size-mono);
+  color: var(--text-dim);
+  background: var(--well);
+  border-radius: 6px;
+  padding: 6px 10px;
+  overflow-x: auto;
+  white-space: pre-wrap;
+  word-break: break-all;
+}
+
+.tl-meta {
+  margin: 0;
+  font-size: var(--font-size-micro);
+  color: var(--text-faint);
+}
+
+/* TurnFold: a finished turn's process rows behind one summary line */
+
+.tf-head {
+  width: 100%;
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  min-height: 24px;
+  padding: 2px 4px;
+  background: transparent;
+  border: none;
+  border-radius: 6px;
+  cursor: pointer;
+  text-align: left;
+  color: var(--text-faint);
+  font-size: var(--font-size-aux);
+}
+
+.tf-head:disabled {
+  cursor: default;
+}
+
+.tf-head:not(:disabled):hover {
+  background: var(--hover);
+}
+
+.tf-caret {
+  flex: none;
+  display: inline-flex;
+  transition: transform var(--duration-base) var(--ease-out);
+}
+
+.turn-fold.open > .tf-head .tf-caret {
+  transform: rotate(90deg);
+}
+
+.tf-body {
+  display: grid;
+  grid-template-rows: 0fr;
+  transition: grid-template-rows var(--duration-base) var(--ease-out);
+}
+
+.turn-fold.open > .tf-body {
+  grid-template-rows: 1fr;
+}
+
+.tf-body-inner {
+  overflow: hidden;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+/* Answer footer: file changes + copy */
+
+.answer-ft {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin-top: 2px;
+}
+
+.ft-files {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.ft-file {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  font-size: var(--font-size-aux);
+}
+
+.ft-path {
+  font-family: ui-monospace, "SF Mono", Menlo, Consolas, "Courier New", monospace;
+  font-size: var(--font-size-mono);
+  color: var(--text-dim);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  min-width: 0;
+}
+
+.ft-diff {
+  flex: none;
+  display: inline-flex;
+  gap: 6px;
+  font-size: var(--font-size-micro);
+}
+
+.ft-add {
+  color: var(--ok);
+}
+
+.ft-del {
+  color: var(--danger);
+}
+
+.answer-ft .copy-button {
+  align-self: flex-start;
+}
+
+/* Approval / question rows: 2px accent bar, no card */
+
+.approval-row {
+  border-left: 2px solid var(--accent);
+  padding: 6px 0 6px 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.approval-row.resolved {
+  border-left-color: var(--line-strong);
+}
+
+.ar-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.ar-title {
+  font-weight: 600;
+  font-size: var(--font-size-aux);
+}
+
+.ar-state {
+  margin-left: auto;
+  font-size: var(--font-size-micro);
+  color: var(--warn);
+  white-space: nowrap;
+}
+
+.approval-row.resolved .ar-state {
+  color: var(--text-faint);
+}
+
+.ar-desc {
+  margin: 0;
+  color: var(--text-dim);
+  font-size: var(--font-size-aux);
+}
+
+.ar-question-text {
+  margin: 0;
+  font-size: var(--font-size-aux);
+  font-weight: 500;
+}
+
+.ar-actions,
+.ar-chips {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.chip,
+.chip-button {
+  border: 1px solid var(--line-strong);
+  background: var(--surface);
+  border-radius: var(--radius-pill);
+  padding: 4px 14px;
+  cursor: pointer;
+  font-size: var(--font-size-aux);
+}
+
+.chip:hover:not(:disabled),
+.chip-button:hover:not(:disabled) {
+  border-color: var(--accent-dim);
+}
+
+.chip.on {
+  background: var(--accent-soft);
+  border-color: var(--accent-dim);
+}
+
+.chip-button.primary {
+  background: var(--accent-dim);
+  border-color: var(--accent-dim);
+  color: var(--on-accent);
+}
+
+.chip:disabled,
+.chip-button:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+
+.ar-other {
+  background: var(--surface);
+  border: 1px solid var(--line-strong);
+  border-radius: 6px;
+  color: var(--text);
+  padding: 6px 10px;
+  font: inherit;
+  max-width: 420px;
+}
+
+/* Delegate / swarm inline rows (basic presentation; full design is R4) */
+
+.pulse-dot {
+  flex: none;
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--accent);
+  animation: kw-pulse 1.4s ease-in-out infinite;
+}
+
+@keyframes kw-pulse {
+  0%,
+  100% {
+    transform: scale(1);
+    opacity: 1;
+  }
+  50% {
+    transform: scale(1.5);
+    opacity: 0.5;
+  }
+}
+
+.swarm-members {
+  list-style: none;
+  margin: 0;
+  padding: 2px 8px 8px 26px;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.swarm-member {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-height: 24px;
+  border-left: 2px solid var(--line-strong);
+  padding-left: 10px;
+  font-size: var(--font-size-aux);
+  color: var(--text-dim);
+}
+
+.swarm-member-item {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* Status lines */
+
+.status-line {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: var(--font-size-aux);
+  color: var(--text-dim);
+  padding: 4px 2px;
+}
+
+.status-line.severity-error {
+  color: var(--danger);
+}
+
+.unknown-raw {
+  margin: 0;
+  white-space: pre-wrap;
+  word-break: break-word;
+  color: var(--text-dim);
+  max-height: 280px;
+  overflow-y: auto;
+}
+
+.full-output-meta {
+  margin: 0;
+  font-size: 12px;
+  color: var(--text-faint);
+}
+
+.text-action {
+  background: transparent;
+  border: none;
+  color: var(--accent);
+  cursor: pointer;
+  padding: 0;
+  text-align: left;
+}
+
 /* -- Markdown ---------------------------------------------------------------- */
 
 .markdown > :first-child {
@@ -577,7 +1109,7 @@ button {
 .markdown pre {
   background: var(--surface-raised);
   border: 1px solid var(--line);
-  border-radius: 8px;
+  border-radius: var(--radius-expand);
   padding: 10px 12px;
   overflow-x: auto;
 }
@@ -603,7 +1135,7 @@ button {
 .output-block {
   background: var(--surface-raised);
   border: 1px solid var(--line);
-  border-radius: 8px;
+  border-radius: var(--radius-expand);
   overflow: hidden;
 }
 
@@ -631,246 +1163,6 @@ button {
   overflow-x: auto;
   max-height: 320px;
   overflow-y: auto;
-}
-
-/* -- Collapsible bars ---------------------------------------------------------- */
-
-.collapsible {
-  border: 1px solid var(--line);
-  border-radius: 8px;
-  background: var(--well);
-  overflow: hidden;
-}
-
-.collapsible-summary {
-  width: 100%;
-  display: flex;
-  align-items: center;
-  gap: 7px;
-  padding: 6px 10px;
-  background: transparent;
-  border: none;
-  cursor: pointer;
-  text-align: left;
-  color: var(--text-dim);
-  min-width: 0;
-}
-
-.collapsible-summary:hover {
-  background: var(--hover);
-}
-
-.collapsible-chevron,
-.collapsible-icon {
-  flex: none;
-  display: inline-flex;
-}
-
-.collapsible-title {
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.collapsible-status {
-  margin-left: auto;
-  flex: none;
-  font-size: var(--font-size-micro);
-  color: var(--text-faint);
-  white-space: nowrap;
-}
-
-.collapsible-body {
-  border-top: 1px solid var(--line);
-  padding: 10px 12px;
-}
-
-.status-failed > .collapsible-summary .collapsible-status {
-  color: var(--danger);
-}
-
-.kind-thinking .collapsible-body {
-  padding: 0;
-}
-
-.thinking-text {
-  margin: 0;
-  padding: 10px 12px;
-  white-space: pre-wrap;
-  word-break: break-word;
-  color: var(--text-dim);
-  max-height: 320px;
-  overflow-y: auto;
-}
-
-.detail-stack {
-  display: flex;
-  flex-direction: column;
-  gap: 8px;
-}
-
-.unknown-raw {
-  margin: 0;
-  white-space: pre-wrap;
-  word-break: break-word;
-  color: var(--text-dim);
-  max-height: 280px;
-  overflow-y: auto;
-}
-
-/* -- Cards (approval / question, in place) ------------------------------------- */
-
-.card {
-  border: 1px solid var(--line-strong);
-  border-radius: 10px;
-  background: var(--surface-raised);
-  padding: 12px 14px;
-  display: flex;
-  flex-direction: column;
-  gap: 10px;
-}
-
-.card-header {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-}
-
-.card-title {
-  font-weight: 600;
-}
-
-.card-state {
-  margin-left: auto;
-  font-size: 12px;
-  color: var(--warn);
-  white-space: nowrap;
-}
-
-.card-actions {
-  display: flex;
-  gap: 8px;
-  flex-wrap: wrap;
-}
-
-.action-button {
-  border: 1px solid var(--line-strong);
-  background: var(--surface);
-  border-radius: 8px;
-  padding: 6px 14px;
-  cursor: pointer;
-}
-
-.action-button:hover:not(:disabled) {
-  border-color: var(--accent-dim);
-}
-
-.action-button.primary {
-  background: var(--accent-dim);
-  border-color: var(--accent-dim);
-}
-
-.action-button:disabled {
-  opacity: 0.45;
-  cursor: not-allowed;
-}
-
-.question-fields {
-  border: none;
-  margin: 0;
-  padding: 0;
-  display: flex;
-  flex-direction: column;
-  gap: 6px;
-}
-
-.question-title {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  font-weight: 600;
-  padding: 0;
-  margin-bottom: 4px;
-}
-
-.question-option {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  cursor: pointer;
-}
-
-.question-note {
-  display: flex;
-  flex-direction: column;
-  gap: 4px;
-}
-
-.question-note input {
-  background: var(--surface);
-  border: 1px solid var(--line-strong);
-  border-radius: 6px;
-  color: var(--text);
-  padding: 6px 10px;
-  font: inherit;
-}
-
-/* -- Status lines / swarm ------------------------------------------------------- */
-
-.status-line {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  font-size: var(--font-size-aux);
-  color: var(--text-dim);
-  padding: 4px 2px;
-}
-
-.status-line.severity-error {
-  color: var(--danger);
-}
-
-.swarm-children {
-  list-style: none;
-  margin: 0;
-  padding: 0;
-  display: flex;
-  flex-direction: column;
-  gap: 6px;
-}
-
-.swarm-child {
-  display: flex;
-  gap: 10px;
-  align-items: baseline;
-  border-left: 2px solid var(--line-strong);
-  padding-left: 10px;
-}
-
-.swarm-child-state {
-  flex: none;
-  font-size: 12px;
-  color: var(--accent);
-}
-
-.swarm-child-item {
-  flex: 1;
-  min-width: 0;
-}
-
-.full-output-meta {
-  margin: 0;
-  font-size: 12px;
-  color: var(--text-faint);
-}
-
-.text-action {
-  background: transparent;
-  border: none;
-  color: var(--accent);
-  cursor: pointer;
-  padding: 0;
-  text-align: left;
 }
 
 /* -- Icon buttons ----------------------------------------------------------------- */
@@ -1240,7 +1532,7 @@ button {
     padding: 0 12px;
   }
 
-  .user-bubble {
+  .u-bub {
     max-width: 88%;
   }
 

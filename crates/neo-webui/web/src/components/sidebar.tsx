@@ -199,7 +199,7 @@ function SessionRow({
             }}
             onClick={(event) => event.stopPropagation()}
           />
-          <button type="submit" className="action-button">
+          <button type="submit" className="chip-button">
             保存
           </button>
         </form>

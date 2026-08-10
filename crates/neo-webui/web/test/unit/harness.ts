@@ -79,13 +79,16 @@ function jsonResponse(body: unknown, status = 200): Response {
 }
 
 export const workspaceSessions = (
-  fixture.long_connection.workspace_snapshot.sessions ?? []
-) as Array<Record<string, unknown>>;
+  fixture.long_connection.workspace_snapshot.workspaces ?? []
+).flatMap((group) => group.sessions) as Array<Record<string, unknown>>;
 
 export function bootstrapBody(): Record<string, unknown> {
   return {
     workspace_label: "neo",
-    models: ["gpt-5-codex", "claude-sonnet"],
+    models: [
+      { alias: "gpt-5-codex", provider: "openai", capabilities: [] },
+      { alias: "claude-sonnet", provider: "anthropic", capabilities: [] },
+    ],
     permission_modes: ["ask", "auto", "yolo"],
     development_modes: ["normal", "plan", "goal"],
     sessions: workspaceSessions,

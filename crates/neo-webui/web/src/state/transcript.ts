@@ -8,14 +8,18 @@
 import type {
   AgentEvent,
   AgentMessage,
+  AgentProgressSnapshot,
   AgentSnapshot,
+  AgentTokenUsage,
   ApprovalRequest,
   ApprovalResolution,
   QuestionEventData,
   StopReason,
+  SwarmAggregate,
   SwarmSnapshot,
   TodoEventData,
   ToolResult,
+  WebUiContextWindow,
   WebUiHistoryEntry,
   WebUiOutputRef,
   WorkflowSnapshot,
@@ -191,6 +195,10 @@ export interface TranscriptProjection {
    * ApprovalResolved or the next snapshot). */
   pendingApprovalId: string | null;
   pendingQuestionId: string | null;
+  /** Latest TokenUsage payload on the stream (latest-wins). */
+  latestUsage: AgentTokenUsage | null;
+  /** Latest ContextWindowUpdated payload on the stream (latest-wins). */
+  contextWindow: WebUiContextWindow | null;
   // Internal, never rendered directly:
   liveMessageId: string | null;
   liveThinkingId: string | null;
@@ -205,6 +213,8 @@ export function emptyProjection(): TranscriptProjection {
     todos: [],
     pendingApprovalId: null,
     pendingQuestionId: null,
+    latestUsage: null,
+    contextWindow: null,
     liveMessageId: null,
     liveThinkingId: null,
     coverage: {
@@ -323,8 +333,6 @@ const KNOWN_SILENT_TAGS = new Set([
   "TurnStarted",
   "RunFinished",
   "TurnFinished",
-  "TokenUsage",
-  "ContextWindowUpdated",
   "SteeringQueued",
   "FollowUpQueued",
   "QueueDrained",
@@ -853,6 +861,29 @@ export function applyAgentEvent(
       };
     }
 
+    // -- Usage / context projections: latest-wins state, never transcript rows.
+    case "TokenUsage": {
+      const b = body as { usage: AgentTokenUsage };
+      return { ...projection, latestUsage: b.usage };
+    }
+    case "ContextWindowUpdated": {
+      const b = body as {
+        used_tokens: number;
+        projected_tokens?: number | null;
+        max_tokens?: number | null;
+        remaining_tokens?: number | null;
+      };
+      return {
+        ...projection,
+        contextWindow: {
+          used_tokens: b.used_tokens,
+          projected_tokens: b.projected_tokens ?? null,
+          max_tokens: b.max_tokens ?? null,
+          remaining_tokens: b.remaining_tokens ?? null,
+        },
+      };
+    }
+
     // -- Delegate / DelegateSwarm: keep hierarchy verbatim from snapshots.
     case "DelegateStarted":
     case "DelegateUpdated":
@@ -894,6 +925,66 @@ export function applyAgentEvent(
         };
       }
       return { ...projection, items: [...projection.items, item] };
+    }
+
+    case "DelegateProgressUpdated": {
+      const b = body as { progress: AgentProgressSnapshot };
+      const id = `delegate:${b.progress.agent_id}`;
+      const existing = projection.items.find((entry) => entry.id === id);
+      const base: AgentSnapshot =
+        existing && existing.kind === "delegate"
+          ? existing.agent
+          : {
+              id: b.progress.agent_id,
+              display_name: b.progress.agent_id,
+              state: b.progress.state,
+            };
+      const item: DelegateItem = {
+        kind: "delegate",
+        id,
+        agent: mergeAgentProgress(base, b.progress),
+        finished: existing && existing.kind === "delegate" ? existing.finished : false,
+      };
+      return { ...projection, items: upsertById(projection.items, item) };
+    }
+    case "DelegateSwarmProgressUpdated": {
+      const b = body as {
+        swarm_id: string;
+        state: string;
+        aggregate: SwarmAggregate;
+        child_progress: { item_index: number; progress: AgentProgressSnapshot };
+      };
+      const id = `swarm:${b.swarm_id}`;
+      const existing = projection.items.find((entry) => entry.id === id);
+      const base: SwarmSnapshot =
+        existing && existing.kind === "swarm"
+          ? existing.swarm
+          : {
+              swarm_id: b.swarm_id,
+              description: b.swarm_id,
+              state: b.state,
+              max_concurrency: 0,
+              aggregate: b.aggregate,
+              children: [],
+            };
+      const children = base.children.slice();
+      const childIndex = children.findIndex(
+        (child) => child.item_index === b.child_progress.item_index,
+      );
+      if (childIndex >= 0) {
+        const child = children[childIndex];
+        children[childIndex] = {
+          ...child,
+          agent: mergeAgentProgress(child.agent, b.child_progress.progress),
+        };
+      }
+      const item: SwarmItem = {
+        kind: "swarm",
+        id,
+        swarm: { ...base, state: b.state, aggregate: b.aggregate, children },
+        finished: existing && existing.kind === "swarm" ? existing.finished : false,
+      };
+      return { ...projection, items: upsertById(projection.items, item) };
     }
 
     // -- Workflows.
@@ -992,6 +1083,34 @@ function upsertById(items: TranscriptItem[], item: TranscriptItem): TranscriptIt
   const next = items.slice();
   next[index] = item;
   return next;
+}
+
+/** Merge a live AgentProgressSnapshot into the last full AgentSnapshot:
+ * progress fields win, identity fields (display_name, task) survive. */
+function mergeAgentProgress(
+  agent: AgentSnapshot,
+  progress: AgentProgressSnapshot,
+): AgentSnapshot {
+  const elapsedMs = progress.elapsed_ms;
+  return {
+    ...agent,
+    state: progress.state ?? agent.state,
+    mode: progress.mode ?? agent.mode,
+    detached_from_foreground:
+      progress.detached_from_foreground ?? agent.detached_from_foreground,
+    updated_at_ms: progress.updated_at_ms ?? agent.updated_at_ms,
+    terminal_reason: progress.terminal_reason ?? agent.terminal_reason,
+    run_count: progress.run_count ?? agent.run_count,
+    live_messages_received:
+      progress.live_messages_received ?? agent.live_messages_received,
+    tool_count: progress.tool_count ?? agent.tool_count,
+    token_count: progress.token_count ?? agent.token_count,
+    latest_text: progress.latest_text ?? agent.latest_text,
+    elapsed:
+      elapsedMs !== undefined
+        ? { secs: Math.floor(elapsedMs / 1000), nanos: (elapsedMs % 1000) * 1_000_000 }
+        : agent.elapsed,
+  };
 }
 
 function applyMessageAppended(

@@ -1,55 +1,59 @@
 /**
- * Compact collapsible bar used by thinking, tools, terminals, workflows,
- * delegate items and unknown records. The summary line always carries the
- * real state in text (never color alone); the expanded body shows details.
+ * Single-line fold primitive of the de-carded transcript: a 24-28px head row
+ * (caret + icon + title + dim summary + right tail) and a body that expands
+ * with the pure-CSS `grid-template-rows 0fr→1fr` transition. Used by think,
+ * tool-line, agent-line, swarm-block and the unknown-event record. Expansion
+ * state is per-session UI state (never part of the transcript projection).
  */
 
-import { ChevronDown, ChevronRight } from "lucide-react";
 import type { ReactNode } from "react";
 import { useAppActions, useAppState } from "../state/store";
 
-export function CollapsibleBar({
-  sessionId,
-  itemId,
-  icon,
-  title,
-  status,
-  defaultExpanded = false,
-  children,
-  className = "",
-}: {
-  sessionId: string;
-  itemId: string;
-  icon: ReactNode;
-  title: string;
-  status: string;
-  defaultExpanded?: boolean;
-  children: ReactNode;
-  className?: string;
-}) {
+/** Expansion state for one transcript line: absent override follows the
+ * line's phase-dependent default; a user click records an explicit override
+ * that survives later phase changes (e.g. think finishing). */
+export function useLineExpanded(
+  sessionId: string,
+  itemId: string,
+  defaultOpen: boolean,
+): [boolean, () => void] {
   const state = useAppState();
   const actions = useAppActions();
-  const expanded = state.sessions[sessionId]?.expandedItemIds.includes(itemId) ?? defaultExpanded;
-  const label = expanded ? `收起${title}` : `展开${title}`;
+  const override = state.sessions[sessionId]?.lineOverrides[itemId];
+  const open = override ?? defaultOpen;
+  return [open, () => actions.setLineExpanded(sessionId, itemId, !open)];
+}
+
+export function Line({
+  className = "",
+  label,
+  open,
+  onToggle,
+  head,
+  children,
+}: {
+  className?: string;
+  /** Accessible name of the fold target, e.g. "思考，状态：思考中". */
+  label: string;
+  open: boolean;
+  onToggle(): void;
+  head: ReactNode;
+  children: ReactNode;
+}) {
   return (
-    <div className={`collapsible ${className} ${expanded ? "expanded" : ""}`}>
+    <div className={`line ${className} ${open ? "open" : ""}`}>
       <button
         type="button"
-        className="collapsible-summary"
-        aria-expanded={expanded}
-        aria-label={`${label}，状态：${status}`}
-        onClick={() => actions.toggleItemExpanded(sessionId, itemId)}
+        className="line-head"
+        aria-expanded={open}
+        aria-label={`${open ? "收起" : "展开"}${label}`}
+        onClick={onToggle}
       >
-        <span className="collapsible-chevron" aria-hidden>
-          {expanded ? <ChevronDown size={14} /> : <ChevronRight size={14} />}
-        </span>
-        <span className="collapsible-icon" aria-hidden>
-          {icon}
-        </span>
-        <span className="collapsible-title">{title}</span>
-        <span className="collapsible-status">{status}</span>
+        {head}
       </button>
-      {expanded ? <div className="collapsible-body">{children}</div> : null}
+      <div className="line-body">
+        <div className="line-body-inner">{children}</div>
+      </div>
     </div>
   );
 }
