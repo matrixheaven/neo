@@ -2924,8 +2924,23 @@ fn replay_main_agent_token_usage<'a>(
             usage: event_usage, ..
         } = event
         {
-            usage.add(*event_usage);
+            usage.add(restore_legacy_full_input_tokens(*event_usage));
         }
+    }
+    usage
+}
+
+fn restore_legacy_full_input_tokens(
+    mut usage: neo_agent_core::AgentTokenUsage,
+) -> neo_agent_core::AgentTokenUsage {
+    let cache_input_tokens = usage
+        .input_cache_read_tokens
+        .saturating_add(usage.input_cache_write_tokens);
+    // Before token accounting was normalized, Anthropic-style responses stored
+    // their uncached input here. This impossible current-state relation is the
+    // only reliable legacy signal preserved in the event log.
+    if cache_input_tokens > usage.input_tokens {
+        usage.input_tokens = usage.input_tokens.saturating_add(cache_input_tokens);
     }
     usage
 }

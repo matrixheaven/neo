@@ -675,7 +675,7 @@ async fn load_session_transcript_keeps_context_usage_event_authoritative() {
 }
 
 #[tokio::test]
-async fn load_session_transcript_replays_token_usage_for_footer() {
+async fn load_session_transcript_normalizes_legacy_token_usage_for_footer() {
     let temp = tempfile::tempdir().expect("tempdir");
     let sessions_dir = temp.path().join(".neo/sessions");
     let config = test_config(temp.path(), sessions_dir);
@@ -697,17 +697,29 @@ async fn load_session_transcript_replays_token_usage_for_footer() {
         })
         .await
         .expect("append token usage");
+    writer
+        .append(&AgentEvent::TokenUsage {
+            turn: 2,
+            usage: neo_agent_core::AgentTokenUsage {
+                input_tokens: 400_800,
+                output_tokens: 10_234,
+                input_cache_read_tokens: 370_200,
+                input_cache_write_tokens: 0,
+            },
+        })
+        .await
+        .expect("append normalized token usage");
     writer.flush().await.expect("flush session");
 
     let loaded = load_session_transcript(SESSION_A.to_owned(), &config)
         .await
         .expect("load transcript");
 
-    assert_eq!(loaded.main_agent_token_usage.input_tokens, 33_900);
-    assert_eq!(loaded.main_agent_token_usage.output_tokens, 2_800);
+    assert_eq!(loaded.main_agent_token_usage.input_tokens, 603_900);
+    assert_eq!(loaded.main_agent_token_usage.output_tokens, 13_034);
     assert_eq!(
         loaded.main_agent_token_usage.input_cache_read_tokens,
-        169_200
+        539_400
     );
     assert_eq!(loaded.main_agent_token_usage.input_cache_write_tokens, 0);
 }
@@ -830,7 +842,7 @@ fn rebuild_transcript_from_session_restores_footer_token_usage() {
 
     let mut usage = neo_tui::shell::MainAgentTokenUsage::default();
     usage.add(neo_agent_core::AgentTokenUsage {
-        input_tokens: 33_900,
+        input_tokens: 203_100,
         output_tokens: 2_800,
         input_cache_read_tokens: 169_200,
         input_cache_write_tokens: 0,
@@ -857,8 +869,8 @@ fn rebuild_transcript_from_session_restores_footer_token_usage() {
         .to_owned();
 
     assert!(footer.contains("ctx 152k/262k"));
-    assert!(footer.contains("↑33.9k"));
+    assert!(footer.contains("↑203.1k"));
     assert!(footer.contains("↓2.8k"));
     assert!(footer.contains("cache 169.2k read"));
-    assert!(footer.contains("hit 100.0%"));
+    assert!(footer.contains("hit 83.3%"));
 }
