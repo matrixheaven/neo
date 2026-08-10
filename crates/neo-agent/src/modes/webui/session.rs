@@ -647,9 +647,13 @@ fn project_presentation(presentation: &mut ApprovalPresentation, workspace: &Pat
     }
 }
 
-/// Read one owned tool-output range: the session's ownership mapping (built
-/// from its canonical history and live events) is verified before the
-/// existing `ToolOutputStore::read_range` runs. Path-form input, undecodable
+/// Read one owned tool-output range: ownership is verified before the
+/// existing `ToolOutputStore::read_range` runs. The ownership set is the refs
+/// collected from the session's own projection (canonical history and live
+/// events) union any well-formed child agent record persisted under this
+/// session's own `agents/` directory — the panel lazy-load projection mints
+/// child output references without touching the collected set, and the data
+/// physically lives in `agents/<agent_id>/`. Path-form input, undecodable
 /// strings, forged, cross-session and stale references all resolve to the
 /// same `404 output_not_in_session` without leaking other sessions.
 pub(crate) fn read_owned_tool_output(
@@ -667,7 +671,9 @@ pub(crate) fn read_owned_tool_output(
     let Some(reference) = decode_output_ref(output_ref) else {
         return Err(WebUiError::new(WebUiErrorCode::OutputNotInSession));
     };
-    if !state.output_refs.contains(output_ref) {
+    let owned = state.output_refs.contains(output_ref)
+        || persisted_child_agent(&state.session_dir, &reference.agent_id);
+    if !owned {
         return Err(WebUiError::new(WebUiErrorCode::OutputNotInSession));
     }
     let store = neo_agent_core::session::ToolOutputStore::new(state.session_dir.clone());
@@ -678,7 +684,28 @@ pub(crate) fn read_owned_tool_output(
             start_line,
             u64::from(max_lines),
         )
-        .map_err(|_| WebUiError::new(WebUiErrorCode::Internal))
+        .map_err(|error| match error.kind() {
+            // An owned ref whose artifact is gone (stale, or a forged id pair
+            // under a real child agent) is indistinguishable from a foreign
+            // one: keep the uniform 404.
+            std::io::ErrorKind::NotFound | std::io::ErrorKind::InvalidInput => {
+                WebUiError::new(WebUiErrorCode::OutputNotInSession)
+            }
+            _ => WebUiError::new(WebUiErrorCode::Internal),
+        })
+}
+
+/// Whether `agent_id` names a persisted agent record inside this session's
+/// own `agents/` directory. The charset rule matches the agent-history route
+/// (alphanumeric plus `-_.`, no `..`), so a forged id never reaches the path
+/// join and the lookup can never escape `session_dir`.
+fn persisted_child_agent(session_dir: &Path, agent_id: &str) -> bool {
+    let well_formed = !agent_id.is_empty()
+        && agent_id
+            .chars()
+            .all(|c: char| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.'))
+        && !agent_id.contains("..");
+    well_formed && neo_agent_core::session::agent_record_dir(session_dir, agent_id).is_dir()
 }
 
 /// Decode the wire form back into a typed `ToolOutputRef`. Anything that is

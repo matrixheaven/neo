@@ -404,7 +404,9 @@ pub struct WebUiAttachmentAck {
 /// snapshot (opaque output references, workspace-relative paths). `watermark`
 /// is the count of replayed events; entries carry contiguous `sequence`
 /// values starting at 1. Read on demand — never cached, never a new event
-/// store.
+/// store. A still-running child agent's history only reaches its last flush
+/// point (the wire writer flushes at run end; text deltas land at message
+/// boundaries), so the tail of a live run is legitimately absent.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct WebUiAgentHistory {
     pub agent_id: String,
