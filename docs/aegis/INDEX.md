@@ -619,3 +619,4 @@ Entries are workspace records, not authoritative runtime decisions.
 | 2026-08-10 | artifact | docs/aegis/work/2026-08-10-media-input-model-lanes/gate-input-pack.json | 2026-08-10-media-input-model-lanes gate input pack |
 | 2026-08-10 | work | docs/aegis/work/2026-08-10-media-input-model-lanes/proof-bundle.md | 2026-08-10-media-input-model-lanes proof bundle |
 | 2026-08-10 | spec | docs/aegis/specs/2026-08-10-neo-webui-redesign-design.md | Neo WebUI 重设计说明 |
+| 2026-08-10 | plan | docs/aegis/plans/2026-08-10-neo-webui-redesign.md | Neo WebUI 重设计实施计划 |
