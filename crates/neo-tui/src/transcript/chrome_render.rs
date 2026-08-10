@@ -122,7 +122,10 @@ pub(super) fn render_ordered_tools(
 
 /// Whether a tool name is eligible for consecutive-call grouping.
 fn is_tree_groupable(name: &str) -> bool {
-    matches!(name, "Read" | "Grep" | "Glob" | "Find" | "List")
+    matches!(
+        name,
+        "Read" | "ReadMediaFile" | "Grep" | "Glob" | "Find" | "List"
+    )
 }
 
 fn is_mutation_groupable(name: &str) -> bool {

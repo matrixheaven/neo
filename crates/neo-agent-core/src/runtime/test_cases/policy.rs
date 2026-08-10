@@ -65,3 +65,34 @@ fn sleep_is_default_approved() {
     };
     assert!(is_default_approved_tool(&call));
 }
+
+#[test]
+fn read_media_file_is_default_approved_with_file_read_access() {
+    let call = AgentToolCall {
+        id: "call-read-media".into(),
+        name: "ReadMediaFile".into(),
+        raw_arguments: r#"{"path":"shot.png"}"#.into(),
+    };
+    assert!(
+        is_default_approved_tool(&call),
+        "ReadMediaFile must be auto-approved like Read; its blob write is session-internal"
+    );
+    let access = access_for_tool(&call, true);
+    assert!(
+        access.file_read && !access.file_write && !access.shell,
+        "ReadMediaFile must reuse the file-read permission boundary"
+    );
+}
+
+#[test]
+fn read_media_file_denial_reports_file_read_operation() {
+    let call = AgentToolCall {
+        id: "call-read-media".into(),
+        name: "ReadMediaFile".into(),
+        raw_arguments: r#"{"path":"shot.png"}"#.into(),
+    };
+    let (operation, subject) = permission_operation_for_tool(&call, &json!({"path": "shot.png"}))
+        .expect("ReadMediaFile must map to a typed operation");
+    assert_eq!(operation, PermissionOperation::FileRead);
+    assert_eq!(subject, "shot.png");
+}

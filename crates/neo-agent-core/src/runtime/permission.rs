@@ -671,6 +671,7 @@ fn is_default_approved_tool(tool_call: &AgentToolCall) -> bool {
             | "Grep"
             | "Find"
             | "Glob"
+            | "ReadMediaFile"
             | "TodoList"
             | "TaskList"
             | "TaskOutput"
@@ -682,7 +683,7 @@ fn is_default_approved_tool(tool_call: &AgentToolCall) -> bool {
 
 fn access_for_tool(tool_call: &AgentToolCall, grant: bool) -> ToolAccess {
     match tool_call.name.as_ref() {
-        "Read" | "List" | "Grep" | "Find" | "Glob" => ToolAccess {
+        "Read" | "List" | "Grep" | "Find" | "Glob" | "ReadMediaFile" => ToolAccess {
             file_read: grant,
             ..ToolAccess::none()
         },
@@ -1548,7 +1549,7 @@ fn permission_operation_for_tool(
     arguments: &serde_json::Value,
 ) -> Option<(PermissionOperation, String)> {
     match tool_call.name.as_ref() {
-        "Read" | "List" | "Grep" | "Find" | "Glob" => Some((
+        "Read" | "ReadMediaFile" | "List" | "Grep" | "Find" | "Glob" => Some((
             PermissionOperation::FileRead,
             path_subject(arguments).unwrap_or_else(|| tool_call.name.to_string()),
         )),

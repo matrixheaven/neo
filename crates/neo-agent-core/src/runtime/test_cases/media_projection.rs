@@ -669,3 +669,50 @@ fn projection_shape_derives_exchange_decision() {
         "different exchange projections must never share a cache lane shape"
     );
 }
+
+/// `tool_result_kind_deliverable` must never drift from the projection's
+/// `tool_cell` decision: the tool table is only exposed for kinds the
+/// projection would actually deliver (in place or attached after the
+/// exchange). Exhaustive over every capability cell — kind × model
+/// acceptance × tool-result transport mode × user-message transport mode.
+#[test]
+fn tool_result_deliverable_matches_tool_cell_for_all_capability_cells() {
+    use neo_ai::MediaKind;
+
+    let modes = [
+        MediaTransportMode::Inline,
+        MediaTransportMode::Url,
+        MediaTransportMode::FileRef,
+        MediaTransportMode::InPlace,
+        MediaTransportMode::AttachAfterResult,
+        MediaTransportMode::Unsupported,
+    ];
+    for kind in [MediaKind::Image, MediaKind::Video] {
+        for model_accepts in [false, true] {
+            let model = ModelCapabilities {
+                images: kind == MediaKind::Image && model_accepts,
+                videos: kind == MediaKind::Video && model_accepts,
+                ..ModelCapabilities::chat()
+            };
+            for &tool_mode in &modes {
+                for &user_mode in &modes {
+                    let transport = MediaTransportCapabilities {
+                        user_image: user_mode,
+                        user_video: user_mode,
+                        tool_image: tool_mode,
+                        tool_video: tool_mode,
+                    };
+                    let cell = MediaProjectionCell::tool_cell(kind, &model, transport);
+                    let deliverable = tool_result_kind_deliverable(kind, &model, transport);
+                    assert_eq!(
+                        cell.mode == MediaProjectionMode::FixedDescription,
+                        !deliverable,
+                        "deliverable must equal non-fixed-description for \
+                         kind={kind:?}, model_accepts={model_accepts}, \
+                         tool_mode={tool_mode:?}, user_mode={user_mode:?}"
+                    );
+                }
+            }
+        }
+    }
+}

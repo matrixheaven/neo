@@ -368,7 +368,7 @@ impl InstructionScopeProbe {
                 .into_iter()
                 .map(|target_directory| Self { target_directory })
                 .collect(),
-            "Read" => {
+            "Read" | "ReadMediaFile" => {
                 let Some(path) = arguments.get("path").and_then(serde_json::Value::as_str) else {
                     return Vec::new();
                 };
@@ -607,25 +607,25 @@ mod tests {
         };
         let absolute = |path: &std::path::Path| path.to_string_lossy().to_string();
 
-        // Read probes the parent directory of its single typed file path.
-        assert_eq!(
-            probe("Read", json!({ "path": "nested/file.txt" })),
-            vec![nested.clone()],
-            "Read relative path"
-        );
-        assert_eq!(
-            probe(
-                "Read",
-                json!({ "path": absolute(&nested.join("file.txt")) })
-            ),
-            vec![nested.clone()],
-            "Read absolute path"
-        );
-        assert_eq!(
-            probe("Read", json!({ "path": absolute(&external) })),
-            Vec::<PathBuf>::new(),
-            "Read external absolute path"
-        );
+        // Read and ReadMediaFile probe the parent directory of their single
+        // typed file path.
+        for name in ["Read", "ReadMediaFile"] {
+            assert_eq!(
+                probe(name, json!({ "path": "nested/file.txt" })),
+                vec![nested.clone()],
+                "{name} relative path"
+            );
+            assert_eq!(
+                probe(name, json!({ "path": absolute(&nested.join("file.txt")) })),
+                vec![nested.clone()],
+                "{name} absolute path"
+            );
+            assert_eq!(
+                probe(name, json!({ "path": absolute(&external) })),
+                Vec::<PathBuf>::new(),
+                "{name} external absolute path"
+            );
+        }
         // Edit and Write probe their typed path parent.
         assert_eq!(
             probe(

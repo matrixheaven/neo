@@ -99,7 +99,7 @@ impl Tool for ReadTool {
     }
 }
 
-fn resolve_read_path(ctx: &ToolContext, path: &std::path::Path) -> std::path::PathBuf {
+pub(crate) fn resolve_read_path(ctx: &ToolContext, path: &std::path::Path) -> std::path::PathBuf {
     let candidate = if path.is_absolute() {
         path.to_path_buf()
     } else {

@@ -36,7 +36,8 @@ use neo_agent_core::session::{JsonlSessionReader, JsonlSessionWriter, SessionEve
 use neo_agent_core::{
     AgentContext, AgentEvent, AgentMessage, AgentRuntime, ApprovalRequest, ApprovalResponse,
     AskUserTool, Content, CreateSkillTool, ListSkillsTool, MessageOrigin, MoveSkillTool,
-    SteerInputHandle, SummarizeSessionsTool, WorkflowNotification, skills::SkillStoreHandle,
+    ReadMediaFileTool, SteerInputHandle, SummarizeSessionsTool, WorkflowNotification,
+    skills::SkillStoreHandle,
 };
 use tokio::sync::{mpsc, oneshot};
 use tokio_util::sync::CancellationToken;
@@ -661,6 +662,11 @@ async fn runtime_for_config(
 ) -> anyhow::Result<AgentRuntime> {
     let model = runtime::resolve_model(config)?;
     let client = runtime::resolve_model_client(config, &model)?;
+    // Capability snapshot for the capability-aware `ReadMediaFile` tool,
+    // captured before `model` is moved into the agent config below. The
+    // runtime is rebuilt on model switches, so the tool table never drifts
+    // from the current model's effective media capabilities.
+    let media_tool = ReadMediaFileTool::from_model(&model.capabilities, client.media_transport());
     let skill_store = resources::load_skill_store(
         neo_home().as_deref(),
         &config.extra_skill_dirs,
@@ -695,6 +701,9 @@ async fn runtime_for_config(
         request.and_then(|request| request.mcp_manager.as_ref()),
     )
     .await?;
+    if let Some(media_tool) = media_tool {
+        tools.register(media_tool);
+    }
     if let Some(channels) = channels {
         tools.register(AskUserTool::new(channels.questions.clone()));
     }

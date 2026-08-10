@@ -176,6 +176,27 @@ impl MediaProjectionPlan {
     }
 }
 
+/// Whether media of `kind` produced by a tool will be delivered somewhere in
+/// the request for this model/transport pair: in place, or attached as a user
+/// message after the tool exchange — exactly the two `tool_cell` outcomes
+/// that are not `FixedDescription`. The `ReadMediaFile` tool table mirrors
+/// this decision so the tool is never exposed when the projection would
+/// reduce its media to a fixed description.
+pub(crate) fn tool_result_kind_deliverable(
+    kind: MediaKind,
+    model: &ModelCapabilities,
+    transport: MediaTransportCapabilities,
+) -> bool {
+    match effective_media_capability(kind, MediaPosition::ToolResult, model, transport) {
+        EffectiveMediaCapability::Sendable(_) => true,
+        EffectiveMediaCapability::ModelRejectsMediaKind => false,
+        EffectiveMediaCapability::TransportUnsupported => matches!(
+            effective_media_capability(kind, MediaPosition::UserMessage, model, transport),
+            EffectiveMediaCapability::Sendable(_)
+        ),
+    }
+}
+
 /// Where a media part sits inside one message.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum ProjectionPosition {

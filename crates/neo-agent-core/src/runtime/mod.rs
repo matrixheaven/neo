@@ -1,7 +1,7 @@
 //! Agent runtime — turn loop, tool dispatch, permissions, compaction.
 //!
 mod agent;
-mod chat_request;
+pub(crate) mod chat_request;
 pub(crate) mod compaction_controller;
 mod config;
 mod context;

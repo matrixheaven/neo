@@ -20,6 +20,7 @@ mod multi_agent_format;
 pub mod plan_mode;
 mod process_supervisor;
 mod read;
+mod read_media;
 mod sessions;
 mod shell_env;
 mod shell_guard;
@@ -190,6 +191,8 @@ pub use goal::{
 pub use sessions::SummarizeSessionsTool;
 // Re-export Sleep tool.
 pub use sleep::SleepTool;
+// Re-export the capability-aware media read tool.
+pub use read_media::ReadMediaFileTool;
 // Re-export skill-manager tool types.
 pub use skills_manager::{CreateSkillTool, ListSkillsTool, MoveSkillTool};
 // Re-export the prepared Edit payload inside the crate for runtime dispatch.
