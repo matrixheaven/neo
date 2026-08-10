@@ -4,7 +4,8 @@
  * shells, terminals, workflows, delegates and unknown records are single
  * 24px lines (.think / .tool-line / .agent-line) that expand in place;
  * approvals and questions are in-place rows with a 2px accent bar
- * (.approval-row). State is always conveyed in text, never color alone.
+ * (.approval-row). Terminal results use a left status icon and retain text in
+ * the expanded detail for screen-reader parity.
  */
 
 import {
@@ -13,9 +14,18 @@ import {
   Check,
   ChevronRight,
   CircleHelp,
+  CircleStop,
   Clock,
+  Eye,
+  File,
+  FilePenLine,
+  FilePlus,
+  FolderSearch,
+  ListChecks,
   Loader2,
+  MessageCircle,
   Network,
+  Search,
   ShieldQuestion,
   SquareTerminal,
   Workflow,
@@ -238,31 +248,180 @@ function commandEchoOf(args: unknown): string | null {
 interface ToolPresentation {
   action: string;
   target: string;
+  secondary?: string;
+  icon: ToolIconName;
 }
 
-function toolPresentation(name: string, args: unknown): ToolPresentation {
-  switch (name.toLowerCase()) {
+type ToolIconName =
+  | "file"
+  | "media"
+  | "file-edit"
+  | "file-plus"
+  | "search"
+  | "folder-search"
+  | "terminal"
+  | "delegate"
+  | "swarm"
+  | "todo"
+  | "wait"
+  | "stop"
+  | "message"
+  | "unknown";
+
+function argumentText(args: unknown, fields: readonly string[]): string | null {
+  if (!args || typeof args !== "object") return null;
+  const record = args as Record<string, unknown>;
+  for (const field of fields) {
+    const value = record[field];
+    if (typeof value === "string" && value !== "") return value;
+    if (typeof value === "number" || typeof value === "boolean") return String(value);
+    if (Array.isArray(value)) {
+      const entries = value.filter(
+        (entry): entry is string | number => typeof entry === "string" || typeof entry === "number",
+      );
+      if (entries.length > 0) return entries.join(", ");
+    }
+  }
+  return null;
+}
+
+function pathPresentation(path: string): Pick<ToolPresentation, "target" | "secondary"> {
+  const trimmed = path.replace(/[\\/]+$/, "");
+  const separator = Math.max(trimmed.lastIndexOf("/"), trimmed.lastIndexOf("\\"));
+  if (trimmed === "" || separator < 0) {
+    return { target: path };
+  }
+  return {
+    target: trimmed.slice(separator + 1),
+    secondary: trimmed.slice(0, separator + 1),
+  };
+}
+
+function pathTarget(args: unknown): Pick<ToolPresentation, "target" | "secondary"> {
+  const path = argumentText(args, ["path"]);
+  return path === null ? { target: "" } : pathPresentation(path);
+}
+
+export function toolPresentation(name: string, args: unknown): ToolPresentation {
+  switch (name.trim().toLowerCase()) {
     case "grep":
+      return {
+        action: "搜索",
+        target: argumentText(args, ["pattern", "query", "path"]) ?? "",
+        secondary: argumentText(args, ["directory", "cwd", "root"]) ?? undefined,
+        icon: "search",
+      };
     case "glob":
     case "find":
-      return { action: "搜索", target: stringArgument(args, ["pattern", "query", "path"]) ?? "" };
+      return {
+        action: "搜索",
+        target: argumentText(args, ["pattern", "query", "path"]) ?? "",
+        secondary: argumentText(args, ["directory", "cwd", "root"]) ?? undefined,
+        icon: "folder-search",
+      };
     case "read":
     case "list":
-      return { action: "读取", target: stringArgument(args, ["path"]) ?? "" };
+      return { action: "读取", ...pathTarget(args), icon: "file" };
     case "readmediafile":
-      return { action: "观察", target: stringArgument(args, ["path"]) ?? "" };
+      return { action: "观察", ...pathTarget(args), icon: "media" };
     case "edit":
-      return { action: "编辑", target: stringArgument(args, ["path"]) ?? "" };
+      return { action: "编辑", target: argumentText(args, ["path"]) ?? "", icon: "file-edit" };
     case "write":
-      return { action: "创建", target: stringArgument(args, ["path"]) ?? "" };
+      return { action: "创建", target: argumentText(args, ["path"]) ?? "", icon: "file-plus" };
     case "bash":
     case "shell":
-      return { action: "运行", target: stringArgument(args, ["command"]) ?? "" };
+      return { action: "运行", target: argumentText(args, ["command"]) ?? "", icon: "terminal" };
     case "terminal":
-      return { action: "启动终端", target: stringArgument(args, ["command", "handle"]) ?? "" };
+      return {
+        action: "启动终端",
+        target: argumentText(args, ["command", "handle"]) ?? "",
+        icon: "terminal",
+      };
+    case "delegate":
+    case "delegategroup":
+    case "delegateswarm":
+    case "task":
+      return {
+        action: "派发子代理",
+        target: argumentText(args, ["task", "prompt", "description", "name"]) ?? "",
+        icon: name.trim().toLowerCase() === "delegateswarm" ? "swarm" : "delegate",
+      };
+    case "waitdelegate":
+      return {
+        action: "等待子代理",
+        target: argumentText(args, ["ids", "id", "agent_id", "swarm_id"]) ?? "",
+        icon: "wait",
+      };
+    case "listdelegates":
+      return { action: "查看子代理", target: "", icon: "delegate" };
+    case "interruptdelegate":
+    case "stopdelegate":
+      return { action: "停止子代理", target: "", icon: "stop" };
+    case "messagedelegate":
+      return {
+        action: "联系子代理",
+        target: argumentText(args, ["message", "text", "agent_id"]) ?? "",
+        icon: "message",
+      };
+    case "todolist":
+    case "settodolist":
+      return { action: "更新任务清单", target: "", icon: "todo" };
     default:
-      return { action: name, target: argumentsPreview(args) };
+      return { action: name, target: argumentsPreview(args), icon: "unknown" };
   }
+}
+
+function toolIcon(icon: ToolIconName) {
+  switch (icon) {
+    case "file":
+      return <File size={13} aria-hidden />;
+    case "media":
+      return <Eye size={13} aria-hidden />;
+    case "file-edit":
+      return <FilePenLine size={13} aria-hidden />;
+    case "file-plus":
+      return <FilePlus size={13} aria-hidden />;
+    case "search":
+      return <Search size={13} aria-hidden />;
+    case "folder-search":
+      return <FolderSearch size={13} aria-hidden />;
+    case "terminal":
+      return <SquareTerminal size={13} aria-hidden />;
+    case "delegate":
+      return <Bot size={13} aria-hidden />;
+    case "swarm":
+      return <Network size={13} aria-hidden />;
+    case "todo":
+      return <ListChecks size={13} aria-hidden />;
+    case "wait":
+      return <Clock size={13} aria-hidden />;
+    case "stop":
+      return <CircleStop size={13} aria-hidden />;
+    case "message":
+      return <MessageCircle size={13} aria-hidden />;
+    case "unknown":
+      return <CircleHelp size={13} aria-hidden />;
+  }
+}
+
+function isTerminalStatus(status: ToolStatus): boolean {
+  return status === "finished" || status === "failed";
+}
+
+function resultIcon(status: ToolStatus) {
+  return (
+    <span className="tl-result-ic" data-status-icon={status} aria-hidden>
+      {statusIcon(status)}
+    </span>
+  );
+}
+
+function toolIconView(icon: ToolIconName) {
+  return (
+    <span className="tl-tool-icon" data-tool-icon={icon} aria-hidden>
+      {toolIcon(icon)}
+    </span>
+  );
 }
 
 function Tool({ sessionId, item }: { sessionId: string; item: ToolItem }) {
@@ -270,9 +429,10 @@ function Tool({ sessionId, item }: { sessionId: string; item: ToolItem }) {
   const status = toolStatusText(item);
   const echo = commandEchoOf(item.arguments);
   const presentation = toolPresentation(item.name, item.arguments);
-  const heading = presentation.target === ""
+  const summary = [presentation.target, presentation.secondary].filter(Boolean).join(" · ");
+  const heading = summary === ""
     ? presentation.action
-    : `${presentation.action} ${presentation.target}`;
+    : `${presentation.action} ${summary}`;
   return (
     <Line
       className={`tool-line status-${item.status}`}
@@ -281,15 +441,19 @@ function Tool({ sessionId, item }: { sessionId: string; item: ToolItem }) {
       onToggle={toggle}
       head={
         <>
-          {lineCaret()}
-          <span className="tl-ic">{statusIcon(item.status)}</span>
+          {resultIcon(item.status)}
+          {toolIconView(presentation.icon)}
           <span className="tl-name">{presentation.action}</span>
-          <span className="tl-mono">{presentation.target}</span>
-          <span className="line-tail">
-            <span className="tl-status" role="status">
-              {status}
+          {presentation.target ? <span className="tl-mono">{presentation.target}</span> : null}
+          {presentation.secondary ? <span className="tl-subtle">{presentation.secondary}</span> : null}
+          {lineCaret()}
+          {!isTerminalStatus(item.status) ? (
+            <span className="line-tail">
+              <span className="tl-status" role="status">
+                {status}
+              </span>
             </span>
-          </span>
+          ) : null}
         </>
       }
     >
@@ -338,15 +502,18 @@ function Shell({ sessionId, item }: { sessionId: string; item: ShellItem }) {
       onToggle={toggle}
       head={
         <>
-          {lineCaret()}
-          <span className="tl-ic">{statusIcon(item.status)}</span>
+          {resultIcon(item.status)}
+          {toolIconView("terminal")}
           <span className="tl-name">运行</span>
           <span className="tl-mono">{item.command}</span>
-          <span className="line-tail">
-            <span className="tl-status" role="status">
-              {status}
+          {lineCaret()}
+          {!isTerminalStatus(item.status) ? (
+            <span className="line-tail">
+              <span className="tl-status" role="status">
+                {status}
+              </span>
             </span>
-          </span>
+          ) : null}
         </>
       }
     >
@@ -383,17 +550,18 @@ function Terminal({ sessionId, item }: { sessionId: string; item: TerminalItem }
       onToggle={toggle}
       head={
         <>
-          {lineCaret()}
-          <span className="tl-ic">
-            <SquareTerminal size={13} aria-hidden />
-          </span>
+          {resultIcon(item.finished ? "finished" : "running")}
+          {toolIconView("terminal")}
           <span className="tl-name">启动终端</span>
           <span className="tl-mono">{item.command ?? item.handle}</span>
-          <span className="line-tail">
-            <span className="tl-status" role="status">
-              {status}
+          {lineCaret()}
+          {!item.finished ? (
+            <span className="line-tail">
+              <span className="tl-status" role="status">
+                {status}
+              </span>
             </span>
-          </span>
+          ) : null}
         </>
       }
     >

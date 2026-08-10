@@ -7,6 +7,7 @@
 import { describe, expect, it } from "vitest";
 import { agentEventTag, type AgentEvent } from "../../src/protocol";
 import { groupTurns } from "../../src/components/transcript";
+import { toolPresentation } from "../../src/components/transcriptItems";
 import {
   applyAgentEvent,
   buildFromHistory,
@@ -31,6 +32,45 @@ import { initialAppState, type AppState } from "../../src/state/appState";
 const fixture = loadFixture();
 const session1 = fixture.sessions[0];
 const session2 = fixture.sessions[1];
+
+describe("tool presentation", () => {
+  it("maps known tool calls, prioritizes Read filenames and preserves unknown arguments", () => {
+    const cases = [
+      ["Read", { path: "src/ui/app.ts" }, "读取", "app.ts", "src/ui/", "file"],
+      ["ReadMediaFile", { path: "assets/preview.png" }, "观察", "preview.png", "assets/", "media"],
+      ["Edit", { path: "src/app.ts" }, "编辑", "src/app.ts", undefined, "file-edit"],
+      ["Write", { path: "src/new.ts" }, "创建", "src/new.ts", undefined, "file-plus"],
+      ["Grep", { pattern: "tool", directory: "src" }, "搜索", "tool", "src", "search"],
+      ["Glob", { pattern: "*.ts", directory: "src" }, "搜索", "*.ts", "src", "folder-search"],
+      ["Bash", { command: "cargo test" }, "运行", "cargo test", undefined, "terminal"],
+      ["Shell", { command: "git status" }, "运行", "git status", undefined, "terminal"],
+      ["Terminal", { command: "npm run dev" }, "启动终端", "npm run dev", undefined, "terminal"],
+      ["Delegate", { task: "检查样式" }, "派发子代理", "检查样式", undefined, "delegate"],
+      ["DelegateGroup", { task: "并行检查" }, "派发子代理", "并行检查", undefined, "delegate"],
+      ["DelegateSwarm", { task: "并行检查" }, "派发子代理", "并行检查", undefined, "swarm"],
+      ["TodoList", {}, "更新任务清单", "", undefined, "todo"],
+      ["WaitDelegate", { ids: ["agent_a", "agent_b"] }, "等待子代理", "agent_a, agent_b", undefined, "wait"],
+    ] as const;
+
+    for (const [name, args, action, target, secondary, icon] of cases) {
+      const presentation = toolPresentation(name, args);
+      expect(presentation).toMatchObject({ action, target, icon });
+      expect(presentation.secondary).toBe(secondary);
+    }
+
+    expect(toolPresentation("FutureTool", { scope: "test" })).toMatchObject({
+      action: "FutureTool",
+      target: '{"scope":"test"}',
+      icon: "unknown",
+    });
+    expect(toolPresentation("Read", { path: "C:\\repo\\src\\app.ts" })).toMatchObject({
+      action: "读取",
+      target: "app.ts",
+      secondary: "C:\\repo\\src\\",
+      icon: "file",
+    });
+  });
+});
 
 function stateWithSnapshot(session = session1): AppState {
   let state = initialAppState(280, "dark");

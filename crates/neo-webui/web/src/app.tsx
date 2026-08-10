@@ -69,6 +69,13 @@ export function App() {
   }
 
   const sessionId = state.selectedSessionId;
+  const selectedSession = sessionId === null ? undefined : state.sessions[sessionId];
+  const connectionBannerState =
+    state.connection === "reconnecting" &&
+    selectedSession?.streamId === null &&
+    !selectedSession.resyncNeeded
+      ? "connecting"
+      : state.connection;
 
   return (
     <div className="app-shell">
@@ -84,11 +91,11 @@ export function App() {
           />
         ) : null}
         <main className="main-area">
-          {state.connection === "connecting" ? (
+          {connectionBannerState === "connecting" ? (
             <div className="connection-banner" role="status">
               正在连接…
             </div>
-          ) : state.connection === "reconnecting" ? (
+          ) : connectionBannerState === "reconnecting" ? (
             <div className="connection-banner" role="status">
               连接已断开，正在重连…
             </div>

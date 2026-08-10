@@ -277,13 +277,21 @@ describe("transcript redesign rows", () => {
     expect(foldRoot.className).toContain("open");
     expect(within(foldRoot).getByRole("button", { name: /编辑 src\/app.ts/ })).toBeTruthy();
     expect(within(foldRoot).getByRole("button", { name: /搜索 app/ })).toBeTruthy();
-    expect(within(foldRoot).getByRole("button", { name: /读取 src\/app.ts/ })).toBeTruthy();
+    const readBar = within(foldRoot).getByRole("button", { name: /读取 app.ts/ });
+    const readLine = readBar.closest(".tool-line") as HTMLElement;
+    expect(readLine.querySelector('[data-tool-icon="file"]')).not.toBeNull();
+    expect(readLine.querySelector(".tl-subtle")?.textContent).toBe("src/");
+    expect(readLine.querySelector(".tl-subtle")?.nextElementSibling?.className).toContain("line-caret");
     const failedCommand = within(foldRoot).getAllByRole("button", {
       name: /运行 cargo test，状态：失败/,
     });
     expect(failedCommand).toHaveLength(1);
+    const failedLine = failedCommand[0].closest(".tool-line") as HTMLElement;
+    expect(failedLine.querySelector('[data-status-icon="failed"]')).not.toBeNull();
+    expect(failedLine.querySelector('[data-tool-icon="terminal"]')).not.toBeNull();
+    expect(failedLine.querySelector(".line-tail")).toBeNull();
     await user.click(failedCommand[0]);
-    expect(within(failedCommand[0].closest(".tool-line") as HTMLElement).getByText(/退出码 1/)).toBeTruthy();
+    expect(within(failedLine).getByText(/退出码 1/)).toBeTruthy();
     expect(within(foldRoot).getByText("先完成 app.ts 的初步修改。")).toBeTruthy();
 
     expect(screen.getAllByRole("button", { name: "复制回答" })).toHaveLength(1);
@@ -552,7 +560,9 @@ describe("session view", () => {
     await screen.findByText("先检查有界中继的边界条件。");
 
     const toolBar = await screen.findByRole("button", { name: /运行 cargo test -p neo-webui/ });
-    expect(toolBar.textContent).toContain("已完成");
+    const toolLine = toolBar.closest(".tool-line") as HTMLElement;
+    expect(toolLine.querySelector('[data-status-icon="finished"]')).not.toBeNull();
+    expect(toolLine.querySelector(".line-tail")).toBeNull();
     await user.click(toolBar);
     await screen.findByText(/42 passed/);
     // Full output loads through the opaque reference, verbatim.
@@ -625,6 +635,23 @@ describe("session view", () => {
     expect(screen.getByText("正在连接…")).toBeTruthy();
   });
 
+  it("shows initial connection status when opening an unseen historical session during reconnect", async () => {
+    renderApp();
+    await screen.findByLabelText("会话列表");
+    await waitFor(() => expect(FakeWebSocket.instances).toHaveLength(1));
+    const socket = FakeWebSocket.instances[0];
+    socket.emit(asServerMessage(fixture.long_connection.workspace_snapshot));
+    await screen.findByText("并行格式化");
+
+    FakeWebSocket.autoOpen = false;
+    socket.closeWith(1013);
+    await screen.findByText("连接已断开，正在重连…");
+
+    (await screen.findByText("并行格式化")).click();
+    await screen.findByText("正在连接…");
+    expect(screen.queryByText("连接已断开，正在重连…")).toBeNull();
+  });
+
   it("switching sessions keeps the background summary updating and drops the old transcript", async () => {
     const { socket } = await openSession1();
     await screen.findByText("检查有界中继的行为测试并修复慢连接。");
@@ -674,6 +701,10 @@ describe("session view", () => {
     expect(bar.textContent).toContain("排队等待");
     expect(bar.textContent).toContain("位置 2");
     expect(bar.textContent).not.toContain("已完成");
+    const line = bar.closest(".tool-line") as HTMLElement;
+    expect(line.querySelector('[data-status-icon="queued"]')).not.toBeNull();
+    expect(line.querySelector('[data-status-icon="finished"]')).toBeNull();
+    expect(line.querySelector(".line-tail")?.textContent).toContain("排队等待");
   });
 
   it("escalates reconnect delays while the service stays unreachable", async () => {

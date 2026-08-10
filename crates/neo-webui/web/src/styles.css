@@ -855,11 +855,26 @@ html.resizing .transcript-scroll * {
   color: var(--text-faint);
 }
 
-.status-finished .tl-ic {
+.tl-result-ic,
+.tl-tool-icon {
+  flex: none;
+  display: inline-flex;
+  align-items: center;
+}
+
+.tl-result-ic {
+  color: var(--text-faint);
+}
+
+.tl-tool-icon {
+  color: var(--text-dim);
+}
+
+.status-finished .tl-result-ic {
   color: var(--ok);
 }
 
-.status-failed .tl-ic,
+.status-failed .tl-result-ic,
 .status-failed .tl-status {
   color: var(--danger);
 }
@@ -878,6 +893,20 @@ html.resizing .transcript-scroll * {
   text-overflow: ellipsis;
   white-space: nowrap;
   min-width: 0;
+}
+
+.tl-subtle {
+  flex: none;
+  max-width: min(30%, 240px);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--text-faint);
+  font-size: var(--font-size-micro);
+}
+
+.tool-line > .line-head .line-caret {
+  margin-left: 1px;
 }
 
 .tl-status {
