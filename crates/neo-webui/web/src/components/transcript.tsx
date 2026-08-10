@@ -1,11 +1,7 @@
 /**
- * Transcript scroll pane (redesign §4). Items are grouped into turns: a user
- * bubble (.u-turn) followed by assistant messages (.a-msg). The process rows
- * (thinking/tools/shells/terminals/workflows/delegates/swarms) that precede
- * an assistant message collapse into a TurnFold ("工作了 Ns · K 个步骤")
- * once that message finishes; in-progress process rows stay visible. A
- * finished final answer gets an .answer-ft footer with the file changes
- * derived from the turn's edit/write tool events plus a copy button.
+ * Transcript scroll pane (redesign §4). Items between one user bubble and the
+ * next form one turn. Earlier assistant messages and process rows collapse
+ * into a TurnFold; only the final assistant message gets the answer footer.
  *
  * Leaving the bottom disables follow; new events never steal the scroll
  * position. A floating jump-to-latest action appears above the composer
@@ -40,37 +36,133 @@ const PROCESS_KINDS = new Set([
 
 type TurnGroup =
   | { kind: "user"; item: UserMessageItem }
-  | { kind: "assist"; process: TranscriptItem[]; msg: AssistantMessageItem }
+  | {
+      kind: "assist";
+      process: TranscriptItem[];
+      activity: TranscriptItem[];
+      msg: AssistantMessageItem;
+    }
   | { kind: "process"; items: TranscriptItem[] }
   | { kind: "inline"; item: TranscriptItem };
 
 function groupTurns(items: TranscriptItem[]): TurnGroup[] {
   const groups: TurnGroup[] = [];
-  let pending: TranscriptItem[] = [];
-  const flushPending = () => {
-    if (pending.length > 0) {
-      groups.push({ kind: "process", items: pending });
-      pending = [];
+  let turn: TranscriptItem[] = [];
+  const appendUngrouped = (activity: TranscriptItem[]) => {
+    let pending: TranscriptItem[] = [];
+    const flushPending = () => {
+      if (pending.length > 0) {
+        groups.push({ kind: "process", items: pending });
+        pending = [];
+      }
+    };
+    for (const item of activity) {
+      if (PROCESS_KINDS.has(item.kind)) {
+        pending.push(item);
+      } else {
+        // Approvals, questions, retry and status lines stay in the flow.
+        flushPending();
+        groups.push({ kind: "inline", item });
+      }
     }
+    flushPending();
+  };
+  const flushTurn = () => {
+    let finalIndex = -1;
+    for (let index = turn.length - 1; index >= 0; index -= 1) {
+      if (turn[index]?.kind === "assistant_message") {
+        finalIndex = index;
+        break;
+      }
+    }
+    if (finalIndex < 0) {
+      appendUngrouped(turn);
+    } else {
+      const msg = turn[finalIndex] as AssistantMessageItem;
+      groups.push({
+        kind: "assist",
+        process: turn.slice(0, finalIndex),
+        activity: [...turn.slice(0, finalIndex), ...turn.slice(finalIndex + 1)],
+        msg,
+      });
+      appendUngrouped(turn.slice(finalIndex + 1));
+    }
+    turn = [];
   };
   for (const item of items) {
     if (item.kind === "user_message") {
-      flushPending();
+      flushTurn();
       groups.push({ kind: "user", item });
-    } else if (item.kind === "assistant_message") {
-      const process = pending;
-      pending = [];
-      groups.push({ kind: "assist", process, msg: item });
-    } else if (PROCESS_KINDS.has(item.kind)) {
-      pending.push(item);
     } else {
-      // Approvals, questions, retry and status lines stay in the flow.
-      flushPending();
-      groups.push({ kind: "inline", item });
+      turn.push(item);
     }
   }
-  flushPending();
+  flushTurn();
   return groups;
+}
+
+function callId(item: TranscriptItem): string {
+  const separator = item.id.indexOf(":");
+  return separator < 0 ? item.id : item.id.slice(separator + 1);
+}
+
+function commandId(item: TranscriptItem): string | null {
+  if (item.kind === "tool") {
+    const name = item.name.toLowerCase();
+    if (name !== "bash" && name !== "terminal") return null;
+  } else if (item.kind !== "shell" && item.kind !== "terminal") {
+    return null;
+  }
+  return "command:" + callId(item);
+}
+
+function failedProcessItem(item: TranscriptItem): boolean {
+  if (item.kind === "tool" || item.kind === "shell") return item.status === "failed";
+  return item.kind === "terminal" && item.finished && typeof item.exitCode === "number" && item.exitCode !== 0;
+}
+
+function processSummary(process: TranscriptItem[]): string {
+  let searches = 0;
+  let reads = 0;
+  let edits = 0;
+  const commands = new Set<string>();
+  const steps = new Set<string>();
+  const failures = new Set<string>();
+
+  for (const item of process) {
+    if (!PROCESS_KINDS.has(item.kind) && item.kind !== "assistant_message") continue;
+    const command = commandId(item);
+    const step = command ?? item.id;
+    steps.add(step);
+    if (command) commands.add(command);
+    if (failedProcessItem(item)) failures.add(step);
+    if (item.kind !== "tool") continue;
+    switch (item.name.toLowerCase()) {
+      case "grep":
+      case "find":
+      case "glob":
+        searches += 1;
+        break;
+      case "read":
+      case "list":
+        reads += 1;
+        break;
+      case "edit":
+      case "write":
+        edits += 1;
+        break;
+    }
+  }
+
+  const parts = [
+    searches > 0 ? "搜索 " + searches : null,
+    reads > 0 ? "读取 " + reads : null,
+    edits > 0 ? "编辑 " + edits : null,
+    commands.size > 0 ? "命令 " + commands.size : null,
+    failures.size > 0 ? "失败 " + failures.size : null,
+    steps.size + " 个步骤",
+  ];
+  return parts.filter((part): part is string => part !== null).join(" · ");
 }
 
 // ---------------------------------------------------------------------------
@@ -141,20 +233,22 @@ function TurnFold({
   sessionId,
   msg,
   process,
+  activity,
 }: {
   sessionId: string;
   msg: AssistantMessageItem;
   process: TranscriptItem[];
+  activity: TranscriptItem[];
 }) {
   // Finished turns default to collapsed behind the summary line; in-progress
   // turns default to open (the head is not a toggle then). An explicit user
   // choice overrides the phase default.
   const [open, toggle] = useLineExpanded(sessionId, `fold:${msg.id}`, !msg.finished);
-  const steps = process.length;
-  const secs = foldElapsedSecs(process);
+  const secs = foldElapsedSecs(activity);
+  const detail = processSummary(activity);
   const summary = msg.finished
-    ? `${secs !== null ? `工作了 ${secs}s · ` : ""}${steps} 个步骤`
-    : `工作中 · ${steps} 个步骤`;
+    ? (secs !== null ? "工作了 " + secs + "s · " : "") + detail
+    : "工作中 · " + detail;
   return (
     <div className={`turn-fold ${open ? "open" : ""}`}>
       <button
@@ -188,6 +282,8 @@ function AnswerFooter({
   msg: AssistantMessageItem;
   changes: FileChange[];
 }) {
+  const hasAnswer = msg.text.trim() !== "";
+  if (!hasAnswer && changes.length === 0) return null;
   return (
     <div className="answer-ft">
       {changes.length > 0 ? (
@@ -203,7 +299,7 @@ function AnswerFooter({
           ))}
         </ul>
       ) : null}
-      <CopyButton text={msg.text} label="复制回答" />
+      {hasAnswer ? <CopyButton text={msg.text} label="复制回答" /> : null}
     </div>
   );
 }
@@ -213,14 +309,14 @@ function AssistGroup({
   group,
 }: {
   sessionId: string;
-  group: { process: TranscriptItem[]; msg: AssistantMessageItem };
+  group: { process: TranscriptItem[]; activity: TranscriptItem[]; msg: AssistantMessageItem };
 }) {
-  const { process, msg } = group;
-  const changes = msg.finished ? deriveFileChanges(process) : [];
+  const { process, activity, msg } = group;
+  const changes = msg.finished ? deriveFileChanges(activity) : [];
   return (
     <div className="a-msg t-item">
       {process.length > 0 ? (
-        <TurnFold sessionId={sessionId} msg={msg} process={process} />
+        <TurnFold sessionId={sessionId} msg={msg} process={process} activity={activity} />
       ) : null}
       <AssistantBody item={msg} />
       {msg.finished ? <AnswerFooter msg={msg} changes={changes} /> : null}

@@ -1,9 +1,9 @@
 /**
  * Composer redesign (R6) tests: attachment queue (enqueue / remove /
  * over-limit rejection / upload failure keeps draft / send carries ids),
- * searchable model overlay writing the per-turn composer field, permission
- * pill tri-state cycling, ContextRing numbers and no-data hiding, and the
- * welcome banner showing only until the first canonical user message.
+ * two-level model selection, explicit per-turn permission and development
+ * menus, ContextRing numbers and no-data hiding, and the welcome banner
+ * showing only until the first canonical user message.
  */
 
 import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
@@ -184,10 +184,12 @@ describe("composer R6", () => {
     await waitFor(() => expect(screen.queryByText("diagram.png")).toBeNull());
   });
 
-  it("searches the model overlay and writes the choice into the composer field", async () => {
+  it("opens the full model list from more models and writes the choice into the composer field", async () => {
     const user = userEvent.setup();
     await renderReady();
     await user.click(screen.getByRole("button", { name: "模型（仅下一回合）" }));
+    expect(screen.getByRole("option", { name: /默认模型/ })).toBeTruthy();
+    await user.click(screen.getByRole("button", { name: "更多模型" }));
     const search = await screen.findByLabelText("搜索模型");
     // Rows carry alias · provider · context size · capability chips.
     screen.getByText("openai · 256k");
@@ -210,21 +212,26 @@ describe("composer R6", () => {
     });
   });
 
-  it("closes the model overlay on Escape and outside click, returning focus", async () => {
+  it("closes each per-turn menu on Escape, restores focus, and closes on outside click", async () => {
     const user = userEvent.setup();
     await renderReady();
-    const pill = screen.getByRole("button", { name: "模型（仅下一回合）" });
-    await user.click(pill);
-    await screen.findByLabelText("搜索模型");
+    for (const [buttonName, dialogName] of [
+      ["模型（仅下一回合）", "选择模型"],
+      ["权限模式（仅下一回合）", "选择权限模式"],
+      ["开发模式（仅下一回合）", "选择开发模式"],
+    ]) {
+      const pill = screen.getByRole("button", { name: buttonName });
+      await user.click(pill);
+      await screen.findByRole("dialog", { name: dialogName });
+      await user.keyboard("{Escape}");
+      await waitFor(() => expect(screen.queryByRole("dialog", { name: dialogName })).toBeNull());
+      expect(document.activeElement).toBe(pill);
+    }
 
-    await user.keyboard("{Escape}");
-    await waitFor(() => expect(screen.queryByLabelText("搜索模型")).toBeNull());
-    expect(document.activeElement).toBe(pill);
-
-    await user.click(pill);
-    await screen.findByLabelText("搜索模型");
+    await user.click(screen.getByRole("button", { name: "模型（仅下一回合）" }));
+    await screen.findByRole("dialog", { name: "选择模型" });
     await user.click(screen.getByLabelText("输入消息"));
-    await waitFor(() => expect(screen.queryByLabelText("搜索模型")).toBeNull());
+    await waitFor(() => expect(screen.queryByRole("dialog", { name: "选择模型" })).toBeNull());
     // Outside click leaves focus where the user clicked.
     expect(document.activeElement).toBe(screen.getByLabelText("输入消息"));
   });
@@ -248,33 +255,61 @@ describe("composer R6", () => {
     });
   });
 
-  it("cycles the permission pill through ask/auto/yolo and sends the override", async () => {
+  it("opens permission and development menus without adding overrides", async () => {
     const user = userEvent.setup();
     await renderReady();
-    const pill = screen.getByRole("button", { name: "权限模式（仅下一回合）" });
-    expect(pill.getAttribute("data-mode")).toBe("default");
+    const permission = screen.getByRole("button", { name: "权限模式（仅下一回合）" });
+    const development = screen.getByRole("button", { name: "开发模式（仅下一回合）" });
 
-    await user.click(pill);
-    expect(pill.textContent).toBe("逐条确认");
-    expect(pill.getAttribute("data-mode")).toBe("ask");
-    await user.click(pill);
-    expect(pill.textContent).toBe("自动");
-    expect(pill.getAttribute("data-mode")).toBe("auto");
-    await user.click(pill);
-    expect(pill.textContent).toBe("免确认");
-    expect(pill.getAttribute("data-mode")).toBe("yolo");
-    await user.click(pill);
-    expect(pill.getAttribute("data-mode")).toBe("default");
+    await user.click(permission);
+    await screen.findByRole("option", { name: /默认/ });
+    expect(permission.getAttribute("data-mode")).toBe("default");
+    await user.keyboard("{Escape}");
 
-    // auto override reaches the create body.
-    await user.click(pill);
-    await user.click(pill);
-    await user.type(screen.getByLabelText("输入消息"), "自动跑{Enter}");
+    await user.click(development);
+    await screen.findByRole("option", { name: /默认/ });
+    expect(development.getAttribute("data-active")).toBe("false");
+    await user.click(screen.getByLabelText("输入消息"));
+    await user.type(screen.getByLabelText("输入消息"), "默认发送{Enter}");
     await waitFor(() => {
       const creates = postedBodies("/api/sessions");
-      expect((creates[0].composer as { permission_mode?: string }).permission_mode).toBe(
-        "auto",
-      );
+      expect(creates).toHaveLength(1);
+      expect(creates[0].composer).toBeUndefined();
+    });
+  });
+
+  it("sends selected permission and development mode overrides", async () => {
+    const user = userEvent.setup();
+    await renderReady();
+
+    await user.click(screen.getByRole("button", { name: "权限模式（仅下一回合）" }));
+    await user.click(await screen.findByRole("option", { name: "自动" }));
+    await user.click(screen.getByRole("button", { name: "开发模式（仅下一回合）" }));
+    await user.click(await screen.findByRole("option", { name: "计划" }));
+    await user.type(screen.getByLabelText("输入消息"), "按计划自动运行{Enter}");
+    await waitFor(() => {
+      const creates = postedBodies("/api/sessions");
+      expect(creates).toHaveLength(1);
+      expect(creates[0].composer).toMatchObject({
+        permission_mode: "auto",
+        development_mode: "plan",
+      });
+    });
+  });
+
+  it("does not send a model override after returning to the default model", async () => {
+    const user = userEvent.setup();
+    await renderReady();
+
+    await user.click(screen.getByRole("button", { name: "模型（仅下一回合）" }));
+    await user.click(await screen.findByRole("option", { name: /gpt-5-codex/ }));
+    await user.click(screen.getByRole("button", { name: "模型（仅下一回合）" }));
+    await user.click(await screen.findByRole("option", { name: /默认模型/ }));
+    await user.type(screen.getByLabelText("输入消息"), "使用默认模型{Enter}");
+    await waitFor(() => {
+      const creates = postedBodies("/api/sessions");
+      expect(creates).toHaveLength(1);
+      expect(creates[0].composer).toBeUndefined();
     });
   });
 

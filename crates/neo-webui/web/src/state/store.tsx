@@ -74,6 +74,7 @@ export interface AppActions {
   selectSession(sessionId: string | null): void;
   setSidebarWidth(width: number): void;
   setDrawerOpen(open: boolean): void;
+  setSidebarCollapsed(collapsed: boolean): void;
   setTheme(theme: Theme): void;
   setContextMenu(sessionId: string | null): void;
   setDraft(sessionId: string, text: string): void;
@@ -267,6 +268,9 @@ export function AppProvider({ children }: { children: ReactNode }) {
     },
     setDrawerOpen(open) {
       dispatch({ type: "set_drawer_open", open });
+    },
+    setSidebarCollapsed(collapsed) {
+      dispatch({ type: "set_sidebar_collapsed", collapsed });
     },
     setTheme(theme) {
       // Only the explicit toggle persists; the system default never writes.

@@ -110,7 +110,7 @@ html[data-theme="light"] {
   --font-size-micro: 11.5px;
   --font-size-mono: 12.5px;
   /* Sidebar session title sits one step below body (design §6.1). */
-  --font-size-sidebar-title: 13.5px;
+  --font-size-sidebar-title: 13px;
 
   /* Chat rhythm (design §3) */
   --chat-turn-gap: 20px;
@@ -272,7 +272,7 @@ button {
 }
 
 .drawer-toggle {
-  display: none;
+  display: inline-flex;
 }
 
 /* -- Sidebar (redesign §6: workspace groups, compact rows, one-step-smaller type) */
@@ -285,6 +285,11 @@ button {
   border-right: 1px solid var(--line);
   background: var(--surface-raised);
   min-width: 0;
+}
+
+.app-body.sidebar-collapsed .sidebar,
+.app-body.sidebar-collapsed .sidebar-resizer {
+  display: none;
 }
 
 .sidebar-top {
@@ -366,6 +371,11 @@ button {
   transform: rotate(90deg);
 }
 
+.session-group-folder {
+  flex: none;
+  color: var(--text-faint);
+}
+
 .session-group-label {
   overflow: hidden;
   text-overflow: ellipsis;
@@ -386,10 +396,29 @@ button {
 .session-list {
   list-style: none;
   margin: 0;
-  padding: 2px 0 0;
+  padding: 2px 0 0 20px;
   display: flex;
   flex-direction: column;
   gap: 2px;
+}
+
+.session-group-more {
+  align-self: flex-start;
+  margin: 3px 0 0 20px;
+  padding: 3px 6px;
+  border: none;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--text-faint);
+  cursor: pointer;
+  font: inherit;
+  font-size: var(--font-size-micro);
+}
+
+.session-group-more:hover,
+.session-group-more:focus-visible {
+  background: var(--hover);
+  color: var(--text);
 }
 
 .session-archived-toggle {
@@ -436,11 +465,9 @@ button {
 .session-main {
   flex: 1;
   min-width: 0;
-  min-height: 40px;
+  min-height: 32px;
   display: flex;
-  flex-direction: column;
-  justify-content: center;
-  gap: 1px;
+  align-items: center;
   padding: 4px 8px;
   background: transparent;
   border: none;
@@ -450,13 +477,26 @@ button {
 }
 
 .session-title-row {
+  flex: 1;
   display: flex;
   align-items: center;
   gap: 6px;
   min-width: 0;
 }
 
+.session-activity {
+  width: 12px;
+  height: 12px;
+  flex: none;
+  color: var(--accent);
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+}
+
 .session-title {
+  flex: 1;
+  min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -464,20 +504,9 @@ button {
   font-weight: 450;
 }
 
-.session-meta {
-  display: flex;
-  gap: 6px;
-  font-size: var(--font-size-micro);
-  color: var(--text-faint);
-  align-items: center;
-}
-
 .session-state {
+  flex: none;
   white-space: nowrap;
-}
-
-.session-state.state-running {
-  color: var(--accent);
 }
 
 .session-state.state-failed {
@@ -486,6 +515,7 @@ button {
 
 /* Amber badge for sessions waiting on approval / a question (redesign §6.1). */
 .session-badge {
+  flex: none;
   white-space: nowrap;
   padding: 0 6px;
   border-radius: var(--radius-pill);
@@ -493,12 +523,6 @@ button {
   color: var(--warn);
   font-size: var(--font-size-micro);
   line-height: 1.6;
-}
-
-.session-time {
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
 }
 
 .session-hover-actions {
@@ -1637,9 +1661,11 @@ html.resizing .transcript-scroll * {
 .composer-tools {
   flex: 1;
   display: flex;
+  flex-wrap: wrap;
+  align-items: center;
   gap: 6px;
   min-width: 0;
-  overflow-x: auto;
+  overflow: visible;
 }
 
 .composer-actions {
@@ -2136,6 +2162,10 @@ html.resizing .transcript-scroll * {
 @media (max-width: 980px) {
   .drawer-toggle {
     display: inline-flex;
+  }
+
+  .app-body.sidebar-collapsed .sidebar {
+    display: flex;
   }
 
   .sidebar {

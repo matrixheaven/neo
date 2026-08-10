@@ -326,6 +326,9 @@ export function appReducer(state: AppState, action: AppAction): AppState {
     case "set_drawer_open":
       return { ...state, sidebarDrawerOpen: action.open };
 
+    case "set_sidebar_collapsed":
+      return { ...state, sidebarCollapsed: action.collapsed };
+
     case "theme_changed":
       return { ...state, theme: action.theme };
 

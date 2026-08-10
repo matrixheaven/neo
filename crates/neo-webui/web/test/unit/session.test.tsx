@@ -53,8 +53,8 @@ describe("transcript redesign rows", () => {
     vi.unstubAllGlobals();
   });
 
-  /** A complete second turn: user message, thinking, one edit tool and a
-   * finished final answer. Sequences continue from the snapshot watermark. */
+  /** A complete second turn with an intermediate answer and two tool loops.
+   * Sequences continue from the snapshot watermark. */
   function emitFinishedEditTurn(socket: FakeWebSocket) {
     let sequence = 9;
     const emit = (event: unknown) => {
@@ -67,9 +67,6 @@ describe("transcript redesign rows", () => {
       });
     };
     emit({ MessageAppended: { message: { User: { content: [{ Text: { text: "修改 app.ts" } }] } } } });
-    emit({ ThinkingStarted: { turn: 2, id: "th_2" } });
-    emit({ ThinkingDelta: { turn: 2, text: "思考一下" } });
-    emit({ ThinkingFinished: { turn: 2, redacted: false } });
     emit({
       ToolExecutionStarted: {
         turn: 2,
@@ -87,9 +84,71 @@ describe("transcript redesign rows", () => {
         result: { content: "ok", is_error: false },
       },
     });
-    emit({ MessageStarted: { turn: 2, id: "msg_2" } });
+    emit({ MessageStarted: { turn: 2, id: "msg_2a" } });
+    emit({ TextDelta: { turn: 2, text: "先完成 app.ts 的初步修改。" } });
+    emit({ MessageFinished: { turn: 2, id: "msg_2a", stop_reason: "EndTurn" } });
+    emit({
+      ToolExecutionStarted: {
+        turn: 2,
+        id: "tool_g1",
+        name: "grep",
+        arguments: { pattern: "app" },
+      },
+    });
+    emit({
+      ToolExecutionFinished: {
+        turn: 2,
+        id: "tool_g1",
+        name: "grep",
+        result: { content: "src/app.ts", is_error: false },
+      },
+    });
+    emit({
+      ToolExecutionStarted: {
+        turn: 2,
+        id: "tool_r1",
+        name: "read",
+        arguments: { path: "src/app.ts" },
+      },
+    });
+    emit({
+      ToolExecutionFinished: {
+        turn: 2,
+        id: "tool_r1",
+        name: "read",
+        result: { content: "a\nb\nc", is_error: false },
+      },
+    });
+    emit({
+      ToolExecutionStarted: {
+        turn: 2,
+        id: "cmd_2",
+        name: "bash",
+        arguments: { command: "cargo test" },
+      },
+    });
+    emit({ ShellCommandStarted: { turn: 2, id: "cmd_2", command: "cargo test", cwd: "." } });
+    emit({
+      ShellCommandFinished: {
+        turn: 2,
+        id: "cmd_2",
+        exit_code: 1,
+        stdout: "",
+        stderr: "failed",
+        truncated: false,
+      },
+    });
+    emit({
+      ToolExecutionFinished: {
+        turn: 2,
+        id: "cmd_2",
+        name: "bash",
+        result: { content: "failed", is_error: true },
+      },
+    });
+    emit({ MessageStarted: { turn: 2, id: "msg_2b" } });
     emit({ TextDelta: { turn: 2, text: "已修改 app.ts。" } });
-    emit({ MessageFinished: { turn: 2, id: "msg_2", stop_reason: "EndTurn" } });
+    emit({ MessageFinished: { turn: 2, id: "msg_2b", stop_reason: "EndTurn" } });
   }
 
   it("clamps long user messages behind a gradient with an expand toggle", async () => {
@@ -187,19 +246,34 @@ describe("transcript redesign rows", () => {
     expect(within(line).getByText(/状态：已完成/)).toBeTruthy();
   });
 
-  it("folds a finished turn's process rows behind a step summary", async () => {
+  it("folds one user prompt's full activity behind its final answer", async () => {
     const user = userEvent.setup();
     const { socket } = await openSession1();
     emitFinishedEditTurn(socket);
-    const fold = await screen.findByRole("button", { name: /展开工作过程（2 个步骤）/ });
+    const fold = await screen.findByRole("button", {
+      name: /展开工作过程（搜索 1 · 读取 1 · 编辑 1 · 命令 1 · 失败 1 · 5 个步骤）/,
+    });
     expect(fold.getAttribute("aria-expanded")).toBe("false");
     await user.click(fold);
-    const openFold = screen.getByRole("button", { name: /收起工作过程（2 个步骤）/ });
+    const openFold = screen.getByRole("button", {
+      name: /收起工作过程（搜索 1 · 读取 1 · 编辑 1 · 命令 1 · 失败 1 · 5 个步骤）/,
+    });
     expect(openFold.getAttribute("aria-expanded")).toBe("true");
     const foldRoot = openFold.closest(".turn-fold") as HTMLElement;
     expect(foldRoot.className).toContain("open");
     expect(within(foldRoot).getByRole("button", { name: /工具 edit/ })).toBeTruthy();
-    expect(within(foldRoot).getByRole("button", { name: /思考，状态：已完成/ })).toBeTruthy();
+    expect(within(foldRoot).getByRole("button", { name: /工具 grep/ })).toBeTruthy();
+    expect(within(foldRoot).getByRole("button", { name: /工具 read/ })).toBeTruthy();
+    expect(within(foldRoot).getByRole("button", { name: /命令 cargo test/ })).toBeTruthy();
+    expect(within(foldRoot).getByText("先完成 app.ts 的初步修改。")).toBeTruthy();
+
+    expect(screen.getAllByRole("button", { name: "复制回答" })).toHaveLength(1);
+    const finalAnswer = screen.getByText("已修改 app.ts。");
+    const finalGroup = finalAnswer.closest(".a-msg") as HTMLElement;
+    const footer = finalGroup.querySelector(".answer-ft") as HTMLElement;
+    expect(within(footer).getByText("src/app.ts")).toBeTruthy();
+    expect(within(footer).getByText("+3")).toBeTruthy();
+    expect(within(footer).getByText("−2")).toBeTruthy();
   });
 
   it("keeps in-progress process rows visible outside the fold", async () => {

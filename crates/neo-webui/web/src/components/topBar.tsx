@@ -6,8 +6,32 @@
  */
 
 import { Moon, PanelLeft, Sun } from "lucide-react";
+import { useEffect, useState } from "react";
 import { useAppActions, useAppState } from "../state/store";
 import type { WebUiPhase } from "../protocol";
+
+const DRAWER_MEDIA_QUERY = "(max-width: 980px)";
+
+function isDrawerViewport(): boolean {
+  return typeof window !== "undefined" &&
+    typeof window.matchMedia === "function" &&
+    window.matchMedia(DRAWER_MEDIA_QUERY).matches;
+}
+
+function useDrawerViewport(): boolean {
+  const [matches, setMatches] = useState(isDrawerViewport);
+
+  useEffect(() => {
+    if (typeof window.matchMedia !== "function") return;
+    const media = window.matchMedia(DRAWER_MEDIA_QUERY);
+    const update = () => setMatches(media.matches);
+    update();
+    media.addEventListener("change", update);
+    return () => media.removeEventListener("change", update);
+  }, []);
+
+  return matches;
+}
 
 function phaseText(phase: WebUiPhase | null): string {
   switch (phase) {
@@ -40,15 +64,31 @@ export function TopBar() {
   const title = view?.metadata?.title ?? summary?.title ?? null;
   const running =
     view && (view.phase === "running" || view.phase === "starting" || view.phase === "finishing");
+  const drawerViewport = useDrawerViewport();
+  const sidebarOpen = drawerViewport ? state.sidebarDrawerOpen : !state.sidebarCollapsed;
+  const sidebarLabel = drawerViewport
+    ? state.sidebarDrawerOpen
+      ? "关闭会话列表"
+      : "打开会话列表"
+    : state.sidebarCollapsed
+      ? "展开会话列表"
+      : "收起会话列表";
 
   return (
     <header className="topbar">
       <button
         type="button"
         className="icon-button drawer-toggle"
-        aria-label="打开会话列表"
-        aria-expanded={state.sidebarDrawerOpen}
-        onClick={() => actions.setDrawerOpen(!state.sidebarDrawerOpen)}
+        aria-controls="session-sidebar"
+        aria-label={sidebarLabel}
+        aria-expanded={sidebarOpen}
+        onClick={() => {
+          if (drawerViewport) {
+            actions.setDrawerOpen(!state.sidebarDrawerOpen);
+          } else {
+            actions.setSidebarCollapsed(!state.sidebarCollapsed);
+          }
+        }}
       >
         <PanelLeft size={16} aria-hidden />
       </button>

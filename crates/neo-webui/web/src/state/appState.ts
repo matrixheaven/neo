@@ -100,6 +100,8 @@ export interface AppState {
   creatingSession: boolean;
   sidebarWidth: number;
   sidebarDrawerOpen: boolean;
+  /** Desktop-only sidebar visibility for this browser run. */
+  sidebarCollapsed: boolean;
   /** Active color theme; mirrored onto document.documentElement[data-theme]. */
   theme: Theme;
   /** Session id whose context menu is open, if any. */
@@ -137,6 +139,7 @@ export function initialAppState(sidebarWidth: number, theme: Theme): AppState {
     creatingSession: false,
     sidebarWidth,
     sidebarDrawerOpen: false,
+    sidebarCollapsed: false,
     theme,
     activeContextMenu: null,
     summaries: [],
@@ -158,6 +161,7 @@ export type AppAction =
   | { type: "select_session"; sessionId: string | null }
   | { type: "set_sidebar_width"; width: number }
   | { type: "set_drawer_open"; open: boolean }
+  | { type: "set_sidebar_collapsed"; collapsed: boolean }
   | { type: "theme_changed"; theme: Theme }
   | { type: "set_context_menu"; sessionId: string | null }
   | { type: "draft_changed"; sessionId: string; text: string }

@@ -73,7 +73,7 @@ export function App() {
   return (
     <div className="app-shell">
       <TopBar />
-      <div className="app-body">
+      <div className={`app-body ${state.sidebarCollapsed ? "sidebar-collapsed" : ""}`}>
         <Sidebar />
         <SidebarResizer />
         {state.sidebarDrawerOpen ? (

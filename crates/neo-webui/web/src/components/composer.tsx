@@ -5,13 +5,13 @@
  * actions — never borrow the normal send.
  *
  * The pill row below the textarea holds: attachment picker (+ drag & drop),
- * model pill with a searchable overlay, permission pill, development-mode
- * pill, reasoning pill (capable models only) — with the context ring and
- * send/stop/steer on the right. All pill selections are per-next-turn
+ * model pill with a two-level menu, permission and development-mode menus,
+ * reasoning pill (capable models only) — with the context ring and
+ * send/stop/steer on the right. All selections are per-next-turn
  * overrides only; nothing is written back to global settings or persisted.
  */
 
-import { ArrowUp, ChevronDown, Paperclip, Search, Square, X, Zap } from "lucide-react";
+import { ArrowUp, ChevronDown, ChevronLeft, Paperclip, Search, Square, X, Zap } from "lucide-react";
 import { useEffect, useRef, useState } from "react";
 import { uploadAttachment } from "../api";
 import type {
@@ -46,6 +46,8 @@ const REASONING_LABELS: Record<string, string> = {
 
 const MAX_ATTACHMENTS = 4;
 const MAX_ATTACHMENT_BYTES = 8 * 1024 * 1024;
+
+type ComposerMenu = "model" | "permission" | "development";
 
 /** Compact token count: 83700 → "83.7k", 256000 → "256k". */
 export function formatTokens(value: number): string {
@@ -131,12 +133,15 @@ export function Composer({ centered }: { centered: boolean }) {
   const queueCountRef = useRef(0);
   const fileInputRef = useRef<HTMLInputElement | null>(null);
 
-  // -- Model overlay ----------------------------------------------------------
-  const [modelOpen, setModelOpen] = useState(false);
+  // -- Per-turn menus ---------------------------------------------------------
+  const [openMenu, setOpenMenu] = useState<ComposerMenu | null>(null);
+  const [modelMenuPage, setModelMenuPage] = useState<"quick" | "all">("quick");
   const [modelQuery, setModelQuery] = useState("");
   const modelWrapRef = useRef<HTMLDivElement | null>(null);
-  const modelButtonRef = useRef<HTMLButtonElement | null>(null);
-  const modelWasOpenRef = useRef(false);
+  const permissionWrapRef = useRef<HTMLDivElement | null>(null);
+  const developmentWrapRef = useRef<HTMLDivElement | null>(null);
+  const menuButtonRef = useRef<HTMLButtonElement | null>(null);
+  const menuWasOpenRef = useRef(false);
   // Esc closes return focus to the pill; outside clicks leave focus where
   // the user clicked.
   const closeViaEscRef = useRef(false);
@@ -174,28 +179,34 @@ export function Composer({ centered }: { centered: boolean }) {
     return () => window.clearTimeout(timer);
   }, [isFreshSession]);
 
-  // Model overlay: Esc / outside click close, focus returns to the pill.
+  // Per-turn menus: Esc / outside click close, focus returns to the pill.
   useEffect(() => {
-    if (!modelOpen) {
-      if (modelWasOpenRef.current) {
-        modelWasOpenRef.current = false;
+    if (openMenu === null) {
+      if (menuWasOpenRef.current) {
+        menuWasOpenRef.current = false;
         if (closeViaEscRef.current) {
           closeViaEscRef.current = false;
-          modelButtonRef.current?.focus();
+          menuButtonRef.current?.focus();
         }
       }
       return;
     }
-    modelWasOpenRef.current = true;
+    menuWasOpenRef.current = true;
+    const activeMenuWrap =
+      openMenu === "model"
+        ? modelWrapRef.current
+        : openMenu === "permission"
+          ? permissionWrapRef.current
+          : developmentWrapRef.current;
     const onPointerDown = (event: MouseEvent) => {
-      if (modelWrapRef.current && !modelWrapRef.current.contains(event.target as Node)) {
-        setModelOpen(false);
+      if (activeMenuWrap && !activeMenuWrap.contains(event.target as Node)) {
+        setOpenMenu(null);
       }
     };
     const onKeyDown = (event: KeyboardEvent) => {
       if (event.key === "Escape") {
         closeViaEscRef.current = true;
-        setModelOpen(false);
+        setOpenMenu(null);
       }
     };
     document.addEventListener("mousedown", onPointerDown);
@@ -204,7 +215,7 @@ export function Composer({ centered }: { centered: boolean }) {
       document.removeEventListener("mousedown", onPointerDown);
       document.removeEventListener("keydown", onKeyDown);
     };
-  }, [modelOpen]);
+  }, [openMenu]);
 
   const autosize = () => {
     const element = textareaRef.current;
@@ -322,12 +333,14 @@ export function Composer({ centered }: { centered: boolean }) {
   );
   const reasoningCapable = (selectedModel?.capabilities ?? []).includes("reasoning");
 
-  const cycle = (current: string, options: readonly string[]): string => {
-    const index = current === "" ? -1 : options.indexOf(current);
-    const next = index + 1;
-    return next >= options.length ? "" : options[next];
+  const nextReasoningEffort = (current: string): string => {
+    const index = REASONING_EFFORTS.indexOf(
+      current as (typeof REASONING_EFFORTS)[number],
+    );
+    return REASONING_EFFORTS[index + 1] ?? "";
   };
 
+  const quickModels = models.slice(0, 4);
   const filteredModels = models.filter((entry) => {
     const needle = modelQuery.trim().toLowerCase();
     if (needle === "") return true;
@@ -336,6 +349,48 @@ export function Composer({ centered }: { centered: boolean }) {
       entry.provider.toLowerCase().includes(needle)
     );
   });
+
+  const toggleMenu = (menu: ComposerMenu, button: HTMLButtonElement) => {
+    menuButtonRef.current = button;
+    if (openMenu === menu) {
+      setOpenMenu(null);
+      return;
+    }
+    if (menu === "model") {
+      setModelMenuPage("quick");
+      setModelQuery("");
+    }
+    setOpenMenu(menu);
+  };
+
+  const modelOption = (entry: WebUiModelInfo) => (
+    <button
+      type="button"
+      key={entry.alias}
+      role="option"
+      aria-selected={model === entry.alias}
+      className={`model-row ${model === entry.alias ? "selected" : ""}`}
+      onClick={() => {
+        setModel(entry.alias);
+        setOpenMenu(null);
+      }}
+    >
+      <span className="model-row-name">{entry.alias}</span>
+      <span className="model-row-meta">
+        {entry.provider}
+        {entry.context_window ? ` · ${formatTokens(entry.context_window)}` : ""}
+      </span>
+      {(entry.capabilities ?? []).length > 0 ? (
+        <span className="model-row-caps">
+          {(entry.capabilities ?? []).map((capability) => (
+            <span key={capability} className="cap-chip">
+              {capability}
+            </span>
+          ))}
+        </span>
+      ) : null}
+    </button>
+  );
 
   const contextWindow = view?.projection.contextWindow ?? null;
 
@@ -447,15 +502,13 @@ export function Composer({ centered }: { centered: boolean }) {
               <div className="pill-wrap" ref={modelWrapRef}>
                 <button
                   type="button"
-                  ref={modelButtonRef}
                   className="composer-pill model-pill"
                   aria-label="模型（仅下一回合）"
-                  aria-expanded={modelOpen}
+                  aria-expanded={openMenu === "model"}
                   aria-haspopup="listbox"
                   title={model === "" ? "默认模型" : model}
-                  onClick={() => {
-                    setModelQuery("");
-                    setModelOpen((open) => !open);
+                  onClick={(event) => {
+                    toggleMenu("model", event.currentTarget);
                   }}
                 >
                   <span className="model-pill-name">
@@ -463,97 +516,178 @@ export function Composer({ centered }: { centered: boolean }) {
                   </span>
                   <ChevronDown size={12} aria-hidden />
                 </button>
-                {modelOpen ? (
+                {openMenu === "model" ? (
                   <div className="pill-popover" role="dialog" aria-label="选择模型">
-                    <div className="pill-popover-search">
-                      <Search size={13} aria-hidden />
-                      <input
-                        autoFocus
-                        aria-label="搜索模型"
-                        placeholder="搜索模型…"
-                        value={modelQuery}
-                        onChange={(event) => setModelQuery(event.target.value)}
-                      />
-                    </div>
+                    {modelMenuPage === "all" ? (
+                      <div className="pill-popover-search">
+                        <Search size={13} aria-hidden />
+                        <input
+                          autoFocus
+                          aria-label="搜索模型"
+                          placeholder="搜索模型…"
+                          value={modelQuery}
+                          onChange={(event) => setModelQuery(event.target.value)}
+                        />
+                      </div>
+                    ) : null}
                     <div className="pill-popover-list" role="listbox" aria-label="模型列表">
-                      <button
-                        type="button"
-                        role="option"
-                        aria-selected={model === ""}
-                        className={`model-row ${model === "" ? "selected" : ""}`}
-                        onClick={() => {
-                          setModel("");
-                          setModelOpen(false);
-                        }}
-                      >
-                        <span className="model-row-name">默认模型</span>
-                        <span className="model-row-meta">跟随会话配置</span>
-                      </button>
-                      {filteredModels.map((entry) => (
-                        <button
-                          type="button"
-                          key={entry.alias}
-                          role="option"
-                          aria-selected={model === entry.alias}
-                          className={`model-row ${model === entry.alias ? "selected" : ""}`}
-                          onClick={() => {
-                            setModel(entry.alias);
-                            setModelOpen(false);
-                          }}
-                        >
-                          <span className="model-row-name">{entry.alias}</span>
-                          <span className="model-row-meta">
-                            {entry.provider}
-                            {entry.context_window
-                              ? ` · ${formatTokens(entry.context_window)}`
-                              : ""}
-                          </span>
-                          {(entry.capabilities ?? []).length > 0 ? (
-                            <span className="model-row-caps">
-                              {(entry.capabilities ?? []).map((capability) => (
-                                <span key={capability} className="cap-chip">
-                                  {capability}
-                                </span>
-                              ))}
-                            </span>
+                      {modelMenuPage === "quick" ? (
+                        <>
+                          <button
+                            type="button"
+                            role="option"
+                            aria-selected={model === ""}
+                            className={`model-row ${model === "" ? "selected" : ""}`}
+                            onClick={() => {
+                              setModel("");
+                              setOpenMenu(null);
+                            }}
+                          >
+                            <span className="model-row-name">默认模型</span>
+                            <span className="model-row-meta">跟随会话配置</span>
+                          </button>
+                          {quickModels.map(modelOption)}
+                          <button
+                            type="button"
+                            className="model-row"
+                            aria-label="更多模型"
+                            onClick={() => setModelMenuPage("all")}
+                          >
+                            <span className="model-row-name">更多模型</span>
+                            <span className="model-row-meta">查看完整列表</span>
+                          </button>
+                        </>
+                      ) : (
+                        <>
+                          <button
+                            type="button"
+                            className="model-row"
+                            onClick={() => {
+                              setModelQuery("");
+                              setModelMenuPage("quick");
+                            }}
+                          >
+                            <ChevronLeft size={13} aria-hidden />
+                            <span className="model-row-name">返回快捷模型</span>
+                          </button>
+                          {filteredModels.map(modelOption)}
+                          {filteredModels.length === 0 ? (
+                            <div className="pill-popover-empty">没有匹配的模型</div>
                           ) : null}
-                        </button>
-                      ))}
-                      {filteredModels.length === 0 ? (
-                        <div className="pill-popover-empty">没有匹配的模型</div>
-                      ) : null}
+                        </>
+                      )}
                     </div>
                   </div>
                 ) : null}
               </div>
             ) : null}
             {permissionModes.length > 0 ? (
-              <button
-                type="button"
-                className="composer-pill perm-pill"
-                data-mode={permissionMode === "" ? "default" : permissionMode}
-                aria-label="权限模式（仅下一回合）"
-                title="点击切换权限模式（仅下一回合）"
-                onClick={() => setPermissionMode(cycle(permissionMode, permissionModes))}
-              >
-                {permissionMode === ""
-                  ? "权限"
-                  : PERMISSION_LABELS[permissionMode as PermissionMode]}
-              </button>
+              <div className="pill-wrap" ref={permissionWrapRef}>
+                <button
+                  type="button"
+                  className="composer-pill perm-pill"
+                  data-mode={permissionMode === "" ? "default" : permissionMode}
+                  aria-label="权限模式（仅下一回合）"
+                  aria-expanded={openMenu === "permission"}
+                  aria-haspopup="listbox"
+                  title="选择权限模式（仅下一回合）"
+                  onClick={(event) => {
+                    toggleMenu("permission", event.currentTarget);
+                  }}
+                >
+                  {permissionMode === ""
+                    ? "权限"
+                    : PERMISSION_LABELS[permissionMode as PermissionMode]}
+                </button>
+                {openMenu === "permission" ? (
+                  <div className="pill-popover" role="dialog" aria-label="选择权限模式">
+                    <div className="pill-popover-list" role="listbox" aria-label="权限模式列表">
+                      <button
+                        type="button"
+                        role="option"
+                        aria-selected={permissionMode === ""}
+                        className={`model-row ${permissionMode === "" ? "selected" : ""}`}
+                        onClick={() => {
+                          setPermissionMode("");
+                          setOpenMenu(null);
+                        }}
+                      >
+                        <span className="model-row-name">默认</span>
+                        <span className="model-row-meta">跟随会话配置</span>
+                      </button>
+                      {permissionModes.map((entry) => (
+                        <button
+                          type="button"
+                          key={entry}
+                          role="option"
+                          aria-selected={permissionMode === entry}
+                          className={`model-row ${permissionMode === entry ? "selected" : ""}`}
+                          onClick={() => {
+                            setPermissionMode(entry);
+                            setOpenMenu(null);
+                          }}
+                        >
+                          <span className="model-row-name">{PERMISSION_LABELS[entry]}</span>
+                        </button>
+                      ))}
+                    </div>
+                  </div>
+                ) : null}
+              </div>
             ) : null}
             {developmentModes.length > 0 ? (
-              <button
-                type="button"
-                className="composer-pill mode-pill"
-                data-active={developmentMode !== ""}
-                aria-label="开发模式（仅下一回合）"
-                title="点击切换开发模式（仅下一回合）"
-                onClick={() => setDevelopmentMode(cycle(developmentMode, developmentModes))}
-              >
-                {developmentMode === ""
-                  ? "模式"
-                  : MODE_LABELS[developmentMode as WebUiDevelopmentMode]}
-              </button>
+              <div className="pill-wrap" ref={developmentWrapRef}>
+                <button
+                  type="button"
+                  className="composer-pill mode-pill"
+                  data-active={developmentMode !== ""}
+                  aria-label="开发模式（仅下一回合）"
+                  aria-expanded={openMenu === "development"}
+                  aria-haspopup="listbox"
+                  title="选择开发模式（仅下一回合）"
+                  onClick={(event) => {
+                    toggleMenu("development", event.currentTarget);
+                  }}
+                >
+                  {developmentMode === ""
+                    ? "模式"
+                    : MODE_LABELS[developmentMode as WebUiDevelopmentMode]}
+                </button>
+                {openMenu === "development" ? (
+                  <div className="pill-popover" role="dialog" aria-label="选择开发模式">
+                    <div className="pill-popover-list" role="listbox" aria-label="开发模式列表">
+                      <button
+                        type="button"
+                        role="option"
+                        aria-selected={developmentMode === ""}
+                        className={`model-row ${developmentMode === "" ? "selected" : ""}`}
+                        onClick={() => {
+                          setDevelopmentMode("");
+                          setOpenMenu(null);
+                        }}
+                      >
+                        <span className="model-row-name">默认</span>
+                        <span className="model-row-meta">跟随会话配置</span>
+                      </button>
+                      {developmentModes.map((entry) => (
+                        <button
+                          type="button"
+                          key={entry}
+                          role="option"
+                          aria-selected={developmentMode === entry}
+                          className={`model-row ${developmentMode === entry ? "selected" : ""}`}
+                          onClick={() => {
+                            setDevelopmentMode(entry);
+                            setOpenMenu(null);
+                          }}
+                        >
+                          <span className="model-row-name">{MODE_LABELS[entry]}</span>
+                        </button>
+                      ))}
+                    </div>
+                  </div>
+                ) : null}
+              </div>
             ) : null}
             {reasoningCapable ? (
               <button
@@ -562,7 +696,7 @@ export function Composer({ centered }: { centered: boolean }) {
                 data-active={reasoningEffort !== ""}
                 aria-label="推理强度（仅下一回合）"
                 title="点击切换推理强度（仅下一回合）"
-                onClick={() => setReasoningEffort(cycle(reasoningEffort, REASONING_EFFORTS))}
+                onClick={() => setReasoningEffort(nextReasoningEffort(reasoningEffort))}
               >
                 {reasoningEffort === "" ? "推理" : REASONING_LABELS[reasoningEffort]}
               </button>

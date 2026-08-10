@@ -12,6 +12,8 @@ import {
   Archive,
   ArchiveRestore,
   ChevronRight,
+  Folder,
+  Loader2,
   MoreHorizontal,
   Pin,
   PinOff,
@@ -32,10 +34,10 @@ import type {
 } from "../protocol";
 import { useAppActions, useAppState } from "../state/store";
 
-export function summaryStateText(state: WebUiSummaryState): string {
+export function summaryStateText(state: WebUiSummaryState): string | null {
   switch (state) {
     case "idle":
-      return "空闲";
+      return null;
     case "running":
       return "运行中";
     case "waiting_approval":
@@ -69,6 +71,8 @@ function formatRelativeTime(updatedAt: string | null | undefined): string {
 
 const byUpdated = (a: WebUiSessionSummary, b: WebUiSessionSummary) =>
   (b.updated_at ?? "").localeCompare(a.updated_at ?? "");
+
+const SESSION_PAGE_SIZE = 5;
 
 interface MenuState {
   sessionId: string;
@@ -181,6 +185,17 @@ function SessionRow({
 }) {
   const actions = useAppActions();
   const [renameValue, setRenameValue] = useState(summary.title ?? "");
+  const stateText = summaryStateText(summary.state);
+  const title = summary.title ?? "未命名会话";
+  const updatedTime = formatRelativeTime(summary.updated_at);
+  const sessionTooltip = [
+    title,
+    summary.workspace_label ? `工作区：${summary.workspace_label}` : null,
+    `状态：${stateText ?? "空闲"}`,
+    updatedTime ? `更新时间：${updatedTime}` : null,
+  ]
+    .filter((line): line is string => line !== null)
+    .join("\n");
 
   const openMenuAt = (x: number, y: number, trigger: HTMLElement | null) => {
     onOpenMenu({ sessionId: summary.session_id, x, y }, trigger);
@@ -236,27 +251,29 @@ function SessionRow({
             type="button"
             className="session-main"
             aria-current={selected ? "true" : undefined}
+            title={sessionTooltip}
             onClick={() => actions.selectSession(summary.session_id)}
           >
             <span className="session-title-row">
-              {summary.state === "running" ? (
-                <span className="pulse-dot" aria-hidden />
-              ) : null}
-              <span className="session-title">{summary.title ?? "未命名会话"}</span>
-            </span>
-            <span className="session-meta">
-              <span className="session-time">{formatRelativeTime(summary.updated_at)}</span>
+              <span className="session-activity">
+                {summary.state === "running" ? (
+                  <span role="status" aria-label="运行中">
+                    <Loader2 size={12} className="spin" aria-hidden />
+                  </span>
+                ) : null}
+              </span>
+              <span className="session-title">{title}</span>
               {isWaitingState(summary.state) ? (
                 // The summary carries no pending-count field; the state text
                 // is the badge label (no fabricated counts).
                 <span className={`session-badge state-${summary.state}`}>
-                  {summaryStateText(summary.state)}
+                  {stateText}
                 </span>
-              ) : (
+              ) : summary.state !== "running" && stateText !== null ? (
                 <span className={`session-state state-${summary.state}`}>
-                  {summaryStateText(summary.state)}
+                  {stateText}
                 </span>
-              )}
+              ) : null}
             </span>
           </button>
           <span className="session-hover-actions">
@@ -319,6 +336,8 @@ export function Sidebar() {
   const [expandedOverrides, setExpandedOverrides] = useState<Record<string, boolean>>({});
   /** Per-group archived-section open flags; absent = collapsed. */
   const [archivedOpen, setArchivedOpen] = useState<Record<string, boolean>>({});
+  /** Per-group session counts; absent starts at the compact default. */
+  const [visibleSessionCounts, setVisibleSessionCounts] = useState<Record<string, number>>({});
   const triggerRef = useRef<HTMLElement | null>(null);
   const menuPositionRef = useRef({ x: 0, y: 0 });
 
@@ -443,6 +462,9 @@ export function Sidebar() {
           if (live.length === 0 && archived.length === 0) return null;
           const expanded = expandedOverrides[group.label] ?? group.current;
           const archivedExpanded = archivedOpen[group.label] ?? false;
+          const sortedLive = [...live].sort(byUpdated);
+          const visibleCount = visibleSessionCounts[group.label] ?? SESSION_PAGE_SIZE;
+          const visibleLive = sortedLive.slice(0, visibleCount);
           return (
             <div className="session-group" role="group" aria-label={group.label} key={group.label}>
               <div className="session-group-header">
@@ -462,6 +484,7 @@ export function Sidebar() {
                     aria-hidden
                     className={`session-group-caret ${expanded ? "expanded" : ""}`}
                   />
+                  <Folder size={14} aria-hidden className="session-group-folder" />
                   <span className="session-group-label">{group.label}</span>
                   {/* Count matches the visible rows: archived are behind the
                       collapsed entry, pinned live in the Pinned section. */}
@@ -482,7 +505,21 @@ export function Sidebar() {
               {expanded ? (
                 <>
                   {live.length > 0 ? (
-                    <ul className="session-list">{[...live].sort(byUpdated).map(renderRow)}</ul>
+                    <ul className="session-list">{visibleLive.map(renderRow)}</ul>
+                  ) : null}
+                  {visibleLive.length < sortedLive.length ? (
+                    <button
+                      type="button"
+                      className="session-group-more"
+                      onClick={() =>
+                        setVisibleSessionCounts((previous) => ({
+                          ...previous,
+                          [group.label]: visibleCount + SESSION_PAGE_SIZE,
+                        }))
+                      }
+                    >
+                      展开更多
+                    </button>
                   ) : null}
                   {archived.length > 0 ? (
                     <div className="session-archived">
@@ -522,7 +559,10 @@ export function Sidebar() {
 
   return (
     <aside
-      className={`sidebar ${state.sidebarDrawerOpen ? "drawer-open" : ""}`}
+      id="session-sidebar"
+      className={`sidebar ${state.sidebarDrawerOpen ? "drawer-open" : ""} ${
+        state.sidebarCollapsed ? "sidebar-collapsed" : ""
+      }`}
       aria-label="会话列表"
     >
       <div className="sidebar-top">

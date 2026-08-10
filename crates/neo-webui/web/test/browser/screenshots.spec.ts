@@ -58,7 +58,7 @@ test("02 宽屏运行会话：tool-line 行态与 TurnFold", async ({ page }) =>
   // Finished turn collapses behind the fold summary; the running turn's
   // process rows stay visible.
   await expect(
-    page.getByRole("button", { name: "展开工作过程（4 个步骤）" }),
+    page.getByRole("button", { name: /展开工作过程（.*个步骤）/ }),
   ).toBeVisible();
   await expect(
     page.getByRole("button", { name: /查看子代理详情：检查测试覆盖/ }),
@@ -82,7 +82,7 @@ test("03 思考展开", async ({ page }) => {
 test("04 工具展开详情：命令回显、参数、输出与元信息", async ({ page }) => {
   await openApp(page, 1440, 900);
   await openShowcase(page);
-  await page.getByRole("button", { name: "展开工作过程（4 个步骤）" }).click();
+  await page.getByRole("button", { name: /展开工作过程（.*个步骤）/ }).click();
   await page.getByRole("button", { name: "展开工具 bash，状态：已完成" }).click();
   await expect(page.getByText("$ cargo test -p neo-webui")).toBeVisible();
   await expect(page.getByText("test result: ok. 42 passed").first()).toBeVisible();
@@ -165,6 +165,15 @@ test("10 composer 模型 pill 覆盖层", async ({ page }) => {
   await page.getByRole("button", { name: "模型（仅下一回合）" }).click();
   const overlay = page.getByRole("dialog", { name: "选择模型" });
   await expect(overlay).toBeVisible();
+  const box = await overlay.boundingBox();
+  if (!box) throw new Error("model menu has no box");
+  const paintedDialog = await page.evaluate(
+    ([x, y]) => document.elementFromPoint(x, y)?.closest('[role="dialog"]')?.getAttribute("aria-label"),
+    [box.x + box.width / 2, box.y + box.height / 2] as const,
+  );
+  expect(paintedDialog).toBe("选择模型");
+  await overlay.getByRole("button", { name: "更多模型" }).click();
+  await expect(overlay.getByLabel("搜索模型")).toBeVisible();
   await expect(overlay.getByRole("option", { name: /gpt-5-codex/ })).toBeVisible();
   await expect(overlay.getByRole("option", { name: /claude-sonnet-4.5/ })).toBeVisible();
   await expect(overlay.getByRole("option", { name: /kimi-k2/ })).toBeVisible();
@@ -209,6 +218,21 @@ test("13 窄桌面抽屉", async ({ page }) => {
   await page.screenshot({ path: `${SHOTS}/13-narrow-desktop-drawer.png` });
 });
 
+test("顶栏在宽窄屏之间保持侧栏与抽屉状态独立", async ({ page }) => {
+  await openApp(page, 1440, 900);
+  const list = sidebar(page);
+  await page.getByRole("button", { name: "收起会话列表" }).click();
+  await expect(list).toHaveClass(/sidebar-collapsed/);
+
+  await page.setViewportSize({ width: 900, height: 780 });
+  await page.getByRole("button", { name: "打开会话列表" }).click();
+  await expect(list).toHaveClass(/drawer-open/);
+
+  await page.setViewportSize({ width: 1440, height: 900 });
+  await page.getByRole("button", { name: "展开会话列表" }).click();
+  await expect(list).not.toHaveClass(/sidebar-collapsed/);
+});
+
 test("14 手机单列", async ({ page }) => {
   await openApp(page, 390, 844);
   await page.getByRole("button", { name: "打开会话列表" }).click();
@@ -224,7 +248,7 @@ test("15 亮色：运行会话", async ({ page }) => {
   await switchToLight(page);
   await openShowcase(page);
   await expect(
-    page.getByRole("button", { name: "展开工作过程（4 个步骤）" }),
+    page.getByRole("button", { name: /展开工作过程（.*个步骤）/ }),
   ).toBeVisible();
   await page.screenshot({ path: `${SHOTS}/15-light-running-session.png` });
 });

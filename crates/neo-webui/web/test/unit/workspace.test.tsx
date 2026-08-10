@@ -2,7 +2,8 @@
  * Workspace interaction tests: sidebar workspace grouping (R5) — current
  * group expanded with a "+" new-session button, other groups collapsed,
  * cross-workspace pinned section deduped out of groups, archived sessions
- * behind a collapsed entry, running pulse dot and waiting badges, rAF-
+ * behind a collapsed entry, compact five-row project lists, running spinner
+ * and waiting badges, rAF-
  * throttled resizer drag, keyboard width control, one shared context menu
  * (right-click / Shift+F10) that never switches the session — plus composer
  * behavior (Enter send, Shift+Enter newline, IME guard, follow-up vs turn vs
@@ -65,12 +66,13 @@ describe("sidebar", () => {
     const neoGroup = screen.getByRole("group", { name: "neo" });
     const neoToggle = within(neoGroup).getByRole("button", { name: /neo/ });
     expect(neoToggle.getAttribute("aria-expanded")).toBe("true");
+    expect(neoToggle.querySelector(".session-group-folder")).not.toBeNull();
     // The count matches the visible rows: the pinned session lives in the
     // Pinned section, so only the running row counts here.
     expect(within(neoToggle).getByText("1")).toBeTruthy();
     expect(within(neoGroup).getByRole("button", { name: "新会话" })).toBeTruthy();
-    expect(within(neoGroup).getByText("并行格式化")).toBeTruthy();
-    expect(within(neoGroup).getByText("运行中")).toBeTruthy();
+    const runningRow = within(neoGroup).getByText("并行格式化").closest(".session-row");
+    expect(runningRow?.querySelector(".session-activity .spin")).not.toBeNull();
     expect(within(neoGroup).queryByText("有界中继测试")).toBeNull();
 
     // Other workspaces are collapsed by default: their rows are not rendered.
@@ -146,15 +148,157 @@ describe("sidebar", () => {
     expect(screen.getByText("旧会话")).toBeTruthy();
   });
 
-  it("shows a pulse dot on running rows and an amber badge on waiting rows", async () => {
+  it("keeps session rows single-line and puts details in their hover tooltip", async () => {
     const { socket } = await renderReady();
-    socket.emit(asServerMessage(fixture.long_connection.workspace_snapshot));
-    const runningRow = (await screen.findByText("并行格式化")).closest(".session-row") as HTMLElement;
-    expect(runningRow.querySelector(".pulse-dot")).not.toBeNull();
-    const waitingRow = (await screen.findByText("有界中继测试")).closest(".session-row") as HTMLElement;
+    socket.emit({
+      type: "workspace_snapshot",
+      stream_id: "ws_status_test",
+      workspace_sequence: 0,
+      workspaces: [
+        {
+          label: "neo",
+          current: true,
+          sessions: [
+            {
+              session_id: "session_idle",
+              title: "空闲会话",
+              updated_at: "2026-08-09T10:00:00+00:00",
+              pinned: false,
+              archived: false,
+              state: "idle",
+              workspace_label: "neo",
+            },
+            {
+              session_id: "session_running",
+              title: "运行会话",
+              updated_at: "2026-08-09T10:01:00+00:00",
+              pinned: false,
+              archived: false,
+              state: "running",
+              workspace_label: "neo",
+            },
+            {
+              session_id: "session_waiting",
+              title: "等待会话",
+              updated_at: "2026-08-09T10:02:00+00:00",
+              pinned: false,
+              archived: false,
+              state: "waiting_question",
+              workspace_label: "neo",
+            },
+            {
+              session_id: "session_failed",
+              title: "失败会话",
+              updated_at: "2026-08-09T10:03:00+00:00",
+              pinned: false,
+              archived: false,
+              state: "failed",
+              workspace_label: "neo",
+            },
+          ],
+        },
+      ],
+    });
+    const runningRow = (await screen.findByText("运行会话")).closest(".session-row") as HTMLElement;
+    expect(runningRow.querySelector(".spin")).not.toBeNull();
+    expect(runningRow.querySelector(".pulse-dot")).toBeNull();
+    expect(within(runningRow).queryByText("运行中")).toBeNull();
+    expect(runningRow.querySelector(".session-meta")).toBeNull();
+    expect(runningRow.querySelector(".session-time")).toBeNull();
+    const idleRow = screen.getByText("空闲会话").closest(".session-row") as HTMLElement;
+    expect(within(idleRow).queryByText("空闲")).toBeNull();
+    expect(idleRow.querySelector(".session-activity")).not.toBeNull();
+    const idleMain = idleRow.querySelector(".session-main") as HTMLButtonElement;
+    expect(idleMain.title).toContain("空闲会话");
+    expect(idleMain.title).toContain("工作区：neo");
+    expect(idleMain.title).toContain("状态：空闲");
+    expect(idleMain.title).toContain("更新时间：");
+    const waitingRow = screen.getByText("等待会话").closest(".session-row") as HTMLElement;
     const badge = waitingRow.querySelector(".session-badge") as HTMLElement;
     expect(badge).not.toBeNull();
     expect(badge.textContent).toBe("等待回答");
+    expect(badge.closest(".session-title-row")).not.toBeNull();
+    expect(screen.getByText("失败", { selector: ".session-state" })).toBeTruthy();
+  });
+
+  it("shows five project sessions at a time and expands by five", async () => {
+    const user = userEvent.setup();
+    const { socket } = await renderReady();
+    socket.emit({
+      type: "workspace_snapshot",
+      stream_id: "ws_page_test",
+      workspace_sequence: 0,
+      workspaces: [
+        {
+          label: "neo",
+          current: true,
+          sessions: Array.from({ length: 12 }, (_, index) => ({
+            session_id: `session_${index}`,
+            title: `会话 ${String(index + 1).padStart(2, "0")}`,
+            updated_at: `2026-08-09T10:${String(index).padStart(2, "0")}:00+00:00`,
+            pinned: false,
+            archived: false,
+            state: "idle",
+            workspace_label: "neo",
+          })),
+        },
+      ],
+    });
+    await screen.findByText("会话 12");
+    const neoGroup = screen.getByRole("group", { name: "neo" });
+    expect(within(neoGroup).getAllByRole("listitem")).toHaveLength(5);
+    expect(screen.queryByText("会话 07")).toBeNull();
+
+    await user.click(screen.getByRole("button", { name: "展开更多" }));
+    expect(within(neoGroup).getAllByRole("listitem")).toHaveLength(10);
+    expect(screen.getByText("会话 07")).toBeTruthy();
+    expect(screen.queryByText("会话 01")).toBeNull();
+
+    await user.click(screen.getByRole("button", { name: "展开更多" }));
+    expect(within(neoGroup).getAllByRole("listitem")).toHaveLength(12);
+    expect(screen.getByText("会话 01")).toBeTruthy();
+    expect(screen.queryByRole("button", { name: "展开更多" })).toBeNull();
+  });
+
+  it("uses the top-left button to collapse only the desktop sidebar", async () => {
+    const user = userEvent.setup();
+    await renderReady();
+    const sidebar = screen.getByLabelText("会话列表");
+    const toggle = screen.getByRole("button", { name: "收起会话列表" });
+    expect(toggle.getAttribute("aria-expanded")).toBe("true");
+
+    await user.click(toggle);
+    expect(sidebar.classList.contains("sidebar-collapsed")).toBe(true);
+    expect(document.querySelector(".app-body")?.classList.contains("sidebar-collapsed")).toBe(true);
+    expect(document.querySelector(".drawer-scrim")).toBeNull();
+    const expand = screen.getByRole("button", { name: "展开会话列表" });
+    await user.click(expand);
+    expect(sidebar.classList.contains("sidebar-collapsed")).toBe(false);
+    expect(document.querySelector(".app-body")?.classList.contains("sidebar-collapsed")).toBe(false);
+    expect(screen.getByRole("button", { name: "收起会话列表" })).toHaveProperty(
+      "ariaExpanded",
+      "true",
+    );
+    expect(window.localStorage.getItem("neo-webui.sidebar-width")).toBeNull();
+  });
+
+  it("keeps the top-left button as the drawer control on narrow screens", async () => {
+    const user = userEvent.setup();
+    vi.stubGlobal(
+      "matchMedia",
+      vi.fn(() => ({
+        matches: true,
+        media: "(max-width: 980px)",
+        addEventListener: vi.fn(),
+        removeEventListener: vi.fn(),
+      })),
+    );
+    await renderReady();
+    const sidebar = screen.getByLabelText("会话列表");
+    await user.click(screen.getByRole("button", { name: "打开会话列表" }));
+    expect(sidebar.classList.contains("drawer-open")).toBe(true);
+    expect(sidebar.classList.contains("sidebar-collapsed")).toBe(false);
+    expect(screen.getByRole("button", { name: "关闭会话列表" })).toBeTruthy();
   });
 
   it("throttles drag width writes through rAF and persists on release", async () => {
