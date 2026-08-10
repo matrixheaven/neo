@@ -725,6 +725,240 @@ async fn load_session_transcript_normalizes_legacy_token_usage_for_footer() {
 }
 
 #[tokio::test]
+async fn load_session_transcript_normalizes_legacy_child_token_usage_for_delegate_and_swarm() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let sessions_dir = temp.path().join(".neo/sessions");
+    let config = test_config(temp.path(), sessions_dir);
+    let bucket_dir = workspace_sessions_dir(&config);
+    fs::create_dir_all(&bucket_dir).expect("create sessions bucket dir");
+    let session_dir = bucket_dir.join(SESSION_A);
+    let session_path = main_wire_path_for_session(&session_dir);
+
+    let runtime = neo_agent_core::multi_agent::MultiAgentRuntime::new();
+    let mut delegate = runtime.start_foreground_delegate_for_test("legacy delegate");
+    delegate.state = neo_agent_core::multi_agent::AgentLifecycleState::Completed;
+    delegate.terminal_reason = Some(neo_agent_core::multi_agent::AgentTerminalReason::Completed);
+    delegate.run_count = 2;
+    delegate.token_count = 77;
+    delegate.input_token_count = 0;
+    delegate.cache_read_token_count = 80;
+    delegate.cache_write_token_count = 0;
+    let mut delegate_progress = delegate.progress_snapshot();
+    delegate_progress.state = neo_agent_core::multi_agent::AgentLifecycleState::Running;
+    delegate_progress.terminal_at_ms = None;
+    delegate_progress.terminal_reason = None;
+
+    let swarm_id = runtime.create_swarm_for_test(vec![(
+        "legacy swarm child",
+        neo_agent_core::multi_agent::AgentLifecycleState::Completed,
+    )]);
+    let mut swarm = runtime.swarm_snapshot(&swarm_id).expect("test swarm");
+    let swarm_child_id = swarm.children[0].agent.id.clone();
+    let swarm_child = &mut swarm.children[0].agent;
+    swarm_child.run_count = 2;
+    swarm_child.token_count = 77;
+    swarm_child.input_token_count = 0;
+    swarm_child.cache_read_token_count = 80;
+    swarm_child.cache_write_token_count = 0;
+
+    // Cache may be smaller than uncached input in an old provider response.
+    // The missing snapshot input total identifies the whole child run as legacy.
+    let legacy_usage = [
+        AgentEvent::RunStarted { turn: 1 },
+        AgentEvent::TokenUsage {
+            turn: 1,
+            usage: neo_agent_core::AgentTokenUsage {
+                input_tokens: 1,
+                output_tokens: 1,
+                input_cache_read_tokens: 10,
+                input_cache_write_tokens: 0,
+            },
+        },
+        AgentEvent::RunFinished {
+            turn: 1,
+            stop_reason: StopReason::EndTurn,
+        },
+        AgentEvent::RunStarted { turn: 2 },
+        AgentEvent::TokenUsage {
+            turn: 2,
+            usage: neo_agent_core::AgentTokenUsage {
+                input_tokens: 10,
+                output_tokens: 3,
+                input_cache_read_tokens: 30,
+                input_cache_write_tokens: 0,
+            },
+        },
+        AgentEvent::TokenUsage {
+            turn: 3,
+            usage: neo_agent_core::AgentTokenUsage {
+                input_tokens: 60,
+                output_tokens: 4,
+                input_cache_read_tokens: 50,
+                input_cache_write_tokens: 0,
+            },
+        },
+        AgentEvent::RunFinished {
+            turn: 3,
+            stop_reason: StopReason::EndTurn,
+        },
+    ];
+    let child_ids = [delegate.id.clone(), swarm_child_id.clone()];
+    let mut child_wire_paths = Vec::new();
+    for agent_id in &child_ids {
+        let child_path = neo_agent_core::session::agent_wire_path(&session_dir, agent_id.as_str());
+        fs::create_dir_all(child_path.parent().expect("child wire parent"))
+            .expect("create child wire parent");
+        let mut child_writer = neo_agent_core::session::JsonlSessionWriter::create(&child_path)
+            .await
+            .expect("create child wire");
+        for event in &legacy_usage {
+            child_writer
+                .append(event)
+                .await
+                .expect("append child event");
+        }
+        child_writer.flush().await.expect("flush child wire");
+        child_wire_paths.push(child_path);
+    }
+
+    let mut writer = neo_agent_core::session::JsonlSessionWriter::create(&session_path)
+        .await
+        .expect("create session");
+    writer
+        .append(&AgentEvent::DelegateStarted {
+            turn: 1,
+            agent: delegate.clone(),
+            workflow_origin: None,
+        })
+        .await
+        .expect("append delegate start");
+    writer
+        .append(&AgentEvent::DelegateProgressUpdated {
+            turn: 1,
+            progress: delegate_progress,
+            workflow_origin: None,
+        })
+        .await
+        .expect("append delegate progress");
+    writer
+        .append(&AgentEvent::DelegateFinished {
+            turn: 1,
+            agent: delegate,
+            workflow_origin: None,
+        })
+        .await
+        .expect("append delegate finish");
+    writer
+        .append(&AgentEvent::DelegateSwarmStarted {
+            turn: 1,
+            swarm: swarm.clone(),
+            workflow_origin: None,
+        })
+        .await
+        .expect("append swarm start");
+    writer
+        .append(&AgentEvent::DelegateSwarmProgressUpdated {
+            turn: 1,
+            swarm_id: swarm_id.clone(),
+            state: swarm.state,
+            aggregate: swarm.aggregate,
+            child_progress: neo_agent_core::multi_agent::SwarmChildProgress {
+                item_index: swarm.children[0].item_index,
+                progress: swarm.children[0].agent.progress_snapshot(),
+            },
+            workflow_origin: None,
+        })
+        .await
+        .expect("append swarm progress");
+    writer.flush().await.expect("flush session");
+
+    let main_before = fs::read(&session_path).expect("read main wire before replay");
+    let child_before = child_wire_paths
+        .iter()
+        .map(|path| fs::read(path).expect("read child wire before replay"))
+        .collect::<Vec<_>>();
+    let loaded = load_session_transcript(SESSION_A.to_owned(), &config)
+        .await
+        .expect("load transcript");
+
+    let delegate_start = loaded.events.iter().find_map(|event| match event {
+        AgentEvent::DelegateStarted { agent, .. } => Some(agent),
+        _ => None,
+    });
+    let delegate_start = delegate_start.expect("delegate start");
+    assert_eq!(
+        (delegate_start.token_count, delegate_start.input_token_count),
+        (77, 0)
+    );
+    let delegate_progress = loaded.events.iter().find_map(|event| match event {
+        AgentEvent::DelegateProgressUpdated { progress, .. } => Some(progress),
+        _ => None,
+    });
+    let delegate_progress = delegate_progress.expect("delegate progress");
+    assert_eq!(
+        (
+            delegate_progress.token_count,
+            delegate_progress.input_token_count
+        ),
+        (77, 0)
+    );
+    let delegate_finish = loaded.events.iter().find_map(|event| match event {
+        AgentEvent::DelegateFinished { agent, .. } => Some(agent),
+        _ => None,
+    });
+    let delegate_finish = delegate_finish.expect("delegate finish");
+    assert_eq!(
+        (
+            delegate_finish.token_count,
+            delegate_finish.input_token_count
+        ),
+        (157, 150)
+    );
+
+    let swarm_start = loaded.events.iter().find_map(|event| match event {
+        AgentEvent::DelegateSwarmStarted { swarm, .. } => Some(&swarm.children[0].agent),
+        _ => None,
+    });
+    let swarm_start = swarm_start.expect("swarm start");
+    assert_eq!(
+        (swarm_start.token_count, swarm_start.input_token_count),
+        (77, 0)
+    );
+    let swarm_progress = loaded.events.iter().find_map(|event| match event {
+        AgentEvent::DelegateSwarmProgressUpdated { child_progress, .. } => {
+            Some(&child_progress.progress)
+        }
+        _ => None,
+    });
+    let swarm_progress = swarm_progress.expect("swarm progress");
+    assert_eq!(
+        (swarm_progress.token_count, swarm_progress.input_token_count),
+        (157, 150)
+    );
+    let restored_swarm = config
+        .multi_agent
+        .swarm_snapshot(&swarm_id)
+        .expect("restored swarm");
+    assert_eq!(
+        (
+            restored_swarm.children[0].agent.token_count,
+            restored_swarm.children[0].agent.input_token_count
+        ),
+        (157, 150)
+    );
+    assert_eq!(
+        fs::read(&session_path).expect("read main wire after replay"),
+        main_before
+    );
+    for (path, before) in child_wire_paths.iter().zip(child_before) {
+        assert_eq!(
+            fs::read(path).expect("read child wire after replay"),
+            before
+        );
+    }
+}
+
+#[tokio::test]
 async fn load_session_transcript_preserves_delegate_events_for_replay() {
     let temp = tempfile::tempdir().expect("tempdir");
     let sessions_dir = temp.path().join(".neo/sessions");

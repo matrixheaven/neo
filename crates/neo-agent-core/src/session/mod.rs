@@ -203,9 +203,18 @@ pub struct AssistantTextPage {
 
 impl JsonlSessionReader {
     pub async fn read_all(path: impl AsRef<Path>) -> Result<Vec<AgentEvent>, SessionError> {
+        let mut events = Vec::new();
+        Self::for_each_event(path, |event| events.push(event)).await?;
+        Ok(events)
+    }
+
+    /// Visit persisted events in file order without retaining the full log.
+    pub async fn for_each_event(
+        path: impl AsRef<Path>,
+        mut on_event: impl FnMut(AgentEvent),
+    ) -> Result<(), SessionError> {
         let file = File::open(path).await?;
         let mut reader = BufReader::new(file);
-        let mut events = Vec::new();
         let mut line_number = 0;
         let mut raw_line = Vec::new();
 
@@ -246,11 +255,11 @@ impl JsonlSessionReader {
                     line: line_number,
                     source,
                 })?;
-                events.push(event);
+                on_event(event);
             }
         }
 
-        Ok(events)
+        Ok(())
     }
 
     pub async fn replay_messages(

@@ -2878,9 +2878,11 @@ async fn load_session_transcript(
 ) -> Result<LoadedSessionTranscript> {
     let path = crate::modes::sessions::session_path(&session_id, config)?;
     crate::modes::sessions::ensure_session_can_be_replayed(&session_id, &path)?;
-    let events = JsonlSessionReader::read_all(&path)
+    let mut events = JsonlSessionReader::read_all(&path)
         .await
         .with_context(|| format!("failed to replay session {}", path.display()))?;
+    let session_directory = crate::modes::sessions::session_dir(&session_id, config)?;
+    normalize_legacy_child_token_usage(&mut events, &session_directory).await;
     config.multi_agent.restore_from_replay(events.iter());
     let context = neo_agent_core::AgentContext::from_replay(events.iter());
     let main_agent_token_usage = replay_main_agent_token_usage(events.iter());
@@ -2943,6 +2945,363 @@ fn restore_legacy_full_input_tokens(
         usage.input_tokens = usage.input_tokens.saturating_add(cache_input_tokens);
     }
     usage
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+struct ReplayedChildTokenUsage {
+    stored_total_tokens: usize,
+    legacy_total_tokens: usize,
+    legacy_input_tokens: usize,
+    cache_read_tokens: usize,
+    cache_write_tokens: usize,
+}
+
+impl ReplayedChildTokenUsage {
+    fn add_legacy(&mut self, usage: neo_agent_core::AgentTokenUsage) {
+        self.stored_total_tokens = self.stored_total_tokens.saturating_add(
+            (usage.input_tokens as usize).saturating_add(usage.output_tokens as usize),
+        );
+        // A missing child input total is only produced by the old runtime,
+        // whose provider input excluded cache on every response.
+        let input_tokens = (usage.input_tokens as usize)
+            .saturating_add(usage.input_cache_read_tokens as usize)
+            .saturating_add(usage.input_cache_write_tokens as usize);
+        let output_tokens = usage.output_tokens as usize;
+        self.legacy_input_tokens = self.legacy_input_tokens.saturating_add(input_tokens);
+        self.legacy_total_tokens = self
+            .legacy_total_tokens
+            .saturating_add(input_tokens.saturating_add(output_tokens));
+        self.cache_read_tokens = self
+            .cache_read_tokens
+            .saturating_add(usage.input_cache_read_tokens as usize);
+        self.cache_write_tokens = self
+            .cache_write_tokens
+            .saturating_add(usage.input_cache_write_tokens as usize);
+    }
+}
+
+async fn replay_child_token_usage_by_run(
+    path: impl AsRef<Path>,
+) -> Result<Vec<ReplayedChildTokenUsage>, neo_agent_core::session::SessionError> {
+    let mut runs = Vec::new();
+    JsonlSessionReader::for_each_event(path, |event| {
+        if matches!(event, AgentEvent::RunStarted { .. }) {
+            runs.push(ReplayedChildTokenUsage::default());
+        }
+        if let AgentEvent::TokenUsage { usage, .. } = &event {
+            if runs.is_empty() {
+                runs.push(ReplayedChildTokenUsage::default());
+            }
+            runs.last_mut()
+                .expect("child usage run exists")
+                .add_legacy(*usage);
+        }
+    })
+    .await?;
+    Ok(runs)
+}
+
+async fn normalize_legacy_child_token_usage(events: &mut [AgentEvent], session_directory: &Path) {
+    let mut agent_ids = BTreeSet::new();
+    for event in events.iter() {
+        collect_legacy_child_agent_ids(event, &mut agent_ids);
+    }
+    if agent_ids.is_empty() {
+        return;
+    }
+
+    let mut usage_by_agent = HashMap::new();
+    for agent_id in agent_ids {
+        if !is_safe_agent_id(&agent_id) {
+            continue;
+        }
+        let child_path = neo_agent_core::session::agent_wire_path(session_directory, &agent_id);
+        let Ok(runs) = replay_child_token_usage_by_run(child_path).await else {
+            continue;
+        };
+        if !runs.is_empty() {
+            usage_by_agent.insert(agent_id, runs);
+        }
+    }
+    if usage_by_agent.is_empty() {
+        return;
+    }
+
+    // A replay stream contains many progress snapshots for the same run. Only
+    // the final matching projection gets repaired; earlier progress remains an
+    // accurate record of what was displayed at that point in time.
+    let mut last_projection_by_agent_run = HashMap::new();
+    for (index, event) in events.iter().enumerate() {
+        for key in matching_legacy_child_projection_keys(event, &usage_by_agent) {
+            last_projection_by_agent_run.insert(key, index);
+        }
+    }
+    for (index, event) in events.iter_mut().enumerate() {
+        normalize_legacy_child_token_usage_in_event(
+            event,
+            &usage_by_agent,
+            &last_projection_by_agent_run,
+            index,
+        );
+    }
+}
+
+fn is_safe_agent_id(agent_id: &str) -> bool {
+    !agent_id.is_empty()
+        && agent_id != "."
+        && agent_id != ".."
+        && !agent_id.contains('/')
+        && !agent_id.contains('\\')
+        && !agent_id.contains('\0')
+}
+
+fn collect_legacy_child_agent_ids(event: &AgentEvent, agent_ids: &mut BTreeSet<String>) {
+    match event {
+        AgentEvent::DelegateStarted { agent, .. }
+        | AgentEvent::DelegateUpdated { agent, .. }
+        | AgentEvent::DelegateFinished { agent, .. } => {
+            collect_legacy_child_snapshot_id(agent, agent_ids);
+        }
+        AgentEvent::DelegateProgressUpdated { progress, .. } => {
+            if legacy_child_progress_needs_usage(progress) {
+                agent_ids.insert(progress.agent_id.as_str().to_owned());
+            }
+        }
+        AgentEvent::DelegateSwarmStarted { swarm, .. }
+        | AgentEvent::DelegateSwarmUpdated { swarm, .. }
+        | AgentEvent::DelegateSwarmFinished { swarm, .. } => {
+            for child in &swarm.children {
+                collect_legacy_child_snapshot_id(&child.agent, agent_ids);
+            }
+        }
+        AgentEvent::DelegateSwarmProgressUpdated { child_progress, .. } => {
+            if legacy_child_progress_needs_usage(&child_progress.progress) {
+                agent_ids.insert(child_progress.progress.agent_id.as_str().to_owned());
+            }
+        }
+        _ => {}
+    }
+}
+
+fn collect_legacy_child_snapshot_id(
+    snapshot: &neo_agent_core::multi_agent::AgentSnapshot,
+    agent_ids: &mut BTreeSet<String>,
+) {
+    if snapshot.input_token_count == 0
+        && snapshot
+            .cache_read_token_count
+            .saturating_add(snapshot.cache_write_token_count)
+            > 0
+    {
+        agent_ids.insert(snapshot.id.as_str().to_owned());
+    }
+}
+
+fn legacy_child_progress_needs_usage(
+    progress: &neo_agent_core::multi_agent::AgentProgressSnapshot,
+) -> bool {
+    progress.input_token_count == 0
+        && progress
+            .cache_read_token_count
+            .saturating_add(progress.cache_write_token_count)
+            > 0
+}
+
+fn normalize_legacy_child_token_usage_in_event(
+    event: &mut AgentEvent,
+    usage_by_agent: &HashMap<String, Vec<ReplayedChildTokenUsage>>,
+    last_projection_by_agent_run: &HashMap<(String, usize), usize>,
+    event_index: usize,
+) {
+    match event {
+        AgentEvent::DelegateStarted { agent, .. }
+        | AgentEvent::DelegateUpdated { agent, .. }
+        | AgentEvent::DelegateFinished { agent, .. } => {
+            normalize_legacy_child_snapshot(
+                agent,
+                usage_by_agent,
+                last_projection_by_agent_run,
+                event_index,
+            );
+        }
+        AgentEvent::DelegateProgressUpdated { progress, .. } => {
+            normalize_legacy_child_progress(
+                progress,
+                usage_by_agent,
+                last_projection_by_agent_run,
+                event_index,
+            );
+        }
+        AgentEvent::DelegateSwarmStarted { swarm, .. }
+        | AgentEvent::DelegateSwarmUpdated { swarm, .. }
+        | AgentEvent::DelegateSwarmFinished { swarm, .. } => {
+            for child in &mut swarm.children {
+                normalize_legacy_child_snapshot(
+                    &mut child.agent,
+                    usage_by_agent,
+                    last_projection_by_agent_run,
+                    event_index,
+                );
+            }
+        }
+        AgentEvent::DelegateSwarmProgressUpdated { child_progress, .. } => {
+            normalize_legacy_child_progress(
+                &mut child_progress.progress,
+                usage_by_agent,
+                last_projection_by_agent_run,
+                event_index,
+            );
+        }
+        _ => {}
+    }
+}
+
+fn matching_legacy_child_projection_keys(
+    event: &AgentEvent,
+    usage_by_agent: &HashMap<String, Vec<ReplayedChildTokenUsage>>,
+) -> Vec<(String, usize)> {
+    let mut keys = Vec::new();
+    match event {
+        AgentEvent::DelegateStarted { agent, .. }
+        | AgentEvent::DelegateUpdated { agent, .. }
+        | AgentEvent::DelegateFinished { agent, .. } => {
+            if let Some(key) = matching_snapshot_projection_key(agent, usage_by_agent) {
+                keys.push(key);
+            }
+        }
+        AgentEvent::DelegateProgressUpdated { progress, .. } => {
+            if let Some(key) = matching_progress_projection_key(progress, usage_by_agent) {
+                keys.push(key);
+            }
+        }
+        AgentEvent::DelegateSwarmStarted { swarm, .. }
+        | AgentEvent::DelegateSwarmUpdated { swarm, .. }
+        | AgentEvent::DelegateSwarmFinished { swarm, .. } => {
+            for child in &swarm.children {
+                if let Some(key) = matching_snapshot_projection_key(&child.agent, usage_by_agent) {
+                    keys.push(key);
+                }
+            }
+        }
+        AgentEvent::DelegateSwarmProgressUpdated { child_progress, .. } => {
+            if let Some(key) =
+                matching_progress_projection_key(&child_progress.progress, usage_by_agent)
+            {
+                keys.push(key);
+            }
+        }
+        _ => {}
+    }
+    keys
+}
+
+fn matching_snapshot_projection_key(
+    snapshot: &neo_agent_core::multi_agent::AgentSnapshot,
+    usage_by_agent: &HashMap<String, Vec<ReplayedChildTokenUsage>>,
+) -> Option<(String, usize)> {
+    matching_replayed_child_usage(
+        snapshot.id.as_str(),
+        snapshot.run_count,
+        snapshot.token_count,
+        snapshot.input_token_count,
+        snapshot.cache_read_token_count,
+        snapshot.cache_write_token_count,
+        usage_by_agent,
+    )
+    .map(|_| (snapshot.id.as_str().to_owned(), snapshot.run_count))
+}
+
+fn matching_progress_projection_key(
+    progress: &neo_agent_core::multi_agent::AgentProgressSnapshot,
+    usage_by_agent: &HashMap<String, Vec<ReplayedChildTokenUsage>>,
+) -> Option<(String, usize)> {
+    matching_replayed_child_usage(
+        progress.agent_id.as_str(),
+        progress.run_count,
+        progress.token_count,
+        progress.input_token_count,
+        progress.cache_read_token_count,
+        progress.cache_write_token_count,
+        usage_by_agent,
+    )
+    .map(|_| (progress.agent_id.as_str().to_owned(), progress.run_count))
+}
+
+fn matching_replayed_child_usage(
+    agent_id: &str,
+    run_count: usize,
+    token_count: usize,
+    input_token_count: usize,
+    cache_read_token_count: usize,
+    cache_write_token_count: usize,
+    usage_by_agent: &HashMap<String, Vec<ReplayedChildTokenUsage>>,
+) -> Option<ReplayedChildTokenUsage> {
+    if input_token_count != 0 {
+        return None;
+    }
+    let usage = usage_by_agent
+        .get(agent_id)
+        .and_then(|runs| runs.get(run_count.saturating_sub(1)))?;
+    if usage.cache_read_tokens != cache_read_token_count
+        || usage.cache_write_tokens != cache_write_token_count
+    {
+        return None;
+    }
+    (token_count == usage.stored_total_tokens || token_count == usage.legacy_total_tokens)
+        .then_some(*usage)
+}
+
+fn normalize_legacy_child_snapshot(
+    snapshot: &mut neo_agent_core::multi_agent::AgentSnapshot,
+    usage_by_agent: &HashMap<String, Vec<ReplayedChildTokenUsage>>,
+    last_projection_by_agent_run: &HashMap<(String, usize), usize>,
+    event_index: usize,
+) {
+    if last_projection_by_agent_run.get(&(snapshot.id.as_str().to_owned(), snapshot.run_count))
+        != Some(&event_index)
+    {
+        return;
+    }
+    let Some(usage) = matching_replayed_child_usage(
+        snapshot.id.as_str(),
+        snapshot.run_count,
+        snapshot.token_count,
+        snapshot.input_token_count,
+        snapshot.cache_read_token_count,
+        snapshot.cache_write_token_count,
+        usage_by_agent,
+    ) else {
+        return;
+    };
+    snapshot.token_count = usage.legacy_total_tokens;
+    snapshot.input_token_count = usage.legacy_input_tokens;
+}
+
+fn normalize_legacy_child_progress(
+    progress: &mut neo_agent_core::multi_agent::AgentProgressSnapshot,
+    usage_by_agent: &HashMap<String, Vec<ReplayedChildTokenUsage>>,
+    last_projection_by_agent_run: &HashMap<(String, usize), usize>,
+    event_index: usize,
+) {
+    if last_projection_by_agent_run
+        .get(&(progress.agent_id.as_str().to_owned(), progress.run_count))
+        != Some(&event_index)
+    {
+        return;
+    }
+    let Some(usage) = matching_replayed_child_usage(
+        progress.agent_id.as_str(),
+        progress.run_count,
+        progress.token_count,
+        progress.input_token_count,
+        progress.cache_read_token_count,
+        progress.cache_write_token_count,
+        usage_by_agent,
+    ) else {
+        return;
+    };
+    progress.token_count = usage.legacy_total_tokens;
+    progress.input_token_count = usage.legacy_input_tokens;
 }
 
 fn replay_session_into_transcript(

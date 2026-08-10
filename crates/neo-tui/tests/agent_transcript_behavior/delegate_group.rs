@@ -209,6 +209,22 @@ fn delegate_group_child_rows_keep_left_border_muted() {
     let group = DelegateGroupComponent::new(1, vec![nova, vega]);
     let lines = group.render_with_theme(160, &theme);
 
+    let completed_header = lines
+        .iter()
+        .find(|line| line.text().contains("Nova"))
+        .expect("completed agent header");
+    assert!(completed_header.text().contains("├─ ✓ Nova"));
+    assert_eq!(completed_header.spans()[0].text(), "  ├─ ");
+    assert_eq!(
+        completed_header.spans()[0].style().fg,
+        Some(theme.text_muted)
+    );
+    assert_eq!(completed_header.spans()[1].text(), "✓");
+    assert_eq!(
+        completed_header.spans()[1].style().fg,
+        Some(theme.status_ok)
+    );
+
     let used_line = lines
         .iter()
         .find(|line| line.text().contains("Used Read"))
@@ -262,21 +278,21 @@ fn delegate_group_styles_header_names_muted_tree_and_role_badges() {
         "vega",
         "Vega",
         AgentRole::Explorer,
-        AgentLifecycleState::Queued,
+        AgentLifecycleState::Failed,
         "搜索历史卡片回归点",
     );
     let orion = option_b_delegate(
         "orion",
         "Orion",
         AgentRole::Planner,
-        AgentLifecycleState::Queued,
+        AgentLifecycleState::Cancelled,
         "规划分支测试",
     );
     let sage = option_b_delegate(
         "sage",
         "Sage",
         AgentRole::Reviewer,
-        AgentLifecycleState::Queued,
+        AgentLifecycleState::Completed,
         "审查分支测试",
     );
     let group = DelegateGroupComponent::new(7, vec![nova, vega, orion, sage]);
@@ -288,30 +304,51 @@ fn delegate_group_styles_header_names_muted_tree_and_role_badges() {
     assert_eq!(header_spans[1].style().fg, Some(theme.brand));
     assert_eq!(header_spans[2].style().fg, Some(theme.brand));
 
-    let assert_role_row = |needle: &str, branch: &str, badge: &str, color| {
-        let row = lines
-            .iter()
-            .find(|line| line.text().contains(needle))
-            .expect("agent row should render");
-        let spans = row.spans();
-        assert_eq!(spans[0].text(), branch);
-        assert_eq!(spans[0].style().fg, Some(theme.text_muted));
-        assert_eq!(spans[1].style().fg, Some(theme.brand));
-        assert_eq!(spans[3].text(), badge);
-        assert_eq!(spans[3].style().fg, Some(color));
-    };
-    assert_role_row("├─ Nova  [Coder]", "  ├─ ", "[Coder]", theme.status_warn);
+    let assert_role_row =
+        |needle: &str, branch: &str, marker: &str, badge: &str, color, status_color| {
+            let row = lines
+                .iter()
+                .find(|line| line.text().contains(needle))
+                .expect("agent row should render");
+            let spans = row.spans();
+            assert_eq!(spans[0].text(), branch);
+            assert_eq!(spans[0].style().fg, Some(theme.text_muted));
+            assert_eq!(spans[1].text(), marker);
+            assert_eq!(spans[1].style().fg, Some(status_color));
+            assert_eq!(spans[3].style().fg, Some(theme.brand));
+            assert_eq!(spans[5].text(), badge);
+            assert_eq!(spans[5].style().fg, Some(color));
+        };
     assert_role_row(
-        "├─ Vega  [Explorer]",
+        "├─ ● Nova  [Coder]",
         "  ├─ ",
+        "●",
+        "[Coder]",
+        theme.status_warn,
+        theme.brand,
+    );
+    assert_role_row(
+        "├─ ✗ Vega  [Explorer]",
+        "  ├─ ",
+        "✗",
         "[Explorer]",
         theme.shell_mode,
+        theme.status_error,
     );
-    assert_role_row("├─ Orion  [Planner]", "  ├─ ", "[Planner]", theme.brand);
     assert_role_row(
-        "└─ Sage  [Reviewer]",
+        "├─ ◌ Orion  [Planner]",
+        "  ├─ ",
+        "◌",
+        "[Planner]",
+        theme.brand,
+        theme.status_warn,
+    );
+    assert_role_row(
+        "└─ ✓ Sage  [Reviewer]",
         "  └─ ",
+        "✓",
         "[Reviewer]",
+        theme.status_ok,
         theme.status_ok,
     );
 }
@@ -422,8 +459,8 @@ fn option_b_delegate_group_absorbs_matching_tool_headers() {
     assert!(!text.contains("Using Delegate"), "{text}");
     assert!(!text.contains("Used Delegate"), "{text}");
     assert!(text.contains("Delegate group · Running 2 agents"), "{text}");
-    assert!(text.contains("├─ Pascal  [Coder]"), "{text}");
-    assert!(text.contains("└─ Huygens  [Explorer]"), "{text}");
+    assert!(text.contains("├─ ● Pascal  [Coder]"), "{text}");
+    assert!(text.contains("└─ ● Huygens  [Explorer]"), "{text}");
 }
 
 #[test]
@@ -459,8 +496,8 @@ fn option_b_delegate_group_keeps_agent_names_visible() {
         .join("\n");
 
     assert!(text.contains("Running 2 agents"), "{text}");
-    assert!(text.contains("├─ Nova  [Coder]"), "{text}");
-    assert!(text.contains("└─ Vega  [Explorer]"), "{text}");
+    assert!(text.contains("├─ ● Nova  [Coder]"), "{text}");
+    assert!(text.contains("└─ ◌ Vega  [Explorer]"), "{text}");
     assert!(text.contains("• Used Read"), "{text}");
     assert!(text.contains("◌ thinking"), "{text}");
     assert!(text.contains("Waiting for scheduler slot"), "{text}");
@@ -677,9 +714,9 @@ fn same_turn_root_delegates_render_as_one_live_group() {
         .join("\n");
 
     assert!(frame.contains("Running 2 agents"), "{frame}");
-    assert!(frame.contains("├─ Gibbs  [Coder]"), "{frame}");
+    assert!(frame.contains("├─ ● Gibbs  [Coder]"), "{frame}");
     assert!(frame.contains("PlanBox border fix"), "{frame}");
-    assert!(frame.contains("└─ Ada  [Explorer]"), "{frame}");
+    assert!(frame.contains("└─ ● Ada  [Explorer]"), "{frame}");
     assert!(frame.contains("Trace markdown width"), "{frame}");
     assert!(frame.contains("Used Read"), "{frame}");
     assert_eq!(frame.matches("Agent Running").count(), 0, "{frame}");

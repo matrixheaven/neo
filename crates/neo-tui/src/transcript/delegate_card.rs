@@ -178,7 +178,7 @@ impl Component for DelegateCardComponent {
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
-enum DelegateDisplayPhase {
+pub(super) enum DelegateDisplayPhase {
     Queued,
     Running,
     Backgrounded,
@@ -209,7 +209,7 @@ fn delegate_stats_line(
     format!(" · {}", parts.join(" · "))
 }
 
-fn display_phase(snapshot: &AgentSnapshot) -> DelegateDisplayPhase {
+pub(super) fn display_phase(snapshot: &AgentSnapshot) -> DelegateDisplayPhase {
     if snapshot.detached_from_foreground && snapshot.state == AgentLifecycleState::Running {
         return DelegateDisplayPhase::Backgrounded;
     }
@@ -228,7 +228,10 @@ fn display_phase(snapshot: &AgentSnapshot) -> DelegateDisplayPhase {
     }
 }
 
-fn status_color(phase: DelegateDisplayPhase, theme: &TuiTheme) -> crate::primitive::Color {
+pub(super) fn status_color(
+    phase: DelegateDisplayPhase,
+    theme: &TuiTheme,
+) -> crate::primitive::Color {
     match phase {
         DelegateDisplayPhase::Completed => theme.status_ok,
         DelegateDisplayPhase::Failed
@@ -242,7 +245,7 @@ fn status_color(phase: DelegateDisplayPhase, theme: &TuiTheme) -> crate::primiti
     }
 }
 
-fn status_marker(phase: DelegateDisplayPhase) -> &'static str {
+pub(super) fn status_marker(phase: DelegateDisplayPhase) -> &'static str {
     match phase {
         DelegateDisplayPhase::Running | DelegateDisplayPhase::Backgrounded => "●",
         DelegateDisplayPhase::Completed => "✓",

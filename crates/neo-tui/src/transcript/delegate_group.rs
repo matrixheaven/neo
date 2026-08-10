@@ -2,6 +2,7 @@ use std::time::Duration;
 
 use neo_agent_core::multi_agent::{AgentLifecycleState, AgentRunMode, AgentSnapshot};
 
+use super::delegate_card::{display_phase, status_color, status_marker};
 use crate::primitive::theme::TuiTheme;
 use crate::primitive::{Component, Finalization, Line, Span, Style};
 use crate::transcript::{
@@ -201,11 +202,17 @@ impl DelegateGroupComponent {
         width: usize,
         theme: &TuiTheme,
     ) -> Line {
+        let phase = display_phase(agent);
         let brand = Style::default().fg(theme.brand);
         let muted = Style::default().fg(theme.text_muted);
         let primary = Style::default().fg(theme.text_primary);
         Line::from_spans(vec![
             Span::styled(format!("  {branch} "), muted),
+            Span::styled(
+                status_marker(phase),
+                Style::default().fg(status_color(phase, theme)),
+            ),
+            Span::raw(" "),
             Span::styled(agent.display_name.as_str(), brand),
             Span::raw("  "),
             Span::styled(
