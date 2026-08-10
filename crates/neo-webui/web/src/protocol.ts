@@ -35,7 +35,11 @@ export interface AgentToolCall {
 }
 
 export interface AgentMessageUser {
-  User: { content: ContentPart[] };
+  User: {
+    content: ContentPart[];
+    display_text?: string | null;
+    origin?: { kind: string; variant?: string } | null;
+  };
 }
 export interface AgentMessageAssistant {
   Assistant: {

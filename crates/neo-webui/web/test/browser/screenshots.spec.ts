@@ -35,7 +35,7 @@ async function openShowcase(page: Page) {
   ).toBeVisible();
   // Final state: an in-progress tool line and the running composer affordances.
   await expect(
-    page.getByRole("button", { name: "展开工具 bash，状态：运行中" }),
+    page.getByRole("button", { name: "展开运行 npm run test:browser，状态：运行中" }),
   ).toBeVisible();
 }
 
@@ -83,7 +83,7 @@ test("04 工具展开详情：命令回显、参数、输出与元信息", async
   await openApp(page, 1440, 900);
   await openShowcase(page);
   await page.getByRole("button", { name: /展开工作过程（.*个步骤）/ }).click();
-  await page.getByRole("button", { name: "展开工具 bash，状态：已完成" }).click();
+  await page.getByRole("button", { name: "展开运行 cargo test -p neo-webui，状态：已完成" }).click();
   await expect(page.getByText("$ cargo test -p neo-webui")).toBeVisible();
   await expect(page.getByText("test result: ok. 42 passed").first()).toBeVisible();
   await expect(page.getByText("状态：已完成", { exact: true }).first()).toBeVisible();
@@ -135,9 +135,13 @@ test("08 answer-ft：文件修改列表与复制按钮", async ({ page }) => {
   await openShowcase(page);
   const footer = page.locator(".answer-ft");
   await footer.scrollIntoViewIfNeeded();
+  await expect(footer.getByText("已编辑 2 个文件")).toBeVisible();
   await expect(footer.locator(".ft-path", { hasText: "web/src/styles.css" })).toBeVisible();
   await expect(footer.locator(".ft-path", { hasText: "web/src/acceptance-notes.md" })).toBeVisible();
-  await expect(footer.locator(".ft-add").first()).toBeVisible();
+  await expect(
+    footer.getByRole("button", { name: "展开 web/src/styles.css 的局部差异" }),
+  ).toBeVisible();
+  await expect(footer.locator(".ft-summary .ft-add")).toHaveText("+5");
   await expect(footer.getByRole("button", { name: "复制回答" })).toBeVisible();
   await page.screenshot({ path: `${SHOTS}/08-answer-footer-files.png` });
 });

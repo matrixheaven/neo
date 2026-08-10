@@ -6,6 +6,7 @@
 
 import { describe, expect, it } from "vitest";
 import { agentEventTag, type AgentEvent } from "../../src/protocol";
+import { groupTurns } from "../../src/components/transcript";
 import {
   applyAgentEvent,
   buildFromHistory,
@@ -619,6 +620,145 @@ describe("grouped workspace snapshot", () => {
 });
 
 describe("append coverage and unknown tags", () => {
+  it("does not turn injected messages into user turns and keeps real user messages", () => {
+    let projection = emptyProjection();
+    projection = applyAgentEvent(projection, { TextDelta: { turn: 1, text: "稳定的正文。" } });
+    projection = applyAgentEvent(projection, {
+      MessageAppended: {
+        message: {
+          User: {
+            content: [{ Text: { text: "<system-reminder>忽略这段内容</system-reminder>" } }],
+            origin: { kind: "injection", variant: "system_reminder" },
+          },
+        },
+      },
+    });
+    expect(projection.items.some((item) => item.kind === "user_message")).toBe(false);
+    expect(projection.coverage.text).toBe("稳定的正文。");
+
+    projection = applyAgentEvent(projection, {
+      MessageAppended: {
+        message: {
+          Assistant: {
+            content: [{ Text: { text: "稳定的正文。" } }],
+            tool_calls: [],
+            stop_reason: "EndTurn",
+          },
+        },
+      },
+    });
+    expect(projection.items.filter((item) => item.kind === "assistant_message")).toHaveLength(1);
+
+    projection = applyAgentEvent(projection, {
+      MessageAppended: {
+        message: { User: { content: [{ Text: { text: "继续处理。" } }] } },
+      },
+    });
+    expect(projection.items.filter((item) => item.kind === "user_message")).toHaveLength(1);
+  });
+
+  it("keeps repeated thinking ids in separate blocks", () => {
+    let projection = emptyProjection();
+    const start = (turn: number) => {
+      projection = applyAgentEvent(projection, { ThinkingStarted: { turn, id: "reasoning" } });
+    };
+    const delta = (turn: number, text: string) => {
+      projection = applyAgentEvent(projection, { ThinkingDelta: { turn, text } });
+    };
+    const finish = (turn: number) => {
+      projection = applyAgentEvent(projection, {
+        ThinkingFinished: { turn, redacted: false },
+      });
+    };
+
+    start(1);
+    delta(1, "第一段思考");
+    finish(1);
+    start(1);
+    delta(1, "第二段思考");
+    finish(1);
+    start(2);
+    delta(2, "第三段思考");
+    finish(2);
+
+    const thinking = projection.items.filter((item) => item.kind === "thinking");
+    expect(thinking.map((item) => item.id)).toEqual([
+      "think:1:reasoning:1",
+      "think:1:reasoning:2",
+      "think:2:reasoning:1",
+    ]);
+    expect(thinking.map((item) => item.text)).toEqual([
+      "第一段思考",
+      "第二段思考",
+      "第三段思考",
+    ]);
+  });
+
+  it("folds late Delegate and WaitDelegate items back into their assistant turn", () => {
+    let projection = emptyProjection();
+    projection = applyAgentEvent(projection, {
+      MessageAppended: { message: { User: { content: [{ Text: { text: "处理任务。" } }] } } },
+    });
+    projection = applyAgentEvent(projection, {
+      TurnStarted: { turn: 1 },
+    });
+    projection = applyAgentEvent(projection, {
+      MessageAppended: {
+        message: {
+          Assistant: {
+            content: [{ Text: { text: "处理完成。" } }],
+            tool_calls: [],
+            stop_reason: "EndTurn",
+          },
+        },
+      },
+    });
+    projection = applyAgentEvent(projection, {
+      MessageAppended: { message: { User: { content: [{ Text: { text: "继续处理。" } }] } } },
+    });
+    projection = applyAgentEvent(projection, {
+      ToolExecutionFinished: {
+        turn: 1,
+        id: "wait_1",
+        name: "WaitDelegate",
+        result: { content: "已等待", is_error: false },
+      },
+    });
+    projection = applyAgentEvent(projection, {
+      DelegateFinished: {
+        turn: 1,
+        agent: { id: "agent_1", display_name: "分析", state: "completed" },
+      },
+    });
+    projection = applyAgentEvent(projection, { TurnStarted: { turn: 2 } });
+    projection = applyAgentEvent(projection, {
+      MessageAppended: {
+        message: {
+          Assistant: {
+            content: [{ Text: { text: "下一回合完成。" } }],
+            tool_calls: [],
+            stop_reason: "EndTurn",
+          },
+        },
+      },
+    });
+
+    const groups = groupTurns(projection.items);
+    const assist = groups.find(
+      (group) => group.kind === "assist" && group.msg.text === "处理完成。",
+    );
+    expect(assist?.kind).toBe("assist");
+    if (!assist || assist.kind !== "assist") return;
+    expect(assist.process.map((item) => item.id)).toEqual(["tool:wait_1", "delegate:agent_1"]);
+    const nextAssist = groups.find(
+      (group) => group.kind === "assist" && group.msg.text === "下一回合完成。",
+    );
+    expect(nextAssist?.kind).toBe("assist");
+    if (nextAssist?.kind === "assist") expect(nextAssist.process).toEqual([]);
+    expect(groups.filter((group) => group.kind === "user")).toHaveLength(2);
+    expect(groups.some((group) => group.kind === "process")).toBe(false);
+  });
+
   it("skips an appended assistant message exactly covered by the stream", () => {
     let projection = emptyProjection();
     projection = applyAgentEvent(projection, {

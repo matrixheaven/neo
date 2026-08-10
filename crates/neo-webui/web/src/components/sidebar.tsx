@@ -12,7 +12,8 @@ import {
   Archive,
   ArchiveRestore,
   ChevronRight,
-  Folder,
+  FolderClosed,
+  FolderOpen,
   Loader2,
   MoreHorizontal,
   Pin,
@@ -479,12 +480,11 @@ export function Sidebar() {
                     }))
                   }
                 >
-                  <ChevronRight
-                    size={12}
-                    aria-hidden
-                    className={`session-group-caret ${expanded ? "expanded" : ""}`}
-                  />
-                  <Folder size={14} aria-hidden className="session-group-folder" />
+                  {expanded ? (
+                    <FolderOpen size={14} aria-hidden className="session-group-folder" />
+                  ) : (
+                    <FolderClosed size={14} aria-hidden className="session-group-folder" />
+                  )}
                   <span className="session-group-label">{group.label}</span>
                   {/* Count matches the visible rows: archived are behind the
                       collapsed entry, pinned live in the Pinned section. */}
@@ -507,19 +507,38 @@ export function Sidebar() {
                   {live.length > 0 ? (
                     <ul className="session-list">{visibleLive.map(renderRow)}</ul>
                   ) : null}
-                  {visibleLive.length < sortedLive.length ? (
-                    <button
-                      type="button"
-                      className="session-group-more"
-                      onClick={() =>
-                        setVisibleSessionCounts((previous) => ({
-                          ...previous,
-                          [group.label]: visibleCount + SESSION_PAGE_SIZE,
-                        }))
-                      }
-                    >
-                      展开更多
-                    </button>
+                  {visibleLive.length < sortedLive.length || visibleCount > SESSION_PAGE_SIZE ? (
+                    <div className="session-group-page-actions">
+                      {visibleLive.length < sortedLive.length ? (
+                        <button
+                          type="button"
+                          className="session-group-more"
+                          onClick={() =>
+                            setVisibleSessionCounts((previous) => ({
+                              ...previous,
+                              [group.label]:
+                                (previous[group.label] ?? SESSION_PAGE_SIZE) + SESSION_PAGE_SIZE,
+                            }))
+                          }
+                        >
+                          展开更多
+                        </button>
+                      ) : null}
+                      {visibleCount > SESSION_PAGE_SIZE ? (
+                        <button
+                          type="button"
+                          className="session-group-more"
+                          onClick={() =>
+                            setVisibleSessionCounts((previous) => ({
+                              ...previous,
+                              [group.label]: SESSION_PAGE_SIZE,
+                            }))
+                          }
+                        >
+                          收起
+                        </button>
+                      ) : null}
+                    </div>
                   ) : null}
                   {archived.length > 0 ? (
                     <div className="session-archived">

@@ -221,30 +221,70 @@ function Think({ sessionId, item }: { sessionId: string; item: ThinkingItem }) {
 // the body carries the command echo, arguments, output and status metadata.
 // ---------------------------------------------------------------------------
 
-function commandEchoOf(args: unknown): string | null {
-  if (args && typeof args === "object") {
-    const command = (args as Record<string, unknown>).command;
-    if (typeof command === "string" && command !== "") return command;
+function stringArgument(args: unknown, fields: readonly string[]): string | null {
+  if (!args || typeof args !== "object") return null;
+  const record = args as Record<string, unknown>;
+  for (const field of fields) {
+    const value = record[field];
+    if (typeof value === "string" && value !== "") return value;
   }
   return null;
+}
+
+function commandEchoOf(args: unknown): string | null {
+  return stringArgument(args, ["command"]);
+}
+
+interface ToolPresentation {
+  action: string;
+  target: string;
+}
+
+function toolPresentation(name: string, args: unknown): ToolPresentation {
+  switch (name.toLowerCase()) {
+    case "grep":
+    case "glob":
+    case "find":
+      return { action: "搜索", target: stringArgument(args, ["pattern", "query", "path"]) ?? "" };
+    case "read":
+    case "list":
+      return { action: "读取", target: stringArgument(args, ["path"]) ?? "" };
+    case "readmediafile":
+      return { action: "观察", target: stringArgument(args, ["path"]) ?? "" };
+    case "edit":
+      return { action: "编辑", target: stringArgument(args, ["path"]) ?? "" };
+    case "write":
+      return { action: "创建", target: stringArgument(args, ["path"]) ?? "" };
+    case "bash":
+    case "shell":
+      return { action: "运行", target: stringArgument(args, ["command"]) ?? "" };
+    case "terminal":
+      return { action: "启动终端", target: stringArgument(args, ["command", "handle"]) ?? "" };
+    default:
+      return { action: name, target: argumentsPreview(args) };
+  }
 }
 
 function Tool({ sessionId, item }: { sessionId: string; item: ToolItem }) {
   const [open, toggle] = useLineExpanded(sessionId, item.id, false);
   const status = toolStatusText(item);
   const echo = commandEchoOf(item.arguments);
+  const presentation = toolPresentation(item.name, item.arguments);
+  const heading = presentation.target === ""
+    ? presentation.action
+    : `${presentation.action} ${presentation.target}`;
   return (
     <Line
       className={`tool-line status-${item.status}`}
-      label={`工具 ${item.name}，状态：${status}`}
+      label={`${heading}，状态：${status}`}
       open={open}
       onToggle={toggle}
       head={
         <>
           {lineCaret()}
           <span className="tl-ic">{statusIcon(item.status)}</span>
-          <span className="tl-name">{item.name}</span>
-          <span className="tl-mono">{argumentsPreview(item.arguments)}</span>
+          <span className="tl-name">{presentation.action}</span>
+          <span className="tl-mono">{presentation.target}</span>
           <span className="line-tail">
             <span className="tl-status" role="status">
               {status}
@@ -293,14 +333,14 @@ function Shell({ sessionId, item }: { sessionId: string; item: ShellItem }) {
   return (
     <Line
       className={`tool-line kind-shell status-${item.status}`}
-      label={`命令 ${item.command || "shell"}，状态：${status}`}
+      label={`运行 ${item.command || "命令"}，状态：${status}`}
       open={open}
       onToggle={toggle}
       head={
         <>
           {lineCaret()}
           <span className="tl-ic">{statusIcon(item.status)}</span>
-          <span className="tl-name">shell</span>
+          <span className="tl-name">运行</span>
           <span className="tl-mono">{item.command}</span>
           <span className="line-tail">
             <span className="tl-status" role="status">
@@ -338,7 +378,7 @@ function Terminal({ sessionId, item }: { sessionId: string; item: TerminalItem }
   return (
     <Line
       className={`tool-line kind-terminal ${item.finished ? "status-finished" : "status-running"}`}
-      label={`终端 ${item.command ?? item.handle}，状态：${status}`}
+      label={`启动终端 ${item.command ?? item.handle}，状态：${status}`}
       open={open}
       onToggle={toggle}
       head={
@@ -347,7 +387,7 @@ function Terminal({ sessionId, item }: { sessionId: string; item: TerminalItem }
           <span className="tl-ic">
             <SquareTerminal size={13} aria-hidden />
           </span>
-          <span className="tl-name">终端</span>
+          <span className="tl-name">启动终端</span>
           <span className="tl-mono">{item.command ?? item.handle}</span>
           <span className="line-tail">
             <span className="tl-status" role="status">

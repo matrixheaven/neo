@@ -403,8 +403,7 @@ button {
 }
 
 .session-group-more {
-  align-self: flex-start;
-  margin: 3px 0 0 20px;
+  margin: 0;
   padding: 3px 6px;
   border: none;
   border-radius: 6px;
@@ -419,6 +418,13 @@ button {
 .session-group-more:focus-visible {
   background: var(--hover);
   color: var(--text);
+}
+
+.session-group-page-actions {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  margin: 3px 0 0 20px;
 }
 
 .session-archived-toggle {
@@ -989,14 +995,56 @@ html.resizing .transcript-scroll * {
   gap: 2px;
 }
 
+.ft-changes {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+}
+
+.ft-summary {
+  display: inline-flex;
+  align-items: baseline;
+  gap: 6px;
+  color: var(--text-faint);
+  font-size: var(--font-size-micro);
+}
+
 .ft-file {
   display: flex;
-  align-items: baseline;
-  gap: 8px;
+  flex-direction: column;
   font-size: var(--font-size-aux);
 }
 
+.ft-file-head {
+  width: 100%;
+  min-width: 0;
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+  padding: 1px 0;
+  border: 0;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  text-align: left;
+}
+
+button.ft-file-head {
+  cursor: pointer;
+}
+
+.ft-file-caret {
+  flex: none;
+  color: var(--text-faint);
+  transition: transform var(--duration-fast) var(--ease-out);
+}
+
+.ft-file-caret.open {
+  transform: rotate(90deg);
+}
+
 .ft-path {
+  flex: 1 1 auto;
   font-family: ui-monospace, "SF Mono", Menlo, Consolas, "Courier New", monospace;
   font-size: var(--font-size-mono);
   color: var(--text-dim);
@@ -1019,6 +1067,52 @@ html.resizing .transcript-scroll * {
 
 .ft-del {
   color: var(--danger);
+}
+
+.ft-file-preview {
+  min-width: 0;
+  margin: 1px 0 2px 19px;
+}
+
+.ft-local-diff {
+  margin: 0;
+  padding: 5px 8px;
+  overflow: auto;
+  border-left: 2px solid var(--line-strong);
+  background: var(--surface-raised);
+  color: var(--text-dim);
+  font-family: ui-monospace, "SF Mono", Menlo, Consolas, "Courier New", monospace;
+  font-size: var(--font-size-micro);
+  line-height: 1.5;
+}
+
+.ft-local-diff > span {
+  display: block;
+  white-space: pre;
+}
+
+.ft-diff-add {
+  color: var(--ok);
+}
+
+.ft-diff-del {
+  color: var(--danger);
+}
+
+.ft-diff-hunk,
+.ft-diff-omitted {
+  color: var(--accent);
+}
+
+.ft-more {
+  align-self: flex-start;
+  padding: 1px 0;
+  border: 0;
+  background: transparent;
+  color: var(--accent);
+  font: inherit;
+  font-size: var(--font-size-micro);
+  cursor: pointer;
 }
 
 .answer-ft .copy-button {
@@ -1502,6 +1596,31 @@ html.resizing .transcript-scroll * {
 
 .markdown a {
   color: var(--accent);
+}
+
+.markdown-table-scroll {
+  max-width: 100%;
+  overflow-x: auto;
+  margin: 10px 0;
+}
+
+.markdown table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: var(--font-size-aux);
+}
+
+.markdown th,
+.markdown td {
+  padding: 6px 8px;
+  border: 1px solid var(--line);
+  text-align: left;
+  vertical-align: top;
+}
+
+.markdown th {
+  background: var(--well);
+  font-weight: 600;
 }
 
 /* -- Code / output blocks ------------------------------------------------------ */

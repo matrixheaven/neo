@@ -212,6 +212,28 @@ describe("composer R6", () => {
     });
   });
 
+  it("opens the full model list and selects a model with the keyboard", async () => {
+    const user = userEvent.setup();
+    await renderReady();
+    const pill = screen.getByRole("button", { name: "模型（仅下一回合）" });
+
+    pill.focus();
+    await user.keyboard("{Enter}");
+    const moreModels = await screen.findByRole("button", { name: "更多模型" });
+    moreModels.focus();
+    await user.keyboard("{Enter}");
+
+    const search = await screen.findByLabelText("搜索模型");
+    expect(document.activeElement).toBe(search);
+    expect(screen.getByRole("button", { name: /返回快捷模型/ })).toBeTruthy();
+
+    const model = screen.getByRole("option", { name: /claude-sonnet/ });
+    model.focus();
+    await user.keyboard("{Enter}");
+    expect(screen.queryByRole("dialog", { name: "选择模型" })).toBeNull();
+    expect(pill.textContent).toContain("claude-sonnet");
+  });
+
   it("closes each per-turn menu on Escape, restores focus, and closes on outside click", async () => {
     const user = userEvent.setup();
     await renderReady();

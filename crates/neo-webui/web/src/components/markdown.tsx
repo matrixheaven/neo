@@ -6,6 +6,7 @@
 import { memo } from "react";
 import ReactMarkdown from "react-markdown";
 import type { Components } from "react-markdown";
+import remarkGfm from "remark-gfm";
 
 function safeUrl(url: string | undefined): string | undefined {
   if (!url) return undefined;
@@ -32,12 +33,19 @@ const components: Components = {
     // Remote images are outside the local-only surface.
     return null;
   },
+  table({ children }) {
+    return (
+      <div className="markdown-table-scroll">
+        <table>{children}</table>
+      </div>
+    );
+  },
 };
 
 export const Markdown = memo(function Markdown({ text }: { text: string }) {
   return (
     <div className="markdown">
-      <ReactMarkdown components={components} skipHtml>
+      <ReactMarkdown components={components} remarkPlugins={[remarkGfm]} skipHtml>
         {text}
       </ReactMarkdown>
     </div>

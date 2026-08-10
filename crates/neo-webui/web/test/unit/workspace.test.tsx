@@ -10,7 +10,7 @@
  * create).
  */
 
-import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import React from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -221,7 +221,7 @@ describe("sidebar", () => {
     expect(screen.getByText("失败", { selector: ".session-state" })).toBeTruthy();
   });
 
-  it("shows five project sessions at a time and expands by five", async () => {
+  it("shows five project sessions at a time, expands by five, then collapses", async () => {
     const user = userEvent.setup();
     const { socket } = await renderReady();
     socket.emit({
@@ -248,16 +248,28 @@ describe("sidebar", () => {
     const neoGroup = screen.getByRole("group", { name: "neo" });
     expect(within(neoGroup).getAllByRole("listitem")).toHaveLength(5);
     expect(screen.queryByText("会话 07")).toBeNull();
+    expect(neoGroup.querySelector(".session-group-header .lucide-folder-open")).not.toBeNull();
+    expect(neoGroup.querySelector(".session-group-header .session-group-caret")).toBeNull();
 
     await user.click(screen.getByRole("button", { name: "展开更多" }));
     expect(within(neoGroup).getAllByRole("listitem")).toHaveLength(10);
     expect(screen.getByText("会话 07")).toBeTruthy();
     expect(screen.queryByText("会话 01")).toBeNull();
+    expect(screen.getByRole("button", { name: "收起" })).toBeTruthy();
 
     await user.click(screen.getByRole("button", { name: "展开更多" }));
     expect(within(neoGroup).getAllByRole("listitem")).toHaveLength(12);
     expect(screen.getByText("会话 01")).toBeTruthy();
     expect(screen.queryByRole("button", { name: "展开更多" })).toBeNull();
+
+    await user.click(screen.getByRole("button", { name: "收起" }));
+    expect(within(neoGroup).getAllByRole("listitem")).toHaveLength(5);
+    expect(screen.queryByText("会话 07")).toBeNull();
+    expect(screen.getByRole("button", { name: "展开更多" })).toBeTruthy();
+    expect(screen.queryByRole("button", { name: "收起" })).toBeNull();
+
+    await user.click(within(neoGroup).getByRole("button", { name: /neo/ }));
+    expect(neoGroup.querySelector(".session-group-header .lucide-folder-closed")).not.toBeNull();
   });
 
   it("uses the top-left button to collapse only the desktop sidebar", async () => {
@@ -299,6 +311,36 @@ describe("sidebar", () => {
     expect(sidebar.classList.contains("drawer-open")).toBe(true);
     expect(sidebar.classList.contains("sidebar-collapsed")).toBe(false);
     expect(screen.getByRole("button", { name: "关闭会话列表" })).toBeTruthy();
+  });
+
+  it("updates the top-left control when the viewport enters drawer mode", async () => {
+    const user = userEvent.setup();
+    let onChange: (() => void) | null = null;
+    const media = {
+      matches: false,
+      media: "(max-width: 980px)",
+      addEventListener: (_type: string, listener: () => void) => {
+        onChange = listener;
+      },
+      removeEventListener: vi.fn(),
+    };
+    vi.stubGlobal("matchMedia", vi.fn(() => media));
+
+    await renderReady();
+    expect(screen.getByRole("button", { name: "收起会话列表" }).getAttribute("aria-expanded"))
+      .toBe("true");
+
+    await act(async () => {
+      media.matches = true;
+      onChange?.();
+    });
+
+    const sidebar = screen.getByLabelText("会话列表");
+    const toggle = screen.getByRole("button", { name: "打开会话列表" });
+    expect(toggle.getAttribute("aria-expanded")).toBe("false");
+    await user.click(toggle);
+    expect(sidebar.classList.contains("drawer-open")).toBe(true);
+    expect(sidebar.classList.contains("sidebar-collapsed")).toBe(false);
   });
 
   it("throttles drag width writes through rAF and persists on release", async () => {

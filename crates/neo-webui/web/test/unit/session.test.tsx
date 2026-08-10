@@ -81,7 +81,21 @@ describe("transcript redesign rows", () => {
         turn: 2,
         id: "tool_e1",
         name: "edit",
-        result: { content: "ok", is_error: false },
+        result: {
+          content: "ok",
+          is_error: false,
+          details: {
+            changes: [
+              {
+                path: "src/app.ts",
+                status: "committed",
+                added: 1,
+                removed: 0,
+                diff: "--- a/src/app.ts\n+++ b/src/app.ts\n@@ -1,2 +1,3 @@\n a\n b\n+c\n",
+              },
+            ],
+          },
+        },
       },
     });
     emit({ MessageStarted: { turn: 2, id: "msg_2a" } });
@@ -238,7 +252,7 @@ describe("transcript redesign rows", () => {
     for (const envelope of session1.after_snapshot.slice(0, 6)) {
       socket.emit(asServerMessage(envelope)); // through ToolExecutionFinished (seq 14)
     }
-    const toolBar = await screen.findByRole("button", { name: /工具 bash/ });
+    const toolBar = await screen.findByRole("button", { name: /运行 cargo test -p neo-webui/ });
     await user.click(toolBar);
     const line = toolBar.closest(".tool-line") as HTMLElement;
     // Command echo in mono, then the status metadata line.
@@ -261,10 +275,15 @@ describe("transcript redesign rows", () => {
     expect(openFold.getAttribute("aria-expanded")).toBe("true");
     const foldRoot = openFold.closest(".turn-fold") as HTMLElement;
     expect(foldRoot.className).toContain("open");
-    expect(within(foldRoot).getByRole("button", { name: /工具 edit/ })).toBeTruthy();
-    expect(within(foldRoot).getByRole("button", { name: /工具 grep/ })).toBeTruthy();
-    expect(within(foldRoot).getByRole("button", { name: /工具 read/ })).toBeTruthy();
-    expect(within(foldRoot).getByRole("button", { name: /命令 cargo test/ })).toBeTruthy();
+    expect(within(foldRoot).getByRole("button", { name: /编辑 src\/app.ts/ })).toBeTruthy();
+    expect(within(foldRoot).getByRole("button", { name: /搜索 app/ })).toBeTruthy();
+    expect(within(foldRoot).getByRole("button", { name: /读取 src\/app.ts/ })).toBeTruthy();
+    const failedCommand = within(foldRoot).getAllByRole("button", {
+      name: /运行 cargo test，状态：失败/,
+    });
+    expect(failedCommand).toHaveLength(1);
+    await user.click(failedCommand[0]);
+    expect(within(failedCommand[0].closest(".tool-line") as HTMLElement).getByText(/退出码 1/)).toBeTruthy();
     expect(within(foldRoot).getByText("先完成 app.ts 的初步修改。")).toBeTruthy();
 
     expect(screen.getAllByRole("button", { name: "复制回答" })).toHaveLength(1);
@@ -272,16 +291,19 @@ describe("transcript redesign rows", () => {
     const finalGroup = finalAnswer.closest(".a-msg") as HTMLElement;
     const footer = finalGroup.querySelector(".answer-ft") as HTMLElement;
     expect(within(footer).getByText("src/app.ts")).toBeTruthy();
-    expect(within(footer).getByText("+3")).toBeTruthy();
-    expect(within(footer).getByText("−2")).toBeTruthy();
+    expect(within(footer).getByText("已编辑 1 个文件")).toBeTruthy();
+    expect(footer.querySelector(".ft-summary .ft-add")?.textContent).toBe("+1");
   });
 
-  it("keeps in-progress process rows visible outside the fold", async () => {
+  it("keeps in-progress process rows visible in an open fold", async () => {
     const { container } = await openSession1();
-    // The snapshot's streamed answer is unfinished: its thinking/tool rows
-    // render directly, never behind a turn-fold head.
-    expect(container.querySelector(".turn-fold")).toBeNull();
-    expect(screen.getByRole("button", { name: /工具 bash/ })).toBeTruthy();
+    // The active turn is grouped with its answer, but remains open and cannot
+    // be collapsed while it is still receiving activity.
+    const fold = container.querySelector(".turn-fold") as HTMLElement;
+    expect(fold).not.toBeNull();
+    expect(fold.className).toContain("open");
+    expect(within(fold).getByRole("button", { name: /工作中/ })).toHaveProperty("disabled", true);
+    expect(screen.getByRole("button", { name: /运行 cargo test -p neo-webui/ })).toBeTruthy();
     expect(screen.getByRole("button", { name: /展开思考/ })).toBeTruthy();
   });
 
@@ -298,14 +320,103 @@ describe("transcript redesign rows", () => {
     const footer = document.querySelector(".answer-ft") as HTMLElement;
     expect(footer).not.toBeNull();
     expect(within(footer).getByText("src/app.ts")).toBeTruthy();
-    expect(within(footer).getByText("+3")).toBeTruthy();
-    expect(within(footer).getByText("−2")).toBeTruthy();
+    expect(within(footer).getByText("已编辑 1 个文件")).toBeTruthy();
+    expect(footer.querySelector(".ft-summary .ft-add")?.textContent).toBe("+1");
+    await user.click(within(footer).getByRole("button", { name: "展开 src/app.ts 的局部差异" }));
+    expect(within(footer).getByText("+c")).toBeTruthy();
     await user.click(within(footer).getByRole("button", { name: "复制回答" }));
     await waitFor(() => expect(writeText).toHaveBeenCalledWith("已修改 app.ts。"));
     await screen.findByRole("button", { name: "已复制" });
   });
 
-  it("renders approval rows as pending, submitted, then stale", async () => {
+  it("shows committed files in batches and expands local diffs", async () => {
+    const user = userEvent.setup();
+    const { socket } = await openSession1();
+    let sequence = 9;
+    const emit = (event: unknown) => {
+      socket.emit({
+        type: "session_event",
+        stream_id: fixture.stream_id,
+        session_id: "session_0001",
+        sequence: sequence++,
+        event: event as never,
+      });
+    };
+
+    emit({ MessageAppended: { message: { User: { content: [{ Text: { text: "整理文件变更" } }] } } } });
+    emit({
+      ToolExecutionFinished: {
+        turn: 2,
+        id: "write_many",
+        name: "write",
+        result: {
+          content: "wrote files",
+          is_error: false,
+          details: {
+            changes: [
+              {
+                path: "src/one.ts",
+                status: "committed",
+                added: 1,
+                removed: 1,
+                diff: "@@ -1 +1 @@\n-before\n+after",
+              },
+              {
+                path: "src/two.ts",
+                status: "committed_unsynced",
+                added: 2,
+                removed: 0,
+                diff: "@@ -1 +1,2 @@\n+two\n+more",
+              },
+              {
+                path: "src/three.ts",
+                status: "committed",
+                added: 0,
+                removed: 1,
+                diff: "@@ -1 +0,0 @@\n-three",
+              },
+              {
+                path: "src/new-file.ts",
+                status: "committed",
+                added: 4,
+                removed: 0,
+              },
+              {
+                path: "src/skipped.ts",
+                status: "not_attempted",
+                added: 99,
+                removed: 99,
+              },
+            ],
+          },
+        },
+      },
+    });
+    emit({ MessageStarted: { turn: 2, id: "files_result" } });
+    emit({ TextDelta: { turn: 2, text: "文件变更已整理。" } });
+    emit({ MessageFinished: { turn: 2, id: "files_result", stop_reason: "EndTurn" } });
+
+    const answer = await screen.findByText("文件变更已整理。");
+    const footer = answer.closest(".a-msg")?.querySelector(".answer-ft") as HTMLElement;
+    expect(within(footer).getByText("已编辑 4 个文件")).toBeTruthy();
+    expect(within(footer).getAllByRole("listitem")).toHaveLength(3);
+    expect(within(footer).queryByText("src/new-file.ts")).toBeNull();
+    expect(within(footer).queryByText("src/skipped.ts")).toBeNull();
+
+    await user.click(within(footer).getByRole("button", { name: "显示其余 1 个文件" }));
+    expect(within(footer).getAllByRole("listitem")).toHaveLength(4);
+    expect(within(footer).getByText("src/new-file.ts")).toBeTruthy();
+    expect(within(footer).queryByText("src/skipped.ts")).toBeNull();
+
+    await user.click(within(footer).getByRole("button", { name: "展开 src/one.ts 的局部差异" }));
+    expect(within(footer).getByText("-before")).toBeTruthy();
+    expect(within(footer).getByText("+after")).toBeTruthy();
+
+    await user.click(within(footer).getByRole("button", { name: "收起其余文件" }));
+    expect(within(footer).getAllByRole("listitem")).toHaveLength(3);
+  });
+
+  it("renders approval rows as pending and submitted, then hides resolved history", async () => {
     const user = userEvent.setup();
     const { socket } = await openSession1();
     const row = screen.getByRole("group", { name: /审批请求/ });
@@ -320,15 +431,11 @@ describe("transcript redesign rows", () => {
       true,
     );
 
-    // Snapshot adjudication: no longer pending → dimmed 已失效, no actions.
+    // Resolved history stays out of the transcript once it is no longer pending.
     const snapshot = structuredClone(session1.snapshot);
     delete snapshot.pending_approval;
     socket.emit({ type: "session_snapshot", snapshot });
-    await waitFor(() => {
-      const staleRow = screen.getByRole("group", { name: /审批请求/ });
-      expect(staleRow.textContent).toContain("已失效");
-      expect(within(staleRow).queryByRole("button", { name: "允许一次" })).toBeNull();
-    });
+    await waitFor(() => expect(screen.queryByRole("group", { name: /审批请求/ })).toBeNull());
   });
 
   it("merges delegate progress into the agent line instead of an unknown record", async () => {
@@ -385,7 +492,7 @@ describe("session view", () => {
     const thinkingBar = screen.getByRole("button", { name: /展开思考/ });
     expect(thinkingBar.getAttribute("aria-expanded")).toBe("false");
 
-    const toolBar = screen.getByRole("button", { name: /工具 bash/ });
+    const toolBar = screen.getByRole("button", { name: /运行 cargo test -p neo-webui/ });
     expect(toolBar.textContent).toContain("排队等待");
 
     const approval = screen.getByRole("group", { name: /审批请求/ });
@@ -411,15 +518,11 @@ describe("session view", () => {
     expect(screen.getByRole("group", { name: /审批请求/ }).textContent).toContain(
       "已提交，等待确认",
     );
-    // Server confirmation updates the same card in place (sequences 9..12).
+    // Server confirmation removes the resolved card from the transcript (sequences 9..12).
     for (const envelope of session1.after_snapshot.slice(0, 4)) {
       socket.emit(asServerMessage(envelope));
     }
-    await waitFor(() =>
-      expect(screen.getByRole("group", { name: /审批请求/ }).textContent).toContain(
-        "已处理",
-      ),
-    );
+    await waitFor(() => expect(screen.queryByRole("group", { name: /审批请求/ })).toBeNull());
   });
 
   it("projects TodoUpdated into the floating task list above the composer", async () => {
@@ -448,7 +551,7 @@ describe("session view", () => {
     await user.click(await screen.findByRole("button", { name: /展开思考/ }));
     await screen.findByText("先检查有界中继的边界条件。");
 
-    const toolBar = await screen.findByRole("button", { name: /工具 bash/ });
+    const toolBar = await screen.findByRole("button", { name: /运行 cargo test -p neo-webui/ });
     expect(toolBar.textContent).toContain("已完成");
     await user.click(toolBar);
     await screen.findByText(/42 passed/);
@@ -511,6 +614,17 @@ describe("session view", () => {
     expect(types.filter((type) => type === "watch_session")).toHaveLength(1);
   });
 
+  it("keeps the initial connection status while the first handshake retries", async () => {
+    FakeWebSocket.autoOpen = false;
+    renderApp();
+    await waitFor(() => expect(FakeWebSocket.instances).toHaveLength(1));
+
+    FakeWebSocket.instances[0].closeWith(1013);
+
+    expect(screen.queryByText("连接已断开，正在重连…")).toBeNull();
+    expect(screen.getByText("正在连接…")).toBeTruthy();
+  });
+
   it("switching sessions keeps the background summary updating and drops the old transcript", async () => {
     const { socket } = await openSession1();
     await screen.findByText("检查有界中继的行为测试并修复慢连接。");
@@ -533,7 +647,7 @@ describe("session view", () => {
       },
     });
     const row = (await screen.findByText("有界中继测试")).closest(".session-row") as HTMLElement;
-    await waitFor(() => expect(within(row).getByText("空闲")).toBeTruthy());
+    await waitFor(() => expect((row.querySelector(".session-main") as HTMLButtonElement).title).toContain("状态：空闲"));
   });
 
   it("shows queued shell positions and truncation markers from explicit fields", async () => {
@@ -554,7 +668,9 @@ describe("session view", () => {
       sequence: 10,
       event: { ShellCommandQueueUpdated: { turn: 1, id: "sh_01", position: 2, waiting_ms: 150 } },
     });
-    const bar = await screen.findByRole("button", { name: /命令 cargo test/ });
+    const bar = await screen.findByRole("button", {
+      name: /展开运行 cargo test，状态：排队等待 · 位置 2 · 已等待 150ms/,
+    });
     expect(bar.textContent).toContain("排队等待");
     expect(bar.textContent).toContain("位置 2");
     expect(bar.textContent).not.toContain("已完成");

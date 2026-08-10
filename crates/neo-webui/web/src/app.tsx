@@ -84,7 +84,11 @@ export function App() {
           />
         ) : null}
         <main className="main-area">
-          {state.connection === "reconnecting" ? (
+          {state.connection === "connecting" ? (
+            <div className="connection-banner" role="status">
+              正在连接…
+            </div>
+          ) : state.connection === "reconnecting" ? (
             <div className="connection-banner" role="status">
               连接已断开，正在重连…
             </div>

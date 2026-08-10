@@ -45,7 +45,55 @@ type TurnGroup =
   | { kind: "process"; items: TranscriptItem[] }
   | { kind: "inline"; item: TranscriptItem };
 
-function groupTurns(items: TranscriptItem[]): TurnGroup[] {
+function processTurn(item: TranscriptItem): number | null {
+  if (!PROCESS_KINDS.has(item.kind) || !("turn" in item) || typeof item.turn !== "number") {
+    return null;
+  }
+  return item.turn;
+}
+
+function attachProcessItemsToTheirTurn(groups: TurnGroup[]): TurnGroup[] {
+  type AssistGroup = Extract<TurnGroup, { kind: "assist" }>;
+  const foldsByTurn = new Map<number, AssistGroup>();
+  for (const group of groups) {
+    if (group.kind === "assist" && typeof group.msg.turn === "number") {
+      foldsByTurn.set(group.msg.turn, group);
+    }
+  }
+
+  const moveItems = (source: TranscriptItem[], current: TurnGroup) => {
+    const remaining: TranscriptItem[] = [];
+    const moved = new Set<TranscriptItem>();
+    for (const item of source) {
+      const turn = processTurn(item);
+      const target = turn === null ? undefined : foldsByTurn.get(turn);
+      if (!target || target === current) {
+        remaining.push(item);
+        continue;
+      }
+      target.process.push(item);
+      target.activity.push(item);
+      moved.add(item);
+    }
+    return { remaining, moved };
+  };
+
+  for (const group of groups) {
+    if (group.kind === "assist") {
+      const { remaining, moved } = moveItems(group.process, group);
+      if (moved.size > 0) {
+        group.process = remaining;
+        group.activity = group.activity.filter((item) => !moved.has(item));
+      }
+    }
+    if (group.kind === "process") {
+      group.items = moveItems(group.items, group).remaining;
+    }
+  }
+  return groups.filter((group) => group.kind !== "process" || group.items.length > 0);
+}
+
+export function groupTurns(items: TranscriptItem[]): TurnGroup[] {
   const groups: TurnGroup[] = [];
   let turn: TranscriptItem[] = [];
   const appendUngrouped = (activity: TranscriptItem[]) => {
@@ -79,17 +127,22 @@ function groupTurns(items: TranscriptItem[]): TurnGroup[] {
       appendUngrouped(turn);
     } else {
       const msg = turn[finalIndex] as AssistantMessageItem;
+      const process = turn.slice(0, finalIndex);
+      const trailing = turn.slice(finalIndex + 1);
       groups.push({
         kind: "assist",
-        process: turn.slice(0, finalIndex),
-        activity: [...turn.slice(0, finalIndex), ...turn.slice(finalIndex + 1)],
+        process,
+        activity: [...process],
         msg,
       });
-      appendUngrouped(turn.slice(finalIndex + 1));
+      appendUngrouped(trailing);
     }
     turn = [];
   };
   for (const item of items) {
+    // A resolved approval remains in the append-only session history, but it
+    // is no longer actionable or useful in a replayed conversation.
+    if (item.kind === "approval" && item.resolution !== undefined) continue;
     if (item.kind === "user_message") {
       flushTurn();
       groups.push({ kind: "user", item });
@@ -98,7 +151,7 @@ function groupTurns(items: TranscriptItem[]): TurnGroup[] {
     }
   }
   flushTurn();
-  return groups;
+  return attachProcessItemsToTheirTurn(groups);
 }
 
 function callId(item: TranscriptItem): string {
@@ -114,6 +167,20 @@ function commandId(item: TranscriptItem): string | null {
     return null;
   }
   return "command:" + callId(item);
+}
+
+/** Runtime shell/terminal events contain the same execution as their tool
+ * call. Keep the richer runtime row and suppress only its paired tool row. */
+function presentationItems(items: TranscriptItem[]): TranscriptItem[] {
+  return items.filter((item) => {
+    if (item.kind !== "tool") return true;
+    const name = item.name.toLowerCase();
+    const runtimeKind = name === "bash" ? "shell" : name === "terminal" ? "terminal" : null;
+    const id = commandId(item);
+    return runtimeKind === null || id === null || !items.some(
+      (candidate) => candidate.kind === runtimeKind && commandId(candidate) === id,
+    );
+  });
 }
 
 function failedProcessItem(item: TranscriptItem): boolean {
@@ -166,44 +233,59 @@ function processSummary(process: TranscriptItem[]): string {
 }
 
 // ---------------------------------------------------------------------------
-// File-change derivation for the answer footer: the turn's finished
-// edit/write tool events carry workspace-relative paths and their content,
-// so added/removed line counts are derived locally (no new backend surface).
-// Field names mirror the real tool input schemas in neo-agent-core
-// (edit: {path, old, new}; write: {path, content}) — events pass the raw
-// tool arguments through verbatim.
+// File-change derivation for the answer footer. The completed tool result is
+// the source of truth: it records which writes reached disk, exact line
+// counts and a bounded unified diff. Tool input is never used to guess a
+// change, so cancelled and failed writes cannot appear as edits.
 // ---------------------------------------------------------------------------
 
 export interface FileChange {
   path: string;
   added: number;
   removed: number;
+  diffs: string[];
 }
 
-const FILE_TOOL_NAMES = new Set(["edit", "write"]);
+const COMMITTED_FILE_CHANGE_STATUSES = new Set(["committed", "committed_unsynced"]);
+const INITIAL_FILE_CHANGE_COUNT = 3;
+const DIFF_PREVIEW_LINE_COUNT = 24;
 
-function countLines(value: unknown): number {
-  return typeof value === "string" && value !== "" ? value.split("\n").length : 0;
+function objectValue(value: unknown): Record<string, unknown> | null {
+  return value !== null && typeof value === "object" && !Array.isArray(value)
+    ? value as Record<string, unknown>
+    : null;
+}
+
+function countFromResult(value: unknown): number {
+  return typeof value === "number" && Number.isFinite(value) && value > 0
+    ? Math.floor(value)
+    : 0;
 }
 
 function deriveFileChanges(process: TranscriptItem[]): FileChange[] {
   const byPath = new Map<string, FileChange>();
   for (const item of process) {
-    if (item.kind !== "tool" || item.status !== "finished") continue;
-    const name = item.name.toLowerCase();
-    if (!FILE_TOOL_NAMES.has(name)) continue;
-    const args = item.arguments as Record<string, unknown> | undefined;
-    if (!args) continue;
-    const rawPath = args.path;
-    if (typeof rawPath !== "string" || rawPath.trim() === "") continue;
-    const entry = byPath.get(rawPath) ?? { path: rawPath, added: 0, removed: 0 };
-    if (name === "write") {
-      entry.added += countLines(args.content);
-    } else {
-      entry.added += countLines(args.new);
-      entry.removed += countLines(args.old);
+    if (item.kind !== "tool") continue;
+    const details = objectValue(item.result?.details);
+    const changes = details?.changes;
+    if (!Array.isArray(changes)) continue;
+    for (const rawChange of changes) {
+      const change = objectValue(rawChange);
+      if (
+        !change ||
+        typeof change.status !== "string" ||
+        !COMMITTED_FILE_CHANGE_STATUSES.has(change.status)
+      ) continue;
+      const path = change.path;
+      if (typeof path !== "string" || path.trim() === "") continue;
+      const entry = byPath.get(path) ?? { path, added: 0, removed: 0, diffs: [] };
+      entry.added += countFromResult(change.added);
+      entry.removed += countFromResult(change.removed);
+      if (typeof change.diff === "string" && change.diff !== "") {
+        entry.diffs.push(change.diff);
+      }
+      byPath.set(path, entry);
     }
-    byPath.set(rawPath, entry);
   }
   return [...byPath.values()];
 }
@@ -243,7 +325,12 @@ function TurnFold({
   // Finished turns default to collapsed behind the summary line; in-progress
   // turns default to open (the head is not a toggle then). An explicit user
   // choice overrides the phase default.
-  const [open, toggle] = useLineExpanded(sessionId, `fold:${msg.id}`, !msg.finished);
+  const displayedProcess = presentationItems(process);
+  const [open, toggle] = useLineExpanded(
+    sessionId,
+    `fold:${msg.id}`,
+    !msg.finished,
+  );
   const secs = foldElapsedSecs(activity);
   const detail = processSummary(activity);
   const summary = msg.finished
@@ -266,7 +353,7 @@ function TurnFold({
       </button>
       <div className="tf-body">
         <div className="tf-body-inner">
-          {process.map((item) => (
+          {displayedProcess.map((item) => (
             <TranscriptItemView key={item.id} sessionId={sessionId} item={item} />
           ))}
         </div>
@@ -275,29 +362,110 @@ function TurnFold({
   );
 }
 
+function diffLineKind(line: string): "add" | "del" | "hunk" | "context" {
+  if (line.startsWith("+") && !line.startsWith("+++")) return "add";
+  if (line.startsWith("-") && !line.startsWith("---")) return "del";
+  if (line.startsWith("@@")) return "hunk";
+  return "context";
+}
+
+function LocalDiff({ diff }: { diff: string }) {
+  const allLines = diff.split("\n");
+  if (allLines[allLines.length - 1] === "") allLines.pop();
+  const lines = allLines.slice(0, DIFF_PREVIEW_LINE_COUNT);
+  const omitted = allLines.length > lines.length;
+  return (
+    <pre className="ft-local-diff">
+      {lines.map((line, index) => (
+        <span className={`ft-diff-${diffLineKind(line)}`} key={`${index}:${line}`}>
+          {line || " "}
+        </span>
+      ))}
+      {omitted ? <span className="ft-diff-omitted">其余差异未显示</span> : null}
+    </pre>
+  );
+}
+
+function FileChangeRow({
+  sessionId,
+  messageId,
+  change,
+}: {
+  sessionId: string;
+  messageId: string;
+  change: FileChange;
+}) {
+  const hasDiff = change.diffs.length > 0;
+  const [open, toggle] = useLineExpanded(sessionId, `file:${messageId}:${change.path}`, false);
+  const label = `${open ? "收起" : "展开"} ${change.path} 的局部差异`;
+  const contents = (
+    <>
+      {hasDiff ? <ChevronRight className={`ft-file-caret ${open ? "open" : ""}`} size={13} aria-hidden /> : null}
+      <span className="ft-path" title={change.path}>{change.path}</span>
+      <span className="ft-diff">
+        {change.added > 0 ? <span className="ft-add">+{change.added}</span> : null}
+        {change.removed > 0 ? <span className="ft-del">−{change.removed}</span> : null}
+      </span>
+    </>
+  );
+  return (
+    <li className={`ft-file ${hasDiff ? "has-diff" : ""}`}>
+      {hasDiff ? (
+        <button type="button" className="ft-file-head" aria-expanded={open} aria-label={label} onClick={toggle}>
+          {contents}
+        </button>
+      ) : (
+        <div className="ft-file-head">{contents}</div>
+      )}
+      {hasDiff && open ? (
+        <div className="ft-file-preview">
+          {change.diffs.map((diff, index) => <LocalDiff key={`${index}:${diff}`} diff={diff} />)}
+        </div>
+      ) : null}
+    </li>
+  );
+}
+
 function AnswerFooter({
+  sessionId,
   msg,
   changes,
 }: {
+  sessionId: string;
   msg: AssistantMessageItem;
   changes: FileChange[];
 }) {
   const hasAnswer = msg.text.trim() !== "";
+  const [showAll, toggleShowAll] = useLineExpanded(sessionId, `files:${msg.id}`, false);
   if (!hasAnswer && changes.length === 0) return null;
+  const visibleChanges = showAll ? changes : changes.slice(0, INITIAL_FILE_CHANGE_COUNT);
+  const hiddenCount = changes.length - visibleChanges.length;
+  const totalAdded = changes.reduce((total, change) => total + change.added, 0);
+  const totalRemoved = changes.reduce((total, change) => total + change.removed, 0);
   return (
     <div className="answer-ft">
       {changes.length > 0 ? (
-        <ul className="ft-files">
-          {changes.map((change) => (
-            <li key={change.path} className="ft-file">
-              <span className="ft-path">{change.path}</span>
-              <span className="ft-diff">
-                {change.added > 0 ? <span className="ft-add">+{change.added}</span> : null}
-                {change.removed > 0 ? <span className="ft-del">−{change.removed}</span> : null}
-              </span>
-            </li>
-          ))}
-        </ul>
+        <div className="ft-changes">
+          <div className="ft-summary">
+            已编辑 {changes.length} 个文件
+            {totalAdded > 0 ? <span className="ft-add">+{totalAdded}</span> : null}
+            {totalRemoved > 0 ? <span className="ft-del">−{totalRemoved}</span> : null}
+          </div>
+          <ul className="ft-files">
+            {visibleChanges.map((change) => (
+              <FileChangeRow key={change.path} sessionId={sessionId} messageId={msg.id} change={change} />
+            ))}
+          </ul>
+          {hiddenCount > 0 ? (
+            <button type="button" className="ft-more" onClick={toggleShowAll}>
+              显示其余 {hiddenCount} 个文件
+            </button>
+          ) : showAll && changes.length > INITIAL_FILE_CHANGE_COUNT ? (
+            <button type="button" className="ft-more" onClick={toggleShowAll}>
+              收起其余文件
+            </button>
+          ) : null}
+        </div>
       ) : null}
       {hasAnswer ? <CopyButton text={msg.text} label="复制回答" /> : null}
     </div>
@@ -319,7 +487,7 @@ function AssistGroup({
         <TurnFold sessionId={sessionId} msg={msg} process={process} activity={activity} />
       ) : null}
       <AssistantBody item={msg} />
-      {msg.finished ? <AnswerFooter msg={msg} changes={changes} /> : null}
+      {msg.finished ? <AnswerFooter sessionId={sessionId} msg={msg} changes={changes} /> : null}
     </div>
   );
 }
@@ -392,7 +560,7 @@ export function TranscriptPane({ sessionId }: { sessionId: string }) {
                 // visible as-is.
                 return (
                   <div className="a-msg t-item" key={group.items[0].id}>
-                    {group.items.map((item) => (
+                    {presentationItems(group.items).map((item) => (
                       <TranscriptItemView key={item.id} sessionId={sessionId} item={item} />
                     ))}
                   </div>

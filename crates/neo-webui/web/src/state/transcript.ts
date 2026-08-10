@@ -8,6 +8,7 @@
 import type {
   AgentEvent,
   AgentMessage,
+  AgentMessageUser,
   AgentProgressSnapshot,
   AgentSnapshot,
   AgentTokenUsage,
@@ -32,13 +33,17 @@ import { agentEventTag } from "../protocol";
 
 export type ToolStatus = "queued" | "running" | "finished" | "failed";
 
+interface TurnScopedItem {
+  turn?: number;
+}
+
 export interface UserMessageItem {
   kind: "user_message";
   id: string;
   text: string;
 }
 
-export interface AssistantMessageItem {
+export interface AssistantMessageItem extends TurnScopedItem {
   kind: "assistant_message";
   id: string;
   text: string;
@@ -46,7 +51,7 @@ export interface AssistantMessageItem {
   stopReason?: StopReason;
 }
 
-export interface ThinkingItem {
+export interface ThinkingItem extends TurnScopedItem {
   kind: "thinking";
   id: string;
   text: string;
@@ -54,7 +59,7 @@ export interface ThinkingItem {
   redacted: boolean;
 }
 
-export interface ToolItem {
+export interface ToolItem extends TurnScopedItem {
   kind: "tool";
   id: string;
   name: string;
@@ -67,7 +72,7 @@ export interface ToolItem {
   output?: WebUiOutputRef;
 }
 
-export interface ShellItem {
+export interface ShellItem extends TurnScopedItem {
   kind: "shell";
   id: string;
   command: string;
@@ -82,7 +87,7 @@ export interface ShellItem {
   output?: WebUiOutputRef;
 }
 
-export interface TerminalItem {
+export interface TerminalItem extends TurnScopedItem {
   kind: "terminal";
   id: string;
   handle: string;
@@ -96,7 +101,7 @@ export interface TerminalItem {
   outputRef?: WebUiOutputRef;
 }
 
-export interface WorkflowItem {
+export interface WorkflowItem extends TurnScopedItem {
   kind: "workflow";
   id: string;
   workflow: WorkflowSnapshot;
@@ -118,14 +123,14 @@ export interface QuestionItem {
   resolved: boolean;
 }
 
-export interface DelegateItem {
+export interface DelegateItem extends TurnScopedItem {
   kind: "delegate";
   id: string;
   agent: AgentSnapshot;
   finished: boolean;
 }
 
-export interface SwarmItem {
+export interface SwarmItem extends TurnScopedItem {
   kind: "swarm";
   id: string;
   swarm: SwarmSnapshot;
@@ -200,8 +205,13 @@ export interface TranscriptProjection {
   /** Latest ContextWindowUpdated payload on the stream (latest-wins). */
   contextWindow: WebUiContextWindow | null;
   // Internal, never rendered directly:
+  /** Last explicit event turn, used because MessageAppended has no turn field. */
+  latestTurn: number | null;
   liveMessageId: string | null;
   liveThinkingId: string | null;
+  /** Per-(turn, provider id) occurrence counts keep separate thinking
+   * blocks independently expandable when a provider reuses an id. */
+  thinkingOccurrenceByKey: Record<string, number>;
   coverage: AttemptCoverage;
   completedToolResults: string[];
   appendedCounter: number;
@@ -215,8 +225,10 @@ export function emptyProjection(): TranscriptProjection {
     pendingQuestionId: null,
     latestUsage: null,
     contextWindow: null,
+    latestTurn: null,
     liveMessageId: null,
     liveThinkingId: null,
+    thinkingOccurrenceByKey: {},
     coverage: {
       text: "",
       thinking: "",
@@ -314,8 +326,13 @@ function messageText(message: AgentMessage): {
   return { text, thinking, thinkingRedacted };
 }
 
+function isInjectedUserMessage(message: AgentMessage): boolean {
+  const user = (message as Partial<AgentMessageUser>).User;
+  return user?.origin?.kind === "injection";
+}
+
 function userDisplayText(message: AgentMessage): string {
-  const user = (message as { User?: { content: unknown[]; display_text?: string | null } }).User;
+  const user = (message as Partial<AgentMessageUser>).User;
   if (!user) return "";
   if (typeof user.display_text === "string" && user.display_text.trim() !== "") {
     return user.display_text;
@@ -361,6 +378,10 @@ export function applyAgentEvent(
 ): TranscriptProjection {
   const tag = agentEventTag(event);
   const body = (event as Record<string, Record<string, unknown>>)[tag] ?? {};
+  const eventTurn = typeof body.turn === "number" ? body.turn : null;
+  if (eventTurn !== null) {
+    projection = { ...projection, latestTurn: eventTurn };
+  }
 
   switch (tag) {
     // -- Retry series: explicit attempt boundaries retract transient output.
@@ -442,6 +463,7 @@ export function applyAgentEvent(
         id: `msg:${b.id}`,
         text: "",
         finished: false,
+        turn: b.turn,
       };
       return {
         ...projection,
@@ -451,7 +473,7 @@ export function applyAgentEvent(
       };
     }
     case "TextDelta": {
-      const b = body as { text: string };
+      const b = body as { turn: number; text: string };
       const coverage = {
         ...projection.coverage,
         hasDetail: true,
@@ -466,6 +488,7 @@ export function applyAgentEvent(
           id,
           text: "",
           finished: false,
+          turn: b.turn,
         };
         items = [...items, item];
         liveMessageId = id;
@@ -509,22 +532,29 @@ export function applyAgentEvent(
     case "ThinkingStarted": {
       const b = body as { turn: number; id: string };
       const coverage = { ...projection.coverage, hasDetail: true };
+      const occurrenceKey = `${b.turn}\u0000${b.id}`;
+      const occurrence = (projection.thinkingOccurrenceByKey[occurrenceKey] ?? 0) + 1;
       const item: ThinkingItem = {
         kind: "thinking",
-        id: `think:${b.id}`,
+        id: `think:${b.turn}:${b.id}:${occurrence}`,
         text: "",
         finished: false,
         redacted: false,
+        turn: b.turn,
       };
       return {
         ...projection,
         items: [...projection.items, item],
         liveThinkingId: item.id,
+        thinkingOccurrenceByKey: {
+          ...projection.thinkingOccurrenceByKey,
+          [occurrenceKey]: occurrence,
+        },
         coverage,
       };
     }
     case "ThinkingDelta": {
-      const b = body as { text: string };
+      const b = body as { turn: number; text: string };
       const coverage = {
         ...projection.coverage,
         hasDetail: true,
@@ -542,6 +572,7 @@ export function applyAgentEvent(
             text: "",
             finished: false,
             redacted: false,
+            turn: b.turn,
           } satisfies ThinkingItem,
         ];
         liveThinkingId = id;
@@ -579,6 +610,7 @@ export function applyAgentEvent(
             ? { ...item, finished: true, redacted: item.redacted || b.redacted }
             : item,
         ),
+        liveThinkingId: null,
         coverage,
       };
     }
@@ -594,6 +626,7 @@ export function applyAgentEvent(
         name: b.name,
         arguments: b.arguments,
         status: "queued",
+        turn: b.turn,
       };
       return {
         ...projection,
@@ -614,7 +647,7 @@ export function applyAgentEvent(
       };
     }
     case "ToolExecutionStarted": {
-      const b = body as { id: string; name: string; arguments: unknown };
+      const b = body as { turn: number; id: string; name: string; arguments: unknown };
       const toolIds = new Set(projection.coverage.toolIds);
       toolIds.add(b.id);
       const id = `tool:${b.id}`;
@@ -624,6 +657,7 @@ export function applyAgentEvent(
         name: b.name,
         arguments: b.arguments,
         status: "running",
+        turn: b.turn,
         ...(output ? { output } : {}),
       };
       return {
@@ -645,7 +679,7 @@ export function applyAgentEvent(
       };
     }
     case "ToolExecutionFinished": {
-      const b = body as { id: string; name: string; result: ToolResult };
+      const b = body as { turn: number; id: string; name: string; result: ToolResult };
       const toolIds = new Set(projection.coverage.toolIds);
       toolIds.add(b.id);
       const completed = [...projection.completedToolResults, b.id];
@@ -657,6 +691,7 @@ export function applyAgentEvent(
         arguments: undefined,
         status: b.result.is_error ? "failed" : "finished",
         result: b.result,
+        turn: b.turn,
         ...(output ? { output } : {}),
       };
       const existing = projection.items.find((entry) => entry.id === id);
@@ -669,9 +704,18 @@ export function applyAgentEvent(
               ...(output ? { output } : {}),
             }
           : item;
+      const items = upsertById(projection.items, merged);
+      // A Bash tool's runtime row is the one shown in the transcript. Carry
+      // its final tool error onto that row for failures without an exit code.
+      const projectedItems =
+        b.name.toLowerCase() === "bash" && b.result.is_error
+          ? replaceItem(items, `shell:${b.id}`, (entry) =>
+              entry.kind === "shell" ? { ...entry, status: "failed" } : entry,
+            )
+          : items;
       return {
         ...projection,
-        items: upsertById(projection.items, merged),
+        items: projectedItems,
         completedToolResults: completed,
         coverage: { ...projection.coverage, toolIds },
       };
@@ -739,7 +783,7 @@ export function applyAgentEvent(
     // -- Shell commands.
     case "ShellCommandQueued":
     case "ShellCommandStarted": {
-      const b = body as { id: string; command: string; cwd: string };
+      const b = body as { turn: number; id: string; command: string; cwd: string };
       const item: ShellItem = {
         kind: "shell",
         id: `shell:${b.id}`,
@@ -749,6 +793,7 @@ export function applyAgentEvent(
         stdout: "",
         stderr: "",
         truncated: false,
+        turn: b.turn,
       };
       return { ...projection, items: upsertById(projection.items, item) };
     }
@@ -766,6 +811,7 @@ export function applyAgentEvent(
     }
     case "ShellCommandFinished": {
       const b = body as {
+        turn: number;
         id: string;
         exit_code: number | null;
         stdout: string;
@@ -786,16 +832,21 @@ export function applyAgentEvent(
               stdout: "",
               stderr: "",
               truncated: false,
+              turn: b.turn,
             };
       return {
         ...projection,
         items: upsertById(projection.items, {
           ...base,
-          status: "finished",
+          status:
+            (b.exit_code !== null && b.exit_code !== 0) || base.status === "failed"
+              ? "failed"
+              : "finished",
           exitCode: b.exit_code,
           stdout: b.stdout,
           stderr: b.stderr,
           truncated: b.truncated,
+          turn: b.turn,
           ...(output ? { output } : {}),
         }),
       };
@@ -803,7 +854,7 @@ export function applyAgentEvent(
 
     // -- Terminal sessions.
     case "TerminalSessionStarted": {
-      const b = body as { id: string; handle: string; command: string; cwd: string };
+      const b = body as { turn: number; id: string; handle: string; command: string; cwd: string };
       const item: TerminalItem = {
         kind: "terminal",
         id: `term:${b.id}`,
@@ -813,12 +864,13 @@ export function applyAgentEvent(
         output: "",
         truncated: false,
         finished: false,
+        turn: b.turn,
         ...(output ? { outputRef: output } : {}),
       };
       return { ...projection, items: upsertById(projection.items, item) };
     }
     case "TerminalSessionOutput": {
-      const b = body as { id: string; handle: string; output: string; truncated: boolean };
+      const b = body as { turn: number; id: string; handle: string; output: string; truncated: boolean };
       const id = `term:${b.id}`;
       const existing = projection.items.find((entry) => entry.id === id);
       const base: TerminalItem =
@@ -831,6 +883,7 @@ export function applyAgentEvent(
               output: "",
               truncated: false,
               finished: false,
+              turn: b.turn,
             };
       return {
         ...projection,
@@ -838,6 +891,7 @@ export function applyAgentEvent(
           ...base,
           output: base.output + b.output,
           truncated: b.truncated,
+          turn: b.turn,
           ...(output ? { outputRef: output } : {}),
         }),
       };
@@ -888,12 +942,13 @@ export function applyAgentEvent(
     case "DelegateStarted":
     case "DelegateUpdated":
     case "DelegateFinished": {
-      const b = body as { agent: AgentSnapshot };
+      const b = body as { turn: number; agent: AgentSnapshot };
       const item: DelegateItem = {
         kind: "delegate",
         id: `delegate:${b.agent.id}`,
         agent: b.agent,
         finished: tag === "DelegateFinished",
+        turn: b.turn,
       };
       const existing = projection.items.find((entry) => entry.id === item.id);
       if (existing) {
@@ -910,12 +965,13 @@ export function applyAgentEvent(
     case "DelegateSwarmStarted":
     case "DelegateSwarmUpdated":
     case "DelegateSwarmFinished": {
-      const b = body as { swarm: SwarmSnapshot };
+      const b = body as { turn: number; swarm: SwarmSnapshot };
       const item: SwarmItem = {
         kind: "swarm",
         id: `swarm:${b.swarm.swarm_id}`,
         swarm: b.swarm,
         finished: tag === "DelegateSwarmFinished",
+        turn: b.turn,
       };
       const existing = projection.items.find((entry) => entry.id === item.id);
       if (existing) {
@@ -928,7 +984,7 @@ export function applyAgentEvent(
     }
 
     case "DelegateProgressUpdated": {
-      const b = body as { progress: AgentProgressSnapshot };
+      const b = body as { turn: number; progress: AgentProgressSnapshot };
       const id = `delegate:${b.progress.agent_id}`;
       const existing = projection.items.find((entry) => entry.id === id);
       const base: AgentSnapshot =
@@ -944,11 +1000,13 @@ export function applyAgentEvent(
         id,
         agent: mergeAgentProgress(base, b.progress),
         finished: existing && existing.kind === "delegate" ? existing.finished : false,
+        turn: b.turn,
       };
       return { ...projection, items: upsertById(projection.items, item) };
     }
     case "DelegateSwarmProgressUpdated": {
       const b = body as {
+        turn: number;
         swarm_id: string;
         state: string;
         aggregate: SwarmAggregate;
@@ -983,6 +1041,7 @@ export function applyAgentEvent(
         id,
         swarm: { ...base, state: b.state, aggregate: b.aggregate, children },
         finished: existing && existing.kind === "swarm" ? existing.finished : false,
+        turn: b.turn,
       };
       return { ...projection, items: upsertById(projection.items, item) };
     }
@@ -990,12 +1049,13 @@ export function applyAgentEvent(
     // -- Workflows.
     case "WorkflowUpdated":
     case "WorkflowFinished": {
-      const b = body as { workflow: WorkflowSnapshot };
+      const b = body as { turn: number; workflow: WorkflowSnapshot };
       const item: WorkflowItem = {
         kind: "workflow",
         id: `wf:${b.workflow.id}`,
         workflow: b.workflow,
         finished: tag === "WorkflowFinished",
+        turn: b.turn,
       };
       const existing = projection.items.find((entry) => entry.id === item.id);
       if (existing) {
@@ -1016,7 +1076,7 @@ export function applyAgentEvent(
     // -- Canonical message appends.
     case "MessageAppended": {
       const b = body as { message: AgentMessage };
-      return applyMessageAppended(projection, b.message);
+      return applyMessageAppended(projection, b.message, projection.latestTurn);
     }
 
     // -- Errors become visible status lines.
@@ -1116,9 +1176,11 @@ function mergeAgentProgress(
 function applyMessageAppended(
   projection: TranscriptProjection,
   message: AgentMessage,
+  turn: number | null,
 ): TranscriptProjection {
   const record = message as Record<string, unknown>;
   if ("User" in record) {
+    if (isInjectedUserMessage(message)) return projection;
     const text = userDisplayText(message);
     const coverage = resetCoverage();
     if (text.trim() === "") {
@@ -1166,6 +1228,7 @@ function applyMessageAppended(
         text: thinking,
         finished: true,
         redacted: thinkingRedacted,
+        ...(turn !== null ? { turn } : {}),
       } satisfies ThinkingItem);
     }
     if (text.trim() !== "") {
@@ -1174,6 +1237,7 @@ function applyMessageAppended(
         id,
         text,
         finished: true,
+        ...(turn !== null ? { turn } : {}),
       } satisfies AssistantMessageItem);
     }
     return {

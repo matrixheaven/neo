@@ -195,7 +195,22 @@ function showcaseSnapshot() {
           turn: 1,
           id: "tool_s2",
           name: "edit",
-          result: { content: "已应用编辑", is_error: false, details: null, terminate: false },
+          result: {
+            content: "已应用编辑",
+            is_error: false,
+            details: {
+              changes: [
+                {
+                  path: "web/src/styles.css",
+                  status: "committed",
+                  added: 2,
+                  removed: 1,
+                  diff: "--- a/web/src/styles.css\n+++ b/web/src/styles.css\n@@ -1,3 +1,4 @@\n .line {\n-  min-height: 28px;\n+  min-height: 24px;\n+  gap: 6px;\n }\n",
+                },
+              ],
+            },
+            terminate: false,
+          },
         },
       },
     },
@@ -220,7 +235,21 @@ function showcaseSnapshot() {
           turn: 1,
           id: "tool_s3",
           name: "write",
-          result: { content: "已写入文件", is_error: false, details: null, terminate: false },
+          result: {
+            content: "已写入文件",
+            is_error: false,
+            details: {
+              changes: [
+                {
+                  path: "web/src/acceptance-notes.md",
+                  status: "committed_unsynced",
+                  added: 3,
+                  removed: 0,
+                },
+              ],
+            },
+            terminate: false,
+          },
         },
       },
     },

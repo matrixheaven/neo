@@ -104,6 +104,7 @@ export function AppProvider({ children }: { children: ReactNode }) {
   stateRef.current = state;
   const socketRef = useRef<EventsSocket | null>(null);
   const reconnectAttemptRef = useRef(0);
+  const hasOpenedRef = useRef(false);
   const reconnectTimerRef = useRef<number | null>(null);
   const disposedRef = useRef(false);
   // Connection generation: bumped on every (re)connect. Watch requests are
@@ -149,7 +150,10 @@ export function AppProvider({ children }: { children: ReactNode }) {
     const connect = () => {
       if (disposedRef.current) return;
       connectionGenRef.current += 1;
-      dispatch({ type: "connection_changed", connection: reconnectAttemptRef.current === 0 ? "connecting" : "reconnecting" });
+      dispatch({
+        type: "connection_changed",
+        connection: hasOpenedRef.current ? "reconnecting" : "connecting",
+      });
       const socket = openEventsSocket({
         onMessage(message: WebUiServerMessage) {
           dispatch({ type: "server_message", message });
@@ -162,7 +166,10 @@ export function AppProvider({ children }: { children: ReactNode }) {
           const attempt = Math.min(reconnectAttemptRef.current, RECONNECT_DELAYS_MS.length - 1);
           const delay = RECONNECT_DELAYS_MS[attempt];
           reconnectAttemptRef.current += 1;
-          dispatch({ type: "connection_changed", connection: "reconnecting" });
+          dispatch({
+            type: "connection_changed",
+            connection: hasOpenedRef.current ? "reconnecting" : "connecting",
+          });
           reconnectTimerRef.current = window.setTimeout(connect, delay);
         },
         onOpen() {
@@ -170,6 +177,7 @@ export function AppProvider({ children }: { children: ReactNode }) {
           // established — while the service is unreachable the delays keep
           // escalating.
           reconnectAttemptRef.current = 0;
+          hasOpenedRef.current = true;
           dispatch({ type: "connection_changed", connection: "open" });
           // Fresh subscriptions without cursors after (re)connect.
           socket.send({ type: "watch_workspace" });
