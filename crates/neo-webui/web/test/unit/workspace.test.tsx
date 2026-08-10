@@ -1,11 +1,15 @@
 /**
- * Workspace interaction tests: sidebar grouping and hover actions, one
- * shared context menu (right-click / Shift+F10) with rename/pin/archive,
- * resizer keyboard control, and composer behavior (Enter send, Shift+Enter
- * newline, IME guard, follow-up vs turn vs create).
+ * Workspace interaction tests: sidebar workspace grouping (R5) — current
+ * group expanded with a "+" new-session button, other groups collapsed,
+ * cross-workspace pinned section deduped out of groups, archived sessions
+ * behind a collapsed entry, running pulse dot and waiting badges, rAF-
+ * throttled resizer drag, keyboard width control, one shared context menu
+ * (right-click / Shift+F10) that never switches the session — plus composer
+ * behavior (Enter send, Shift+Enter newline, IME guard, follow-up vs turn vs
+ * create).
  */
 
-import { cleanup, render, screen, waitFor, within } from "@testing-library/react";
+import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import React from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -48,19 +52,150 @@ describe("sidebar", () => {
     vi.unstubAllGlobals();
   });
 
-  it("groups sessions as pinned / normal / archived with state text", async () => {
+  it("groups sessions by workspace: current expanded, others collapsed, pinned deduped", async () => {
     const { socket } = await renderReady();
     socket.emit(asServerMessage(fixture.long_connection.workspace_snapshot));
-    await screen.findByText("已置顶");
-    expect(screen.getByText("会话", { selector: ".session-group-label" })).toBeTruthy();
-    const pinnedGroup = screen.getByText("已置顶").parentElement as HTMLElement;
+
+    // Pinned section surfaces the pinned session once, cross-workspace.
+    const pinnedGroup = (await screen.findByText("已置顶")).parentElement as HTMLElement;
     expect(within(pinnedGroup).getByText("有界中继测试")).toBeTruthy();
-    expect(within(pinnedGroup).getByText("等待回答")).toBeTruthy();
-    const normalGroup = screen
-      .getByText("会话", { selector: ".session-group-label" })
-      .closest(".session-group") as HTMLElement;
-    expect(within(normalGroup).getByText("并行格式化")).toBeTruthy();
-    expect(within(normalGroup).getByText("运行中")).toBeTruthy();
+
+    // Current workspace group is expanded with a "+" new-session button and a
+    // session count; the pinned session does not repeat inside it.
+    const neoGroup = screen.getByRole("group", { name: "neo" });
+    const neoToggle = within(neoGroup).getByRole("button", { name: /neo/ });
+    expect(neoToggle.getAttribute("aria-expanded")).toBe("true");
+    // The count matches the visible rows: the pinned session lives in the
+    // Pinned section, so only the running row counts here.
+    expect(within(neoToggle).getByText("1")).toBeTruthy();
+    expect(within(neoGroup).getByRole("button", { name: "新会话" })).toBeTruthy();
+    expect(within(neoGroup).getByText("并行格式化")).toBeTruthy();
+    expect(within(neoGroup).getByText("运行中")).toBeTruthy();
+    expect(within(neoGroup).queryByText("有界中继测试")).toBeNull();
+
+    // Other workspaces are collapsed by default: their rows are not rendered.
+    const playgroundGroup = screen.getByRole("group", { name: "playground" });
+    const playgroundToggle = within(playgroundGroup).getByRole("button", { name: /playground/ });
+    expect(playgroundToggle.getAttribute("aria-expanded")).toBe("false");
+    expect(screen.queryByText("原型脚本调试")).toBeNull();
+  });
+
+  it("expands and collapses workspace groups via the header toggle", async () => {
+    const user = userEvent.setup();
+    const { socket } = await renderReady();
+    socket.emit(asServerMessage(fixture.long_connection.workspace_snapshot));
+    await screen.findByText("并行格式化");
+
+    // Collapsed group expands to show its sessions.
+    const playgroundToggle = screen.getByRole("button", { name: /playground/ });
+    await user.click(playgroundToggle);
+    expect(playgroundToggle.getAttribute("aria-expanded")).toBe("true");
+    expect(screen.getByText("原型脚本调试")).toBeTruthy();
+
+    // The current group collapses too; its rows leave the DOM.
+    const neoToggle = screen.getByRole("button", { name: /neo/ });
+    await user.click(neoToggle);
+    expect(neoToggle.getAttribute("aria-expanded")).toBe("false");
+    expect(screen.queryByText("并行格式化")).toBeNull();
+  });
+
+  it("tucks archived sessions behind a collapsed per-group entry", async () => {
+    const user = userEvent.setup();
+    const { socket } = await renderReady();
+    socket.emit({
+      type: "workspace_snapshot",
+      stream_id: "ws_archived_test",
+      workspace_sequence: 0,
+      workspaces: [
+        {
+          label: "neo",
+          current: true,
+          sessions: [
+            {
+              session_id: "session_live",
+              title: "活跃会话",
+              updated_at: "2026-08-09T10:00:00+00:00",
+              pinned: false,
+              archived: false,
+              state: "idle",
+              workspace_label: "neo",
+            },
+            {
+              session_id: "session_old",
+              title: "旧会话",
+              updated_at: "2026-08-08T10:00:00+00:00",
+              pinned: false,
+              archived: true,
+              state: "idle",
+              workspace_label: "neo",
+            },
+          ],
+        },
+      ],
+    });
+    await screen.findByText("活跃会话");
+    // Archived rows are hidden until the "已归档 n" entry is opened; the group
+    // count covers live sessions only.
+    expect(screen.queryByText("旧会话")).toBeNull();
+    const neoToggle = screen.getByRole("button", { name: /neo/ });
+    expect(within(neoToggle).getByText("1")).toBeTruthy();
+    const archivedToggle = screen.getByRole("button", { name: /已归档 1/ });
+    expect(archivedToggle.getAttribute("aria-expanded")).toBe("false");
+    await user.click(archivedToggle);
+    expect(archivedToggle.getAttribute("aria-expanded")).toBe("true");
+    expect(screen.getByText("旧会话")).toBeTruthy();
+  });
+
+  it("shows a pulse dot on running rows and an amber badge on waiting rows", async () => {
+    const { socket } = await renderReady();
+    socket.emit(asServerMessage(fixture.long_connection.workspace_snapshot));
+    const runningRow = (await screen.findByText("并行格式化")).closest(".session-row") as HTMLElement;
+    expect(runningRow.querySelector(".pulse-dot")).not.toBeNull();
+    const waitingRow = (await screen.findByText("有界中继测试")).closest(".session-row") as HTMLElement;
+    const badge = waitingRow.querySelector(".session-badge") as HTMLElement;
+    expect(badge).not.toBeNull();
+    expect(badge.textContent).toBe("等待回答");
+  });
+
+  it("throttles drag width writes through rAF and persists on release", async () => {
+    await renderReady();
+    const resizer = screen.getByRole("separator", { name: "调整会话列表宽度" });
+    // Committed default mirrors into the CSS variable.
+    await waitFor(() =>
+      expect(document.documentElement.style.getPropertyValue("--sidebar-w")).toBe("264px"),
+    );
+
+    resizer.dispatchEvent(new MouseEvent("pointerdown", { bubbles: true, clientX: 100, button: 0 }));
+    expect(document.documentElement.classList.contains("resizing")).toBe(true);
+    document.dispatchEvent(new MouseEvent("pointermove", { clientX: 140 }));
+    // The var write lands on the next animation frame, once per frame.
+    await waitFor(() =>
+      expect(document.documentElement.style.getPropertyValue("--sidebar-w")).toBe("304px"),
+    );
+    // Nothing is persisted mid-drag.
+    expect(window.localStorage.getItem("neo-webui.sidebar-width")).toBeNull();
+
+    document.dispatchEvent(new MouseEvent("pointerup", { clientX: 140 }));
+    expect(document.documentElement.classList.contains("resizing")).toBe(false);
+    await waitFor(() =>
+      expect(window.localStorage.getItem("neo-webui.sidebar-width")).toBe("304"),
+    );
+  });
+
+  it("adjusts the sidebar with ArrowLeft/ArrowRight, clamped and persisted", async () => {
+    const user = userEvent.setup();
+    await renderReady();
+    const resizer = screen.getByRole("separator", { name: "调整会话列表宽度" });
+    resizer.focus();
+    await user.keyboard("{ArrowRight}");
+    await waitFor(() =>
+      expect(document.documentElement.style.getPropertyValue("--sidebar-w")).toBe("280px"),
+    );
+    expect(window.localStorage.getItem("neo-webui.sidebar-width")).toBe("280");
+    await user.keyboard("{ArrowLeft}{ArrowLeft}");
+    await waitFor(() =>
+      expect(document.documentElement.style.getPropertyValue("--sidebar-w")).toBe("248px"),
+    );
   });
 
   it("hover pin action does not switch the session", async () => {
@@ -131,20 +266,104 @@ describe("sidebar", () => {
     expect(document.activeElement).toBe(mainButton);
   });
 
-  it("adjusts the sidebar with ArrowLeft/ArrowRight and persists the width", async () => {
+  it("returns focus to a right-clicked row when the menu closes", async () => {
     const user = userEvent.setup();
-    await renderReady();
-    const resizer = screen.getByRole("separator", { name: "调整会话列表宽度" });
-    resizer.focus();
-    await user.keyboard("{ArrowRight}");
-    await waitFor(() =>
-      expect(screen.getByLabelText("会话列表").style.width).toBe("296px"),
+    const { socket } = await renderReady();
+    socket.emit(asServerMessage(fixture.long_connection.workspace_snapshot));
+    const title = await screen.findByText("并行格式化");
+    // Right-click triggers the menu with the <li> row itself as trigger.
+    const row = title.closest(".session-row") as HTMLElement;
+    fireEvent.contextMenu(row);
+    await screen.findByRole("menu", { name: "会话操作" });
+    await user.keyboard("{Escape}");
+    expect(screen.queryByRole("menu", { name: "会话操作" })).toBeNull();
+    // tabIndex=-1 makes the row programmatically focusable for mouse users.
+    expect(document.activeElement).toBe(row);
+    // Opening/closing the menu never switched the session.
+    expect(FakeWebSocket.instances[0].watchSessionIds()).toEqual([]);
+  });
+
+  it("inserts a freshly created session into its workspace group in the sidebar", async () => {
+    const user = userEvent.setup();
+    // The create response uses a session id the workspace snapshot never
+    // listed, so the sidebar depends on the summary insert path.
+    vi.stubGlobal(
+      "fetch",
+      vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
+        const url = typeof input === "string" ? input : input.toString();
+        if (url === "/api/sessions" && init?.method === "POST") {
+          return Promise.resolve(
+            new Response(
+              JSON.stringify({
+                session_id: "session_new",
+                turn_id: "turn_01",
+                state: {
+                  phase: "running",
+                  waiting_approval: false,
+                  waiting_question: false,
+                  current_turn_id: "turn_01",
+                },
+                stream_id: fixture.stream_id,
+                sequence: 0,
+              }),
+              { status: 201, headers: { "content-type": "application/json" } },
+            ),
+          );
+        }
+        return mockFetch(input, init);
+      }),
     );
-    expect(window.localStorage.getItem("neo-webui.sidebar-width")).toBe("296");
-    await user.keyboard("{ArrowLeft}{ArrowLeft}");
-    await waitFor(() =>
-      expect(screen.getByLabelText("会话列表").style.width).toBe("264px"),
-    );
+    const { socket } = await renderReady();
+    socket.emit(asServerMessage(fixture.long_connection.workspace_snapshot));
+    await screen.findByText("并行格式化");
+    const input = screen.getByLabelText("输入消息");
+    await user.type(input, "第一条消息{Enter}");
+    await waitFor(() => expect(socket.watchSessionIds()).toEqual(["session_new"]));
+    const neoGroup = screen.getByRole("group", { name: "neo" });
+    expect(within(neoGroup).queryByText("刚建好的会话")).toBeNull();
+
+    // The workspace layer reports the new session; it lands in the group
+    // matching its recorded workspace label, newest first.
+    socket.emit({
+      type: "session_summary_changed",
+      stream_id: fixture.stream_id,
+      workspace_sequence: 1,
+      event: {
+        session_id: "session_new",
+        title: "刚建好的会话",
+        updated_at: "2026-08-09T11:00:00+00:00",
+        pinned: false,
+        archived: false,
+        state: "running",
+        workspace_label: "neo",
+      },
+    });
+    expect(await within(neoGroup).findByText("刚建好的会话")).toBeTruthy();
+    const rows = within(neoGroup)
+      .getAllByRole("listitem")
+      .map((item) => item.textContent ?? "");
+    expect(rows[0]).toContain("刚建好的会话");
+  });
+
+  it("falls back to the current workspace group for an unknown summary label", async () => {
+    const { socket } = await renderReady();
+    socket.emit(asServerMessage(fixture.long_connection.workspace_snapshot));
+    await screen.findByText("并行格式化");
+    socket.emit({
+      type: "session_summary_changed",
+      stream_id: fixture.stream_id,
+      workspace_sequence: 1,
+      event: {
+        session_id: "session_ghost",
+        title: "无标签会话",
+        updated_at: "2026-08-09T11:30:00+00:00",
+        pinned: false,
+        archived: false,
+        state: "idle",
+      },
+    });
+    const neoGroup = screen.getByRole("group", { name: "neo" });
+    expect(await within(neoGroup).findByText("无标签会话")).toBeTruthy();
   });
 
   it("searches titles on the server only", async () => {

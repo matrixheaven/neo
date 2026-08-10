@@ -17,9 +17,10 @@ import type { TranscriptProjection } from "./transcript";
 import { emptyProjection } from "./transcript";
 import type { Theme } from "./theme";
 
-export const SIDEBAR_DEFAULT = 280;
-export const SIDEBAR_MIN = 224;
-export const SIDEBAR_MAX = 420;
+// Design §3: sidebar 264px default, min 220, max 400 (drag + keyboard).
+export const SIDEBAR_DEFAULT = 264;
+export const SIDEBAR_MIN = 220;
+export const SIDEBAR_MAX = 400;
 
 export interface SessionViewState {
   sessionId: string;

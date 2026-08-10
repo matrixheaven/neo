@@ -126,15 +126,44 @@ function applySessionMessage(state: AppState, message: WebUiServerMessage): AppS
       }
       // Best-effort sync of the grouped view (source of truth for R5): the
       // session keeps the workspace label recorded on its summary.
-      const workspaces = state.workspaces.map((group) => {
-        const sessionIndex = group.sessions.findIndex(
-          (entry) => entry.session_id === summary.session_id,
-        );
-        if (sessionIndex < 0) return group;
-        const sessions = group.sessions.slice();
-        sessions[sessionIndex] = summary;
-        return { ...group, sessions };
-      });
+      const known = state.workspaces.some((group) =>
+        group.sessions.some((entry) => entry.session_id === summary.session_id),
+      );
+      let workspaces: AppState["workspaces"];
+      if (known) {
+        workspaces = state.workspaces.map((group) => {
+          const sessionIndex = group.sessions.findIndex(
+            (entry) => entry.session_id === summary.session_id,
+          );
+          if (sessionIndex < 0) return group;
+          const sessions = group.sessions.slice();
+          sessions[sessionIndex] = summary;
+          return { ...group, sessions };
+        });
+      } else {
+        // A session the snapshot never listed (e.g. just created): insert it
+        // into the group matching its recorded workspace label, falling back
+        // to the current workspace group, keeping the group's recency order.
+        const targetLabel =
+          summary.workspace_label !== undefined &&
+          state.workspaces.some((group) => group.label === summary.workspace_label)
+            ? summary.workspace_label
+            : (state.workspaces.find((group) => group.current)?.label ??
+              state.workspaces[0]?.label);
+        workspaces = state.workspaces.map((group) => {
+          if (group.label !== targetLabel) return group;
+          const sessions = group.sessions.slice();
+          const insertAt = sessions.findIndex(
+            (entry) => (entry.updated_at ?? "") < (summary.updated_at ?? ""),
+          );
+          if (insertAt < 0) {
+            sessions.push(summary);
+          } else {
+            sessions.splice(insertAt, 0, summary);
+          }
+          return { ...group, sessions };
+        });
+      }
       return {
         ...state,
         summaries,

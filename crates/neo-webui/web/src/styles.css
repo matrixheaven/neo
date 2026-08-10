@@ -109,6 +109,8 @@ html[data-theme="light"] {
   --font-size-aux: 12.5px;
   --font-size-micro: 11.5px;
   --font-size-mono: 12.5px;
+  /* Sidebar session title sits one step below body (design §6.1). */
+  --font-size-sidebar-title: 13.5px;
 
   /* Chat rhythm (design §3) */
   --chat-turn-gap: 20px;
@@ -273,10 +275,11 @@ button {
   display: none;
 }
 
-/* -- Sidebar ---------------------------------------------------------------- */
+/* -- Sidebar (redesign §6: workspace groups, compact rows, one-step-smaller type) */
 
 .sidebar {
   flex: none;
+  width: var(--sidebar-w, 264px);
   display: flex;
   flex-direction: column;
   border-right: 1px solid var(--line);
@@ -290,22 +293,6 @@ button {
   flex-direction: column;
   gap: 8px;
   border-bottom: 1px solid var(--line);
-}
-
-.new-session-button {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  justify-content: center;
-  padding: 7px 10px;
-  border: 1px solid var(--line-strong);
-  border-radius: 8px;
-  background: var(--surface);
-  cursor: pointer;
-}
-
-.new-session-button:hover {
-  border-color: var(--accent-dim);
 }
 
 .search-box {
@@ -337,21 +324,92 @@ button {
   padding: 8px 6px;
 }
 
-.session-group-label {
-  font-size: 11px;
+/* Static section label (Pinned / search results). */
+.session-group-static {
+  font-size: var(--font-size-micro);
   color: var(--text-faint);
-  text-transform: uppercase;
-  letter-spacing: 0.06em;
   padding: 8px 8px 4px;
+}
+
+.session-group-header {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  padding: 4px 4px 0;
+}
+
+.session-group-toggle {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  padding: 3px 4px;
+  background: transparent;
+  border: none;
+  border-radius: 6px;
+  cursor: pointer;
+  color: var(--text-faint);
+  text-align: left;
+}
+
+.session-group-toggle:hover {
+  background: var(--hover);
+}
+
+.session-group-caret {
+  flex: none;
+  transition: transform var(--duration-fast) var(--ease-out);
+}
+
+.session-group-caret.expanded {
+  transform: rotate(90deg);
+}
+
+.session-group-label {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: var(--font-size-micro);
+}
+
+.session-group-count {
+  flex: none;
+  font-size: var(--font-size-micro);
+  color: var(--text-faint);
+}
+
+.session-group-new {
+  flex: none;
 }
 
 .session-list {
   list-style: none;
   margin: 0;
-  padding: 0;
+  padding: 2px 0 0;
   display: flex;
   flex-direction: column;
   gap: 2px;
+}
+
+.session-archived-toggle {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  width: 100%;
+  margin-top: 2px;
+  padding: 4px 8px;
+  background: transparent;
+  border: none;
+  border-radius: 6px;
+  cursor: pointer;
+  color: var(--text-faint);
+  font-size: var(--font-size-micro);
+  text-align: left;
+}
+
+.session-archived-toggle:hover {
+  background: var(--hover);
 }
 
 .session-row {
@@ -361,8 +419,10 @@ button {
   align-items: stretch;
 }
 
+/* Selected = accent-soft fill + inner hairline outline (redesign §6.1). */
 .session-row.selected {
   background: var(--accent-soft);
+  box-shadow: inset 0 0 0 1px var(--accent-dim);
 }
 
 .session-row:hover {
@@ -376,10 +436,12 @@ button {
 .session-main {
   flex: 1;
   min-width: 0;
+  min-height: 40px;
   display: flex;
   flex-direction: column;
-  gap: 2px;
-  padding: 7px 8px;
+  justify-content: center;
+  gap: 1px;
+  padding: 4px 8px;
   background: transparent;
   border: none;
   text-align: left;
@@ -387,16 +449,25 @@ button {
   border-radius: 8px;
 }
 
+.session-title-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+}
+
 .session-title {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+  font-size: var(--font-size-sidebar-title);
+  font-weight: 450;
 }
 
 .session-meta {
   display: flex;
-  gap: 8px;
-  font-size: 11px;
+  gap: 6px;
+  font-size: var(--font-size-micro);
   color: var(--text-faint);
   align-items: center;
 }
@@ -405,14 +476,23 @@ button {
   white-space: nowrap;
 }
 
-.session-state.state-running,
-.session-state.state-waiting_approval,
-.session-state.state-waiting_question {
+.session-state.state-running {
   color: var(--accent);
 }
 
 .session-state.state-failed {
   color: var(--danger);
+}
+
+/* Amber badge for sessions waiting on approval / a question (redesign §6.1). */
+.session-badge {
+  white-space: nowrap;
+  padding: 0 6px;
+  border-radius: var(--radius-pill);
+  background: var(--warn-soft);
+  color: var(--warn);
+  font-size: var(--font-size-micro);
+  line-height: 1.6;
 }
 
 .session-time {
@@ -463,6 +543,18 @@ button {
 .sidebar-resizer:hover,
 .sidebar-resizer:focus-visible {
   background: var(--accent-dim);
+}
+
+/* While dragging the separator, transcript transitions are disabled so the
+   rAF-throttled `--sidebar-w` writes stay cheap on long transcripts. */
+html.resizing {
+  cursor: col-resize;
+}
+
+html.resizing .transcript-scroll,
+html.resizing .transcript-scroll * {
+  transition: none !important;
+  animation: none !important;
 }
 
 /* -- Context menu ------------------------------------------------------------ */

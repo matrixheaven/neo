@@ -1,13 +1,17 @@
 /**
- * Sidebar: new-session entry, server-side title search, grouped session list
- * (pinned / normal / archived), hover icon actions, and one shared context
- * menu (right-click, menu key, Shift+F10) with rename/pin/archive. Hover
- * buttons and the menu never switch the current session.
+ * Sidebar (redesign §6): server-side title search, a cross-workspace Pinned
+ * section, then collapsible workspace groups (current workspace expanded with
+ * a "+" new-session button, others collapsed, most-recent first). Group rows
+ * exclude pinned sessions (they live in the Pinned section) and tuck archived
+ * sessions behind a collapsed "已归档 n" entry. Hover icon actions and one
+ * shared context menu (right-click, menu key, Shift+F10) never switch the
+ * current session; closing the menu returns focus to the trigger row.
  */
 
 import {
   Archive,
   ArchiveRestore,
+  ChevronRight,
   MoreHorizontal,
   Pin,
   PinOff,
@@ -21,7 +25,11 @@ import {
   useState,
 } from "react";
 import { listSessions } from "../api";
-import type { WebUiSessionSummary, WebUiSummaryState } from "../protocol";
+import type {
+  WebUiSessionSummary,
+  WebUiSummaryState,
+  WebUiWorkspaceGroup,
+} from "../protocol";
 import { useAppActions, useAppState } from "../state/store";
 
 export function summaryStateText(state: WebUiSummaryState): string {
@@ -39,12 +47,28 @@ export function summaryStateText(state: WebUiSummaryState): string {
   }
 }
 
-function formatUpdatedAt(updatedAt: string | null | undefined): string {
+function isWaitingState(state: WebUiSummaryState): boolean {
+  return state === "waiting_approval" || state === "waiting_question";
+}
+
+function formatRelativeTime(updatedAt: string | null | undefined): string {
   if (!updatedAt) return "";
   const date = new Date(updatedAt);
   if (Number.isNaN(date.getTime())) return "";
-  return date.toLocaleString();
+  const diffMs = Date.now() - date.getTime();
+  if (diffMs < 0) return date.toLocaleDateString();
+  const minutes = Math.floor(diffMs / 60_000);
+  if (minutes < 1) return "刚刚";
+  if (minutes < 60) return `${minutes} 分钟前`;
+  const hours = Math.floor(minutes / 60);
+  if (hours < 24) return `${hours} 小时前`;
+  const days = Math.floor(hours / 24);
+  if (days < 7) return `${days} 天前`;
+  return date.toLocaleDateString();
 }
+
+const byUpdated = (a: WebUiSessionSummary, b: WebUiSessionSummary) =>
+  (b.updated_at ?? "").localeCompare(a.updated_at ?? "");
 
 interface MenuState {
   sessionId: string;
@@ -166,6 +190,9 @@ function SessionRow({
     <li
       className={`session-row ${selected ? "selected" : ""}`}
       data-session-id={summary.session_id}
+      // Programmatically focusable (not in the Tab order) so closing the
+      // context menu can return focus to a right-clicked row.
+      tabIndex={-1}
       onContextMenu={(event) => {
         event.preventDefault();
         openMenuAt(event.clientX, event.clientY, event.currentTarget);
@@ -211,12 +238,25 @@ function SessionRow({
             aria-current={selected ? "true" : undefined}
             onClick={() => actions.selectSession(summary.session_id)}
           >
-            <span className="session-title">{summary.title ?? "未命名会话"}</span>
+            <span className="session-title-row">
+              {summary.state === "running" ? (
+                <span className="pulse-dot" aria-hidden />
+              ) : null}
+              <span className="session-title">{summary.title ?? "未命名会话"}</span>
+            </span>
             <span className="session-meta">
-              <span className={`session-state state-${summary.state}`}>
-                {summaryStateText(summary.state)}
-              </span>
-              <span className="session-time">{formatUpdatedAt(summary.updated_at)}</span>
+              <span className="session-time">{formatRelativeTime(summary.updated_at)}</span>
+              {isWaitingState(summary.state) ? (
+                // The summary carries no pending-count field; the state text
+                // is the badge label (no fabricated counts).
+                <span className={`session-badge state-${summary.state}`}>
+                  {summaryStateText(summary.state)}
+                </span>
+              ) : (
+                <span className={`session-state state-${summary.state}`}>
+                  {summaryStateText(summary.state)}
+                </span>
+              )}
             </span>
           </button>
           <span className="session-hover-actions">
@@ -275,6 +315,10 @@ export function Sidebar() {
   const [query, setQuery] = useState("");
   const [searchResults, setSearchResults] = useState<WebUiSessionSummary[] | null>(null);
   const [renamingId, setRenamingId] = useState<string | null>(null);
+  /** Per-group expanded overrides; absent = current expanded, others collapsed. */
+  const [expandedOverrides, setExpandedOverrides] = useState<Record<string, boolean>>({});
+  /** Per-group archived-section open flags; absent = collapsed. */
+  const [archivedOpen, setArchivedOpen] = useState<Record<string, boolean>>({});
   const triggerRef = useRef<HTMLElement | null>(null);
   const menuPositionRef = useRef({ x: 0, y: 0 });
 
@@ -311,15 +355,22 @@ export function Sidebar() {
     return () => window.clearTimeout(handle);
   }, [query]);
 
-  const source = searchResults ?? state.summaries;
-  const pinned = source.filter((entry) => entry.pinned && !entry.archived);
-  const normal = source.filter((entry) => !entry.pinned && !entry.archived);
-  const archived = source.filter((entry) => entry.archived);
-  const byUpdated = (a: WebUiSessionSummary, b: WebUiSessionSummary) =>
-    (b.updated_at ?? "").localeCompare(a.updated_at ?? "");
-  pinned.sort(byUpdated);
-  normal.sort(byUpdated);
-  archived.sort(byUpdated);
+  const renderRow = (summary: WebUiSessionSummary) => (
+    <SessionRow
+      key={summary.session_id}
+      summary={summary}
+      selected={state.selectedSessionId === summary.session_id}
+      renaming={renamingId === summary.session_id}
+      onOpenMenu={openMenu}
+      onRenameSubmit={(title) => {
+        if (title !== "") {
+          actions.patchMetadata(summary.session_id, { title });
+        }
+        setRenamingId(null);
+      }}
+      onRenameCancel={() => setRenamingId(null)}
+    />
+  );
 
   const menuSummary =
     state.activeContextMenu !== null
@@ -328,47 +379,153 @@ export function Sidebar() {
         null
       : null;
 
-  const renderGroup = (label: string, items: WebUiSessionSummary[]) => {
+  const renderSearchResults = () => {
+    const source = searchResults ?? [];
+    const items = [...source.filter((entry) => !entry.archived)].sort(byUpdated);
     if (items.length === 0) return null;
     return (
-      <div className="session-group" role="group" aria-label={label}>
-        <div className="session-group-label">{label}</div>
-        <ul className="session-list">
-          {items.map((summary) => (
-            <SessionRow
-              key={summary.session_id}
-              summary={summary}
-              selected={state.selectedSessionId === summary.session_id}
-              renaming={renamingId === summary.session_id}
-              onOpenMenu={openMenu}
-              onRenameSubmit={(title) => {
-                if (title !== "") {
-                  actions.patchMetadata(summary.session_id, { title });
-                }
-                setRenamingId(null);
-              }}
-              onRenameCancel={() => setRenamingId(null)}
-            />
-          ))}
-        </ul>
+      <div className="session-group" role="group" aria-label="搜索结果">
+        <div className="session-group-static">搜索结果</div>
+        <ul className="session-list">{items.map(renderRow)}</ul>
       </div>
+    );
+  };
+
+  const renderGrouped = () => {
+    // Grouped aggregation is the source of truth; before the first workspace
+    // snapshot, fall back to one current-workspace group from the bootstrap.
+    const groups: WebUiWorkspaceGroup[] =
+      state.workspaces.length > 0
+        ? state.workspaces
+        : [
+            {
+              label: state.bootstrap?.workspace_label ?? "当前工作区",
+              current: true,
+              sessions: state.summaries,
+            },
+          ];
+
+    // Pinned sessions surface once, cross-workspace, in the Pinned section.
+    const pinned = groups
+      .flatMap((group) => group.sessions)
+      .filter((entry) => entry.pinned && !entry.archived)
+      .sort(byUpdated);
+    const pinnedIds = new Set(pinned.map((entry) => entry.session_id));
+
+    // Current workspace first; the rest by most recent activity.
+    const ordered = groups
+      .map((group, index) => ({ group, index }))
+      .sort((a, b) => {
+        if (a.group.current !== b.group.current) return a.group.current ? -1 : 1;
+        const latest = (entry: (typeof a)["group"]) =>
+          entry.sessions.reduce<string>(
+            (max, session) => ((session.updated_at ?? "") > max ? (session.updated_at ?? "") : max),
+            "",
+          );
+        return latest(b.group).localeCompare(latest(a.group)) || a.index - b.index;
+      });
+
+    return (
+      <>
+        {pinned.length > 0 ? (
+          <div className="session-group" role="group" aria-label="已置顶">
+            <div className="session-group-static">已置顶</div>
+            <ul className="session-list">{pinned.map(renderRow)}</ul>
+          </div>
+        ) : null}
+        {ordered.map(({ group }) => {
+          const live = group.sessions.filter(
+            (entry) => !entry.archived && !pinnedIds.has(entry.session_id),
+          );
+          const archived = group.sessions.filter((entry) => entry.archived);
+          // Empty groups never render; a lone current workspace still renders
+          // as a group (no flat special case).
+          if (live.length === 0 && archived.length === 0) return null;
+          const expanded = expandedOverrides[group.label] ?? group.current;
+          const archivedExpanded = archivedOpen[group.label] ?? false;
+          return (
+            <div className="session-group" role="group" aria-label={group.label} key={group.label}>
+              <div className="session-group-header">
+                <button
+                  type="button"
+                  className="session-group-toggle"
+                  aria-expanded={expanded}
+                  onClick={() =>
+                    setExpandedOverrides((previous) => ({
+                      ...previous,
+                      [group.label]: !expanded,
+                    }))
+                  }
+                >
+                  <ChevronRight
+                    size={12}
+                    aria-hidden
+                    className={`session-group-caret ${expanded ? "expanded" : ""}`}
+                  />
+                  <span className="session-group-label">{group.label}</span>
+                  {/* Count matches the visible rows: archived are behind the
+                      collapsed entry, pinned live in the Pinned section. */}
+                  <span className="session-group-count">{live.length}</span>
+                </button>
+                {group.current ? (
+                  <button
+                    type="button"
+                    className="icon-button session-group-new"
+                    aria-label="新会话"
+                    title="新会话"
+                    onClick={() => actions.selectSession(null)}
+                  >
+                    <Plus size={14} aria-hidden />
+                  </button>
+                ) : null}
+              </div>
+              {expanded ? (
+                <>
+                  {live.length > 0 ? (
+                    <ul className="session-list">{[...live].sort(byUpdated).map(renderRow)}</ul>
+                  ) : null}
+                  {archived.length > 0 ? (
+                    <div className="session-archived">
+                      <button
+                        type="button"
+                        className="session-archived-toggle"
+                        aria-expanded={archivedExpanded}
+                        onClick={() =>
+                          setArchivedOpen((previous) => ({
+                            ...previous,
+                            [group.label]: !archivedExpanded,
+                          }))
+                        }
+                      >
+                        <ChevronRight
+                          size={12}
+                          aria-hidden
+                          className={`session-group-caret ${archivedExpanded ? "expanded" : ""}`}
+                        />
+                        已归档 {archived.length}
+                      </button>
+                      {archivedExpanded ? (
+                        <ul className="session-list">
+                          {[...archived].sort(byUpdated).map(renderRow)}
+                        </ul>
+                      ) : null}
+                    </div>
+                  ) : null}
+                </>
+              ) : null}
+            </div>
+          );
+        })}
+      </>
     );
   };
 
   return (
     <aside
       className={`sidebar ${state.sidebarDrawerOpen ? "drawer-open" : ""}`}
-      style={{ width: state.sidebarWidth }}
       aria-label="会话列表"
     >
       <div className="sidebar-top">
-        <button
-          type="button"
-          className="new-session-button"
-          onClick={() => actions.selectSession(null)}
-        >
-          <Plus size={15} aria-hidden /> 新会话
-        </button>
         <div className="search-box">
           <Search size={14} aria-hidden />
           <input
@@ -381,15 +538,7 @@ export function Sidebar() {
         </div>
       </div>
       <div className="sidebar-scroll">
-        {searchResults !== null
-          ? renderGroup("搜索结果", [...pinned, ...normal])
-          : (
-            <>
-              {renderGroup("已置顶", pinned)}
-              {renderGroup("会话", normal)}
-              {renderGroup("已归档", archived)}
-            </>
-          )}
+        {searchResults !== null ? renderSearchResults() : renderGrouped()}
       </div>
       {state.activeContextMenu !== null && menuSummary !== null ? (
         <SessionMenu
