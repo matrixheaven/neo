@@ -616,3 +616,6 @@ Entries are workspace records, not authoritative runtime decisions.
 | 2026-08-10 | plan | docs/aegis/plans/2026-08-10-media-input-model-cache-lanes.md | Neo 图片视频输入与模型缓存车道实施计划 |
 | 2026-08-10 | handoff | docs/aegis/handoffs/2026-08-10-media-input-model-cache-lanes.md | Neo 图片视频输入与模型缓存车道交接提示 |
 | 2026-08-10 | spec | docs/aegis/specs/2026-08-10-media-input-model-cache-lanes-design.md | Neo 图片与视频输入、模型投影和缓存车道设计 |
+| 2026-08-10 | artifact | docs/aegis/work/2026-08-10-media-input-model-lanes/gate-input-pack.json | 2026-08-10-media-input-model-lanes gate input pack |
+| 2026-08-10 | work | docs/aegis/work/2026-08-10-media-input-model-lanes/proof-bundle.md | 2026-08-10-media-input-model-lanes proof bundle |
+| 2026-08-10 | spec | docs/aegis/specs/2026-08-10-neo-webui-redesign-design.md | Neo WebUI 重设计说明 |
