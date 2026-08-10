@@ -14,6 +14,8 @@ mod context_preflight;
 mod fake_harness;
 #[path = "runtime_behavior/goal_mode.rs"]
 mod goal_mode;
+#[path = "runtime_behavior/model_switch.rs"]
+mod model_switch;
 #[path = "runtime_behavior/permissions.rs"]
 mod permissions;
 #[path = "runtime_behavior/permissions_mode.rs"]
