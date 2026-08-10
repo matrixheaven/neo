@@ -141,6 +141,23 @@ test("08 answer-ft：文件修改列表与复制按钮", async ({ page }) => {
   await expect(
     footer.getByRole("button", { name: "展开 web/src/styles.css 的局部差异" }),
   ).toBeVisible();
+  const createdFile = footer.getByRole("button", { name: "展开 web/src/acceptance-notes.md 的新建文件内容" });
+  await expect(createdFile).toBeVisible();
+  await createdFile.hover();
+  await expect(footer.getByText("# 验收记录")).toBeVisible();
+  await createdFile.click();
+  const openPreview = footer.locator(".ft-file-preview.open");
+  await expect(openPreview).toBeVisible();
+  const previewLayout = await page.evaluate(() => {
+    const preview = document.querySelector<HTMLElement>(".answer-ft .ft-file-preview.open");
+    const composerDock = document.querySelector<HTMLElement>(".session-view > .composer-dock");
+    if (!preview || !composerDock) throw new Error("文件预览或输入框未渲染");
+    return {
+      previewBottom: preview.getBoundingClientRect().bottom,
+      composerTop: composerDock.getBoundingClientRect().top,
+    };
+  });
+  expect(previewLayout.previewBottom).toBeLessThanOrEqual(previewLayout.composerTop + 1);
   await expect(footer.locator(".ft-summary .ft-add")).toHaveText("+5");
   await expect(footer.getByRole("button", { name: "复制回答" })).toBeVisible();
   await page.screenshot({ path: `${SHOTS}/08-answer-footer-files.png` });

@@ -8,17 +8,18 @@
  * while away from the bottom.
  */
 
-import { ArrowDown, ChevronRight } from "lucide-react";
-import { useEffect, useLayoutEffect, useRef } from "react";
+import { ArrowDown, ChevronRight, FilePenLine } from "lucide-react";
+import { useEffect, useLayoutEffect, useRef, useState } from "react";
 import { useAppActions, useAppState } from "../state/store";
 import type {
   AssistantMessageItem,
   TranscriptItem,
+  ToolItem,
   UserMessageItem,
 } from "../state/transcript";
 import { CopyButton } from "./codeBlock";
 import { useLineExpanded } from "./collapsible";
-import { AssistantBody, TranscriptItemView } from "./transcriptItems";
+import { AssistantBody, ReadGroup, TranscriptItemView } from "./transcriptItems";
 
 // ---------------------------------------------------------------------------
 // Turn grouping
@@ -171,15 +172,118 @@ function commandId(item: TranscriptItem): string | null {
 
 /** Runtime shell/terminal events contain the same execution as their tool
  * call. Keep the richer runtime row and suppress only its paired tool row. */
-function presentationItems(items: TranscriptItem[]): TranscriptItem[] {
+const DELEGATE_CONTROL_TOOL_NAMES = new Set([
+  "delegate",
+  "delegategroup",
+  "delegateswarm",
+  "waitdelegate",
+]);
+
+type DelegateCardItem = Extract<TranscriptItem, { kind: "delegate" | "swarm" }>;
+
+function isDelegateCard(item: TranscriptItem): item is DelegateCardItem {
+  return item.kind === "delegate" || item.kind === "swarm";
+}
+
+function delegateCardMatchesToolTurn(
+  item: ToolItem,
+  localItems: TranscriptItem[],
+  allItems: TranscriptItem[],
+): boolean {
+  if (typeof item.turn === "number") {
+    return allItems.some(
+      (candidate) => isDelegateCard(candidate) && candidate.turn === item.turn,
+    );
+  }
+  return localItems.some(
+    (candidate) => isDelegateCard(candidate) && candidate.turn === undefined,
+  );
+}
+
+/** Keep only the rows that add information beyond an existing process card. */
+export function presentationItems(
+  items: TranscriptItem[],
+  allItems: TranscriptItem[] = items,
+): TranscriptItem[] {
   return items.filter((item) => {
     if (item.kind !== "tool") return true;
     const name = item.name.toLowerCase();
+    if (DELEGATE_CONTROL_TOOL_NAMES.has(name) && delegateCardMatchesToolTurn(item, items, allItems)) {
+      return false;
+    }
+    if (name === "askuserquestion" && (item.status === "finished" || item.status === "running")) {
+      return false;
+    }
     const runtimeKind = name === "bash" ? "shell" : name === "terminal" ? "terminal" : null;
     const id = commandId(item);
     return runtimeKind === null || id === null || !items.some(
       (candidate) => candidate.kind === runtimeKind && commandId(candidate) === id,
     );
+  });
+}
+
+export type ProcessPresentationItem =
+  | { kind: "item"; item: TranscriptItem }
+  | { kind: "read_group"; items: ToolItem[] };
+
+function isActiveReadInTurn(item: TranscriptItem): item is ToolItem {
+  return item.kind === "tool" &&
+    item.name.trim().toLowerCase() === "read" &&
+    (item.status === "running" || item.status === "finished") &&
+    typeof item.turn === "number";
+}
+
+/**
+ * Preserve every process boundary, then fold only direct runs of active or
+ * completed Read calls from one explicit turn. This happens before hidden paired rows
+ * are removed so an intervening tool can never join two independent reads.
+ */
+export function processPresentationItems(
+  items: TranscriptItem[],
+  allItems: TranscriptItem[] = items,
+): ProcessPresentationItem[] {
+  const visibleItems = new Set(presentationItems(items, allItems));
+  const presentation: ProcessPresentationItem[] = [];
+  for (let index = 0; index < items.length;) {
+    const item = items[index];
+    if (!isActiveReadInTurn(item)) {
+      if (visibleItems.has(item)) presentation.push({ kind: "item", item });
+      index += 1;
+      continue;
+    }
+
+    const reads = [item];
+    let next = index + 1;
+    while (next < items.length) {
+      const candidate = items[next];
+      if (!candidate || !isActiveReadInTurn(candidate) || candidate.turn !== item.turn) break;
+      reads.push(candidate);
+      next += 1;
+    }
+    if (reads.length > 1) {
+      presentation.push({ kind: "read_group", items: reads });
+    } else if (visibleItems.has(item)) {
+      presentation.push({ kind: "item", item });
+    }
+    index = next;
+  }
+  return presentation;
+}
+
+function ProcessRows({
+  sessionId,
+  items,
+  allItems = items,
+}: {
+  sessionId: string;
+  items: TranscriptItem[];
+  allItems?: TranscriptItem[];
+}) {
+  return processPresentationItems(items, allItems).map((item) => {
+    if (item.kind === "read_group") {
+      return <ReadGroup key={`read-group:${item.items[0].id}`} sessionId={sessionId} items={item.items} />;
+    }
+    return <TranscriptItemView key={item.item.id} sessionId={sessionId} item={item.item} />;
   });
 }
 
@@ -235,20 +339,29 @@ function processSummary(process: TranscriptItem[]): string {
 // ---------------------------------------------------------------------------
 // File-change derivation for the answer footer. The completed tool result is
 // the source of truth: it records which writes reached disk, exact line
-// counts and a bounded unified diff. Tool input is never used to guess a
-// change, so cancelled and failed writes cannot appear as edits.
+// counts and preview data. Tool input is never used to guess a change, so
+// cancelled and failed writes cannot appear as edits.
 // ---------------------------------------------------------------------------
 
-export interface FileChange {
+interface FilePreviewLine {
+  content: string;
+  kind: "add" | "del" | "context" | "separator" | "created";
+}
+
+interface FileChange {
   path: string;
   added: number;
   removed: number;
-  diffs: string[];
+  preview: FilePreviewLine[];
+  previewOmitted: boolean;
+  hasPreview: boolean;
+  created: boolean;
 }
 
 const COMMITTED_FILE_CHANGE_STATUSES = new Set(["committed", "committed_unsynced"]);
 const INITIAL_FILE_CHANGE_COUNT = 3;
-const DIFF_PREVIEW_LINE_COUNT = 24;
+const HOVER_FILE_PREVIEW_LINE_COUNT = 6;
+const EXPANDED_FILE_PREVIEW_LINE_COUNT = 28;
 
 function objectValue(value: unknown): Record<string, unknown> | null {
   return value !== null && typeof value === "object" && !Array.isArray(value)
@@ -260,6 +373,58 @@ function countFromResult(value: unknown): number {
   return typeof value === "number" && Number.isFinite(value) && value > 0
     ? Math.floor(value)
     : 0;
+}
+
+function splitPreviewLines(value: string): string[] {
+  const lines = value.split(/\r?\n/);
+  if (lines[lines.length - 1] === "") lines.pop();
+  return lines;
+}
+
+function diffLineKind(line: string): FilePreviewLine["kind"] {
+  if (line.startsWith("+")) return "add";
+  if (line.startsWith("-")) return "del";
+  return "context";
+}
+
+function diffHeaderMatches(line: string, marker: "---" | "+++", path: string): boolean {
+  if (!line.startsWith(`${marker} `)) return false;
+  const headerPath = line.slice(marker.length + 1).trim().split("\t", 1)[0] ?? "";
+  const normalizedPath = path.split("\\").join("/");
+  return headerPath === "/dev/null" || headerPath === normalizedPath ||
+    headerPath === `a/${normalizedPath}` || headerPath === `b/${normalizedPath}`;
+}
+
+function localDiffPreviewLines(path: string, diff: string): FilePreviewLine[] {
+  const sourceLines = splitPreviewLines(diff);
+  const hasFileHeaders = sourceLines.length >= 3 &&
+    diffHeaderMatches(sourceLines[0] ?? "", "---", path) &&
+    diffHeaderMatches(sourceLines[1] ?? "", "+++", path) &&
+    sourceLines[2]?.startsWith("@@") === true;
+  const previewLines = hasFileHeaders ? sourceLines.slice(2) : sourceLines;
+  const lines: FilePreviewLine[] = [];
+  for (const line of previewLines) {
+    if (line.startsWith("@@")) {
+      lines.push({ content: "...", kind: "separator" });
+    } else {
+      lines.push({ content: line, kind: diffLineKind(line) });
+    }
+  }
+  return lines;
+}
+
+function createdFilePreviewLines(content: string): FilePreviewLine[] {
+  return splitPreviewLines(content).map((line) => ({ content: line, kind: "created" }));
+}
+
+function appendPreview(entry: FileChange, lines: FilePreviewLine[]): void {
+  const remaining = EXPANDED_FILE_PREVIEW_LINE_COUNT - entry.preview.length;
+  if (remaining <= 0) {
+    entry.previewOmitted ||= lines.length > 0;
+    return;
+  }
+  entry.preview.push(...lines.slice(0, remaining));
+  entry.previewOmitted ||= lines.length > remaining;
 }
 
 function deriveFileChanges(process: TranscriptItem[]): FileChange[] {
@@ -278,11 +443,26 @@ function deriveFileChanges(process: TranscriptItem[]): FileChange[] {
       ) continue;
       const path = change.path;
       if (typeof path !== "string" || path.trim() === "") continue;
-      const entry = byPath.get(path) ?? { path, added: 0, removed: 0, diffs: [] };
+      const entry = byPath.get(path) ?? {
+        path,
+        added: 0,
+        removed: 0,
+        preview: [],
+        previewOmitted: false,
+        hasPreview: false,
+        created: false,
+      };
       entry.added += countFromResult(change.added);
       entry.removed += countFromResult(change.removed);
-      if (typeof change.diff === "string" && change.diff !== "") {
-        entry.diffs.push(change.diff);
+      if (change.operation === "created") {
+        entry.created = true;
+        entry.hasPreview = true;
+        if (typeof change.content === "string") {
+          appendPreview(entry, createdFilePreviewLines(change.content));
+        }
+      } else if (typeof change.diff === "string" && change.diff !== "") {
+        entry.hasPreview = true;
+        appendPreview(entry, localDiffPreviewLines(path, change.diff));
       }
       byPath.set(path, entry);
     }
@@ -316,16 +496,16 @@ function TurnFold({
   msg,
   process,
   activity,
+  allItems,
 }: {
   sessionId: string;
   msg: AssistantMessageItem;
   process: TranscriptItem[];
   activity: TranscriptItem[];
+  allItems: TranscriptItem[];
 }) {
-  // Finished turns default to collapsed behind the summary line; in-progress
-  // turns default to open (the head is not a toggle then). An explicit user
-  // choice overrides the phase default.
-  const displayedProcess = presentationItems(process);
+  // All completed activity stays behind its summary. In-progress turns remain
+  // open so streaming progress is visible; an explicit choice wins later.
   const [open, toggle] = useLineExpanded(
     sessionId,
     `fold:${msg.id}`,
@@ -353,36 +533,51 @@ function TurnFold({
       </button>
       <div className="tf-body">
         <div className="tf-body-inner">
-          {displayedProcess.map((item) => (
-            <TranscriptItemView key={item.id} sessionId={sessionId} item={item} />
-          ))}
+          <ProcessRows sessionId={sessionId} items={process} allItems={allItems} />
         </div>
       </div>
     </div>
   );
 }
 
-function diffLineKind(line: string): "add" | "del" | "hunk" | "context" {
-  if (line.startsWith("+") && !line.startsWith("+++")) return "add";
-  if (line.startsWith("-") && !line.startsWith("---")) return "del";
-  if (line.startsWith("@@")) return "hunk";
-  return "context";
-}
-
-function LocalDiff({ diff }: { diff: string }) {
-  const allLines = diff.split("\n");
-  if (allLines[allLines.length - 1] === "") allLines.pop();
-  const lines = allLines.slice(0, DIFF_PREVIEW_LINE_COUNT);
-  const omitted = allLines.length > lines.length;
+function LocalPreview({ change, expanded }: { change: FileChange; expanded: boolean }) {
+  const lineCount = expanded ? EXPANDED_FILE_PREVIEW_LINE_COUNT : HOVER_FILE_PREVIEW_LINE_COUNT;
+  const lines = change.preview.slice(0, lineCount);
+  const omitted = change.previewOmitted || change.preview.length > lines.length;
   return (
     <pre className="ft-local-diff">
       {lines.map((line, index) => (
-        <span className={`ft-diff-${diffLineKind(line)}`} key={`${index}:${line}`}>
-          {line || " "}
+        <span className={`ft-diff-${line.kind}`} key={`${index}:${line.content}`}>
+          {line.content || " "}
         </span>
       ))}
-      {omitted ? <span className="ft-diff-omitted">其余差异未显示</span> : null}
+      {lines.length === 0 ? (
+        <span className="ft-diff-empty">{change.created ? "新建空文件" : "没有可显示的局部内容"}</span>
+      ) : null}
+      {omitted ? <span className="ft-diff-omitted">其余内容未显示</span> : null}
     </pre>
+  );
+}
+
+function filePreviewId(messageId: string, path: string): string {
+  return `file-preview-${encodeURIComponent(`${messageId}\u0000${path}`)}`;
+}
+
+function filePathParts(path: string): { directory: string | null; basename: string } {
+  const separator = Math.max(path.lastIndexOf("/"), path.lastIndexOf("\\"));
+  if (separator < 0) return { directory: null, basename: path };
+  return { directory: path.slice(0, separator + 1), basename: path.slice(separator + 1) };
+}
+
+function SummaryChangeRatio({ added, removed }: { added: number; removed: number }) {
+  const total = added + removed;
+  const addedPercent = total === 0 ? 0 : (added / total) * 100;
+  const removedPercent = total === 0 ? 0 : (removed / total) * 100;
+  return (
+    <span className="ft-summary-ratio" role="img" aria-label={`新增 ${added} 行，删除 ${removed} 行`}>
+      <span className="ft-summary-ratio-add" style={{ width: `${addedPercent}%` }} />
+      <span className="ft-summary-ratio-del" style={{ width: `${removedPercent}%` }} />
+    </span>
   );
 }
 
@@ -395,13 +590,39 @@ function FileChangeRow({
   messageId: string;
   change: FileChange;
 }) {
-  const hasDiff = change.diffs.length > 0;
+  const [hovering, setHovering] = useState(false);
+  const rowRef = useRef<HTMLLIElement>(null);
+  const scrollAfterOpenRef = useRef(false);
+  const hasPreview = change.hasPreview;
+  const path = filePathParts(change.path);
   const [open, toggle] = useLineExpanded(sessionId, `file:${messageId}:${change.path}`, false);
-  const label = `${open ? "收起" : "展开"} ${change.path} 的局部差异`;
+  const previewId = filePreviewId(messageId, change.path);
+  const label = `${open ? "收起" : "展开"} ${change.path} 的${change.created ? "新建文件内容" : "局部差异"}`;
+  const previewVisible = open || hovering;
+
+  // Hover previews are intentionally passive. Only an explicit expansion
+  // requests room above the fixed composer.
+  useLayoutEffect(() => {
+    if (!open || !scrollAfterOpenRef.current) return;
+    scrollAfterOpenRef.current = false;
+    const row = rowRef.current;
+    if (typeof row?.scrollIntoView === "function") {
+      row.scrollIntoView({ block: "nearest" });
+    }
+  }, [open]);
+
+  const togglePreview = () => {
+    if (!open) scrollAfterOpenRef.current = true;
+    toggle();
+  };
+
   const contents = (
     <>
-      {hasDiff ? <ChevronRight className={`ft-file-caret ${open ? "open" : ""}`} size={13} aria-hidden /> : null}
-      <span className="ft-path" title={change.path}>{change.path}</span>
+      {hasPreview ? <ChevronRight className={`ft-file-caret ${open ? "open" : ""}`} size={13} aria-hidden /> : null}
+      <span className="ft-path" title={change.path}>
+        {path.directory ? <span className="ft-directory">{path.directory}</span> : null}
+        <span className="ft-basename">{path.basename}</span>
+      </span>
       <span className="ft-diff">
         {change.added > 0 ? <span className="ft-add">+{change.added}</span> : null}
         {change.removed > 0 ? <span className="ft-del">−{change.removed}</span> : null}
@@ -409,17 +630,34 @@ function FileChangeRow({
     </>
   );
   return (
-    <li className={`ft-file ${hasDiff ? "has-diff" : ""}`}>
-      {hasDiff ? (
-        <button type="button" className="ft-file-head" aria-expanded={open} aria-label={label} onClick={toggle}>
+    <li
+      ref={rowRef}
+      className={`ft-file ${hasPreview ? "has-preview" : ""}`}
+      onMouseEnter={hasPreview ? () => setHovering(true) : undefined}
+      onMouseLeave={hasPreview ? () => setHovering(false) : undefined}
+    >
+      {hasPreview ? (
+        <button
+          type="button"
+          className="ft-file-head"
+          aria-controls={previewId}
+          aria-expanded={open}
+          aria-label={label}
+          onClick={togglePreview}
+        >
           {contents}
         </button>
       ) : (
         <div className="ft-file-head">{contents}</div>
       )}
-      {hasDiff && open ? (
-        <div className="ft-file-preview">
-          {change.diffs.map((diff, index) => <LocalDiff key={`${index}:${diff}`} diff={diff} />)}
+      {hasPreview ? (
+        <div
+          id={previewId}
+          className={`ft-file-preview ${open ? "open" : ""}`}
+          hidden={!previewVisible}
+          aria-hidden={open ? undefined : true}
+        >
+          <LocalPreview change={change} expanded={open} />
         </div>
       ) : null}
     </li>
@@ -442,26 +680,41 @@ function AnswerFooter({
   const hiddenCount = changes.length - visibleChanges.length;
   const totalAdded = changes.reduce((total, change) => total + change.added, 0);
   const totalRemoved = changes.reduce((total, change) => total + change.removed, 0);
+  const fileListId = `file-list:${msg.id}`;
   return (
     <div className="answer-ft">
       {changes.length > 0 ? (
         <div className="ft-changes">
           <div className="ft-summary">
-            已编辑 {changes.length} 个文件
+            <FilePenLine className="ft-summary-icon" size={14} aria-hidden />
+            <span className="ft-summary-title">已编辑 {changes.length} 个文件</span>
             {totalAdded > 0 ? <span className="ft-add">+{totalAdded}</span> : null}
             {totalRemoved > 0 ? <span className="ft-del">−{totalRemoved}</span> : null}
+            <SummaryChangeRatio added={totalAdded} removed={totalRemoved} />
           </div>
-          <ul className="ft-files">
+          <ul className="ft-files" id={fileListId}>
             {visibleChanges.map((change) => (
               <FileChangeRow key={change.path} sessionId={sessionId} messageId={msg.id} change={change} />
             ))}
           </ul>
           {hiddenCount > 0 ? (
-            <button type="button" className="ft-more" onClick={toggleShowAll}>
+            <button
+              type="button"
+              className="ft-more"
+              aria-controls={fileListId}
+              aria-expanded={showAll}
+              onClick={toggleShowAll}
+            >
               显示其余 {hiddenCount} 个文件
             </button>
           ) : showAll && changes.length > INITIAL_FILE_CHANGE_COUNT ? (
-            <button type="button" className="ft-more" onClick={toggleShowAll}>
+            <button
+              type="button"
+              className="ft-more"
+              aria-controls={fileListId}
+              aria-expanded={showAll}
+              onClick={toggleShowAll}
+            >
               收起其余文件
             </button>
           ) : null}
@@ -475,16 +728,18 @@ function AnswerFooter({
 function AssistGroup({
   sessionId,
   group,
+  allItems,
 }: {
   sessionId: string;
   group: { process: TranscriptItem[]; activity: TranscriptItem[]; msg: AssistantMessageItem };
+  allItems: TranscriptItem[];
 }) {
   const { process, activity, msg } = group;
   const changes = msg.finished ? deriveFileChanges(activity) : [];
   return (
     <div className="a-msg t-item">
       {process.length > 0 ? (
-        <TurnFold sessionId={sessionId} msg={msg} process={process} activity={activity} />
+        <TurnFold sessionId={sessionId} msg={msg} process={process} activity={activity} allItems={allItems} />
       ) : null}
       <AssistantBody item={msg} />
       {msg.finished ? <AnswerFooter sessionId={sessionId} msg={msg} changes={changes} /> : null}
@@ -554,15 +809,13 @@ export function TranscriptPane({ sessionId }: { sessionId: string }) {
                   <TranscriptItemView key={group.item.id} sessionId={sessionId} item={group.item} />
                 );
               case "assist":
-                return <AssistGroup key={group.msg.id} sessionId={sessionId} group={group} />;
+                return <AssistGroup key={group.msg.id} sessionId={sessionId} group={group} allItems={items} />;
               case "process":
                 // In-progress process rows without a following message stay
                 // visible as-is.
                 return (
                   <div className="a-msg t-item" key={group.items[0].id}>
-                    {presentationItems(group.items).map((item) => (
-                      <TranscriptItemView key={item.id} sessionId={sessionId} item={item} />
-                    ))}
+                    <ProcessRows sessionId={sessionId} items={group.items} allItems={items} />
                   </div>
                 );
               case "inline":

@@ -125,7 +125,7 @@ describe("subagent UI (R4)", () => {
     vi.unstubAllGlobals();
   });
 
-  it("agent-line shows a pulsing dot, running pill and elapsed while running", async () => {
+  it("agent-line shows a pulsing dot, left status icon and elapsed while running", async () => {
     const { socket } = await openSession1();
     const emit = emitter(socket);
     emit({ DelegateStarted: { turn: 1, agent: runningAgent() } });
@@ -136,8 +136,8 @@ describe("subagent UI (R4)", () => {
     const line = button.closest(".agent-line") as HTMLElement;
     expect(line.className).toContain("state-running");
     expect(line.querySelector(".pulse-dot")).not.toBeNull();
-    const pill = line.querySelector(".agent-pill.st-running");
-    expect(pill?.textContent).toContain("运行中");
+    expect(line.querySelector('.tl-result-ic[data-status-icon="running"]')).not.toBeNull();
+    expect(line.querySelector(".agent-pill")).toBeNull();
     expect(line.querySelector(".agent-elapsed")?.textContent).toBe("5s");
     expect(line.querySelector(".tl-mono")?.textContent).toBe("relay 覆盖检查进行中");
 
@@ -156,12 +156,13 @@ describe("subagent UI (R4)", () => {
     await waitFor(() => {
       const finished = button.closest(".agent-line") as HTMLElement;
       expect(finished.querySelector(".pulse-dot")).toBeNull();
-      expect(finished.querySelector(".agent-pill.st-completed")?.textContent).toContain("已完成");
+      expect(finished.querySelector('.tl-result-ic[data-status-icon="finished"]')).not.toBeNull();
+      expect(finished.querySelector(".agent-pill")).toBeNull();
       expect(finished.querySelector(".agent-elapsed")?.textContent).toBe("7s");
     });
   });
 
-  it("agent-line renders failure and timeout states as distinct pills", async () => {
+  it("agent-line renders failure and timeout states with a left failure icon", async () => {
     const { socket } = await openSession1();
     const emit = emitter(socket);
     emit({
@@ -193,8 +194,10 @@ describe("subagent UI (R4)", () => {
     const timedOut = await screen.findByRole("button", { name: /查看子代理详情：超时的代理/ });
     const failedLine = failed.closest(".agent-line") as HTMLElement;
     const timedOutLine = timedOut.closest(".agent-line") as HTMLElement;
-    expect(failedLine.querySelector(".agent-pill.st-failed")?.textContent).toContain("失败");
-    expect(timedOutLine.querySelector(".agent-pill.st-timed_out")?.textContent).toContain("超时");
+    expect(failedLine.querySelector('.tl-result-ic[data-status-icon="failed"]')).not.toBeNull();
+    expect(timedOutLine.querySelector('.tl-result-ic[data-status-icon="failed"]')).not.toBeNull();
+    expect(failedLine.querySelector(".agent-pill")).toBeNull();
+    expect(timedOutLine.querySelector(".agent-pill")).toBeNull();
     expect(timedOutLine.querySelector(".agent-elapsed")?.textContent).toBe("30s");
   });
 
@@ -222,9 +225,8 @@ describe("subagent UI (R4)", () => {
     // Each member row is a full agent-line that can open the panel on its own.
     expect(members[0].querySelector(".agent-line")).not.toBeNull();
     expect(members[1].querySelector(".agent-line .pulse-dot")).not.toBeNull();
-    expect(
-      members[0].querySelector(".agent-pill.st-completed")?.textContent,
-    ).toContain("已完成");
+    expect(members[0].querySelector('.tl-result-ic[data-status-icon="finished"]')).not.toBeNull();
+    expect(members[0].querySelector(".agent-pill")).toBeNull();
   });
 
   it("opens the drill-down panel with the child transcript, Esc closes and focus returns", async () => {

@@ -6,8 +6,15 @@
 
 import { describe, expect, it } from "vitest";
 import { agentEventTag, type AgentEvent } from "../../src/protocol";
-import { groupTurns } from "../../src/components/transcript";
-import { toolPresentation } from "../../src/components/transcriptItems";
+import {
+  groupTurns,
+  presentationItems,
+  processPresentationItems,
+} from "../../src/components/transcript";
+import {
+  readGroupStatusForItems,
+  toolPresentation,
+} from "../../src/components/transcriptItems";
 import {
   applyAgentEvent,
   buildFromHistory,
@@ -20,6 +27,7 @@ import {
   type SwarmItem,
   type TerminalItem,
   type ThinkingItem,
+  type TranscriptItem,
   type ToolItem,
   type UnknownItem,
   type UserMessageItem,
@@ -37,19 +45,45 @@ describe("tool presentation", () => {
   it("maps known tool calls, prioritizes Read filenames and preserves unknown arguments", () => {
     const cases = [
       ["Read", { path: "src/ui/app.ts" }, "读取", "app.ts", "src/ui/", "file"],
+      ["List", { path: "src/ui" }, "读取", "ui", "src/", "file"],
       ["ReadMediaFile", { path: "assets/preview.png" }, "观察", "preview.png", "assets/", "media"],
       ["Edit", { path: "src/app.ts" }, "编辑", "src/app.ts", undefined, "file-edit"],
       ["Write", { path: "src/new.ts" }, "创建", "src/new.ts", undefined, "file-plus"],
       ["Grep", { pattern: "tool", directory: "src" }, "搜索", "tool", "src", "search"],
       ["Glob", { pattern: "*.ts", directory: "src" }, "搜索", "*.ts", "src", "folder-search"],
+      ["Find", { pattern: "*.tsx", directory: "src" }, "搜索", "*.tsx", "src", "folder-search"],
       ["Bash", { command: "cargo test" }, "运行", "cargo test", undefined, "terminal"],
       ["Shell", { command: "git status" }, "运行", "git status", undefined, "terminal"],
       ["Terminal", { command: "npm run dev" }, "启动终端", "npm run dev", undefined, "terminal"],
+      ["Skill", { skill: "release" }, "使用技能", "release", undefined, "skill"],
+      [
+        "MoveSkill",
+        { skill: "release", destination_parent: "~/.neo/skills" },
+        "移动技能",
+        "release",
+        "~/.neo/skills",
+        "skill",
+      ],
+      ["AskUserQuestion", { questions: [] }, "询问用户", "", undefined, "question"],
+      ["TaskList", { active_only: true }, "查看后台任务", "", undefined, "todo"],
+      ["TaskOutput", { task_id: "task_1" }, "查看任务输出", "task_1", undefined, "todo"],
+      ["TaskStop", { task_id: "task_1" }, "停止后台任务", "task_1", undefined, "stop"],
+      ["TaskPause", { task_id: "task_1" }, "暂停后台任务", "task_1", undefined, "wait"],
+      ["TaskResume", { task_id: "task_1" }, "恢复后台任务", "task_1", undefined, "wait"],
+      ["TaskAnswer", { task_id: "task_1" }, "回答后台任务", "task_1", undefined, "message"],
+      ["EnterPlanMode", {}, "进入计划模式", "", undefined, "workflow"],
+      ["ExitPlanMode", {}, "退出计划模式", "", undefined, "workflow"],
       ["Delegate", { task: "检查样式" }, "派发子代理", "检查样式", undefined, "delegate"],
       ["DelegateGroup", { task: "并行检查" }, "派发子代理", "并行检查", undefined, "delegate"],
       ["DelegateSwarm", { task: "并行检查" }, "派发子代理", "并行检查", undefined, "swarm"],
+      ["ListDelegates", {}, "查看子代理", "", undefined, "delegate"],
       ["TodoList", {}, "更新任务清单", "", undefined, "todo"],
+      ["SetTodoList", {}, "更新任务清单", "", undefined, "todo"],
       ["WaitDelegate", { ids: ["agent_a", "agent_b"] }, "等待子代理", "agent_a, agent_b", undefined, "wait"],
+      ["InterruptDelegate", { agent_id: "agent_a" }, "停止子代理", "", undefined, "stop"],
+      ["MessageDelegate", { message: "继续", agent_id: "agent_a" }, "联系子代理", "继续", undefined, "message"],
+      ["Sleep", { reason: "等待构建", duration_seconds: 5 }, "等待", "等待构建", undefined, "wait"],
+      ["Workflow", { action: "run_saved", name: "nightly" }, "运行工作流", "nightly", undefined, "workflow"],
     ] as const;
 
     for (const [name, args, action, target, secondary, icon] of cases) {
@@ -69,6 +103,194 @@ describe("tool presentation", () => {
       secondary: "C:\\repo\\src\\",
       icon: "file",
     });
+  });
+});
+
+describe("transcript presentation", () => {
+  it("prioritizes failed and running states when summarizing read groups", () => {
+    const read = (id: string, status: ToolItem["status"]): ToolItem => ({
+      kind: "tool",
+      id,
+      name: "Read",
+      arguments: { path: `src/${id}.ts` },
+      status,
+      turn: 1,
+    });
+
+    expect(readGroupStatusForItems([read("done", "finished")])).toEqual({
+      status: "finished",
+      text: "已完成",
+    });
+    expect(readGroupStatusForItems([read("queued", "queued")])).toEqual({
+      status: "running",
+      text: "读取中",
+    });
+    expect(readGroupStatusForItems([read("running", "running"), read("done", "finished")])).toEqual({
+      status: "running",
+      text: "读取中",
+    });
+    expect(readGroupStatusForItems([read("done", "finished"), read("failed", "failed")])).toEqual({
+      status: "failed",
+      text: "部分失败",
+    });
+  });
+
+  it("hides delegated control tools when their card already carries the activity", () => {
+    const names = ["Delegate", "DelegateGroup", "DelegateSwarm", "WaitDelegate"];
+    const controls: ToolItem[] = names.map((name, index) => ({
+      kind: "tool",
+      id: `tool:control_${index}`,
+      name,
+      arguments: {},
+      status: "finished",
+      turn: 1,
+    }));
+    const delegateCard: TranscriptItem = {
+      kind: "delegate",
+      id: "delegate:agent_1",
+      agent: { id: "agent_1", display_name: "检查", state: "completed" },
+      finished: true,
+      turn: 1,
+    };
+    const items: TranscriptItem[] = [
+      ...controls,
+      {
+        kind: "tool",
+        id: "tool:read_1",
+        name: "Read",
+        arguments: { path: "src/app.ts" },
+        status: "finished",
+        turn: 1,
+      },
+      delegateCard,
+    ];
+
+    expect(presentationItems(items).map((item) => item.id)).toEqual([
+      "tool:read_1",
+      "delegate:agent_1",
+    ]);
+    expect(presentationItems(controls).map((item) => item.id)).toEqual(
+      controls.map((item) => item.id),
+    );
+    expect(presentationItems(
+      controls,
+      [
+        ...controls,
+        { kind: "question", id: "question:split", turn: 1, questions: [], resolved: false },
+        delegateCard,
+      ],
+    )).toEqual([]);
+    expect(processPresentationItems(
+      [controls[0]],
+      [...controls, { kind: "question", id: "question:split-2", turn: 1, questions: [], resolved: false }, delegateCard],
+    )).toEqual([]);
+    const failedControl: ToolItem = {
+      kind: "tool",
+      id: "tool:control_failed",
+      name: "WaitDelegate",
+      arguments: {},
+      status: "failed",
+      turn: 1,
+    };
+    expect(presentationItems([failedControl], [...controls, failedControl, delegateCard])).toEqual([]);
+    expect(presentationItems([failedControl])).toEqual([failedControl]);
+    const failedControls = names.map((name, index): ToolItem => ({
+      kind: "tool",
+      id: `tool:failed_${index}`,
+      name,
+      arguments: {},
+      status: "failed",
+      turn: 1,
+    }));
+    expect(presentationItems(failedControls, [...failedControls, delegateCard])).toEqual([]);
+    expect(presentationItems(failedControls).map((item) => item.id)).toEqual(
+      failedControls.map((item) => item.id),
+    );
+  });
+
+  it("uses the question row for active and completed AskUserQuestion calls", () => {
+    const ask = (id: string, status: ToolItem["status"]): ToolItem => ({
+      kind: "tool",
+      id,
+      name: "AskUserQuestion",
+      arguments: { questions: [] },
+      status,
+      turn: 1,
+    });
+    const items: TranscriptItem[] = [
+      ask("tool:question_running", "running"),
+      ask("tool:question_finished", "finished"),
+      ask("tool:question_failed", "failed"),
+      {
+        kind: "question",
+        id: "question:question_1",
+        turn: 1,
+        questions: [],
+        resolved: false,
+      },
+    ];
+
+    expect(presentationItems(items).map((item) => item.id)).toEqual([
+      "tool:question_failed",
+      "question:question_1",
+    ]);
+  });
+
+  it("groups only adjacent active reads from the same explicit turn", () => {
+    const read = (id: string, status: ToolItem["status"], turn?: number): ToolItem => ({
+      kind: "tool",
+      id,
+      name: "Read",
+      arguments: { path: `src/${id}.ts` },
+      status,
+      turn,
+    });
+    const items: TranscriptItem[] = [
+      read("read_1", "finished", 1),
+      read("read_2", "running", 1),
+      read("read_3", "finished", 1),
+      {
+        kind: "tool",
+        id: "edit_1",
+        name: "Edit",
+        arguments: { path: "src/app.ts", old: "a", new: "b" },
+        status: "finished",
+        turn: 1,
+      },
+      read("read_failed", "failed", 1),
+      read("read_after_failure", "running", 1),
+      read("read_after_failure_finished", "finished", 1),
+      read("read_turn_2", "finished", 2),
+      read("read_turn_3", "finished", 3),
+      read("read_unscoped_1", "finished"),
+      read("read_unscoped_2", "finished"),
+    ];
+
+    const labels = processPresentationItems(items).map((entry) =>
+      entry.kind === "read_group"
+        ? `group:${entry.items.map((item) => item.id).join(",")}`
+        : entry.item.id,
+    );
+    expect(labels).toEqual([
+      "group:read_1,read_2,read_3",
+      "edit_1",
+      "read_failed",
+      "group:read_after_failure,read_after_failure_finished",
+      "read_turn_2",
+      "read_turn_3",
+      "read_unscoped_1",
+      "read_unscoped_2",
+    ]);
+    const runningGroup = processPresentationItems(items).find(
+      (entry) => entry.kind === "read_group" && entry.items.some((item) => item.status === "running"),
+    );
+    expect(runningGroup?.kind).toBe("read_group");
+    if (runningGroup?.kind === "read_group") {
+      expect(readGroupStatusForItems(runningGroup.items)).toEqual({
+        status: "running",
+        text: "读取中",
+      });
+    }
   });
 });
 

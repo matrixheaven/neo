@@ -212,10 +212,10 @@ function Think({ sessionId, item }: { sessionId: string; item: ThinkingItem }) {
       onToggle={toggle}
       head={
         <>
+          {resultIcon(item.finished ? "finished" : "running")}
           {lineCaret()}
           <Brain size={14} aria-hidden />
           <span className="think-title">思考</span>
-          <span className="line-tail">{item.finished ? status : `${elapsedSecs}s`}</span>
         </>
       }
     >
@@ -266,7 +266,15 @@ type ToolIconName =
   | "wait"
   | "stop"
   | "message"
+  | "skill"
+  | "question"
+  | "workflow"
+  | "goal"
   | "unknown";
+
+function normalizedToolName(name: string): string {
+  return name.trim().toLowerCase();
+}
 
 function argumentText(args: unknown, fields: readonly string[]): string | null {
   if (!args || typeof args !== "object") return null;
@@ -302,8 +310,29 @@ function pathTarget(args: unknown): Pick<ToolPresentation, "target" | "secondary
   return path === null ? { target: "" } : pathPresentation(path);
 }
 
+function workflowPresentation(args: unknown): ToolPresentation {
+  const action = argumentText(args, ["action"]);
+  const target = argumentText(args, ["name", "workflow", "id"]) ?? "";
+  switch (action) {
+    case "list":
+    case "show":
+      return { action: "查看工作流", target, icon: "workflow" };
+    case "save":
+      return { action: "保存工作流", target, icon: "workflow" };
+    case "validate_inline":
+    case "validate_saved":
+      return { action: "校验工作流", target, icon: "workflow" };
+    case "run_inline":
+    case "run_saved":
+      return { action: "运行工作流", target, icon: "workflow" };
+    default:
+      return { action: "处理工作流", target, icon: "workflow" };
+  }
+}
+
 export function toolPresentation(name: string, args: unknown): ToolPresentation {
-  switch (name.trim().toLowerCase()) {
+  const toolName = normalizedToolName(name);
+  switch (toolName) {
     case "grep":
       return {
         action: "搜索",
@@ -324,6 +353,14 @@ export function toolPresentation(name: string, args: unknown): ToolPresentation 
       return { action: "读取", ...pathTarget(args), icon: "file" };
     case "readmediafile":
       return { action: "观察", ...pathTarget(args), icon: "media" };
+    case "skill":
+      return {
+        action: "使用技能",
+        target: argumentText(args, ["skill"]) ?? "",
+        icon: "skill",
+      };
+    case "askuserquestion":
+      return { action: "询问用户", target: "", icon: "question" };
     case "edit":
       return { action: "编辑", target: argumentText(args, ["path"]) ?? "", icon: "file-edit" };
     case "write":
@@ -337,6 +374,42 @@ export function toolPresentation(name: string, args: unknown): ToolPresentation 
         target: argumentText(args, ["command", "handle"]) ?? "",
         icon: "terminal",
       };
+    case "tasklist":
+      return { action: "查看后台任务", target: "", icon: "todo" };
+    case "taskoutput":
+      return {
+        action: "查看任务输出",
+        target: argumentText(args, ["task_id", "id"]) ?? "",
+        icon: "todo",
+      };
+    case "taskstop":
+      return {
+        action: "停止后台任务",
+        target: argumentText(args, ["task_id", "id"]) ?? "",
+        icon: "stop",
+      };
+    case "taskpause":
+      return {
+        action: "暂停后台任务",
+        target: argumentText(args, ["task_id", "id"]) ?? "",
+        icon: "wait",
+      };
+    case "taskresume":
+      return {
+        action: "恢复后台任务",
+        target: argumentText(args, ["task_id", "id"]) ?? "",
+        icon: "wait",
+      };
+    case "taskanswer":
+      return {
+        action: "回答后台任务",
+        target: argumentText(args, ["task_id", "id"]) ?? "",
+        icon: "message",
+      };
+    case "enterplanmode":
+      return { action: "进入计划模式", target: "", icon: "workflow" };
+    case "exitplanmode":
+      return { action: "退出计划模式", target: "", icon: "workflow" };
     case "delegate":
     case "delegategroup":
     case "delegateswarm":
@@ -344,7 +417,7 @@ export function toolPresentation(name: string, args: unknown): ToolPresentation 
       return {
         action: "派发子代理",
         target: argumentText(args, ["task", "prompt", "description", "name"]) ?? "",
-        icon: name.trim().toLowerCase() === "delegateswarm" ? "swarm" : "delegate",
+        icon: toolName === "delegateswarm" ? "swarm" : "delegate",
       };
     case "waitdelegate":
       return {
@@ -366,6 +439,61 @@ export function toolPresentation(name: string, args: unknown): ToolPresentation 
     case "todolist":
     case "settodolist":
       return { action: "更新任务清单", target: "", icon: "todo" };
+    case "sleep":
+      return {
+        action: "等待",
+        target: argumentText(args, ["reason", "duration_seconds"]) ?? "",
+        icon: "wait",
+      };
+    case "workflow":
+      return workflowPresentation(args);
+    case "startgoal":
+      return {
+        action: "开始目标",
+        target: argumentText(args, ["objective"]) ?? "",
+        icon: "goal",
+      };
+    case "exitgoalmode":
+      return {
+        action: "退出目标模式",
+        target: argumentText(args, ["objective"]) ?? "",
+        icon: "goal",
+      };
+    case "updategoalstatus":
+      return {
+        action: "更新目标状态",
+        target: argumentText(args, ["status", "reason"]) ?? "",
+        icon: "goal",
+      };
+    case "getgoalstatus":
+      return { action: "查看目标状态", target: "", icon: "goal" };
+    case "listskills":
+      return { action: "查看技能", target: "", icon: "skill" };
+    case "createskill":
+      return {
+        action: "创建技能",
+        target: argumentText(args, ["name", "skill"]) ?? "",
+        icon: "skill",
+      };
+    case "moveskill":
+      return {
+        action: "移动技能",
+        target: argumentText(args, ["name", "skill", "source"]) ?? "",
+        secondary: argumentText(args, ["destination_parent"]) ?? undefined,
+        icon: "skill",
+      };
+    case "summarizesessions":
+      return {
+        action: "整理会话",
+        target: argumentText(args, ["session_id", "days"]) ?? "",
+        icon: "message",
+      };
+    case "themedraft":
+      return {
+        action: "起草主题",
+        target: argumentText(args, ["name", "theme"]) ?? "",
+        icon: "skill",
+      };
     default:
       return { action: name, target: argumentsPreview(args), icon: "unknown" };
   }
@@ -399,13 +527,17 @@ function toolIcon(icon: ToolIconName) {
       return <CircleStop size={13} aria-hidden />;
     case "message":
       return <MessageCircle size={13} aria-hidden />;
+    case "skill":
+      return <Brain size={13} aria-hidden />;
+    case "question":
+      return <ShieldQuestion size={13} aria-hidden />;
+    case "workflow":
+      return <Workflow size={13} aria-hidden />;
+    case "goal":
+      return <Brain size={13} aria-hidden />;
     case "unknown":
       return <CircleHelp size={13} aria-hidden />;
   }
-}
-
-function isTerminalStatus(status: ToolStatus): boolean {
-  return status === "finished" || status === "failed";
 }
 
 function resultIcon(status: ToolStatus) {
@@ -424,12 +556,346 @@ function toolIconView(icon: ToolIconName) {
   );
 }
 
+function objectArgument(value: unknown): Record<string, unknown> | null {
+  return value !== null && typeof value === "object" && !Array.isArray(value)
+    ? value as Record<string, unknown>
+    : null;
+}
+
+function stringField(record: Record<string, unknown> | null, field: string): string | null {
+  const value = record?.[field];
+  return typeof value === "string" ? value : null;
+}
+
+function countField(record: Record<string, unknown>, field: string): number {
+  const value = record[field];
+  return typeof value === "number" && Number.isFinite(value) && value > 0
+    ? Math.floor(value)
+    : 0;
+}
+
+interface CommittedChange {
+  path: string;
+  added: number;
+  removed: number;
+  replacements: number;
+  operation: string | null;
+  diff: string | null;
+  content: string | null;
+}
+
+function committedChanges(item: ToolItem): CommittedChange[] {
+  const details = objectArgument(item.result?.details);
+  if (!details || !Array.isArray(details.changes)) return [];
+  const changes: CommittedChange[] = [];
+  for (const rawChange of details.changes) {
+    const change = objectArgument(rawChange);
+    if (
+      !change ||
+      (change.status !== "committed" && change.status !== "committed_unsynced") ||
+      typeof change.path !== "string" ||
+      change.path === ""
+    ) continue;
+    changes.push({
+      path: change.path,
+      added: countField(change, "added"),
+      removed: countField(change, "removed"),
+      replacements: countField(change, "replacements"),
+      operation: typeof change.operation === "string" ? change.operation : null,
+      diff: typeof change.diff === "string" && change.diff.trim() !== ""
+        ? change.diff
+        : null,
+      content: typeof change.content === "string" ? change.content : null,
+    });
+  }
+  return changes;
+}
+
+function changeSummary(kind: "edit" | "write", changes: CommittedChange[]): string {
+  return changes.map((change) => {
+    const action = kind === "edit"
+      ? (change.replacements > 0 ? `替换 ${change.replacements} 处` : "已编辑")
+      : change.operation === "created" ? "已创建" : "已写入";
+    const counts = [
+      change.added > 0 ? `+${change.added}` : null,
+      change.removed > 0 ? `−${change.removed}` : null,
+    ].filter((part): part is string => part !== null);
+    return [action, change.path, ...counts].join(" ");
+  }).join(" · ");
+}
+
+function ChangeRatio({ change }: { change: CommittedChange }) {
+  const total = change.added + change.removed;
+  const addedPercent = total === 0 ? 0 : (change.added / total) * 100;
+  const removedPercent = total === 0 ? 0 : (change.removed / total) * 100;
+  return (
+    <div className="tl-change-ratio-row">
+      <span className="tl-change-ratio-path tl-mono">{change.path}</span>
+      <span
+        className="tl-change-ratio"
+        role="img"
+        aria-label={`新增 ${change.added} 行，删除 ${change.removed} 行`}
+      >
+        <span
+          className="tl-change-ratio-add"
+          style={{ width: `${addedPercent}%` }}
+        />
+        <span
+          className="tl-change-ratio-remove"
+          style={{ width: `${removedPercent}%` }}
+        />
+      </span>
+      <span className="tl-change-ratio-counts" aria-hidden>
+        <span className="tl-change-ratio-added">+{change.added}</span>
+        <span className="tl-change-ratio-removed">−{change.removed}</span>
+      </span>
+    </div>
+  );
+}
+
+type LocalDiffLineKind = "add" | "del" | "context" | "separator";
+
+interface LocalDiffLine {
+  content: string;
+  kind: LocalDiffLineKind;
+}
+
+function editDiffHeaderMatches(line: string, marker: "---" | "+++", path: string): boolean {
+  if (!line.startsWith(`${marker} `)) return false;
+  const headerPath = line.slice(marker.length + 1).trim().split("\t", 1)[0] ?? "";
+  const normalizedPath = path.split("\\").join("/");
+  return headerPath === "/dev/null" || headerPath === normalizedPath ||
+    headerPath === `a/${normalizedPath}` || headerPath === `b/${normalizedPath}`;
+}
+
+function localEditDiffLines(path: string, diff: string): LocalDiffLine[] {
+  const sourceLines = diff.split(/\r?\n/);
+  if (sourceLines[sourceLines.length - 1] === "") sourceLines.pop();
+  const hasFileHeaders = sourceLines.length >= 3 &&
+    editDiffHeaderMatches(sourceLines[0] ?? "", "---", path) &&
+    editDiffHeaderMatches(sourceLines[1] ?? "", "+++", path) &&
+    (sourceLines[2] ?? "").startsWith("@@");
+  return sourceLines.slice(hasFileHeaders ? 2 : 0).map((line) => {
+    if (line.startsWith("@@")) return { content: "...", kind: "separator" };
+    if (line.startsWith("+")) return { content: line, kind: "add" };
+    if (line.startsWith("-")) return { content: line, kind: "del" };
+    return { content: line, kind: "context" };
+  });
+}
+
+function LocalEditDiff({ path, diff }: { path: string; diff: string }) {
+  const lines = localEditDiffLines(path, diff);
+  return (
+    <pre className="ft-local-diff tl-local-diff" aria-label={`${path} 的局部差异`}>
+      {lines.map((line, index) => (
+        <span className={`ft-diff-${line.kind}`} key={`${index}:${line.content}`}>
+          {line.content || " "}
+        </span>
+      ))}
+    </pre>
+  );
+}
+
+interface TodoEntry {
+  title: string;
+  status: "pending" | "in_progress" | "done";
+}
+
+function todoEntries(value: unknown): TodoEntry[] | null {
+  if (!Array.isArray(value)) return null;
+  const entries: TodoEntry[] = [];
+  for (const rawEntry of value) {
+    const entry = objectArgument(rawEntry);
+    const title = stringField(entry, "title");
+    const status = stringField(entry, "status");
+    if (
+      title === null ||
+      (status !== "pending" && status !== "in_progress" && status !== "done")
+    ) return null;
+    entries.push({ title, status });
+  }
+  return entries;
+}
+
+function todoEntriesFor(item: ToolItem): TodoEntry[] | null {
+  const result = objectArgument(item.result?.details);
+  const completed = todoEntries(result?.todos);
+  if (completed !== null) return completed;
+  return todoEntries(objectArgument(item.arguments)?.todos);
+}
+
+function todoStatusText(status: TodoEntry["status"]): string {
+  switch (status) {
+    case "pending":
+      return "待处理";
+    case "in_progress":
+      return "进行中";
+    case "done":
+      return "已完成";
+  }
+}
+
+function TodoProgress({ entries, compact = false }: { entries: TodoEntry[]; compact?: boolean }) {
+  const completed = entries.filter((entry) => entry.status === "done").length;
+  const total = entries.length;
+  const progress = total === 0 ? 0 : Math.round((completed / total) * 100);
+  return (
+    <span
+      className={`tl-todo-progress${compact ? " compact" : ""}`}
+      role="progressbar"
+      aria-label={`任务进度：${completed}/${total}`}
+      aria-valuemin={0}
+      aria-valuemax={total}
+      aria-valuenow={completed}
+    >
+      <span className="tl-todo-progress-count">
+        {compact ? `${completed}/${total}` : `已完成 ${completed}/${total}`}
+      </span>
+      <span className="tl-todo-progress-track" aria-hidden>
+        <span className="tl-todo-progress-fill" style={{ width: `${progress}%` }} />
+      </span>
+    </span>
+  );
+}
+
+function ToolResultView({ item, includeSuccess = true }: { item: ToolItem; includeSuccess?: boolean }) {
+  return (
+    <>
+      {item.partialResult && item.status === "running" ? (
+        <OutputBlock text={item.partialResult.content} />
+      ) : null}
+      {item.result && (includeSuccess || item.result.is_error) ? (
+        <OutputBlock
+          text={
+            item.result.content || (item.result.is_error ? "（错误，无内容）" : "（无内容）")
+          }
+        />
+      ) : null}
+    </>
+  );
+}
+
+function ToolMeta({ item, status }: { item: ToolItem; status: string }) {
+  return (
+    <p className="tl-meta">
+      状态：{status}
+      {item.result?.is_error ? " · 结果标记为错误" : ""}
+    </p>
+  );
+}
+
+function showsRawArguments(name: string): boolean {
+  return toolPresentation(name, undefined).icon === "unknown";
+}
+
+function GenericToolDetails({ item, echo, status }: { item: ToolItem; echo: string | null; status: string }) {
+  return (
+    <>
+      {echo !== null ? <div className="cmd-echo">$ {echo}</div> : null}
+      {item.arguments !== undefined && showsRawArguments(item.name) ? (
+        <CodeBlock code={argumentsPreview(item.arguments)} language="参数" />
+      ) : null}
+      <ToolResultView item={item} />
+      <ToolMeta item={item} status={status} />
+    </>
+  );
+}
+
+function SkillToolDetails({ item, status }: { item: ToolItem; status: string }) {
+  const skillName = argumentText(item.arguments, ["skill"]) ?? "未命名技能";
+  return (
+    <>
+      <p className="tl-meta">已调用技能：{skillName}</p>
+      {item.result?.is_error ? <p className="tl-meta">技能调用失败</p> : null}
+      <ToolMeta item={item} status={status} />
+    </>
+  );
+}
+
+function FileToolDetails({ item, status, kind }: {
+  item: ToolItem;
+  status: string;
+  kind: "edit" | "write";
+}) {
+  const argumentsRecord = objectArgument(item.arguments);
+  const argumentPath = stringField(argumentsRecord, "path");
+  const argumentContent = kind === "write"
+    ? stringField(argumentsRecord, "content")
+    : null;
+  const changes = committedChanges(item);
+  const hasLocalDiff = kind === "edit" && changes.some((change) => change.diff !== null);
+  const resultContent = kind === "write"
+    ? changes.find((change) => change.operation === "created" && change.content !== null)?.content ?? null
+    : null;
+  const content = argumentContent ?? resultContent;
+  const contentPath = argumentPath ?? changes.find((change) => change.content !== null)?.path ?? "文件";
+  if (changes.length === 0 && content === null) {
+    return <GenericToolDetails item={item} echo={commandEchoOf(item.arguments)} status={status} />;
+  }
+  return (
+    <>
+      {hasLocalDiff ? changes.map((change) => change.diff !== null ? (
+        <div className="tl-change-diff" key={change.path}>
+          <p className="tl-meta">局部差异：{change.path}</p>
+          <LocalEditDiff path={change.path} diff={change.diff} />
+        </div>
+      ) : null) : null}
+      {kind === "write" && content !== null ? (
+        <div className="tl-change-content" key={`content:${contentPath}`}>
+          <p className="tl-meta">文件内容：{contentPath}</p>
+          <CodeBlock code={content} language={contentPath} />
+        </div>
+      ) : null}
+      {changes.length > 0 ? <p className="tl-meta">{changeSummary(kind, changes)}</p> : null}
+      {changes.length > 0 ? (
+        <div className="tl-change-ratios">
+          {changes.map((change) => <ChangeRatio key={`ratio:${change.path}`} change={change} />)}
+        </div>
+      ) : null}
+      <ToolResultView item={item} includeSuccess={false} />
+      <ToolMeta item={item} status={status} />
+    </>
+  );
+}
+
+function TodoToolDetails({ item, status }: { item: ToolItem; status: string }) {
+  const entries = todoEntriesFor(item);
+  if (entries === null) {
+    return <GenericToolDetails item={item} echo={commandEchoOf(item.arguments)} status={status} />;
+  }
+  return (
+    <>
+      <TodoProgress entries={entries} />
+      {entries.length === 0 ? <p className="tl-meta">任务清单已清空</p> : (
+        <ul className="tl-todos">
+          {entries.map((entry, index) => (
+            <li className={`tl-todo status-${entry.status}`} key={`${index}:${entry.title}`}>
+              <span className="tl-todo-status">{todoStatusText(entry.status)}</span>
+              <span>{entry.title}</span>
+            </li>
+          ))}
+        </ul>
+      )}
+      <ToolResultView item={item} includeSuccess={false} />
+      <ToolMeta item={item} status={status} />
+    </>
+  );
+}
+
 function Tool({ sessionId, item }: { sessionId: string; item: ToolItem }) {
   const [open, toggle] = useLineExpanded(sessionId, item.id, false);
   const status = toolStatusText(item);
   const echo = commandEchoOf(item.arguments);
   const presentation = toolPresentation(item.name, item.arguments);
-  const summary = [presentation.target, presentation.secondary].filter(Boolean).join(" · ");
+  const toolName = normalizedToolName(item.name);
+  const isTodoList = toolName === "todolist" || toolName === "settodolist";
+  const todoEntries = isTodoList ? todoEntriesFor(item) : null;
+  const completedTodos = todoEntries?.filter((entry) => entry.status === "done").length ?? 0;
+  const summary = [
+    todoEntries ? `${completedTodos}/${todoEntries.length} 已完成` : null,
+    presentation.target,
+    presentation.secondary,
+  ].filter(Boolean).join(" · ");
   const heading = summary === ""
     ? presentation.action
     : `${presentation.action} ${summary}`;
@@ -446,39 +912,65 @@ function Tool({ sessionId, item }: { sessionId: string; item: ToolItem }) {
           <span className="tl-name">{presentation.action}</span>
           {presentation.target ? <span className="tl-mono">{presentation.target}</span> : null}
           {presentation.secondary ? <span className="tl-subtle">{presentation.secondary}</span> : null}
+          {todoEntries ? <TodoProgress entries={todoEntries} compact /> : null}
           {lineCaret()}
-          {!isTerminalStatus(item.status) ? (
-            <span className="line-tail">
-              <span className="tl-status" role="status">
-                {status}
-              </span>
-            </span>
-          ) : null}
         </>
       }
     >
       <div className="tl-detail">
-        {echo !== null ? <div className="cmd-echo">$ {echo}</div> : null}
-        {item.arguments !== undefined ? (
-          <CodeBlock code={argumentsPreview(item.arguments)} language="参数" />
-        ) : null}
-        {item.partialResult && item.status === "running" ? (
-          <OutputBlock text={item.partialResult.content} />
-        ) : null}
-        {item.result ? (
-          <OutputBlock
-            text={
-              item.result.content || (item.result.is_error ? "（错误，无内容）" : "（无内容）")
-            }
-          />
-        ) : null}
-        <p className="tl-meta">
-          状态：{status}
-          {item.result?.is_error ? " · 结果标记为错误" : ""}
-        </p>
+        {toolName === "skill" ? (
+          <SkillToolDetails item={item} status={status} />
+        ) : toolName === "edit" ? (
+          <FileToolDetails item={item} status={status} kind="edit" />
+        ) : toolName === "write" ? (
+          <FileToolDetails item={item} status={status} kind="write" />
+        ) : isTodoList ? (
+          <TodoToolDetails item={item} status={status} />
+        ) : (
+          <GenericToolDetails item={item} echo={echo} status={status} />
+        )}
         {item.output ? (
           <FullOutput sessionId={sessionId} itemId={item.id} outputRef={item.output} />
         ) : null}
+      </div>
+    </Line>
+  );
+}
+
+/** Adjacent, completed reads are one user-visible operation until expanded. */
+export function readGroupStatusForItems(items: ToolItem[]): { status: ToolStatus; text: string } {
+  if (items.some((item) => item.status === "failed")) {
+    return { status: "failed", text: "部分失败" };
+  }
+  if (items.some((item) => item.status !== "finished")) {
+    return { status: "running", text: "读取中" };
+  }
+  return { status: "finished", text: "已完成" };
+}
+
+export function ReadGroup({ sessionId, items }: { sessionId: string; items: ToolItem[] }) {
+  const groupId = `read-group:${items.map((item) => item.id).join("|")}`;
+  const [open, toggle] = useLineExpanded(sessionId, groupId, false);
+  const count = items.length;
+  const groupStatus = readGroupStatusForItems(items);
+  return (
+    <Line
+      className={`tool-line kind-read-group status-${groupStatus.status}`}
+      label={`连续读取 ${count} 个文件，状态：${groupStatus.text}`}
+      open={open}
+      onToggle={toggle}
+      head={
+        <>
+          {resultIcon(groupStatus.status)}
+          {toolIconView("file")}
+          <span className="tl-name">连续读取</span>
+          <span className="tl-mono">{count} 个文件</span>
+          {lineCaret()}
+        </>
+      }
+    >
+      <div className="tl-detail">
+        {items.map((item) => <Tool key={item.id} sessionId={sessionId} item={item} />)}
       </div>
     </Line>
   );
@@ -507,13 +999,6 @@ function Shell({ sessionId, item }: { sessionId: string; item: ShellItem }) {
           <span className="tl-name">运行</span>
           <span className="tl-mono">{item.command}</span>
           {lineCaret()}
-          {!isTerminalStatus(item.status) ? (
-            <span className="line-tail">
-              <span className="tl-status" role="status">
-                {status}
-              </span>
-            </span>
-          ) : null}
         </>
       }
     >
@@ -555,13 +1040,6 @@ function Terminal({ sessionId, item }: { sessionId: string; item: TerminalItem }
           <span className="tl-name">启动终端</span>
           <span className="tl-mono">{item.command ?? item.handle}</span>
           {lineCaret()}
-          {!item.finished ? (
-            <span className="line-tail">
-              <span className="tl-status" role="status">
-                {status}
-              </span>
-            </span>
-          ) : null}
         </>
       }
     >
@@ -599,17 +1077,13 @@ function WorkflowLine({ sessionId, item }: { sessionId: string; item: WorkflowIt
       onToggle={toggle}
       head={
         <>
-          {lineCaret()}
+          {resultIcon(item.finished ? "finished" : "running")}
           <span className="tl-ic">
             <Workflow size={13} aria-hidden />
           </span>
           <span className="tl-name">{workflow.title}</span>
           <span className="tl-mono">{workflow.latest_log_summary ?? ""}</span>
-          <span className="line-tail">
-            <span className="tl-status" role="status">
-              {status}
-            </span>
-          </span>
+          {lineCaret()}
         </>
       }
     >
@@ -798,7 +1272,7 @@ export function agentStateText(state: string): string {
   }
 }
 
-/** Status pill of the agent rows: text plus an icon — never color alone. */
+/** Status pill used by the agent detail panel: text plus an icon. */
 export function AgentStatePill({ state }: { state: string }) {
   const icon =
     state === "running" ? (
@@ -816,6 +1290,28 @@ export function AgentStatePill({ state }: { state: string }) {
       {agentStateText(state)}
     </span>
   );
+}
+
+function agentResultStatus(state: string): ToolStatus {
+  switch (state) {
+    case "running":
+      return "running";
+    case "queued":
+      return "queued";
+    case "completed":
+      return "finished";
+    case "failed":
+    case "cancelled":
+    case "aborted":
+    case "timed_out":
+      return "failed";
+    default:
+      return "running";
+  }
+}
+
+function agentResultIcon(state: string) {
+  return resultIcon(agentResultStatus(state));
 }
 
 /** One agent-line: pulse dot while running + icon + title + dim progress
@@ -837,23 +1333,27 @@ function AgentRow({
     (elapsed !== null ? ` · ${elapsed}` : "") +
     (agent.terminal_reason ? ` · ${agent.terminal_reason}` : "");
   return (
-    <div className={`line agent-line state-${agent.state} ${className}`}>
+    <div
+      className={`line agent-line state-${agent.state} status-${agentResultStatus(agent.state)} ${className}`}
+    >
       <button
         type="button"
         className="line-head"
         aria-label={`查看子代理详情：${title}，状态：${status}`}
         onClick={() => actions.openAgentPanel(sessionId, agent)}
       >
+        {agentResultIcon(agent.state)}
         {agent.state === "running" ? <span className="pulse-dot" aria-hidden /> : null}
         <span className="tl-ic">
           <Bot size={13} aria-hidden />
         </span>
         <span className="tl-name">{title}</span>
         <span className="tl-mono">{agent.latest_text ?? ""}</span>
-        <span className="line-tail">
-          {elapsed !== null ? <span className="agent-elapsed">{elapsed}</span> : null}
-          <AgentStatePill state={agent.state} />
-        </span>
+        {elapsed !== null ? (
+          <span className="line-tail">
+            <span className="agent-elapsed">{elapsed}</span>
+          </span>
+        ) : null}
       </button>
     </div>
   );
@@ -872,12 +1372,13 @@ function SwarmBlock({ sessionId, item }: { sessionId: string; item: SwarmItem })
   const percent = aggregate.total > 0 ? Math.round((settled / aggregate.total) * 100) : 0;
   return (
     <Line
-      className={`swarm-block state-${swarm.state}`}
+      className={`swarm-block state-${swarm.state} status-${agentResultStatus(swarm.state)}`}
       label={`并行子代理 ${swarm.description}，状态：${agentStateText(swarm.state)}，完成 ${aggregate.completed}/${aggregate.total}`}
       open={open}
       onToggle={toggle}
       head={
         <>
+          {agentResultIcon(swarm.state)}
           {lineCaret()}
           <span className="tl-ic">
             <Network size={13} aria-hidden />
@@ -894,10 +1395,9 @@ function SwarmBlock({ sessionId, item }: { sessionId: string; item: SwarmItem })
             <span className="swarm-bar-fill" style={{ width: `${percent}%` }} />
           </span>
           <span className="line-tail">
-            <span className="tl-status" role="status">
+            <span className="swarm-count" role="status">
               完成 {aggregate.completed}/{aggregate.total}
             </span>
-            <AgentStatePill state={swarm.state} />
           </span>
         </>
       }

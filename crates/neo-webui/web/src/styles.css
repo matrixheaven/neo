@@ -874,6 +874,14 @@ html.resizing .transcript-scroll * {
   color: var(--ok);
 }
 
+.status-running .tl-result-ic {
+  color: var(--accent);
+}
+
+.status-queued .tl-result-ic {
+  color: var(--text-faint);
+}
+
 .status-failed .tl-result-ic,
 .status-failed .tl-status {
   color: var(--danger);
@@ -918,6 +926,13 @@ html.resizing .transcript-scroll * {
   white-space: nowrap;
 }
 
+.swarm-count {
+  flex: none;
+  color: var(--text-faint);
+  font-size: var(--font-size-micro);
+  white-space: nowrap;
+}
+
 .status-running .tl-status {
   color: var(--accent);
   border-color: var(--accent-dim);
@@ -950,6 +965,138 @@ html.resizing .transcript-scroll * {
   margin: 0;
   font-size: var(--font-size-micro);
   color: var(--text-faint);
+}
+
+.tl-change-diff {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  min-width: 0;
+}
+
+.tl-change-ratios {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+}
+
+.tl-change-ratio-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+}
+
+.tl-change-ratio-path {
+  flex: 0 1 38%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.tl-change-ratio {
+  display: flex;
+  flex: 1 1 96px;
+  min-width: 72px;
+  height: 5px;
+  overflow: hidden;
+  border-radius: 3px;
+  background: var(--line);
+}
+
+.tl-change-ratio-counts {
+  display: inline-flex;
+  flex: none;
+  gap: 5px;
+  font-family: ui-monospace, "SF Mono", Menlo, Consolas, "Courier New", monospace;
+  font-size: var(--font-size-micro);
+}
+
+.tl-change-ratio-added {
+  color: var(--ok);
+}
+
+.tl-change-ratio-removed {
+  color: var(--danger);
+}
+
+.tl-change-ratio-add {
+  background: var(--ok);
+}
+
+.tl-change-ratio-remove {
+  background: var(--danger);
+}
+
+.tl-todo-progress {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+  color: var(--text-faint);
+  font-size: var(--font-size-micro);
+}
+
+.tl-todo-progress.compact {
+  flex: none;
+  gap: 5px;
+}
+
+.tl-todo-progress-count {
+  flex: none;
+  white-space: nowrap;
+}
+
+.tl-todo-progress-track {
+  display: inline-flex;
+  width: 72px;
+  height: 5px;
+  overflow: hidden;
+  border-radius: 3px;
+  background: var(--line);
+}
+
+.tl-todo-progress.compact .tl-todo-progress-track {
+  width: 48px;
+}
+
+.tl-todo-progress-fill {
+  height: 100%;
+  background: var(--ok);
+  transition: width var(--duration-base) var(--ease-out);
+}
+
+.tl-todos {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.tl-todo {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  min-width: 0;
+  color: var(--text-dim);
+  font-size: var(--font-size-aux);
+}
+
+.tl-todo-status {
+  flex: none;
+  color: var(--text-faint);
+  font-size: var(--font-size-micro);
+}
+
+.tl-todo.status-in_progress .tl-todo-status {
+  color: var(--accent);
+}
+
+.tl-todo.status-done,
+.tl-todo.status-done .tl-todo-status {
+  color: var(--ok);
 }
 
 /* TurnFold: a finished turn's process rows behind one summary line */
@@ -1021,27 +1168,70 @@ html.resizing .transcript-scroll * {
   padding: 0;
   display: flex;
   flex-direction: column;
-  gap: 2px;
 }
 
 .ft-changes {
   display: flex;
   flex-direction: column;
-  gap: 3px;
+  overflow: hidden;
+  border: 1px solid var(--line-strong);
+  border-radius: 6px;
+  background: var(--surface);
 }
 
 .ft-summary {
-  display: inline-flex;
-  align-items: baseline;
+  display: flex;
+  align-items: center;
   gap: 6px;
+  min-height: 32px;
+  padding: 7px 10px;
+  border-bottom: 1px solid var(--line);
   color: var(--text-faint);
   font-size: var(--font-size-micro);
+}
+
+.ft-summary-icon {
+  flex: none;
+  color: var(--accent);
+}
+
+.ft-summary-title {
+  min-width: 0;
+  overflow: hidden;
+  color: var(--text);
+  font-weight: 600;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.ft-summary-ratio {
+  display: inline-flex;
+  flex: none;
+  width: 38px;
+  height: 3px;
+  margin-left: auto;
+  overflow: hidden;
+  border-radius: var(--radius-pill);
+  background: var(--line);
+}
+
+.ft-summary-ratio-add {
+  background: var(--ok);
+}
+
+.ft-summary-ratio-del {
+  background: var(--danger);
 }
 
 .ft-file {
   display: flex;
   flex-direction: column;
   font-size: var(--font-size-aux);
+  scroll-margin-block-end: 260px;
+}
+
+.ft-file + .ft-file {
+  border-top: 1px solid var(--line);
 }
 
 .ft-file-head {
@@ -1050,7 +1240,8 @@ html.resizing .transcript-scroll * {
   display: flex;
   align-items: baseline;
   gap: 6px;
-  padding: 1px 0;
+  min-height: 30px;
+  padding: 5px 10px;
   border: 0;
   background: transparent;
   color: inherit;
@@ -1060,6 +1251,11 @@ html.resizing .transcript-scroll * {
 
 button.ft-file-head {
   cursor: pointer;
+}
+
+button.ft-file-head:hover,
+button.ft-file-head:focus-visible {
+  background: var(--surface-raised);
 }
 
 .ft-file-caret {
@@ -1083,6 +1279,15 @@ button.ft-file-head {
   min-width: 0;
 }
 
+.ft-directory {
+  color: var(--text-faint);
+}
+
+.ft-basename {
+  color: var(--text);
+  font-weight: 600;
+}
+
 .ft-diff {
   flex: none;
   display: inline-flex;
@@ -1100,14 +1305,16 @@ button.ft-file-head {
 
 .ft-file-preview {
   min-width: 0;
-  margin: 1px 0 2px 19px;
+  padding: 0 10px 8px 29px;
+  scroll-margin-block-end: 260px;
 }
 
 .ft-local-diff {
   margin: 0;
   padding: 5px 8px;
-  overflow: auto;
-  border-left: 2px solid var(--line-strong);
+  overflow-x: auto;
+  border: 1px solid var(--line);
+  border-radius: 4px;
   background: var(--surface-raised);
   color: var(--text-dim);
   font-family: ui-monospace, "SF Mono", Menlo, Consolas, "Courier New", monospace;
@@ -1122,26 +1329,40 @@ button.ft-file-head {
 
 .ft-diff-add {
   color: var(--ok);
+  background: color-mix(in srgb, var(--ok) 12%, transparent);
 }
 
 .ft-diff-del {
   color: var(--danger);
+  background: color-mix(in srgb, var(--danger) 12%, transparent);
 }
 
-.ft-diff-hunk,
+.ft-diff-separator,
 .ft-diff-omitted {
   color: var(--accent);
 }
 
+.ft-diff-empty {
+  color: var(--text-faint);
+}
+
 .ft-more {
-  align-self: flex-start;
-  padding: 1px 0;
+  width: 100%;
+  min-height: 30px;
+  padding: 5px 10px;
   border: 0;
+  border-top: 1px solid var(--line);
   background: transparent;
   color: var(--accent);
   font: inherit;
   font-size: var(--font-size-micro);
+  text-align: left;
   cursor: pointer;
+}
+
+.ft-more:hover,
+.ft-more:focus-visible {
+  background: var(--surface-raised);
 }
 
 .answer-ft .copy-button {

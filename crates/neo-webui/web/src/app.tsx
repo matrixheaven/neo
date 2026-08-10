@@ -71,9 +71,7 @@ export function App() {
   const sessionId = state.selectedSessionId;
   const selectedSession = sessionId === null ? undefined : state.sessions[sessionId];
   const connectionBannerState =
-    state.connection === "reconnecting" &&
-    selectedSession?.streamId === null &&
-    !selectedSession.resyncNeeded
+    selectedSession?.streamId === null
       ? "connecting"
       : state.connection;
 

@@ -203,6 +203,9 @@ describe("transcript redesign rows", () => {
     const bar = await screen.findByRole("button", { name: /思考，状态：思考中/ });
     expect(bar.getAttribute("aria-expanded")).toBe("true");
     expect(container.querySelector(".think.live .think-title")).not.toBeNull();
+    const runningLine = bar.closest(".think") as HTMLElement;
+    expect(runningLine.querySelector('[data-status-icon="running"]')).not.toBeNull();
+    expect(runningLine.querySelector(".line-tail")).toBeNull();
     await screen.findByText("实时思考内容");
 
     emit({ ThinkingFinished: { turn: 2, redacted: false } });
@@ -213,6 +216,77 @@ describe("transcript redesign rows", () => {
     expect(
       within(line).getByRole("button", { name: /思考，状态：已完成/ }).getAttribute("aria-expanded"),
     ).toBe("false");
+    expect(line.querySelector('[data-status-icon="finished"]')).not.toBeNull();
+    expect(line.querySelector(".line-tail")).toBeNull();
+  });
+
+  it("shows workflow state with a left icon and no trailing capsule", async () => {
+    const { socket } = await openSession1();
+    const emit = (event: unknown, sequence: number) => {
+      socket.emit({
+        type: "session_event",
+        stream_id: fixture.stream_id,
+        session_id: "session_0001",
+        sequence,
+        event: event as never,
+      });
+    };
+
+    emit(
+      {
+        WorkflowUpdated: {
+          turn: 2,
+          workflow: {
+            id: "wf_session_01",
+            title: "运行测试",
+            state: "running",
+            current_phase: "executing",
+            started_at_ms: 1723000002000,
+            updated_at_ms: 1723000002500,
+            latest_log_summary: "执行行为测试",
+          },
+        },
+      },
+      9,
+    );
+    const running = await screen.findByRole("button", {
+      name: /工作流 运行测试，状态：运行中 · executing/,
+    });
+    const runningLine = running.closest(".kind-workflow") as HTMLElement;
+    expect(runningLine.querySelector('[data-status-icon="running"]')).not.toBeNull();
+    expect(runningLine.querySelector(".line-tail")).toBeNull();
+    expect(runningLine.querySelector(".tl-status")).toBeNull();
+    const runningHead = runningLine.querySelector(".line-head") as HTMLElement;
+    const runningChildren = [...runningHead.children];
+    expect(runningChildren.indexOf(runningHead.querySelector(".line-caret") as Element)).toBeGreaterThan(
+      runningChildren.indexOf(runningHead.querySelector(".tl-mono") as Element),
+    );
+
+    emit(
+      {
+        WorkflowFinished: {
+          turn: 2,
+          workflow: {
+            id: "wf_session_01",
+            title: "运行测试",
+            state: "completed",
+            started_at_ms: 1723000002000,
+            updated_at_ms: 1723000004000,
+            latest_log_summary: "执行行为测试",
+            terminal_reason: "completed",
+          },
+        },
+      },
+      10,
+    );
+    const finished = await screen.findByRole("button", {
+      name: /工作流 运行测试，状态：已完成（completed）/,
+    });
+    const finishedLine = finished.closest(".kind-workflow") as HTMLElement;
+    expect(finishedLine.querySelector('[data-status-icon="finished"]')).not.toBeNull();
+    expect(finishedLine.querySelector('[data-status-icon="running"]')).toBeNull();
+    expect(finishedLine.querySelector(".line-tail")).toBeNull();
+    expect(finishedLine.querySelector(".tl-status")).toBeNull();
   });
 
   it("respects a manual collapse choice across the stream finish", async () => {
@@ -246,6 +320,52 @@ describe("transcript redesign rows", () => {
     ).toBe("false");
   });
 
+  it("keeps completed same-turn thinking blocks independently expandable", async () => {
+    const user = userEvent.setup();
+    const { socket } = await openSession1();
+    let sequence = 9;
+    const emit = (event: unknown) => {
+      socket.emit({
+        type: "session_event",
+        stream_id: fixture.stream_id,
+        session_id: "session_0001",
+        sequence: sequence++,
+        event: event as never,
+      });
+    };
+
+    emit({ MessageAppended: { message: { User: { content: [{ Text: { text: "说明过程" } }] } } } });
+    emit({ ThinkingStarted: { turn: 2, id: "reasoning" } });
+    emit({ ThinkingDelta: { turn: 2, text: "第一段独立思考" } });
+    emit({ ThinkingFinished: { turn: 2, redacted: false } });
+    emit({ ThinkingStarted: { turn: 2, id: "reasoning" } });
+    emit({ ThinkingDelta: { turn: 2, text: "第二段独立思考" } });
+    emit({ ThinkingFinished: { turn: 2, redacted: false } });
+    emit({ MessageStarted: { turn: 2, id: "thought_answer" } });
+    emit({ TextDelta: { turn: 2, text: "思考后的回答" } });
+    emit({ MessageFinished: { turn: 2, id: "thought_answer", stop_reason: "EndTurn" } });
+
+    const answer = await screen.findByText("思考后的回答");
+    const group = answer.closest(".a-msg") as HTMLElement;
+    const fold = group.querySelector(".turn-fold") as HTMLElement;
+    expect(fold).not.toBeNull();
+    expect(fold.className).not.toContain("open");
+    await user.click(within(fold).getByRole("button", { name: /展开工作过程/ }));
+    expect(fold.className).toContain("open");
+
+    const first = (await within(fold).findByText("第一段独立思考")).closest(".think") as HTMLElement;
+    const second = (await within(fold).findByText("第二段独立思考")).closest(".think") as HTMLElement;
+    expect(first).not.toBe(second);
+    expect(within(first).getByRole("button", { name: /展开思考，状态：已完成/ })).toHaveProperty(
+      "ariaExpanded",
+      "false",
+    );
+    const secondButton = within(second).getByRole("button", { name: /展开思考，状态：已完成/ });
+    await user.click(secondButton);
+    expect(first.className).not.toContain("open");
+    expect(second.className).toContain("open");
+  });
+
   it("shows the command echo and status metadata in the expanded tool line", async () => {
     const user = userEvent.setup();
     const { socket } = await openSession1();
@@ -258,6 +378,288 @@ describe("transcript redesign rows", () => {
     // Command echo in mono, then the status metadata line.
     expect(within(line).getByText("$ cargo test -p neo-webui")).toBeTruthy();
     expect(within(line).getByText(/状态：已完成/)).toBeTruthy();
+    expect(line.querySelector(".tl-status")).toBeNull();
+    expect(line.querySelector('[data-status-icon="finished"]')).not.toBeNull();
+  });
+
+  it("uses semantic details for Skill and AskUserQuestion instead of parameter JSON", async () => {
+    const user = userEvent.setup();
+    const { socket } = await openSession1();
+    let sequence = 9;
+    const emit = (event: unknown) => {
+      socket.emit({
+        type: "session_event",
+        stream_id: fixture.stream_id,
+        session_id: "session_0001",
+        sequence: sequence++,
+        event: event as never,
+      });
+    };
+
+    emit({
+      ToolExecutionStarted: {
+        turn: 2,
+        id: "tool_skill_semantic",
+        name: "Skill",
+        arguments: { skill: "release", arguments: { secret: "不要显示" } },
+      },
+    });
+    emit({
+      ToolExecutionFinished: {
+        turn: 2,
+        id: "tool_skill_semantic",
+        name: "Skill",
+        result: { content: "技能已启用", is_error: false },
+      },
+    });
+    emit({
+      ToolExecutionStarted: {
+        turn: 2,
+        id: "tool_question_semantic",
+        name: "AskUserQuestion",
+        arguments: { questions: [{ question: "不要显示的问题" }] },
+      },
+    });
+    emit({
+      ToolExecutionFinished: {
+        turn: 2,
+        id: "tool_question_semantic",
+        name: "AskUserQuestion",
+        result: { content: "提问失败", is_error: true },
+      },
+    });
+
+    const skillButton = await screen.findByRole("button", { name: /使用技能 release/ });
+    await user.click(skillButton);
+    const skillLine = skillButton.closest(".tool-line") as HTMLElement;
+    expect(within(skillLine).getByText("已调用技能：release")).toBeTruthy();
+    expect(within(skillLine).queryByText("技能已启用")).toBeNull();
+    expect(within(skillLine).queryByText("不要显示")).toBeNull();
+
+    const questionButton = await screen.findByRole("button", { name: /询问用户/ });
+    await user.click(questionButton);
+    const questionLine = questionButton.closest(".tool-line") as HTMLElement;
+    expect(within(questionLine).getByText("提问失败")).toBeTruthy();
+    expect(within(questionLine).queryByText("不要显示的问题")).toBeNull();
+    expect(questionLine.querySelector(".tl-status")).toBeNull();
+    expect(questionLine.querySelector(".line-tail")).toBeNull();
+    expect(questionLine.querySelector('[data-status-icon="failed"]')).not.toBeNull();
+  });
+
+  it("renders Edit, Write and TodoList from structured tool fields", async () => {
+    const user = userEvent.setup();
+    const { socket } = await openSession1();
+    let sequence = 9;
+    const emit = (event: unknown) => {
+      socket.emit({
+        type: "session_event",
+        stream_id: fixture.stream_id,
+        session_id: "session_0001",
+        sequence: sequence++,
+        event: event as never,
+      });
+    };
+
+    emit({ MessageAppended: { message: { User: { content: [{ Text: { text: "展示专用工具" } }] } } } });
+    emit({
+      ToolExecutionStarted: {
+        turn: 2,
+        id: "tool_edit_special",
+        name: "Edit",
+        arguments: { path: "src/app.ts", old: "before", new: "after" },
+      },
+    });
+    emit({
+      ToolExecutionFinished: {
+        turn: 2,
+        id: "tool_edit_special",
+        name: "Edit",
+        result: {
+          content: "edited",
+          is_error: false,
+          details: {
+            changes: [{
+              path: "src/app.ts",
+              status: "committed",
+              replacements: 1,
+              added: 1,
+              removed: 1,
+            }],
+          },
+        },
+      },
+    });
+    emit({
+      ToolExecutionStarted: {
+        turn: 2,
+        id: "tool_edit_diff",
+        name: "Edit",
+        arguments: { path: "src/diff.ts", old: "old", new: "new" },
+      },
+    });
+    emit({
+      ToolExecutionFinished: {
+        turn: 2,
+        id: "tool_edit_diff",
+        name: "Edit",
+        result: {
+          content: "edited",
+          is_error: false,
+          details: {
+            changes: [{
+              path: "src/diff.ts",
+              status: "committed",
+              added: 1,
+              removed: 1,
+              diff: "--- src/diff.ts\n+++ src/diff.ts\n@@ -1 +1 @@\n-old\n+new\n---literal old\n+++literal new",
+            }],
+          },
+        },
+      },
+    });
+    emit({
+      ToolExecutionStarted: {
+        turn: 2,
+        id: "tool_write_special",
+        name: "Write",
+        arguments: { path: "src/new.ts", content: "export const value = 1;" },
+      },
+    });
+    emit({
+      ToolExecutionFinished: {
+        turn: 2,
+        id: "tool_write_special",
+        name: "Write",
+        result: {
+          content: "created",
+          is_error: false,
+          details: {
+            changes: [{
+              path: "src/new.ts",
+              operation: "created",
+              status: "committed",
+              added: 1,
+              removed: 0,
+              content: "结果正文不应覆盖参数正文",
+            }],
+          },
+        },
+      },
+    });
+    emit({
+      ToolExecutionStarted: {
+        turn: 2,
+        id: "tool_todo_special",
+        name: "TodoList",
+        arguments: {
+          todos: [
+            { title: "检查展示", status: "in_progress" },
+            { title: "补回归", status: "pending" },
+          ],
+        },
+      },
+    });
+    emit({
+      ToolExecutionFinished: {
+        turn: 2,
+        id: "tool_todo_special",
+        name: "TodoList",
+        result: {
+          content: "updated",
+          is_error: false,
+          details: {
+            todos: [
+              { title: "检查展示", status: "in_progress" },
+              { title: "补回归", status: "pending" },
+            ],
+          },
+        },
+      },
+    });
+    emit({
+      ToolExecutionStarted: {
+        turn: 2,
+        id: "tool_set_todo_special",
+        name: "SetTodoList",
+        arguments: {
+          todos: [{ title: "发布回归", status: "done" }],
+        },
+      },
+    });
+    emit({
+      ToolExecutionFinished: {
+        turn: 2,
+        id: "tool_set_todo_special",
+        name: "SetTodoList",
+        result: {
+          content: "updated",
+          is_error: false,
+          details: {
+            todos: [{ title: "发布回归", status: "done" }],
+          },
+        },
+      },
+    });
+    emit({ MessageStarted: { turn: 2, id: "special_answer" } });
+    emit({ TextDelta: { turn: 2, text: "专用工具已完成。" } });
+    emit({ MessageFinished: { turn: 2, id: "special_answer", stop_reason: "EndTurn" } });
+
+    const answer = await screen.findByText("专用工具已完成。");
+    const group = answer.closest(".a-msg") as HTMLElement;
+    const foldButton = within(group).getByRole("button", { name: /展开工作过程/ });
+    await user.click(foldButton);
+    const fold = group.querySelector(".turn-fold") as HTMLElement;
+
+    const editButton = within(fold).getByRole("button", { name: /编辑 src\/app.ts/ });
+    await user.click(editButton);
+    const editLine = editButton.closest(".tool-line") as HTMLElement;
+    expect(within(editLine).queryByText("替换前")).toBeNull();
+    expect(within(editLine).queryByText("before")).toBeNull();
+    expect(within(editLine).queryByText("替换后")).toBeNull();
+    expect(within(editLine).queryByText("after")).toBeNull();
+    expect(within(editLine).getByText(/替换 1 处 src\/app.ts/)).toBeTruthy();
+
+    const diffButton = within(fold).getByRole("button", { name: /编辑 src\/diff.ts/ });
+    await user.click(diffButton);
+    const diffLine = diffButton.closest(".tool-line") as HTMLElement;
+    expect(within(diffLine).getByText("局部差异：src/diff.ts")).toBeTruthy();
+    const localDiff = within(diffLine).getByLabelText("src/diff.ts 的局部差异");
+    expect(within(localDiff).getByText("-old").className).toContain("ft-diff-del");
+    expect(within(localDiff).getByText("+new").className).toContain("ft-diff-add");
+    expect(within(localDiff).getByText("...").className).toContain("ft-diff-separator");
+    expect(within(localDiff).queryByText("--- src/diff.ts")).toBeNull();
+    expect(within(localDiff).queryByText("+++ src/diff.ts")).toBeNull();
+    expect(within(localDiff).queryByText("@@ -1 +1 @@")).toBeNull();
+    expect(within(localDiff).getByText("---literal old").className).toContain("ft-diff-del");
+    expect(within(localDiff).getByText("+++literal new").className).toContain("ft-diff-add");
+    expect(within(diffLine).queryByText("替换前")).toBeNull();
+    const changeRatio = within(diffLine).getByRole("img", { name: "新增 1 行，删除 1 行" });
+    const changeRatioRow = changeRatio.closest(".tl-change-ratio-row") as HTMLElement;
+    expect(within(changeRatioRow).getByText("+1").className).toContain("tl-change-ratio-added");
+    expect(within(changeRatioRow).getByText("−1").className).toContain("tl-change-ratio-removed");
+
+    const writeButton = within(fold).getByRole("button", { name: /创建 src\/new.ts/ });
+    await user.click(writeButton);
+    const writeLine = writeButton.closest(".tool-line") as HTMLElement;
+    expect(within(writeLine).getByText("文件内容：src/new.ts")).toBeTruthy();
+    expect(within(writeLine).getByText(
+      (_, node) => node?.tagName === "CODE" && node.textContent === "export const value = 1;",
+    )).toBeTruthy();
+    expect(within(writeLine).queryByText("结果正文不应覆盖参数正文")).toBeNull();
+
+    const [todoButton, setTodoButton] = within(fold).getAllByRole("button", { name: /更新任务清单/ });
+    await user.click(todoButton);
+    const todoLine = todoButton.closest(".tool-line") as HTMLElement;
+    expect(within(todoLine).getByText("进行中")).toBeTruthy();
+    expect(within(todoLine).getByText("检查展示")).toBeTruthy();
+    expect(within(todoLine).getByText("待处理")).toBeTruthy();
+    expect(within(todoButton).getByRole("progressbar", { name: "任务进度：0/2" })).toBeTruthy();
+
+    await user.click(setTodoButton);
+    const setTodoLine = setTodoButton.closest(".tool-line") as HTMLElement;
+    expect(within(setTodoLine).getByText("发布回归")).toBeTruthy();
+    expect(within(setTodoLine).getByText("已完成")).toBeTruthy();
+    expect(within(setTodoButton).getByRole("progressbar", { name: "任务进度：1/1" })).toBeTruthy();
   });
 
   it("folds one user prompt's full activity behind its final answer", async () => {
@@ -298,7 +700,7 @@ describe("transcript redesign rows", () => {
     const finalAnswer = screen.getByText("已修改 app.ts。");
     const finalGroup = finalAnswer.closest(".a-msg") as HTMLElement;
     const footer = finalGroup.querySelector(".answer-ft") as HTMLElement;
-    expect(within(footer).getByText("src/app.ts")).toBeTruthy();
+    expect(within(footer).getByTitle("src/app.ts")).toBeTruthy();
     expect(within(footer).getByText("已编辑 1 个文件")).toBeTruthy();
     expect(footer.querySelector(".ft-summary .ft-add")?.textContent).toBe("+1");
   });
@@ -327,7 +729,7 @@ describe("transcript redesign rows", () => {
     await screen.findByText("已修改 app.ts。");
     const footer = document.querySelector(".answer-ft") as HTMLElement;
     expect(footer).not.toBeNull();
-    expect(within(footer).getByText("src/app.ts")).toBeTruthy();
+    expect(within(footer).getByTitle("src/app.ts")).toBeTruthy();
     expect(within(footer).getByText("已编辑 1 个文件")).toBeTruthy();
     expect(footer.querySelector(".ft-summary .ft-add")?.textContent).toBe("+1");
     await user.click(within(footer).getByRole("button", { name: "展开 src/app.ts 的局部差异" }));
@@ -350,6 +752,12 @@ describe("transcript redesign rows", () => {
         event: event as never,
       });
     };
+    const followUpDiff = [
+      "--- a/src/one.ts",
+      "+++ b/src/one.ts",
+      "@@ -1,1 +1,30 @@",
+      ...Array.from({ length: 30 }, (_, index) => `+edit${index}`),
+    ].join("\n");
 
     emit({ MessageAppended: { message: { User: { content: [{ Text: { text: "整理文件变更" } }] } } } });
     emit({
@@ -365,9 +773,10 @@ describe("transcript redesign rows", () => {
               {
                 path: "src/one.ts",
                 status: "committed",
+                operation: "overwritten",
                 added: 1,
                 removed: 1,
-                diff: "@@ -1 +1 @@\n-before\n+after",
+                diff: "--- src/one.ts\n+++ src/one.ts\n@@ -1,1 +1,1 @@\n---removed body\n+++added body",
               },
               {
                 path: "src/two.ts",
@@ -384,16 +793,65 @@ describe("transcript redesign rows", () => {
                 diff: "@@ -1 +0,0 @@\n-three",
               },
               {
-                path: "src/new-file.ts",
+                path: "src/new file.ts",
                 status: "committed",
+                operation: "created",
                 added: 4,
                 removed: 0,
+                content: Array.from(
+                  { length: 36 },
+                  (_, index) => `export const line${index} = ${index};`,
+                ).join("\n"),
               },
               {
                 path: "src/skipped.ts",
                 status: "not_attempted",
                 added: 99,
                 removed: 99,
+              },
+            ],
+          },
+        },
+      },
+    });
+    emit({
+      ToolExecutionFinished: {
+        turn: 2,
+        id: "edit_literal_headers",
+        name: "edit",
+        result: {
+          content: "updated literal body",
+          is_error: false,
+          details: {
+            changes: [
+              {
+                path: "src/one.ts",
+                status: "committed",
+                added: 0,
+                removed: 0,
+                diff: "--- src/one.ts\n+++ src/one.ts\n普通正文，不是差异区块",
+              },
+            ],
+          },
+        },
+      },
+    });
+    emit({
+      ToolExecutionFinished: {
+        turn: 2,
+        id: "edit_same_file",
+        name: "edit",
+        result: {
+          content: "updated src/one.ts",
+          is_error: false,
+          details: {
+            changes: [
+              {
+                path: "src/one.ts",
+                status: "committed",
+                added: 30,
+                removed: 0,
+                diff: followUpDiff,
               },
             ],
           },
@@ -407,21 +865,104 @@ describe("transcript redesign rows", () => {
     const answer = await screen.findByText("文件变更已整理。");
     const footer = answer.closest(".a-msg")?.querySelector(".answer-ft") as HTMLElement;
     expect(within(footer).getByText("已编辑 4 个文件")).toBeTruthy();
+    expect(footer.querySelector(".ft-summary .ft-add")?.textContent).toBe("+37");
+    expect(footer.querySelector(".ft-summary .ft-del")?.textContent).toBe("−2");
     expect(within(footer).getAllByRole("listitem")).toHaveLength(3);
-    expect(within(footer).queryByText("src/new-file.ts")).toBeNull();
-    expect(within(footer).queryByText("src/skipped.ts")).toBeNull();
+    expect(within(footer).queryByTitle("src/new file.ts")).toBeNull();
+    expect(within(footer).queryByTitle("src/skipped.ts")).toBeNull();
 
-    await user.click(within(footer).getByRole("button", { name: "显示其余 1 个文件" }));
+    const moreButton = within(footer).getByRole("button", { name: "显示其余 1 个文件" });
+    const fileListId = moreButton.getAttribute("aria-controls");
+    expect(moreButton.getAttribute("aria-expanded")).toBe("false");
+    expect(fileListId).toBeTruthy();
+    expect(document.getElementById(fileListId ?? "")).not.toBeNull();
+    await user.click(moreButton);
     expect(within(footer).getAllByRole("listitem")).toHaveLength(4);
-    expect(within(footer).getByText("src/new-file.ts")).toBeTruthy();
-    expect(within(footer).queryByText("src/skipped.ts")).toBeNull();
+    expect(within(footer).getByTitle("src/new file.ts")).toBeTruthy();
+    expect(within(footer).queryByTitle("src/skipped.ts")).toBeNull();
 
-    await user.click(within(footer).getByRole("button", { name: "展开 src/one.ts 的局部差异" }));
-    expect(within(footer).getByText("-before")).toBeTruthy();
-    expect(within(footer).getByText("+after")).toBeTruthy();
+    const createdButton = within(footer).getByRole("button", {
+      name: "展开 src/new file.ts 的新建文件内容",
+    });
+    const createdPreviewId = createdButton.getAttribute("aria-controls");
+    expect(/\s/.test(createdPreviewId ?? "")).toBe(false);
+    const createdPreview = document.getElementById(createdPreviewId ?? "") as HTMLElement;
+    expect(createdPreview).not.toBeNull();
+    expect(createdPreview.hasAttribute("hidden")).toBe(true);
+    await user.hover(createdButton);
+    expect(createdPreview.hasAttribute("hidden")).toBe(false);
+    expect(createdPreview.getAttribute("aria-hidden")).toBe("true");
+    await user.unhover(createdButton);
+    expect(createdPreview.hasAttribute("hidden")).toBe(true);
+
+    createdButton.focus();
+    await user.keyboard("{Enter}");
+    expect(createdButton.getAttribute("aria-expanded")).toBe("true");
+    expect(createdPreview.hasAttribute("hidden")).toBe(false);
+    expect(within(createdPreview).getByText("export const line0 = 0;")).toBeTruthy();
+    expect(within(createdPreview).queryByText("export const line30 = 30;")).toBeNull();
+    expect(within(createdPreview).getByText("其余内容未显示")).toBeTruthy();
+
+    const diffButton = within(footer).getByRole("button", { name: "展开 src/one.ts 的局部差异" });
+    const diffPreviewId = diffButton.getAttribute("aria-controls");
+    expect(diffPreviewId).toBeTruthy();
+    const diffPreview = document.getElementById(diffPreviewId ?? "") as HTMLElement;
+    expect(diffPreview).not.toBeNull();
+    expect(diffPreview.hasAttribute("hidden")).toBe(true);
+    await user.hover(diffButton);
+    expect(diffPreview.hasAttribute("hidden")).toBe(false);
+    expect(within(diffPreview).queryByText("--- a/src/one.ts")).toBeNull();
+    expect(within(diffPreview).queryByText("+++ b/src/one.ts")).toBeNull();
+    expect(within(diffPreview).getByText("---removed body")).toBeTruthy();
+    expect(within(diffPreview).getByText("+++added body")).toBeTruthy();
+    expect(within(diffPreview).getByText("--- src/one.ts")).toBeTruthy();
+    expect(within(diffPreview).getByText("+++ src/one.ts")).toBeTruthy();
+    await user.unhover(diffButton);
+    expect(diffPreview.hasAttribute("hidden")).toBe(true);
+    await user.click(diffButton);
+    expect(within(diffPreview).getByText("+edit20")).toBeTruthy();
+    expect(within(diffPreview).queryByText("+edit21")).toBeNull();
+    expect(within(diffPreview).getByText("其余内容未显示")).toBeTruthy();
+    expect(diffPreview.textContent?.indexOf("---removed body")).toBeLessThan(
+      diffPreview.textContent?.indexOf("+edit0") ?? 0,
+    );
 
     await user.click(within(footer).getByRole("button", { name: "收起其余文件" }));
     expect(within(footer).getAllByRole("listitem")).toHaveLength(3);
+  });
+
+  it("scrolls a clicked file preview above the composer without moving on hover", async () => {
+    const user = userEvent.setup();
+    const { socket } = await openSession1();
+    const scrollIntoView = vi.fn();
+    const originalScrollIntoView = Object.getOwnPropertyDescriptor(HTMLElement.prototype, "scrollIntoView");
+    Object.defineProperty(HTMLElement.prototype, "scrollIntoView", {
+      configurable: true,
+      value: scrollIntoView,
+    });
+
+    try {
+      emitFinishedEditTurn(socket);
+      const answer = await screen.findByText("已修改 app.ts。");
+      const footer = answer.closest(".a-msg")?.querySelector(".answer-ft") as HTMLElement;
+      const previewButton = within(footer).getByRole("button", {
+        name: "展开 src/app.ts 的局部差异",
+      });
+
+      await user.hover(previewButton);
+      expect(scrollIntoView).not.toHaveBeenCalled();
+      await user.unhover(previewButton);
+
+      await user.click(previewButton);
+      await waitFor(() => expect(scrollIntoView).toHaveBeenCalledWith({ block: "nearest" }));
+      expect(scrollIntoView).toHaveBeenCalledTimes(1);
+    } finally {
+      if (originalScrollIntoView) {
+        Object.defineProperty(HTMLElement.prototype, "scrollIntoView", originalScrollIntoView);
+      } else {
+        delete (HTMLElement.prototype as { scrollIntoView?: unknown }).scrollIntoView;
+      }
+    }
   });
 
   it("renders approval rows as pending and submitted, then hides resolved history", async () => {
@@ -473,7 +1014,8 @@ describe("transcript redesign rows", () => {
       },
     });
     const line = await screen.findByRole("button", { name: /查看子代理详情：巡检/ });
-    expect(line.textContent).toContain("运行中");
+    expect(line.querySelector('.tl-result-ic[data-status-icon="running"]')).not.toBeNull();
+    expect(line.querySelector(".agent-pill")).toBeNull();
     expect(line.textContent).toContain("扫描 src/ 中");
     expect(screen.queryByRole("button", { name: /未识别事件/ })).toBeNull();
   });
@@ -501,7 +1043,9 @@ describe("session view", () => {
     expect(thinkingBar.getAttribute("aria-expanded")).toBe("false");
 
     const toolBar = screen.getByRole("button", { name: /运行 cargo test -p neo-webui/ });
-    expect(toolBar.textContent).toContain("排队等待");
+    expect(toolBar.textContent).not.toContain("排队等待");
+    expect(toolBar.closest(".tool-line")?.querySelector(".line-tail")).toBeNull();
+    expect(toolBar.closest(".tool-line")?.querySelector('[data-status-icon="queued"]')).not.toBeNull();
 
     const approval = screen.getByRole("group", { name: /审批请求/ });
     expect(approval.textContent).toContain("等待确认");
@@ -635,21 +1179,35 @@ describe("session view", () => {
     expect(screen.getByText("正在连接…")).toBeTruthy();
   });
 
-  it("shows initial connection status when opening an unseen historical session during reconnect", async () => {
-    renderApp();
-    await screen.findByLabelText("会话列表");
-    await waitFor(() => expect(FakeWebSocket.instances).toHaveLength(1));
-    const socket = FakeWebSocket.instances[0];
-    socket.emit(asServerMessage(fixture.long_connection.workspace_snapshot));
-    await screen.findByText("并行格式化");
+  it("shows initial connection status when reopening unloaded history during reconnect", async () => {
+    const { socket } = await openSession1();
+
+    (await screen.findByText("并行格式化")).click();
+    await waitFor(() => expect(socket.watchSessionIds()).toEqual(["session_0001", "session_0002"]));
+    socket.emit({ type: "session_snapshot", snapshot: fixture.sessions[1].snapshot });
+    await screen.findByText("另一个会话并行跑格式化。");
+    expect(screen.queryByText("检查有界中继的行为测试并修复慢连接。")).toBeNull();
 
     FakeWebSocket.autoOpen = false;
     socket.closeWith(1013);
     await screen.findByText("连接已断开，正在重连…");
 
-    (await screen.findByText("并行格式化")).click();
+    (await screen.findByText("有界中继测试")).click();
     await screen.findByText("正在连接…");
     expect(screen.queryByText("连接已断开，正在重连…")).toBeNull();
+  });
+
+  it("shows initial connection status while an open socket loads an unseen history snapshot", async () => {
+    const { socket } = await openSession1();
+
+    (await screen.findByText("并行格式化")).click();
+    await waitFor(() => expect(socket.watchSessionIds()).toEqual(["session_0001", "session_0002"]));
+    await screen.findByText("正在连接…");
+    expect(screen.queryByText("连接已断开，正在重连…")).toBeNull();
+
+    socket.emit({ type: "session_snapshot", snapshot: fixture.sessions[1].snapshot });
+    await screen.findByText("另一个会话并行跑格式化。");
+    expect(screen.queryByText("正在连接…")).toBeNull();
   });
 
   it("switching sessions keeps the background summary updating and drops the old transcript", async () => {
@@ -698,13 +1256,13 @@ describe("session view", () => {
     const bar = await screen.findByRole("button", {
       name: /展开运行 cargo test，状态：排队等待 · 位置 2 · 已等待 150ms/,
     });
-    expect(bar.textContent).toContain("排队等待");
-    expect(bar.textContent).toContain("位置 2");
+    expect(bar.textContent).not.toContain("排队等待");
+    expect(bar.textContent).not.toContain("位置 2");
     expect(bar.textContent).not.toContain("已完成");
     const line = bar.closest(".tool-line") as HTMLElement;
     expect(line.querySelector('[data-status-icon="queued"]')).not.toBeNull();
     expect(line.querySelector('[data-status-icon="finished"]')).toBeNull();
-    expect(line.querySelector(".line-tail")?.textContent).toContain("排队等待");
+    expect(line.querySelector(".line-tail")).toBeNull();
   });
 
   it("escalates reconnect delays while the service stays unreachable", async () => {

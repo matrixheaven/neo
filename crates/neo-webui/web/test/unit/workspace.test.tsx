@@ -208,6 +208,7 @@ describe("sidebar", () => {
     const idleRow = screen.getByText("空闲会话").closest(".session-row") as HTMLElement;
     expect(within(idleRow).queryByText("空闲")).toBeNull();
     expect(idleRow.querySelector(".session-activity")).not.toBeNull();
+    expect(idleRow.querySelector(".session-activity")?.childElementCount).toBe(0);
     const idleMain = idleRow.querySelector(".session-main") as HTMLButtonElement;
     expect(idleMain.title).toContain("空闲会话");
     expect(idleMain.title).toContain("工作区：neo");

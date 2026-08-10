@@ -243,8 +243,10 @@ function showcaseSnapshot() {
                 {
                   path: "web/src/acceptance-notes.md",
                   status: "committed_unsynced",
+                  operation: "created",
                   added: 3,
                   removed: 0,
+                  content: "# 验收记录\n- 转录行式层级\n- 侧栏工作区分组",
                 },
               ],
             },

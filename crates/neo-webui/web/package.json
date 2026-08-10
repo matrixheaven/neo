@@ -11,6 +11,7 @@
   },
   "dependencies": {
     "lucide-react": "0.454.0",
+    "prismjs": "1.30.0",
     "react": "18.3.1",
     "react-dom": "18.3.1",
     "react-markdown": "9.0.1",
@@ -20,6 +21,7 @@
     "@playwright/test": "1.48.2",
     "@testing-library/react": "16.0.1",
     "@testing-library/user-event": "14.5.2",
+    "@types/prismjs": "1.26.6",
     "@types/react": "18.3.12",
     "@types/react-dom": "18.3.1",
     "@types/ws": "^8.5.13",
