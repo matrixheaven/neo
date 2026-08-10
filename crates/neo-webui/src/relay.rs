@@ -56,6 +56,13 @@ pub const CONNECTION_QUEUE_MESSAGES: usize = 256;
 pub const TOOL_OUTPUT_MAX_LINES: u32 = 1_000;
 /// Session-list page cap.
 pub const SESSION_PAGE_LIMIT: usize = 100;
+/// Decoded byte cap for one uploaded attachment.
+pub const ATTACHMENT_MAX_BYTES: usize = 8 * 1024 * 1024;
+/// Maximum attachments accepted on one message.
+pub const ATTACHMENTS_PER_MESSAGE_MAX: usize = 4;
+/// `POST /api/attachments` body cap: base64 of [`ATTACHMENT_MAX_BYTES`] plus
+/// JSON envelope slack.
+pub const ATTACHMENT_BODY_LIMIT_BYTES: usize = 12 * 1024 * 1024;
 /// Deadline for the first subscribe frame on a fresh long connection.
 pub const FIRST_SUBSCRIBE_DEADLINE: Duration = Duration::from_secs(5);
 /// WebSocket close code for a slow consumer whose bounded queue overflowed.

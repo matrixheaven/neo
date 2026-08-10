@@ -4,6 +4,12 @@
 //! programmable mock `openai_response` provider.
 
 mod webui_behavior {
+    #[path = "agent_history.rs"]
+    pub mod agent_history;
+    #[path = "attachments.rs"]
+    pub mod attachments;
+    #[path = "cross_workspace.rs"]
+    pub mod cross_workspace;
     #[path = "http.rs"]
     pub mod http;
     #[path = "provider.rs"]

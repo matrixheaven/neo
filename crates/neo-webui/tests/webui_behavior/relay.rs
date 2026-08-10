@@ -408,6 +408,7 @@ async fn workspace_subscription_updates_background_session_without_full_transcri
         pinned: false,
         archived: false,
         state: WebUiSummaryState::Running,
+        workspace_label: "workspace".to_string(),
     });
     publish_text(&foreground, 1, "foreground transcript");
 
@@ -456,6 +457,7 @@ async fn workspace_subscription_updates_background_session_without_full_transcri
         pinned: false,
         archived: false,
         state: WebUiSummaryState::Idle,
+        workspace_label: "workspace".to_string(),
     });
     let drained = switched.queue.drain_sendable();
     assert!(
@@ -494,7 +496,13 @@ async fn workspace_subscription_updates_background_session_without_full_transcri
     };
     let body: serde_json::Value = serde_json::from_str(&body).expect("workspace snapshot JSON");
     assert_eq!(body["type"], "workspace_snapshot");
-    assert_eq!(body["sessions"].as_array().expect("sessions").len(), 2);
+    assert_eq!(
+        body["workspaces"][0]["sessions"]
+            .as_array()
+            .expect("sessions")
+            .len(),
+        2
+    );
 
     let second = ws.next().await.expect("session snapshot").expect("ok");
     let WsMessage::Text(body) = second else {
@@ -763,13 +771,17 @@ fn fixture_parses_into_protocol_types_and_covers_required_samples() {
         "TodoUpdated",
         "DelegateStarted",
         "DelegateUpdated",
+        "DelegateProgressUpdated",
         "DelegateFinished",
         "DelegateSwarmStarted",
         "DelegateSwarmUpdated",
+        "DelegateSwarmProgressUpdated",
         "DelegateSwarmFinished",
         "WorkflowUpdated",
         "WorkflowFinished",
         "TerminalSessionOutput",
+        "TokenUsage",
+        "ContextWindowUpdated",
     ] {
         assert!(
             event_kinds.contains(required),
@@ -807,10 +819,23 @@ fn fixture_parses_into_protocol_types_and_covers_required_samples() {
         long_connection["workspace_snapshot"].clone()
     ]))
     .expect("workspace snapshot matches protocol");
-    let WebUiServerMessage::WorkspaceSnapshot { sessions, .. } = &workspace_snapshot[0] else {
+    let WebUiServerMessage::WorkspaceSnapshot { workspaces, .. } = &workspace_snapshot[0] else {
         panic!("workspace wire starts with a workspace_snapshot");
     };
-    assert_eq!(sessions.len(), 2, "workspace snapshot lists both sessions");
+    let grouped: usize = workspaces.iter().map(|group| group.sessions.len()).sum();
+    assert_eq!(grouped, 3, "workspace snapshot groups every session");
+    assert_eq!(workspaces.len(), 2, "two workspace groups");
+    assert!(
+        workspaces.iter().any(|group| group.current),
+        "one group is the current workspace"
+    );
+    assert!(
+        workspaces.iter().all(|group| group
+            .sessions
+            .iter()
+            .all(|s| s.workspace_label == group.label)),
+        "every session carries its group label, never a path"
+    );
     let summary: Vec<WebUiServerMessage> = serde_json::from_value(serde_json::json!([
         long_connection["session_summary_changed"].clone()
     ]))

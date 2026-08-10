@@ -34,6 +34,25 @@ pub(crate) async fn start_env_with_config(
     steps: Vec<Step>,
     extra_config: &str,
 ) -> (TestEnv, Provider) {
+    start_env_inner(project, steps, extra_config, "\"streaming\", \"tools\"").await
+}
+
+/// [`start_env`] with the mock model's capability list replaced (media
+/// capability lanes).
+pub(crate) async fn start_env_with_capabilities(
+    project: TempDir,
+    steps: Vec<Step>,
+    capabilities: &str,
+) -> (TestEnv, Provider) {
+    start_env_inner(project, steps, "", capabilities).await
+}
+
+async fn start_env_inner(
+    project: TempDir,
+    steps: Vec<Step>,
+    extra_config: &str,
+    capabilities: &str,
+) -> (TestEnv, Provider) {
     let home = tempfile::tempdir().expect("home tempdir");
     let provider = Provider::start(steps);
     let config = format!(
@@ -50,7 +69,7 @@ api_key_env = "OPENAI_API_KEY"
 [models."mock/gpt-4.1"]
 provider = "mock"
 model = "gpt-4.1"
-capabilities = ["streaming", "tools"]
+capabilities = [{capabilities}]
 "#,
         url = provider.url
     );

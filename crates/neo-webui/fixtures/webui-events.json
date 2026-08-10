@@ -1,5 +1,5 @@
 {
-  "_comment": "Fixed, read-only web event samples for the frontend. Shape matches crates/neo-webui/src/protocol.rs (B1 wire): every long-connection message is a tagged WebUiServerMessage (session_snapshot / workspace_snapshot / session_summary_changed / session_event / session_state / session_metadata_changed); the event payload is the canonical AgentEvent (externally tagged, e.g. {\"TextDelta\":{...}}) with structured ToolOutputRef stripped — full tool and terminal output travels only as the opaque envelope/history-level `output` ({id, byte_len, line_count, complete}) and is read via GET tool-output/<id>. Two sessions, user MessageAppended as the only user-bubble source, full tool lifecycle, Delegate and DelegateSwarm series, snapshot watermark + resume, snapshot replacement under a different stream_id, thinking, queued tools, approval/question, retry retraction, task updates, workflow change statistics, the two-tier (workspace summary + full session) subscription wire, slow-consumer close, and stale-control rejection. Path metadata is workspace-relative or `.`; absolute paths never appear.",
+  "_comment": "Fixed, read-only web event samples for the frontend. Shape matches crates/neo-webui/src/protocol.rs (B1 wire): every long-connection message is a tagged WebUiServerMessage (session_snapshot / workspace_snapshot / session_summary_changed / session_event / session_state / session_metadata_changed); the event payload is the canonical AgentEvent (externally tagged, e.g. {\"TextDelta\":{...}}) with structured ToolOutputRef stripped — full tool and terminal output travels only as the opaque envelope/history-level `output` ({id, byte_len, line_count, complete}) and is read via GET tool-output/<id>. Two sessions, user MessageAppended as the only user-bubble source (including one with image attachments as MediaRef.Blob content parts), full tool lifecycle, Delegate and DelegateSwarm series (including the DelegateProgressUpdated/DelegateSwarmProgressUpdated progress payloads), TokenUsage/ContextWindowUpdated samples plus their cached session_state projections (token_usage/context_window), snapshot watermark + resume, snapshot replacement under a different stream_id, thinking, queued tools, approval/question, retry retraction, task updates, workflow change statistics, the two-tier (workspace summary + full session) subscription wire with the grouped cross-workspace workspace_snapshot (workspaces: [{label, current, sessions}]), slow-consumer close, and stale-control rejection. Path metadata is workspace-relative or `.`; absolute paths never appear; sessions carry only their workspace_label.",
   "stream_id": "webui_sample_aaaaaaaa",
   "sessions": [
     {
@@ -12,7 +12,19 @@
           "phase": "running",
           "waiting_approval": true,
           "waiting_question": false,
-          "current_turn_id": "turn_01"
+          "current_turn_id": "turn_01",
+          "token_usage": {
+            "input_tokens": 12480,
+            "output_tokens": 312,
+            "input_cache_read_tokens": 4096,
+            "input_cache_write_tokens": 0
+          },
+          "context_window": {
+            "used_tokens": 12792,
+            "projected_tokens": 13100,
+            "max_tokens": 200000,
+            "remaining_tokens": 187208
+          }
         },
         "metadata": {
           "title": "初始标题",
@@ -311,6 +323,67 @@
             "waiting_approval": false,
             "waiting_question": true,
             "current_turn_id": "turn_01"
+          }
+        },
+        {
+          "type": "session_event",
+          "stream_id": "webui_sample_aaaaaaaa",
+          "session_id": "session_0001",
+          "sequence": 18,
+          "event": {
+            "TokenUsage": {
+              "turn": 1,
+              "usage": {
+                "input_tokens": 12480,
+                "output_tokens": 312,
+                "input_cache_read_tokens": 4096,
+                "input_cache_write_tokens": 0
+              }
+            }
+          }
+        },
+        {
+          "type": "session_event",
+          "stream_id": "webui_sample_aaaaaaaa",
+          "session_id": "session_0001",
+          "sequence": 19,
+          "event": {
+            "ContextWindowUpdated": {
+              "turn": 1,
+              "used_tokens": 12792,
+              "projected_tokens": 13100,
+              "max_tokens": 200000,
+              "remaining_tokens": 187208
+            }
+          }
+        },
+        {
+          "type": "session_event",
+          "stream_id": "webui_sample_aaaaaaaa",
+          "session_id": "session_0001",
+          "sequence": 20,
+          "event": {
+            "MessageAppended": {
+              "message": {
+                "User": {
+                  "content": [
+                    {
+                      "Text": {
+                        "text": "看这张截图，把转录区改成同样的行式层级。"
+                      }
+                    },
+                    {
+                      "Image": {
+                        "mime_type": "image/png",
+                        "data": {
+                          "Blob": "9f2c1a7b4e8d06f3a5c29b18d7e40f619a3c85b72d04e6f18a2c97b53d16e04f8a"
+                        }
+                      }
+                    }
+                  ]
+                }
+              }
+            }
           }
         },
         {
@@ -664,6 +737,44 @@
           "session_id": "session_0002",
           "sequence": 10,
           "event": {
+            "DelegateSwarmProgressUpdated": {
+              "turn": 1,
+              "swarm_id": "swarm_02",
+              "state": "running",
+              "aggregate": {
+                "total": 2,
+                "queued": 0,
+                "running": 1,
+                "completed": 1,
+                "failed": 0,
+                "cancelled": 0,
+                "timed_out": 0
+              },
+              "child_progress": {
+                "item_index": 0,
+                "progress": {
+                  "agent_id": "agent_02",
+                  "state": "completed",
+                  "mode": "background",
+                  "detached_from_foreground": true,
+                  "updated_at_ms": 1723000001600,
+                  "terminal_reason": "completed",
+                  "run_count": 1,
+                  "tool_count": 1,
+                  "token_count": 20,
+                  "elapsed_ms": 7000,
+                  "latest_text": "relay 测试覆盖良好"
+                }
+              }
+            }
+          }
+        },
+        {
+          "type": "session_event",
+          "stream_id": "webui_sample_aaaaaaaa",
+          "session_id": "session_0002",
+          "sequence": 11,
+          "event": {
             "DelegateSwarmFinished": {
               "turn": 1,
               "swarm": {
@@ -890,6 +1001,35 @@
         "session_id": "session_0002",
         "sequence": 7,
         "event": {
+          "DelegateProgressUpdated": {
+            "turn": 1,
+            "progress": {
+              "agent_id": "agent_02",
+              "state": "running",
+              "mode": "background",
+              "detached_from_foreground": true,
+              "updated_at_ms": 1723000001500,
+              "run_count": 1,
+              "tool_count": 1,
+              "token_count": 16,
+              "elapsed_ms": 6500,
+              "latest_text": "relay 覆盖检查进行中",
+              "last_tool": {
+                "id": "tool_11",
+                "name": "grep",
+                "summary": "搜索测试用例",
+                "phase": "ongoing"
+              }
+            }
+          }
+        }
+      },
+      {
+        "type": "session_event",
+        "stream_id": "webui_sample_bbbbbbbb",
+        "session_id": "session_0002",
+        "sequence": 8,
+        "event": {
           "DelegateFinished": {
             "turn": 1,
             "agent": {
@@ -923,7 +1063,7 @@
         "type": "session_event",
         "stream_id": "webui_sample_bbbbbbbb",
         "session_id": "session_0002",
-        "sequence": 8,
+        "sequence": 9,
         "event": {
           "WorkflowUpdated": {
             "turn": 1,
@@ -947,7 +1087,7 @@
         "type": "session_event",
         "stream_id": "webui_sample_bbbbbbbb",
         "session_id": "session_0002",
-        "sequence": 9,
+        "sequence": 10,
         "event": {
           "WorkflowFinished": {
             "turn": 1,
@@ -971,7 +1111,7 @@
         "type": "session_event",
         "stream_id": "webui_sample_bbbbbbbb",
         "session_id": "session_0002",
-        "sequence": 10,
+        "sequence": 11,
         "event": {
           "TerminalSessionOutput": {
             "turn": 1,
@@ -992,7 +1132,7 @@
         "type": "session_state",
         "stream_id": "webui_sample_bbbbbbbb",
         "session_id": "session_0002",
-        "sequence": 11,
+        "sequence": 12,
         "event": {
           "phase": "idle",
           "waiting_approval": false,
@@ -1020,22 +1160,45 @@
       "type": "workspace_snapshot",
       "stream_id": "webui_sample_aaaaaaaa",
       "workspace_sequence": 0,
-      "sessions": [
+      "workspaces": [
         {
-          "session_id": "session_0001",
-          "title": "有界中继测试",
-          "updated_at": "2026-08-09T10:00:00+00:00",
-          "pinned": true,
-          "archived": false,
-          "state": "waiting_question"
+          "label": "neo",
+          "current": true,
+          "sessions": [
+            {
+              "session_id": "session_0001",
+              "title": "有界中继测试",
+              "updated_at": "2026-08-09T10:00:00+00:00",
+              "pinned": true,
+              "archived": false,
+              "state": "waiting_question",
+              "workspace_label": "neo"
+            },
+            {
+              "session_id": "session_0002",
+              "title": "并行格式化",
+              "updated_at": "2026-08-09T09:58:30+00:00",
+              "pinned": false,
+              "archived": false,
+              "state": "running",
+              "workspace_label": "neo"
+            }
+          ]
         },
         {
-          "session_id": "session_0002",
-          "title": "并行格式化",
-          "updated_at": "2026-08-09T09:58:30+00:00",
-          "pinned": false,
-          "archived": false,
-          "state": "running"
+          "label": "playground",
+          "current": false,
+          "sessions": [
+            {
+              "session_id": "session_0003",
+              "title": "原型脚本调试",
+              "updated_at": "2026-08-09T08:12:00+00:00",
+              "pinned": false,
+              "archived": false,
+              "state": "idle",
+              "workspace_label": "playground"
+            }
+          ]
         }
       ]
     },
@@ -1049,7 +1212,8 @@
         "updated_at": "2026-08-09T10:01:00+00:00",
         "pinned": false,
         "archived": false,
-        "state": "idle"
+        "state": "idle",
+        "workspace_label": "neo"
       }
     }
   },

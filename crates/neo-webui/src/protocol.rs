@@ -11,8 +11,8 @@
 use async_trait::async_trait;
 use neo_agent_core::session::ToolOutputRange;
 use neo_agent_core::{
-    AgentEvent, ApprovalAction, ApprovalOption, ApprovalPresentation, PermissionMode,
-    QuestionEventData, TodoEventData,
+    AgentEvent, AgentTokenUsage, ApprovalAction, ApprovalOption, ApprovalPresentation,
+    PermissionMode, QuestionEventData, TodoEventData,
 };
 use serde::{Deserialize, Serialize};
 
@@ -88,7 +88,10 @@ pub struct WebUiComposer {
     pub development_mode: Option<WebUiDevelopmentMode>,
 }
 
-/// One row of the session list.
+/// One row of the session list. `workspace_label` is the display label of
+/// the workspace bucket the session belongs to (directory base name, with a
+/// short hash suffix on collisions); an absolute workspace path never appears
+/// anywhere on the wire.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct WebUiSessionSummary {
     pub session_id: String,
@@ -101,6 +104,7 @@ pub struct WebUiSessionSummary {
     #[serde(default)]
     pub archived: bool,
     pub state: WebUiSummaryState,
+    pub workspace_label: String,
 }
 
 /// Cursor-paginated session page.
@@ -111,8 +115,23 @@ pub struct WebUiSessionPage {
     pub next_cursor: Option<String>,
 }
 
+/// Latest known context-window occupancy of a session, cached from the most
+/// recent `ContextWindowUpdated` event so a reconnect or workspace switch
+/// restores the composer context ring without waiting for new model traffic.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WebUiContextWindow {
+    pub used_tokens: u32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub projected_tokens: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_tokens: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub remaining_tokens: Option<u32>,
+}
+
 /// Transport state of one session (never a forged `AgentEvent`, never
-/// written to JSONL).
+/// written to JSONL). `token_usage` and `context_window` are the latest
+/// values observed on the canonical event stream, cached host-side.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct WebUiSessionState {
     pub phase: WebUiPhase,
@@ -122,6 +141,10 @@ pub struct WebUiSessionState {
     pub waiting_question: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub current_turn_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub token_usage: Option<AgentTokenUsage>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub context_window: Option<WebUiContextWindow>,
 }
 
 /// Session metadata projection (title, pinned, archived).
@@ -196,13 +219,28 @@ pub struct WebUiSnapshot {
     pub todos: Vec<TodoEventData>,
 }
 
+/// One workspace group of the cross-workspace session aggregation. `label`
+/// is the display label (directory base name, short hash suffix on
+/// collisions); `current` marks the workspace the service was started in.
+/// The workspace path itself never leaves the service.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WebUiWorkspaceGroup {
+    pub label: String,
+    #[serde(default)]
+    pub current: bool,
+    #[serde(default)]
+    pub sessions: Vec<WebUiSessionSummary>,
+}
+
 /// Workspace summary view sent on `watch_workspace` when the summary cache
-/// cannot resume from the client's cursor.
+/// cannot resume from the client's cursor. The only shape is the grouped
+/// cross-workspace aggregation: sessions are always nested under their
+/// workspace group, the current workspace first.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct WebUiWorkspaceSnapshot {
     pub stream_id: String,
     pub workspace_sequence: u64,
-    pub sessions: Vec<WebUiSessionSummary>,
+    pub workspaces: Vec<WebUiWorkspaceGroup>,
 }
 
 /// One message the service sends on the web long connection. One connection
@@ -220,7 +258,7 @@ pub enum WebUiServerMessage {
     WorkspaceSnapshot {
         stream_id: String,
         workspace_sequence: u64,
-        sessions: Vec<WebUiSessionSummary>,
+        workspaces: Vec<WebUiWorkspaceGroup>,
     },
     SessionSnapshot {
         snapshot: Box<WebUiSnapshot>,
@@ -342,6 +380,39 @@ pub struct WebUiWorkspaceChangeDetail {
     pub truncated: bool,
 }
 
+/// Body of `POST /api/attachments`: one media payload, base64-encoded. The
+/// decoded bytes are bounded per attachment and the MIME type is whitelisted
+/// (image types only); both limits are enforced before anything is stored.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct WebUiAttachmentBody {
+    pub mime: String,
+    pub base64: String,
+}
+
+/// Body of `201 Created` attachment uploads: the opaque id (digest of the
+/// stored bytes), the accepted MIME type and the decoded byte length.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WebUiAttachmentAck {
+    pub id: String,
+    pub mime: String,
+    pub byte_len: u64,
+}
+
+/// Body of `GET /api/sessions/<id>/agents/<agent_id>/history`: the child
+/// agent's persisted wire history, projected exactly like the main session
+/// snapshot (opaque output references, workspace-relative paths). `watermark`
+/// is the count of replayed events; entries carry contiguous `sequence`
+/// values starting at 1. Read on demand — never cached, never a new event
+/// store.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WebUiAgentHistory {
+    pub agent_id: String,
+    pub watermark: u64,
+    #[serde(default)]
+    pub history: Vec<WebUiHistoryEntry>,
+}
+
 /// Strong-typed commands executed against the host.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum WebUiCommand {
@@ -358,17 +429,28 @@ pub enum WebUiCommand {
     CreateSession {
         message: String,
         composer: Option<WebUiComposer>,
+        attachments: Option<Vec<String>>,
     },
     StartTurn {
         session_id: String,
         message: String,
         composer: Option<WebUiComposer>,
+        attachments: Option<Vec<String>>,
     },
     SendInput {
         session_id: String,
         turn_id: String,
         delivery: WebUiInputDelivery,
         message: String,
+        attachments: Option<Vec<String>>,
+    },
+    UploadAttachment {
+        mime: String,
+        base64: String,
+    },
+    AgentHistory {
+        session_id: String,
+        agent_id: String,
     },
     CancelTurn {
         session_id: String,
@@ -415,13 +497,25 @@ pub struct WebUiQuestionAnswer {
     pub text: Option<String>,
 }
 
+/// Read-only display row of the bootstrap model catalog (model pill overlay).
+/// Display fields only: no keys, no base URLs, no provider secrets.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WebUiModelInfo {
+    pub alias: String,
+    pub provider: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub context_window: Option<u32>,
+    #[serde(default)]
+    pub capabilities: Vec<String>,
+}
+
 /// Initial page payload.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct WebUiBootstrap {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub workspace_label: Option<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub models: Vec<String>,
+    pub models: Vec<WebUiModelInfo>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub permission_modes: Vec<PermissionMode>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -481,6 +575,8 @@ pub enum WebUiReply {
     ToolOutput(ToolOutputRange),
     WorkspaceChanges(WebUiWorkspaceChanges),
     WorkspaceChangeDetail(WebUiWorkspaceChangeDetail),
+    AttachmentUploaded(WebUiAttachmentAck),
+    AgentHistory(WebUiAgentHistory),
 }
 
 /// Stable short error codes returned by every web API surface. Error
@@ -552,6 +648,8 @@ pub struct WebUiCreateSessionBody {
     pub message: String,
     #[serde(default)]
     pub composer: Option<WebUiComposer>,
+    #[serde(default)]
+    pub attachments: Option<Vec<String>>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
@@ -560,6 +658,8 @@ pub struct WebUiStartTurnBody {
     pub message: String,
     #[serde(default)]
     pub composer: Option<WebUiComposer>,
+    #[serde(default)]
+    pub attachments: Option<Vec<String>>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
@@ -568,6 +668,8 @@ pub struct WebUiInputBody {
     pub turn_id: String,
     pub delivery: WebUiInputDelivery,
     pub message: String,
+    #[serde(default)]
+    pub attachments: Option<Vec<String>>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]

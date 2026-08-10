@@ -1,10 +1,85 @@
 //! History projection: JSONL-equivalent retry filtering and delta merging,
 //! and the release/rebuild round-trip of an idle session's projection.
 
-use neo_agent_core::{Content, StopReason};
+use neo_agent_core::{AgentTokenUsage, Content, StopReason};
 
 use super::state_fixtures::{test_state, user_message};
 use super::*;
+
+/// Latest `TokenUsage`/`ContextWindowUpdated` values are cached like
+/// `last_todos`: the live `session_state` carries them and they survive the
+/// idle projection release plus the canonical rebuild that a reconnect
+/// snapshot goes through.
+#[test]
+fn usage_and_context_window_survive_snapshot_and_reconnect() {
+    let relay = Relay::new("test_stream");
+    let state = test_state(&relay, "session_1", Some("turn_1"));
+    let usage = AgentTokenUsage {
+        input_tokens: 1200,
+        output_tokens: 300,
+        input_cache_read_tokens: 64,
+        input_cache_write_tokens: 0,
+    };
+    let canonical_events = vec![
+        user_message("measure me"),
+        AgentEvent::TokenUsage { turn: 1, usage },
+        AgentEvent::ContextWindowUpdated {
+            turn: 1,
+            used_tokens: 1500,
+            projected_tokens: Some(1600),
+            max_tokens: Some(200_000),
+            trigger_tokens: None,
+            remaining_tokens: Some(198_500),
+            source: None,
+        },
+        AgentEvent::MessageAppended {
+            message: AgentMessage::assistant(
+                vec![Content::text("done")],
+                Vec::new(),
+                StopReason::EndTurn,
+            ),
+        },
+    ];
+    {
+        let mut guard = state.lock().expect("state lock");
+        for event in &canonical_events {
+            guard.ingest_event(event.clone());
+        }
+    }
+    let live = {
+        let guard = state.lock().expect("state lock");
+        guard.state_snapshot()
+    };
+    assert_eq!(live.token_usage, Some(usage), "live state carries usage");
+    let window = live.context_window.expect("live state carries window");
+    assert_eq!(window.used_tokens, 1500);
+    assert_eq!(window.max_tokens, Some(200_000));
+    assert_eq!(window.remaining_tokens, Some(198_500));
+
+    // The turn completes: the projection is released, then the next access
+    // (a reconnect snapshot) rebuilds it from the canonical JSONL events.
+    {
+        let mut guard = state.lock().expect("state lock");
+        guard.release_projection();
+    }
+    {
+        let mut guard = state.lock().expect("state lock");
+        guard.rebuild_projection(canonical_events);
+    }
+    let rebuilt = {
+        let guard = state.lock().expect("state lock");
+        guard.state_snapshot()
+    };
+    assert_eq!(
+        rebuilt.token_usage,
+        Some(usage),
+        "rebuilt state restores usage from the canonical stream"
+    );
+    assert_eq!(
+        rebuilt.context_window, live.context_window,
+        "rebuilt state restores the context window from the canonical stream"
+    );
+}
 
 #[test]
 fn snapshot_projection_drops_failed_attempt_text_with_retry_semantics() {

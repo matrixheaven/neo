@@ -611,6 +611,7 @@ fn format_agent_activity(activity: &neo_agent_core::multi_agent::AgentActivityEn
             }
         }
         AgentActivityKind::Text { text, .. } => text.clone(),
+        AgentActivityKind::Instruction { .. } => "instructions updated".to_owned(),
     }
 }
 

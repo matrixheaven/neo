@@ -13,10 +13,11 @@ use neo_agent_core::{AgentEvent, TodoEventData};
 use neo_webui::Relay;
 use neo_webui::protocol::{
     WebUiBootstrap, WebUiChangeStatus, WebUiCommand, WebUiCursor, WebUiError, WebUiErrorCode,
-    WebUiEventBody, WebUiHistoryEntry, WebUiHost, WebUiPendingApproval, WebUiPendingQuestion,
-    WebUiPhase, WebUiReply, WebUiSessionMetadata, WebUiSessionPage, WebUiSessionScope,
-    WebUiSessionState, WebUiSessionSummary, WebUiSnapshot, WebUiSummaryState, WebUiWorkspaceChange,
-    WebUiWorkspaceChangeDetail, WebUiWorkspaceChanges, WebUiWorkspaceSnapshot,
+    WebUiEventBody, WebUiHistoryEntry, WebUiHost, WebUiModelInfo, WebUiPendingApproval,
+    WebUiPendingQuestion, WebUiPhase, WebUiReply, WebUiSessionMetadata, WebUiSessionPage,
+    WebUiSessionScope, WebUiSessionState, WebUiSessionSummary, WebUiSnapshot, WebUiSummaryState,
+    WebUiWorkspaceChange, WebUiWorkspaceChangeDetail, WebUiWorkspaceChanges, WebUiWorkspaceGroup,
+    WebUiWorkspaceSnapshot,
 };
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
@@ -53,6 +54,8 @@ impl Default for FakeSession {
                 waiting_approval: false,
                 waiting_question: false,
                 current_turn_id: Some("turn_1".to_string()),
+                token_usage: None,
+                context_window: None,
             },
             metadata: WebUiSessionMetadata {
                 title: None,
@@ -169,6 +172,7 @@ impl FakeHost {
                 _ if session.state.waiting_question => WebUiSummaryState::WaitingQuestion,
                 _ => WebUiSummaryState::Running,
             },
+            workspace_label: "sample-workspace".to_string(),
         }
     }
     fn snapshot_locked(
@@ -222,11 +226,17 @@ impl WebUiHost for FakeHost {
                             }
                             _ => WebUiSummaryState::Running,
                         },
+                        workspace_label: "sample-workspace".to_string(),
                     });
                 }
                 Ok(WebUiReply::Bootstrap(WebUiBootstrap {
                     workspace_label: Some("sample-workspace".to_string()),
-                    models: vec!["fake-model".to_string()],
+                    models: vec![WebUiModelInfo {
+                        alias: "fake-model".to_string(),
+                        provider: "fake-provider".to_string(),
+                        context_window: Some(128_000),
+                        capabilities: vec!["streaming".to_string()],
+                    }],
                     permission_modes: vec![
                         neo_agent_core::PermissionMode::Ask,
                         neo_agent_core::PermissionMode::Auto,
@@ -254,6 +264,7 @@ impl WebUiHost for FakeHost {
                         pinned: session.metadata.pinned,
                         archived: session.metadata.archived,
                         state: WebUiSummaryState::Idle,
+                        workspace_label: "sample-workspace".to_string(),
                     })
                     .collect();
                 match scope {
@@ -304,6 +315,8 @@ impl WebUiHost for FakeHost {
                     waiting_approval: false,
                     waiting_question: false,
                     current_turn_id: Some("turn_1".to_string()),
+                    token_usage: None,
+                    context_window: None,
                 };
                 Ok(WebUiReply::SessionCreated {
                     session_id,
@@ -457,6 +470,38 @@ impl WebUiHost for FakeHost {
                     },
                 ))
             }
+            WebUiCommand::UploadAttachment { mime, base64 } => {
+                use base64::Engine as _;
+                if !mime.starts_with("image/") {
+                    return Err(WebUiError::new(WebUiErrorCode::InvalidRequest));
+                }
+                let bytes = base64::engine::general_purpose::STANDARD
+                    .decode(base64.as_bytes())
+                    .map_err(|_| WebUiError::new(WebUiErrorCode::InvalidRequest))?;
+                Ok(WebUiReply::AttachmentUploaded(
+                    neo_webui::protocol::WebUiAttachmentAck {
+                        id: "fake-attachment".to_string(),
+                        mime,
+                        byte_len: bytes.len() as u64,
+                    },
+                ))
+            }
+            WebUiCommand::AgentHistory {
+                session_id,
+                agent_id,
+            } => {
+                let sessions = self.sessions.lock().expect("fake host poisoned");
+                if !sessions.contains_key(&session_id) {
+                    return Err(WebUiError::new(WebUiErrorCode::NotFound));
+                }
+                Ok(WebUiReply::AgentHistory(
+                    neo_webui::protocol::WebUiAgentHistory {
+                        agent_id,
+                        watermark: 0,
+                        history: Vec::new(),
+                    },
+                ))
+            }
         }
     }
 
@@ -477,7 +522,11 @@ impl WebUiHost for FakeHost {
         Ok(WebUiWorkspaceSnapshot {
             stream_id: String::new(),
             workspace_sequence: 0,
-            sessions: summaries,
+            workspaces: vec![WebUiWorkspaceGroup {
+                label: "sample-workspace".to_string(),
+                current: true,
+                sessions: summaries,
+            }],
         })
     }
 

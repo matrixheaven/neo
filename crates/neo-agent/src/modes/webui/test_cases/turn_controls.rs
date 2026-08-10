@@ -29,7 +29,8 @@ fn input_routing_distinguishes_idle_stale_and_finishing() {
             &idle,
             "turn_1",
             neo_webui::protocol::WebUiInputDelivery::FollowUp,
-            "hi"
+            "hi",
+            Vec::new()
         )
         .expect_err("idle has no active turn")
         .code,
@@ -41,7 +42,8 @@ fn input_routing_distinguishes_idle_stale_and_finishing() {
             &running,
             "turn_old",
             neo_webui::protocol::WebUiInputDelivery::FollowUp,
-            "hi"
+            "hi",
+            Vec::new()
         )
         .is_err(),
         "stale turn id rejected"
@@ -51,7 +53,8 @@ fn input_routing_distinguishes_idle_stale_and_finishing() {
             &running,
             "turn_1",
             neo_webui::protocol::WebUiInputDelivery::Steer,
-            "now"
+            "now",
+            Vec::new()
         )
         .is_ok(),
         "steer is not degraded to follow-up"
@@ -72,7 +75,8 @@ fn input_routing_distinguishes_idle_stale_and_finishing() {
             &closing,
             "turn_1",
             neo_webui::protocol::WebUiInputDelivery::FollowUp,
-            "hi"
+            "hi",
+            Vec::new()
         )
         .expect_err("closed handle race")
         .code,

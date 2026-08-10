@@ -69,6 +69,7 @@ pub(super) fn test_state_in(
         relay.publisher(session_id),
         PerSessionContainers::fresh(&test_config()),
         std::env::temp_dir().join("neo-webui-test-project"),
+        "neo-webui-test-project".to_owned(),
         None,
     );
     let state = Arc::new(Mutex::new(state));

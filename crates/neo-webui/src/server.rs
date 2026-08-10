@@ -27,16 +27,16 @@ use crate::auth::{
     session_cookie_header, session_cookie_value,
 };
 use crate::protocol::{
-    WebUiApprovalBody, WebUiCancelBody, WebUiCancelling, WebUiClaimRequest, WebUiCommand,
-    WebUiCreateSessionBody, WebUiError, WebUiErrorBody, WebUiErrorCode, WebUiHost,
+    WebUiApprovalBody, WebUiAttachmentBody, WebUiCancelBody, WebUiCancelling, WebUiClaimRequest,
+    WebUiCommand, WebUiCreateSessionBody, WebUiError, WebUiErrorBody, WebUiErrorCode, WebUiHost,
     WebUiInputAccepted, WebUiInputBody, WebUiMetadataBody, WebUiQuestionBody, WebUiReply,
     WebUiServerMessage, WebUiSessionScope, WebUiSessionStarted, WebUiStartTurnBody,
     WebUiWatchRequest,
 };
 use crate::relay::{
-    COMMAND_BODY_LIMIT_BYTES, FIRST_SUBSCRIBE_DEADLINE, ObserverQueue, OutboundMessage, Relay,
-    SESSION_PAGE_LIMIT, SubscribeMode, SubscriptionLayer, TOOL_OUTPUT_MAX_LINES,
-    WS_FRAME_LIMIT_BYTES,
+    ATTACHMENT_BODY_LIMIT_BYTES, COMMAND_BODY_LIMIT_BYTES, FIRST_SUBSCRIBE_DEADLINE, ObserverQueue,
+    OutboundMessage, Relay, SESSION_PAGE_LIMIT, SubscribeMode, SubscriptionLayer,
+    TOOL_OUTPUT_MAX_LINES, WS_FRAME_LIMIT_BYTES,
 };
 
 /// Shared service state (all fields cheaply cloneable for handlers).
@@ -101,8 +101,13 @@ fn build_router(app: AppState) -> Router {
     Router::new()
         .route("/api/auth/claim", post(claim))
         .route("/api/bootstrap", get(bootstrap))
+        .route("/api/attachments", post(upload_attachment))
         .route("/api/sessions", get(list_sessions).post(create_session))
         .route("/api/sessions/{session_id}/snapshot", get(snapshot))
+        .route(
+            "/api/sessions/{session_id}/agents/{agent_id}/history",
+            get(agent_history),
+        )
         .route("/api/sessions/{session_id}/turns", post(start_turn))
         .route("/api/sessions/{session_id}/input", post(send_input))
         .route("/api/sessions/{session_id}/cancel", post(cancel_turn))
@@ -217,7 +222,11 @@ fn json<T: Serialize>(status: StatusCode, value: &T) -> Response {
 }
 
 async fn read_limited(body: Body) -> Result<axum::body::Bytes, Response> {
-    match to_bytes(body, COMMAND_BODY_LIMIT_BYTES).await {
+    read_limited_with(body, COMMAND_BODY_LIMIT_BYTES).await
+}
+
+async fn read_limited_with(body: Body, limit: usize) -> Result<axum::body::Bytes, Response> {
+    match to_bytes(body, limit).await {
         Ok(bytes) => Ok(bytes),
         Err(_) => Err(error_response(
             StatusCode::PAYLOAD_TOO_LARGE,
@@ -281,6 +290,8 @@ fn reply_response(app: &AppState, reply: WebUiReply) -> Response {
         WebUiReply::ToolOutput(value) => json(StatusCode::OK, &value),
         WebUiReply::WorkspaceChanges(value) => json(StatusCode::OK, &value),
         WebUiReply::WorkspaceChangeDetail(value) => json(StatusCode::OK, &value),
+        WebUiReply::AttachmentUploaded(value) => json(StatusCode::CREATED, &value),
+        WebUiReply::AgentHistory(value) => json(StatusCode::OK, &value),
     }
 }
 
@@ -398,6 +409,48 @@ async fn snapshot(State(app): State<AppState>, Path(session_id): Path<String>) -
     }
 }
 
+/// `GET /api/sessions/<id>/agents/<agent_id>/history` — lazy child-agent
+/// history replay. Unknown sessions, unknown or cross-session agent ids and
+/// malformed ids all get the same 404 `not_found`.
+async fn agent_history(
+    State(app): State<AppState>,
+    Path((session_id, agent_id)): Path<(String, String)>,
+) -> Response {
+    match app
+        .host
+        .execute(WebUiCommand::AgentHistory {
+            session_id,
+            agent_id,
+        })
+        .await
+    {
+        Ok(reply) => reply_response(&app, reply),
+        Err(error) => host_error_response(error),
+    }
+}
+
+/// `POST /api/attachments` — one base64 media payload staged digest-addressed.
+/// The body limit is the attachment-specific cap (base64 inflation of the
+/// per-attachment decoded cap), not the small command limit.
+async fn upload_attachment(State(app): State<AppState>, body: Body) -> Response {
+    let bytes = match read_limited_with(body, ATTACHMENT_BODY_LIMIT_BYTES).await {
+        Ok(bytes) => bytes,
+        Err(response) => return response,
+    };
+    let parsed: WebUiAttachmentBody = match serde_json::from_slice(&bytes) {
+        Ok(parsed) => parsed,
+        Err(_) => return invalid_request(),
+    };
+    let command = WebUiCommand::UploadAttachment {
+        mime: parsed.mime,
+        base64: parsed.base64,
+    };
+    match app.host.execute(command).await {
+        Ok(reply) => reply_response(&app, reply),
+        Err(error) => host_error_response(error),
+    }
+}
+
 async fn read_tool_output(
     State(app): State<AppState>,
     Path((session_id, output_ref)): Path<(String, String)>,
@@ -496,6 +549,7 @@ async fn create_session(State(app): State<AppState>, body: Body) -> Response {
     let command = WebUiCommand::CreateSession {
         message: parsed.message,
         composer: parsed.composer,
+        attachments: parsed.attachments,
     };
     match app.host.execute(command).await {
         Ok(reply) => reply_response(&app, reply),
@@ -531,6 +585,7 @@ path_body_handler!(
             session_id,
             message: body.message,
             composer: body.composer,
+            attachments: body.attachments,
         }
     }
 );
@@ -543,6 +598,7 @@ path_body_handler!(
             turn_id: body.turn_id,
             delivery: body.delivery,
             message: body.message,
+            attachments: body.attachments,
         }
     }
 );
@@ -729,7 +785,7 @@ async fn deliver_workspace_snapshot(
     let message = WebUiServerMessage::WorkspaceSnapshot {
         stream_id: app.relay.stream_id().to_string(),
         workspace_sequence,
-        sessions: snapshot.sessions,
+        workspaces: snapshot.workspaces,
     };
     match serde_json::to_string(&message) {
         Ok(json) => {

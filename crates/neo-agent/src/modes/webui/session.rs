@@ -17,16 +17,16 @@ use std::sync::{Arc, Mutex, RwLock};
 use anyhow::Result as AnyhowResult;
 use neo_agent_core::session::{SessionEventPersistence, SessionMetadataStore, ToolOutputRef};
 use neo_agent_core::{
-    ActiveTurnInput, AgentEvent, AgentMessage, ApprovalPresentation, ApprovalResponse,
-    McpConnectionManager, PendingQuestion, PermissionMode, QuestionResponse, TodoEventData,
-    WorkspaceAccessPolicy,
+    ActiveTurnInput, AgentEvent, AgentMessage, AgentTokenUsage, ApprovalPresentation,
+    ApprovalResponse, McpConnectionManager, PendingQuestion, PermissionMode, QuestionResponse,
+    TodoEventData, WorkspaceAccessPolicy,
     instructions::{InstructionRegistry, InstructionRegistryConfig},
     mode::PlanMode,
 };
 use neo_webui::protocol::{
-    WebUiError, WebUiErrorCode, WebUiEventBody, WebUiHistoryEntry, WebUiOutputRef,
-    WebUiPendingApproval, WebUiPendingQuestion, WebUiPhase, WebUiSessionState, WebUiSessionSummary,
-    WebUiSummaryState,
+    WebUiContextWindow, WebUiError, WebUiErrorCode, WebUiEventBody, WebUiHistoryEntry,
+    WebUiOutputRef, WebUiPendingApproval, WebUiPendingQuestion, WebUiPhase, WebUiSessionState,
+    WebUiSessionSummary, WebUiSummaryState,
 };
 use neo_webui::relay::{EventPublisher, Relay, TOOL_OUTPUT_MAX_LINES};
 use tokio::sync::{mpsc, oneshot};
@@ -118,7 +118,12 @@ impl SessionSummarySink {
         }
     }
 
-    pub(crate) fn publish(&self, session_id: &str, state: WebUiSummaryState) {
+    pub(crate) fn publish(
+        &self,
+        session_id: &str,
+        state: WebUiSummaryState,
+        workspace_label: &str,
+    ) {
         let record = SessionMetadataStore::new(self.sessions_dir.clone())
             .list()
             .ok()
@@ -134,6 +139,7 @@ impl SessionSummarySink {
             pinned: record.as_ref().is_some_and(|record| record.pinned),
             archived: record.as_ref().is_some_and(|record| record.archived),
             state,
+            workspace_label: workspace_label.to_owned(),
         };
         self.relay.publish_summary(summary);
     }
@@ -150,8 +156,12 @@ pub(crate) struct WebSessionState {
     pub(crate) publisher: EventPublisher,
     /// Workspace root used by the display projection: path metadata fields
     /// (`cwd`, approval paths) leave the service workspace-relative or as
-    /// `.`; canonical events and JSONL are never touched.
+    /// `.`; canonical events and JSONL are never touched. For a session that
+    /// belongs to another workspace this is the session's own recorded
+    /// workspace, matching CLI cross-directory resume semantics.
     workspace: PathBuf,
+    /// Display label of the session's workspace group (never a path).
+    workspace_label: String,
     /// Workspace summary publisher (absent in unit tests).
     summary_sink: Option<SessionSummarySink>,
     /// Every published display event with its relay sequence: canonical JSONL
@@ -175,6 +185,11 @@ pub(crate) struct WebSessionState {
     pub(crate) pending_approval: Option<PendingApprovalEntry>,
     pub(crate) pending_question: Option<PendingQuestionEntry>,
     pub(crate) last_todos: Vec<TodoEventData>,
+    /// Latest `TokenUsage` seen on the canonical stream (cached like
+    /// `last_todos` so snapshots and reconnects restore it immediately).
+    last_token_usage: Option<AgentTokenUsage>,
+    /// Latest `ContextWindowUpdated` occupancy, same caching discipline.
+    last_context_window: Option<WebUiContextWindow>,
     /// URL-safe encoded `ToolOutputRef` values owned by this session, built
     /// from the canonical history and live events; rebuilt from JSONL after a
     /// service restart.
@@ -195,6 +210,7 @@ impl WebSessionState {
         publisher: EventPublisher,
         containers: PerSessionContainers,
         workspace: PathBuf,
+        workspace_label: String,
         summary_sink: Option<SessionSummarySink>,
     ) -> Self {
         Self {
@@ -203,6 +219,7 @@ impl WebSessionState {
             containers,
             publisher,
             workspace,
+            workspace_label,
             summary_sink,
             history: Vec::new(),
             last_sequence: 0,
@@ -215,6 +232,8 @@ impl WebSessionState {
             pending_approval: None,
             pending_question: None,
             last_todos: Vec::new(),
+            last_token_usage: None,
+            last_context_window: None,
             output_refs: HashSet::new(),
             cancel_requested: false,
             turn_error: None,
@@ -229,6 +248,8 @@ impl WebSessionState {
             waiting_approval: self.waiting_approval,
             waiting_question: self.waiting_question,
             current_turn_id: self.turn_id.clone(),
+            token_usage: self.last_token_usage,
+            context_window: self.last_context_window,
         }
     }
 
@@ -260,7 +281,11 @@ impl WebSessionState {
             .publish(WebUiEventBody::SessionState(self.state_snapshot()));
         self.last_sequence = sequence;
         if let Some(sink) = &self.summary_sink {
-            sink.publish(&self.session_id, self.summary_state());
+            sink.publish(
+                &self.session_id,
+                self.summary_state(),
+                &self.workspace_label,
+            );
         }
     }
 
@@ -311,9 +336,7 @@ impl WebSessionState {
         }
         for event in valid {
             collect_output_refs(&event, &mut self.output_refs);
-            if let AgentEvent::TodoUpdated { todos, .. } = &event {
-                self.last_todos.clone_from(todos);
-            }
+            self.cache_session_metrics(&event);
             let (event, output) = self.project_event_for_web(&event);
             let sequence = self.publisher.publish(WebUiEventBody::SessionEvent {
                 event: event.clone(),
@@ -325,6 +348,32 @@ impl WebSessionState {
                 output,
             });
             self.last_sequence = sequence;
+        }
+    }
+
+    /// Cache the latest usage/context-window values from one canonical event
+    /// (same discipline as the todo projection: the newest event wins and the
+    /// value survives projection release so `session_state` always carries
+    /// it).
+    fn cache_session_metrics(&mut self, event: &AgentEvent) {
+        match event {
+            AgentEvent::TodoUpdated { todos, .. } => self.last_todos.clone_from(todos),
+            AgentEvent::TokenUsage { usage, .. } => self.last_token_usage = Some(*usage),
+            AgentEvent::ContextWindowUpdated {
+                used_tokens,
+                projected_tokens,
+                max_tokens,
+                remaining_tokens,
+                ..
+            } => {
+                self.last_context_window = Some(WebUiContextWindow {
+                    used_tokens: *used_tokens,
+                    projected_tokens: *projected_tokens,
+                    max_tokens: *max_tokens,
+                    remaining_tokens: *remaining_tokens,
+                });
+            }
+            _ => {}
         }
     }
 
@@ -487,9 +536,7 @@ impl WebSessionState {
         self.last_todos.clear();
         for (offset, event) in events.into_iter().enumerate() {
             collect_output_refs(&event, &mut self.output_refs);
-            if let AgentEvent::TodoUpdated { todos, .. } = &event {
-                self.last_todos.clone_from(todos);
-            }
+            self.cache_session_metrics(&event);
             let (event, output) = self.project_event_for_web(&event);
             self.history.push(WebUiHistoryEntry {
                 sequence: start + offset as u64,
@@ -498,6 +545,26 @@ impl WebSessionState {
             });
         }
         self.projection_released = false;
+    }
+
+    /// Project a child agent's persisted wire events with the exact same web
+    /// projection as the main session (opaque output references,
+    /// workspace-relative paths). Sequences are synthetic and contiguous from
+    /// 1; the child wire is read on demand and never enters this session's
+    /// history, the relay cache or any event store.
+    pub(crate) fn project_agent_history(&self, events: Vec<AgentEvent>) -> Vec<WebUiHistoryEntry> {
+        events
+            .into_iter()
+            .enumerate()
+            .map(|(offset, event)| {
+                let (event, output) = self.project_event_for_web(&event);
+                WebUiHistoryEntry {
+                    sequence: offset as u64 + 1,
+                    event,
+                    output,
+                }
+            })
+            .collect()
     }
 }
 
@@ -894,6 +961,8 @@ async fn finalize_turn(
 }
 
 /// Push a follow-up or steer message into the active turn's input handle.
+/// `media` carries already-staged attachment parts (blob references into the
+/// session's own blob store); they ride the same user message as the text.
 /// Returns `Ok(true)` when queued, `Ok(false)` when the handle was closed
 /// (turn ending), and `Err(code)` for stale or absent turns.
 pub(crate) fn push_turn_input(
@@ -901,6 +970,7 @@ pub(crate) fn push_turn_input(
     turn_id: &str,
     delivery: neo_webui::protocol::WebUiInputDelivery,
     message: &str,
+    media: Vec<neo_agent_core::Content>,
 ) -> Result<bool, WebUiError> {
     let steer_input = {
         let guard = state
@@ -921,13 +991,13 @@ pub(crate) fn push_turn_input(
             .map(|active| active.steer_input.clone())
             .ok_or_else(|| WebUiError::new(WebUiErrorCode::TurnTransition))?
     };
+    let mut content = Vec::with_capacity(media.len() + 1);
+    content.push(neo_agent_core::Content::text(message));
+    content.extend(media);
+    let message = AgentMessage::user_content(content);
     let input = match delivery {
-        neo_webui::protocol::WebUiInputDelivery::FollowUp => {
-            ActiveTurnInput::FollowUp(AgentMessage::user_text(message))
-        }
-        neo_webui::protocol::WebUiInputDelivery::Steer => {
-            ActiveTurnInput::SteerNow(AgentMessage::user_text(message))
-        }
+        neo_webui::protocol::WebUiInputDelivery::FollowUp => ActiveTurnInput::FollowUp(message),
+        neo_webui::protocol::WebUiInputDelivery::Steer => ActiveTurnInput::SteerNow(message),
     };
     if steer_input.try_push(input) {
         return Ok(true);
