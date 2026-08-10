@@ -8,6 +8,7 @@
 import type {
   ToolOutputRange,
   WebUiAgentHistory,
+  WebUiAttachmentAck,
   WebUiBootstrap,
   WebUiCursor,
   WebUiErrorBody,
@@ -136,10 +137,12 @@ export function fetchSnapshot(sessionId: string): Promise<WebUiSnapshot> {
 export function createSession(
   message: string,
   composer?: WebUiComposer,
+  attachments?: string[],
 ): Promise<WebUiSessionStarted> {
   return request<WebUiSessionStarted>("POST", "/api/sessions", {
     message,
     ...(composer ? { composer } : {}),
+    ...(attachments && attachments.length > 0 ? { attachments } : {}),
   });
 }
 
@@ -147,11 +150,16 @@ export function startTurn(
   sessionId: string,
   message: string,
   composer?: WebUiComposer,
+  attachments?: string[],
 ): Promise<WebUiSessionStarted> {
   return request<WebUiSessionStarted>(
     "POST",
     `/api/sessions/${encodeURIComponent(sessionId)}/turns`,
-    { message, ...(composer ? { composer } : {}) },
+    {
+      message,
+      ...(composer ? { composer } : {}),
+      ...(attachments && attachments.length > 0 ? { attachments } : {}),
+    },
   );
 }
 
@@ -160,12 +168,30 @@ export function sendInput(
   turnId: string,
   delivery: WebUiInputDelivery,
   message: string,
+  attachments?: string[],
 ): Promise<WebUiInputAccepted> {
   return request<WebUiInputAccepted>(
     "POST",
     `/api/sessions/${encodeURIComponent(sessionId)}/input`,
-    { turn_id: turnId, delivery, message },
+    {
+      turn_id: turnId,
+      delivery,
+      message,
+      ...(attachments && attachments.length > 0 ? { attachments } : {}),
+    },
   );
+}
+
+/** Stage one media payload (base64) into the session-level blob store. The
+ * returned id is opaque and passed back verbatim on send. */
+export function uploadAttachment(
+  mime: string,
+  base64: string,
+): Promise<WebUiAttachmentAck> {
+  return request<WebUiAttachmentAck>("POST", "/api/attachments", {
+    mime,
+    base64,
+  });
 }
 
 export function cancelTurn(

@@ -68,8 +68,11 @@ export function resetHarness(): void {
   recordedRequests.length = 0;
   FakeWebSocket.instances = [];
   FakeWebSocket.autoOpen = true;
+  attachmentCounter = 0;
   window.localStorage.clear();
 }
+
+let attachmentCounter = 0;
 
 function jsonResponse(body: unknown, status = 200): Response {
   return new Response(JSON.stringify(body), {
@@ -86,8 +89,18 @@ export function bootstrapBody(): Record<string, unknown> {
   return {
     workspace_label: "neo",
     models: [
-      { alias: "gpt-5-codex", provider: "openai", capabilities: [] },
-      { alias: "claude-sonnet", provider: "anthropic", capabilities: [] },
+      {
+        alias: "gpt-5-codex",
+        provider: "openai",
+        context_window: 256000,
+        capabilities: ["reasoning"],
+      },
+      {
+        alias: "claude-sonnet",
+        provider: "anthropic",
+        context_window: 200000,
+        capabilities: [],
+      },
     ],
     permission_modes: ["ask", "auto", "yolo"],
     development_modes: ["normal", "plan", "goal"],
@@ -229,6 +242,20 @@ export function mockFetch(input: RequestInfo | URL, init?: RequestInit): Promise
         next_line: 2,
         reached_end: true,
       }),
+    );
+  }
+  if (path === "/api/attachments" && method === "POST") {
+    attachmentCounter += 1;
+    const base64 = typeof body?.base64 === "string" ? body.base64 : "";
+    return Promise.resolve(
+      jsonResponse(
+        {
+          id: `att_${attachmentCounter}`,
+          mime: body?.mime ?? "application/octet-stream",
+          byte_len: Math.floor(base64.length * 0.75),
+        },
+        201,
+      ),
     );
   }
   const patchMatch = /^\/api\/sessions\/([^/]+)$/.exec(path);

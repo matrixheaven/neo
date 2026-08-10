@@ -634,6 +634,19 @@ export interface WebUiBootstrap {
   sessions?: WebUiSessionSummary[];
 }
 
+/** Body of `POST /api/attachments`: one base64 media payload. */
+export interface WebUiAttachmentBody {
+  mime: string;
+  base64: string;
+}
+
+/** 201 response of an attachment upload (WebUiAttachmentAck). */
+export interface WebUiAttachmentAck {
+  id: string;
+  mime: string;
+  byte_len: number;
+}
+
 export interface WebUiSessionStarted {
   session_id: string;
   turn_id: string;

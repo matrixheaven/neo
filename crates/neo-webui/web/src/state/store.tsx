@@ -79,7 +79,7 @@ export interface AppActions {
   setDraft(sessionId: string, text: string): void;
   setLineExpanded(sessionId: string, itemId: string, expanded: boolean): void;
   setAtBottom(sessionId: string, atBottom: boolean): void;
-  sendMessage(text: string, composer?: WebUiComposer): void;
+  sendMessage(text: string, composer?: WebUiComposer, attachments?: string[], onSent?: () => void): void;
   steer(text: string): void;
   stop(): void;
   submitApproval(requestId: string, action: ApprovalAction, feedback?: string): void;
@@ -287,7 +287,7 @@ export function AppProvider({ children }: { children: ReactNode }) {
       dispatch({ type: "set_at_bottom", sessionId, atBottom });
     },
 
-    sendMessage(text, composer) {
+    sendMessage(text, composer, attachments, onSent) {
       const current = stateRef.current;
       const trimmed = text.trim();
       if (trimmed === "") return;
@@ -299,9 +299,10 @@ export function AppProvider({ children }: { children: ReactNode }) {
         // network failures keep it.
         if (current.creatingSession) return;
         dispatch({ type: "create_started" });
-        createSession(trimmed, composer)
+        createSession(trimmed, composer, attachments)
           .then((started) => {
             dispatch({ type: "session_started", started });
+            onSent?.();
           })
           .catch((error: unknown) => {
             dispatch({ type: "create_finished" });
@@ -318,19 +319,21 @@ export function AppProvider({ children }: { children: ReactNode }) {
       const clearDraft = () =>
         dispatch({ type: "draft_changed", sessionId: selected, text: "" });
       if (running && view) {
-        sendInput(selected, view.currentTurnId as string, "follow_up", trimmed)
+        sendInput(selected, view.currentTurnId as string, "follow_up", trimmed, attachments)
           .then(() => {
             dispatch({ type: "send_finished", sessionId: selected });
             clearDraft();
+            onSent?.();
           })
           .catch((error: unknown) => {
             dispatch({ type: "send_finished", sessionId: selected });
             handleApiError(error, selected);
           });
       } else {
-        startTurn(selected, trimmed, composer)
+        startTurn(selected, trimmed, composer, attachments)
           .then((started) => {
             dispatch({ type: "session_started", started });
+            onSent?.();
           })
           .catch((error: unknown) => {
             dispatch({ type: "send_finished", sessionId: selected });

@@ -1642,21 +1642,6 @@ html.resizing .transcript-scroll * {
   overflow-x: auto;
 }
 
-.composer-select {
-  background: transparent;
-  border: 1px solid var(--line);
-  border-radius: var(--radius-pill);
-  color: var(--text-dim);
-  font-size: 12px;
-  padding: 2px 8px;
-  max-width: 150px;
-}
-
-.composer-select option {
-  background: var(--surface-raised);
-  color: var(--text);
-}
-
 .composer-actions {
   display: flex;
   align-items: center;
@@ -1693,6 +1678,318 @@ html.resizing .transcript-scroll * {
   height: 32px;
   border-radius: 50%;
   border: 1px solid var(--line-strong);
+}
+
+/* -- Composer: welcome banner ------------------------------------------------ */
+
+.welcome-banner {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 12px 2px;
+  color: var(--text-dim);
+  font-size: 12.5px;
+  opacity: 0;
+  transition: opacity 0.22s ease;
+}
+
+.welcome-banner.visible {
+  opacity: 1;
+}
+
+.welcome-banner .neo-mark {
+  color: var(--accent);
+  flex: none;
+}
+
+/* -- Composer: drag & drop --------------------------------------------------- */
+
+.composer.drag-over {
+  background: var(--accent-soft);
+  border-color: var(--accent);
+}
+
+/* -- Composer: attachment queue ---------------------------------------------- */
+
+.attachment-queue {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  padding: 4px 10px 0;
+}
+
+.attachment-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  max-width: 220px;
+  padding: 3px 6px 3px 8px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-pill);
+  background: var(--surface-raised);
+  color: var(--text-dim);
+  font-size: 12px;
+}
+
+.attachment-chip[data-status="error"] {
+  border-color: var(--danger);
+  color: var(--danger);
+}
+
+.attachment-thumb {
+  width: 20px;
+  height: 20px;
+  border-radius: 4px;
+  object-fit: cover;
+  flex: none;
+}
+
+.attachment-name {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.attachment-state {
+  color: var(--text-faint);
+  flex: none;
+}
+
+.attachment-state.error {
+  color: var(--danger);
+}
+
+.attachment-remove {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 18px;
+  height: 18px;
+  border: none;
+  border-radius: 50%;
+  background: transparent;
+  color: var(--text-faint);
+  cursor: pointer;
+  flex: none;
+}
+
+.attachment-remove:hover {
+  background: var(--line);
+  color: var(--text);
+}
+
+.attachment-error {
+  padding: 2px 12px 0;
+  color: var(--danger);
+  font-size: 12px;
+}
+
+/* -- Composer: pill row -------------------------------------------------------- */
+
+.attach-button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 36px;
+  height: 36px;
+  border-radius: 50%;
+  border: 1px solid var(--line);
+  background: transparent;
+  color: var(--text-dim);
+  cursor: pointer;
+  flex: none;
+}
+
+.attach-button:hover {
+  background: var(--accent-soft);
+  color: var(--accent);
+}
+
+.composer-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  max-width: 200px;
+  padding: 4px 10px;
+  border: 1px solid transparent;
+  border-radius: var(--radius-pill);
+  background: transparent;
+  color: var(--text-dim);
+  font-size: 12.5px;
+  font-weight: 500;
+  cursor: pointer;
+  white-space: nowrap;
+  transition:
+    background 0.16s ease,
+    color 0.16s ease;
+}
+
+.composer-pill:hover {
+  background: var(--accent-soft);
+}
+
+.model-pill-name {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.perm-pill[data-mode="ask"],
+.perm-pill[data-mode="default"] {
+  color: var(--text-dim);
+}
+
+.perm-pill[data-mode="auto"] {
+  background: var(--warn-soft);
+  color: var(--warn);
+}
+
+.perm-pill[data-mode="yolo"] {
+  color: var(--danger);
+}
+
+.mode-pill[data-active="true"],
+.reasoning-pill[data-active="true"] {
+  background: var(--accent-soft);
+  color: var(--accent);
+}
+
+/* -- Composer: model popover --------------------------------------------------- */
+
+.pill-wrap {
+  position: relative;
+  display: inline-flex;
+}
+
+.pill-popover {
+  position: absolute;
+  bottom: calc(100% + 8px);
+  left: 0;
+  width: 300px;
+  max-height: 320px;
+  display: flex;
+  flex-direction: column;
+  background: var(--surface-raised);
+  border: 1px solid var(--line-strong);
+  border-radius: var(--radius-menu);
+  box-shadow: var(--shadow-low);
+  overflow: hidden;
+  z-index: 40;
+}
+
+.pill-popover-search {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 8px 10px;
+  border-bottom: 1px solid var(--line);
+  color: var(--text-faint);
+}
+
+.pill-popover-search input {
+  flex: 1;
+  min-width: 0;
+  background: transparent;
+  border: none;
+  color: var(--text);
+  font: inherit;
+  font-size: 12.5px;
+}
+
+.pill-popover-search input:focus {
+  outline: none;
+}
+
+.pill-popover-list {
+  overflow-y: auto;
+  padding: 4px;
+}
+
+.model-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 4px 8px;
+  width: 100%;
+  padding: 7px 10px;
+  border: none;
+  border-radius: 8px;
+  background: transparent;
+  color: var(--text);
+  font: inherit;
+  font-size: 12.5px;
+  text-align: left;
+  cursor: pointer;
+}
+
+.model-row:hover,
+.model-row:focus-visible {
+  background: var(--accent-soft);
+}
+
+.model-row.selected {
+  background: var(--accent-soft-strong);
+}
+
+.model-row-name {
+  font-weight: 500;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.model-row-meta {
+  color: var(--text-faint);
+  font-size: 11.5px;
+}
+
+.model-row-caps {
+  display: inline-flex;
+  gap: 4px;
+}
+
+.cap-chip {
+  padding: 1px 6px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-pill);
+  color: var(--text-faint);
+  font-size: 10.5px;
+}
+
+.pill-popover-empty {
+  padding: 12px;
+  color: var(--text-faint);
+  font-size: 12.5px;
+  text-align: center;
+}
+
+/* -- Composer: context ring ---------------------------------------------------- */
+
+.context-ring {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  color: var(--text-dim);
+  font-size: 11.5px;
+  flex: none;
+}
+
+.context-ring-track {
+  fill: none;
+  stroke: var(--line-strong);
+  stroke-width: 2;
+}
+
+.context-ring-value {
+  fill: none;
+  stroke: var(--accent);
+  stroke-width: 2;
+  stroke-linecap: round;
+  transition: stroke-dashoffset 0.25s ease;
+}
+
+.context-ring-pct {
+  font-variant-numeric: tabular-nums;
 }
 
 /* -- Task list -------------------------------------------------------------------------- */
