@@ -5,7 +5,7 @@
  * permission modes or development modes.
  */
 
-import { PanelLeft } from "lucide-react";
+import { Moon, PanelLeft, Sun } from "lucide-react";
 import { useAppActions, useAppState } from "../state/store";
 import type { WebUiPhase } from "../protocol";
 
@@ -76,6 +76,15 @@ export function TopBar() {
       <span className="topbar-spacer" />
       {/* Change entry and branch status render only when the backend provides
           structured workspace change data; until then this area stays empty. */}
+      <button
+        type="button"
+        className="icon-button theme-toggle"
+        aria-label="切换主题"
+        title="切换主题"
+        onClick={() => actions.setTheme(state.theme === "dark" ? "light" : "dark")}
+      >
+        {state.theme === "dark" ? <Sun size={16} aria-hidden /> : <Moon size={16} aria-hidden />}
+      </button>
     </header>
   );
 }

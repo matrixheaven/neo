@@ -41,6 +41,12 @@ import {
   type AppState,
 } from "./appState";
 import { appReducer } from "./reducer";
+import {
+  applyTheme,
+  loadThemePreference,
+  saveThemePreference,
+  type Theme,
+} from "./theme";
 
 const SIDEBAR_WIDTH_KEY = "neo-webui.sidebar-width";
 
@@ -67,6 +73,7 @@ export interface AppActions {
   selectSession(sessionId: string | null): void;
   setSidebarWidth(width: number): void;
   setDrawerOpen(open: boolean): void;
+  setTheme(theme: Theme): void;
   setContextMenu(sessionId: string | null): void;
   setDraft(sessionId: string, text: string): void;
   toggleItemExpanded(sessionId: string, itemId: string): void;
@@ -87,7 +94,7 @@ const RECONNECT_DELAYS_MS = [500, 1000, 2000, 4000, 8000];
 
 export function AppProvider({ children }: { children: ReactNode }) {
   const [state, dispatch] = useReducer(appReducer, undefined, () =>
-    initialAppState(loadSidebarWidth()),
+    initialAppState(loadSidebarWidth(), loadThemePreference()),
   );
   const stateRef = useRef(state);
   stateRef.current = state;
@@ -257,6 +264,12 @@ export function AppProvider({ children }: { children: ReactNode }) {
     },
     setDrawerOpen(open) {
       dispatch({ type: "set_drawer_open", open });
+    },
+    setTheme(theme) {
+      // Only the explicit toggle persists; the system default never writes.
+      saveThemePreference(theme);
+      applyTheme(theme);
+      dispatch({ type: "theme_changed", theme });
     },
     setContextMenu(sessionId) {
       dispatch({ type: "set_context_menu", sessionId });

@@ -262,6 +262,9 @@ export function appReducer(state: AppState, action: AppAction): AppState {
     case "set_drawer_open":
       return { ...state, sidebarDrawerOpen: action.open };
 
+    case "theme_changed":
+      return { ...state, theme: action.theme };
+
     case "set_context_menu":
       return { ...state, activeContextMenu: action.sessionId };
 

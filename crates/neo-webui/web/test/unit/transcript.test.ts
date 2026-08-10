@@ -32,7 +32,7 @@ const session1 = fixture.sessions[0];
 const session2 = fixture.sessions[1];
 
 function stateWithSnapshot(session = session1): AppState {
-  let state = initialAppState(280);
+  let state = initialAppState(280, "dark");
   state = appReducer(state, { type: "select_session", sessionId: session.session_id });
   state = appReducer(state, {
     type: "server_message",
@@ -120,7 +120,7 @@ describe("snapshot rebuild", () => {
     // remains in place yet must not stay actionable.
     const snapshot = structuredClone(session1.snapshot);
     delete snapshot.pending_approval;
-    state = initialAppState(280);
+    state = initialAppState(280, "dark");
     state = appReducer(state, { type: "select_session", sessionId: session1.session_id });
     state = appReducer(state, {
       type: "server_message",
@@ -153,7 +153,7 @@ describe("snapshot rebuild", () => {
       },
     ];
     delete snapshot.pending_question;
-    let state = initialAppState(280);
+    let state = initialAppState(280, "dark");
     state = appReducer(state, { type: "select_session", sessionId: session1.session_id });
     state = appReducer(state, {
       type: "server_message",

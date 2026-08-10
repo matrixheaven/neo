@@ -13,6 +13,7 @@ import type {
 } from "../protocol";
 import type { TranscriptProjection } from "./transcript";
 import { emptyProjection } from "./transcript";
+import type { Theme } from "./theme";
 
 export const SIDEBAR_DEFAULT = 280;
 export const SIDEBAR_MIN = 224;
@@ -93,6 +94,8 @@ export interface AppState {
   creatingSession: boolean;
   sidebarWidth: number;
   sidebarDrawerOpen: boolean;
+  /** Active color theme; mirrored onto document.documentElement[data-theme]. */
+  theme: Theme;
   /** Session id whose context menu is open, if any. */
   activeContextMenu: string | null;
   summaries: WebUiSessionSummary[];
@@ -104,7 +107,7 @@ export interface AppState {
   notice: string | null;
 }
 
-export function initialAppState(sidebarWidth: number): AppState {
+export function initialAppState(sidebarWidth: number, theme: Theme): AppState {
   return {
     auth: "pending",
     bootstrap: null,
@@ -112,6 +115,7 @@ export function initialAppState(sidebarWidth: number): AppState {
     creatingSession: false,
     sidebarWidth,
     sidebarDrawerOpen: false,
+    theme,
     activeContextMenu: null,
     summaries: [],
     workspaceStreamId: null,
@@ -130,6 +134,7 @@ export type AppAction =
   | { type: "select_session"; sessionId: string | null }
   | { type: "set_sidebar_width"; width: number }
   | { type: "set_drawer_open"; open: boolean }
+  | { type: "theme_changed"; theme: Theme }
   | { type: "set_context_menu"; sessionId: string | null }
   | { type: "draft_changed"; sessionId: string; text: string }
   | { type: "toggle_item_expanded"; sessionId: string; itemId: string }
