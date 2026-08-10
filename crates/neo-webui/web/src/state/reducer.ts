@@ -275,6 +275,9 @@ export function appReducer(state: AppState, action: AppAction): AppState {
         selectedSessionId: action.sessionId,
         activeContextMenu: null,
         sidebarDrawerOpen: false,
+        // Session switching closes the drill-down panel; its data is
+        // discarded, never cached.
+        agentPanel: null,
       };
       // The previous session keeps its draft/expansion/scroll anchor but
       // drops the full transcript — full transcripts live only on the
@@ -391,5 +394,11 @@ export function appReducer(state: AppState, action: AppAction): AppState {
 
     case "clear_notice":
       return { ...state, notice: null };
+
+    case "open_agent_panel":
+      return { ...state, agentPanel: action.panel };
+
+    case "close_agent_panel":
+      return { ...state, agentPanel: null };
   }
 }

@@ -30,6 +30,7 @@ import {
   type EventsSocket,
 } from "../api";
 import type {
+  AgentSnapshot,
   ApprovalAction,
   WebUiComposer,
   WebUiQuestionAnswer,
@@ -85,6 +86,8 @@ export interface AppActions {
   submitQuestion(questionId: string, answer: WebUiQuestionAnswer): void;
   patchMetadata(sessionId: string, change: { title?: string; pinned?: boolean; archived?: boolean }): void;
   dismissNotice(): void;
+  openAgentPanel(sessionId: string, agent: AgentSnapshot): void;
+  closeAgentPanel(): void;
 }
 
 const AppStateContext = createContext<AppState | null>(null);
@@ -410,6 +413,17 @@ export function AppProvider({ children }: { children: ReactNode }) {
 
     dismissNotice() {
       dispatch({ type: "clear_notice" });
+    },
+
+    openAgentPanel(sessionId, agent) {
+      dispatch({
+        type: "open_agent_panel",
+        panel: { sessionId, agentId: agent.id, agent },
+      });
+    },
+
+    closeAgentPanel() {
+      dispatch({ type: "close_agent_panel" });
     },
   }), [handleApiError]);
 

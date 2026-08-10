@@ -143,6 +143,9 @@ export interface AgentSnapshot {
   live_messages_received?: number | null;
   tool_count?: number | null;
   token_count?: number | null;
+  input_token_count?: number | null;
+  cache_read_token_count?: number | null;
+  cache_write_token_count?: number | null;
   elapsed?: { secs: number; nanos: number } | null;
   latest_text?: string | null;
 }
@@ -533,6 +536,15 @@ export interface WebUiHistoryEntry {
   sequence: number;
   event: AgentEvent;
   output?: WebUiOutputRef | null;
+}
+
+/** Body of `GET /api/sessions/<sid>/agents/<agent_id>/history`: the child
+ * agent's persisted wire history, projected exactly like the main snapshot.
+ * Read on demand — never cached client-side either. */
+export interface WebUiAgentHistory {
+  agent_id: string;
+  watermark: number;
+  history: WebUiHistoryEntry[];
 }
 
 export interface WebUiSnapshot {

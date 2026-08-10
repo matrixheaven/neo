@@ -4,6 +4,7 @@
  */
 
 import type {
+  AgentSnapshot,
   WebUiBootstrap,
   WebUiPhase,
   WebUiServerMessage,
@@ -112,6 +113,19 @@ export interface AppState {
   connection: ConnectionState;
   /** Non-sensitive one-line notice (e.g. input too large, stale refresh). */
   notice: string | null;
+  /** Drill-down panel for a child agent (R4 §5.2). UI-only state: the panel
+   * data is fetched lazily and discarded on close; switching sessions closes
+   * the panel. */
+  agentPanel: AgentPanelTarget | null;
+}
+
+/** Which child agent the drill-down panel shows. The snapshot is carried for
+ * the header (title/state/elapsed/tokens) so the header never waits on the
+ * history fetch. */
+export interface AgentPanelTarget {
+  sessionId: string;
+  agentId: string;
+  agent: AgentSnapshot;
 }
 
 export function initialAppState(sidebarWidth: number, theme: Theme): AppState {
@@ -131,6 +145,7 @@ export function initialAppState(sidebarWidth: number, theme: Theme): AppState {
     sessions: {},
     connection: "connecting",
     notice: null,
+    agentPanel: null,
   };
 }
 
@@ -157,4 +172,6 @@ export type AppAction =
   | { type: "question_submitted"; sessionId: string; questionId: string }
   | { type: "question_stale"; sessionId: string; questionId: string }
   | { type: "notice"; text: string }
-  | { type: "clear_notice" };
+  | { type: "clear_notice" }
+  | { type: "open_agent_panel"; panel: AgentPanelTarget }
+  | { type: "close_agent_panel" };

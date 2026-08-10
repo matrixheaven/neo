@@ -95,6 +95,40 @@ export function bootstrapBody(): Record<string, unknown> {
   };
 }
 
+/** Fixture-style child-agent wire history for the drill-down panel (R4):
+ * the same projection inputs as a main snapshot — user + assistant canonical
+ * appends with contiguous sequences. */
+export function agentHistoryBody(agentId: string): Record<string, unknown> {
+  return {
+    agent_id: agentId,
+    watermark: 2,
+    history: [
+      {
+        sequence: 1,
+        event: {
+          MessageAppended: {
+            message: { User: { content: [{ Text: { text: "检查 relay 测试覆盖" } }] } },
+          },
+        },
+      },
+      {
+        sequence: 2,
+        event: {
+          MessageAppended: {
+            message: {
+              Assistant: {
+                content: [{ Text: { text: "子代理结论：relay 覆盖达标。" } }],
+                tool_calls: [],
+                stop_reason: "EndTurn",
+              },
+            },
+          },
+        },
+      },
+    ],
+  };
+}
+
 export function mockFetch(input: RequestInfo | URL, init?: RequestInit): Promise<Response> {
   const url = typeof input === "string" ? input : input instanceof URL ? input.href : input.url;
   const method = init?.method ?? "GET";
@@ -177,6 +211,14 @@ export function mockFetch(input: RequestInfo | URL, init?: RequestInit): Promise
   }
   if (path.endsWith("/question") && method === "POST") {
     return Promise.resolve(jsonResponse({}, 202));
+  }
+  const agentHistoryMatch = /^\/api\/sessions\/([^/]+)\/agents\/([^/]+)\/history$/.exec(path);
+  if (agentHistoryMatch) {
+    const agentId = decodeURIComponent(agentHistoryMatch[2]);
+    if (agentId === "agent_missing") {
+      return Promise.resolve(jsonResponse({ code: "not_found" }, 404));
+    }
+    return Promise.resolve(jsonResponse(agentHistoryBody(agentId)));
   }
   const toolOutputMatch = /^\/api\/sessions\/([^/]+)\/tool-output\/([^?]+)/.exec(path);
   if (toolOutputMatch) {

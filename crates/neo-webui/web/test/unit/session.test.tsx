@@ -283,7 +283,7 @@ describe("transcript redesign rows", () => {
         },
       },
     });
-    const line = await screen.findByRole("button", { name: /子代理 巡检/ });
+    const line = await screen.findByRole("button", { name: /查看子代理详情：巡检/ });
     expect(line.textContent).toContain("运行中");
     expect(line.textContent).toContain("扫描 src/ 中");
     expect(screen.queryByRole("button", { name: /未识别事件/ })).toBeNull();

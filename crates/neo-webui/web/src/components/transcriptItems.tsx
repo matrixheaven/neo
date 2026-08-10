@@ -21,8 +21,8 @@ import {
   Workflow,
   XCircle,
 } from "lucide-react";
-import { useEffect, useLayoutEffect, useRef, useState } from "react";
-import type { ApprovalOption, QuestionEventData } from "../protocol";
+import { useEffect, useLayoutEffect, useRef, useState, type CSSProperties } from "react";
+import type { AgentSnapshot, ApprovalOption, QuestionEventData } from "../protocol";
 import { useAppActions, useAppState } from "../state/store";
 import type {
   ApprovalItem,
@@ -47,7 +47,7 @@ import { Line, useLineExpanded } from "./collapsible";
 import { FullOutput } from "./fullOutput";
 import { Markdown } from "./markdown";
 
-function formatElapsed(secs: number | undefined): string | null {
+export function formatElapsed(secs: number | undefined): string | null {
   if (secs === undefined || !Number.isFinite(secs) || secs <= 0) return null;
   if (secs < 60) return `${secs}s`;
   const minutes = Math.floor(secs / 60);
@@ -563,11 +563,13 @@ function QuestionRow({ sessionId, item }: { sessionId: string; item: QuestionIte
 }
 
 // ---------------------------------------------------------------------------
-// Delegate / swarm inline rows (R3 basic presentation; the drill-down panel
-// and the full swarm block design land in R4).
+// Delegate / swarm rows (R4 §5.1): a delegate is a single agent-line that
+// opens the drill-down panel; a swarm is a header line with an aggregate
+// progress bar whose member rows (same agent-line presentation, border-l
+// connector, stagger-in) open the panel per child agent.
 // ---------------------------------------------------------------------------
 
-function agentStateText(state: string): string {
+export function agentStateText(state: string): string {
   switch (state) {
     case "running":
       return "运行中";
@@ -579,6 +581,8 @@ function agentStateText(state: string): string {
       return "失败";
     case "cancelled":
       return "已取消";
+    case "aborted":
+      return "已中止";
     case "timed_out":
       return "超时";
     default:
@@ -586,58 +590,82 @@ function agentStateText(state: string): string {
   }
 }
 
-function DelegateLine({ sessionId, item }: { sessionId: string; item: DelegateItem }) {
-  const [open, toggle] = useLineExpanded(sessionId, item.id, false);
-  const agent = item.agent;
-  const elapsed = formatElapsed(agent.elapsed?.secs);
-  const status =
-    agentStateText(agent.state) +
-    (elapsed ? ` · ${elapsed}` : "") +
-    (agent.terminal_reason ? ` · ${agent.terminal_reason}` : "");
+/** Status pill of the agent rows: text plus an icon — never color alone. */
+export function AgentStatePill({ state }: { state: string }) {
+  const icon =
+    state === "running" ? (
+      <Loader2 size={11} className="spin" aria-hidden />
+    ) : state === "completed" ? (
+      <Check size={11} aria-hidden />
+    ) : state === "failed" || state === "timed_out" || state === "cancelled" || state === "aborted" ? (
+      <XCircle size={11} aria-hidden />
+    ) : (
+      <Clock size={11} aria-hidden />
+    );
   return (
-    <Line
-      className={`agent-line state-${agent.state}`}
-      label={`子代理 ${agent.task_title ?? agent.display_name}，状态：${status}`}
-      open={open}
-      onToggle={toggle}
-      head={
-        <>
-          {lineCaret()}
-          {agent.state === "running" ? <span className="pulse-dot" aria-hidden /> : null}
-          <span className="tl-ic">
-            <Bot size={13} aria-hidden />
-          </span>
-          <span className="tl-name">{agent.task_title ?? agent.display_name}</span>
-          <span className="tl-mono">{agent.latest_text ?? agent.task ?? ""}</span>
-          <span className="line-tail">
-            <span className="tl-status" role="status">
-              {status}
-            </span>
-          </span>
-        </>
-      }
-    >
-      <div className="tl-detail">
-        {agent.task ? <p className="ar-desc">{agent.task}</p> : null}
-        {agent.latest_text ? <p className="tl-meta">最新进展：{agent.latest_text}</p> : null}
-        <p className="tl-meta">
-          工具 {agent.tool_count ?? 0} 次 · 消息 {agent.live_messages_received ?? 0} 条 · token{" "}
-          {agent.token_count ?? 0}
-        </p>
-      </div>
-    </Line>
+    <span className={`agent-pill st-${state}`} role="status">
+      {icon}
+      {agentStateText(state)}
+    </span>
   );
 }
 
+/** One agent-line: pulse dot while running + icon + title + dim progress
+ * summary + elapsed + state pill. Clicking opens the drill-down panel. */
+function AgentRow({
+  sessionId,
+  agent,
+  className = "",
+}: {
+  sessionId: string;
+  agent: AgentSnapshot;
+  className?: string;
+}) {
+  const actions = useAppActions();
+  const title = agent.task_title ?? agent.display_name;
+  const elapsed = formatElapsed(agent.elapsed?.secs);
+  const status =
+    agentStateText(agent.state) +
+    (elapsed !== null ? ` · ${elapsed}` : "") +
+    (agent.terminal_reason ? ` · ${agent.terminal_reason}` : "");
+  return (
+    <div className={`line agent-line state-${agent.state} ${className}`}>
+      <button
+        type="button"
+        className="line-head"
+        aria-label={`查看子代理详情：${title}，状态：${status}`}
+        onClick={() => actions.openAgentPanel(sessionId, agent)}
+      >
+        {agent.state === "running" ? <span className="pulse-dot" aria-hidden /> : null}
+        <span className="tl-ic">
+          <Bot size={13} aria-hidden />
+        </span>
+        <span className="tl-name">{title}</span>
+        <span className="tl-mono">{agent.latest_text ?? ""}</span>
+        <span className="line-tail">
+          {elapsed !== null ? <span className="agent-elapsed">{elapsed}</span> : null}
+          <AgentStatePill state={agent.state} />
+        </span>
+      </button>
+    </div>
+  );
+}
+
+function DelegateLine({ sessionId, item }: { sessionId: string; item: DelegateItem }) {
+  return <AgentRow sessionId={sessionId} agent={item.agent} className="kind-delegate" />;
+}
+
 function SwarmBlock({ sessionId, item }: { sessionId: string; item: SwarmItem }) {
-  const [open, toggle] = useLineExpanded(sessionId, item.id, false);
+  const [open, toggle] = useLineExpanded(sessionId, item.id, true);
   const swarm = item.swarm;
   const aggregate = swarm.aggregate;
-  const status = `${agentStateText(swarm.state)} · 完成 ${aggregate.completed}/${aggregate.total}`;
+  const settled =
+    aggregate.completed + aggregate.failed + aggregate.cancelled + aggregate.timed_out;
+  const percent = aggregate.total > 0 ? Math.round((settled / aggregate.total) * 100) : 0;
   return (
     <Line
       className={`swarm-block state-${swarm.state}`}
-      label={`并行子代理 ${swarm.description}，状态：${status}`}
+      label={`并行子代理 ${swarm.description}，状态：${agentStateText(swarm.state)}，完成 ${aggregate.completed}/${aggregate.total}`}
       open={open}
       onToggle={toggle}
       head={
@@ -647,26 +675,35 @@ function SwarmBlock({ sessionId, item }: { sessionId: string; item: SwarmItem })
             <Network size={13} aria-hidden />
           </span>
           <span className="tl-name">{swarm.description}</span>
-          <span className="tl-mono">
-            运行 {aggregate.running} · 排队 {aggregate.queued} · 失败 {aggregate.failed}
+          <span
+            className="swarm-bar"
+            role="progressbar"
+            aria-valuemin={0}
+            aria-valuemax={aggregate.total}
+            aria-valuenow={settled}
+            aria-label={`聚合进度：已结束 ${settled}/${aggregate.total}`}
+          >
+            <span className="swarm-bar-fill" style={{ width: `${percent}%` }} />
           </span>
           <span className="line-tail">
             <span className="tl-status" role="status">
-              {status}
+              完成 {aggregate.completed}/{aggregate.total}
             </span>
+            <AgentStatePill state={swarm.state} />
           </span>
         </>
       }
     >
       <ul className="swarm-members">
-        {swarm.children.map((child) => (
-          <li key={child.item_index} className="swarm-member">
-            <span className="tl-ic">{statusIcon(child.agent.state === "running" ? "running" : child.agent.state === "failed" || child.agent.state === "timed_out" ? "failed" : child.agent.state === "queued" ? "queued" : "finished")}</span>
-            <span className="swarm-member-item">{child.item}</span>
-            <span className="line-tail">
-              {agentStateText(child.agent.state)}
-              {formatElapsed(child.agent.elapsed?.secs) ? ` · ${formatElapsed(child.agent.elapsed?.secs)}` : ""}
-              {child.agent.terminal_reason ? ` · ${child.agent.terminal_reason}` : ""}
+        {swarm.children.map((child, index) => (
+          <li
+            key={child.item_index}
+            className="swarm-member"
+            style={{ "--stagger": index } as CSSProperties}
+          >
+            <AgentRow sessionId={sessionId} agent={child.agent} className="kind-swarm-member" />
+            <span className="swarm-member-item" title={child.item}>
+              {child.item}
             </span>
           </li>
         ))}

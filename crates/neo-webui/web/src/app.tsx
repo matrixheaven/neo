@@ -5,6 +5,7 @@
  */
 
 import { NeoMark } from "./components/neoMark";
+import { AgentPanelHost } from "./components/agentPanel";
 import { Composer } from "./components/composer";
 import { Sidebar } from "./components/sidebar";
 import { SidebarResizer } from "./components/sidebarResizer";
@@ -99,6 +100,7 @@ export function App() {
           {sessionId === null ? <NewSessionView /> : <SessionView sessionId={sessionId} />}
         </main>
       </div>
+      <AgentPanelHost />
     </div>
   );
 }

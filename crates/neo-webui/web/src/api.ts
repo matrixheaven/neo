@@ -7,6 +7,7 @@
 
 import type {
   ToolOutputRange,
+  WebUiAgentHistory,
   WebUiBootstrap,
   WebUiCursor,
   WebUiErrorBody,
@@ -220,6 +221,19 @@ export function updateMetadata(
     "PATCH",
     `/api/sessions/${encodeURIComponent(sessionId)}`,
     change,
+  );
+}
+
+/** Lazy child-agent history replay for the drill-down panel (R4). Unknown
+ * sessions/agents return 404 `not_found`; callers render a non-sensitive
+ * error. The result is used once and discarded — never cached. */
+export function fetchAgentHistory(
+  sessionId: string,
+  agentId: string,
+): Promise<WebUiAgentHistory> {
+  return request<WebUiAgentHistory>(
+    "GET",
+    `/api/sessions/${encodeURIComponent(sessionId)}/agents/${encodeURIComponent(agentId)}/history`,
   );
 }
 
