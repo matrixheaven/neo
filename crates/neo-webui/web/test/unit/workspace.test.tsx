@@ -101,6 +101,42 @@ describe("sidebar", () => {
     expect(screen.queryByText("并行格式化")).toBeNull();
   });
 
+  it("adds a project from its local directory path", async () => {
+    const user = userEvent.setup();
+    await renderReady();
+    await user.click(screen.getByRole("button", { name: "添加项目" }));
+    await user.type(screen.getByLabelText("项目文件夹"), "/tmp/added");
+    await user.click(screen.getByRole("button", { name: "添加", exact: true }));
+    await waitFor(() =>
+      expect(
+        recordedRequests.some(
+          (entry) =>
+            entry.url === "/api/workspaces" &&
+            entry.method === "POST" &&
+            (entry.body as { path?: string }).path === "/tmp/added",
+        ),
+      ).toBe(true),
+    );
+    expect(await screen.findByRole("group", { name: "added" })).toBeTruthy();
+  });
+
+  it("keeps workspace expansion while the selected session loads", async () => {
+    const user = userEvent.setup();
+    const { socket } = await renderReady();
+    socket.emit(asServerMessage(fixture.long_connection.workspace_snapshot));
+
+    const playgroundToggle = await screen.findByRole("button", { name: /playground/ });
+    await user.click(playgroundToggle);
+    await user.click(screen.getByText("原型脚本调试"));
+
+    await waitFor(() => expect(socket.watchSessionIds()).toContain("session_0003"));
+    expect(screen.getByLabelText("会话列表")).toBeTruthy();
+    expect(playgroundToggle.getAttribute("aria-expanded")).toBe("true");
+    expect(
+      within(screen.getByRole("group", { name: "playground" })).getByText("原型脚本调试"),
+    ).toBeTruthy();
+  });
+
   it("tucks archived sessions behind a collapsed per-group entry", async () => {
     const user = userEvent.setup();
     const { socket } = await renderReady();
@@ -110,6 +146,7 @@ describe("sidebar", () => {
       workspace_sequence: 0,
       workspaces: [
         {
+          id: "workspace_neo",
           label: "neo",
           current: true,
           sessions: [
@@ -156,6 +193,7 @@ describe("sidebar", () => {
       workspace_sequence: 0,
       workspaces: [
         {
+          id: "workspace_neo",
           label: "neo",
           current: true,
           sessions: [
@@ -231,6 +269,7 @@ describe("sidebar", () => {
       workspace_sequence: 0,
       workspaces: [
         {
+          id: "workspace_neo",
           label: "neo",
           current: true,
           sessions: Array.from({ length: 12 }, (_, index) => ({
@@ -679,6 +718,28 @@ describe("composer", () => {
     // After creation the session is selected and watched; the response
     // sequence was not treated as a transcript watermark.
     await waitFor(() => expect(socket.watchSessionIds()).toEqual(["session_0001"]));
+  });
+
+  it("creates a new session in the project selected above the composer", async () => {
+    const user = userEvent.setup();
+    const { socket } = await renderReady();
+    socket.emit(asServerMessage(fixture.long_connection.workspace_snapshot));
+    const project = await screen.findByLabelText("选择项目");
+    await user.selectOptions(project, "workspace_playground");
+    expect((project as HTMLSelectElement).value).toBe("workspace_playground");
+    expect(screen.getByText("feature", { selector: ".workspace-branch" })).toBeTruthy();
+
+    await user.type(screen.getByLabelText("输入消息"), "在另一个项目工作{Enter}");
+    await waitFor(() =>
+      expect(
+        recordedRequests.some(
+          (entry) =>
+            entry.url === "/api/sessions" &&
+            entry.method === "POST" &&
+            (entry.body as { workspace_id?: string }).workspace_id === "workspace_playground",
+        ),
+      ).toBe(true),
+    );
   });
 
   it("routes idle sends to turns and running sends to follow_up input", async () => {

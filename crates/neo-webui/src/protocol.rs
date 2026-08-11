@@ -226,7 +226,10 @@ pub struct WebUiSnapshot {
 /// The workspace path itself never leaves the service.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct WebUiWorkspaceGroup {
+    pub id: String,
     pub label: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub branch: Option<String>,
     #[serde(default)]
     pub current: bool,
     #[serde(default)]
@@ -433,6 +436,7 @@ pub enum WebUiCommand {
         session_id: String,
     },
     CreateSession {
+        workspace_id: Option<String>,
         message: String,
         composer: Option<WebUiComposer>,
         attachments: Option<Vec<String>>,
@@ -490,6 +494,9 @@ pub enum WebUiCommand {
     WorkspaceChanges,
     WorkspaceChangeDetail {
         change_id: String,
+    },
+    AddWorkspace {
+        path: String,
     },
 }
 
@@ -604,6 +611,7 @@ pub enum WebUiReply {
     ToolOutput(ToolOutputRange),
     WorkspaceChanges(WebUiWorkspaceChanges),
     WorkspaceChangeDetail(WebUiWorkspaceChangeDetail),
+    WorkspaceAdded(WebUiWorkspaceGroup),
     AttachmentUploaded(WebUiAttachmentAck),
     AgentHistory(WebUiAgentHistory),
 }
@@ -674,11 +682,19 @@ impl From<WebUiErrorCode> for WebUiError {
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct WebUiCreateSessionBody {
+    #[serde(default)]
+    pub workspace_id: Option<String>,
     pub message: String,
     #[serde(default)]
     pub composer: Option<WebUiComposer>,
     #[serde(default)]
     pub attachments: Option<Vec<String>>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct WebUiAddWorkspaceBody {
+    pub path: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]

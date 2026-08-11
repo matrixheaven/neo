@@ -17,6 +17,8 @@ import {
   ChevronDown,
   ChevronLeft,
   ChevronRight,
+  Folder,
+  GitBranch,
   Paperclip,
   Search,
   Square,
@@ -625,10 +627,35 @@ export function Composer({ centered }: { centered: boolean }) {
   };
 
   const contextWindow = view?.projection.contextWindow ?? null;
+  const selectedWorkspace =
+    appState.workspaces.find((group) => group.id === appState.selectedWorkspaceId) ??
+    appState.workspaces.find((group) => group.current);
 
   return (
     <div className={`composer-dock ${centered ? "centered" : ""}`}>
       {!centered && sessionId !== null ? <TaskList todos={todos} /> : null}
+      {centered && selectedWorkspace ? (
+        <div className="workspace-bar" aria-label="新会话项目">
+          <Folder size={14} aria-hidden />
+          <select
+            aria-label="选择项目"
+            value={selectedWorkspace.id}
+            onChange={(event) => actions.selectWorkspace(event.target.value)}
+          >
+            {appState.workspaces.map((workspace) => (
+              <option key={workspace.id} value={workspace.id}>
+                {workspace.label}
+              </option>
+            ))}
+          </select>
+          {selectedWorkspace.branch ? (
+            <span className="workspace-branch">
+              <GitBranch size={13} aria-hidden />
+              {selectedWorkspace.branch}
+            </span>
+          ) : null}
+        </div>
+      ) : null}
       <div
         className={`composer ${dragOver ? "drag-over" : ""}`}
         data-centered={centered}

@@ -112,6 +112,8 @@ function applySessionMessage(state: AppState, message: WebUiServerMessage): AppS
         summaries: message.workspaces.flatMap((group) => group.sessions),
         workspaceStreamId: message.stream_id,
         workspaceCursor: message.workspace_sequence,
+        selectedWorkspaceId:
+          state.selectedWorkspaceId ?? message.workspaces.find((group) => group.current)?.id ?? null,
       };
 
     case "session_summary_changed": {
@@ -361,6 +363,25 @@ export function appReducer(state: AppState, action: AppAction): AppState {
         next = updateSession(next, action.sessionId, (view) => view);
       }
       return next;
+    }
+
+    case "select_workspace":
+      return {
+        ...state,
+        selectedWorkspaceId: action.workspaceId,
+        selectedSessionId: null,
+        activeContextMenu: null,
+        sidebarDrawerOpen: false,
+      };
+
+    case "workspace_added": {
+      const exists = state.workspaces.some((group) => group.id === action.workspace.id);
+      return {
+        ...state,
+        workspaces: exists ? state.workspaces : [...state.workspaces, action.workspace],
+        selectedWorkspaceId: action.workspace.id,
+        selectedSessionId: null,
+      };
     }
 
     case "set_sidebar_width":

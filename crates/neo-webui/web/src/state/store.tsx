@@ -16,6 +16,7 @@ import {
 } from "react";
 import {
   ApiError,
+  addWorkspace as requestAddWorkspace,
   cancelTurn,
   claimAccessToken,
   createSession,
@@ -73,6 +74,8 @@ function saveSidebarWidth(width: number): void {
 
 export interface AppActions {
   selectSession(sessionId: string | null): void;
+  selectWorkspace(workspaceId: string): void;
+  addWorkspace(path: string): Promise<void>;
   setSidebarWidth(width: number): void;
   setDrawerOpen(open: boolean): void;
   setSidebarCollapsed(collapsed: boolean): void;
@@ -282,6 +285,18 @@ export function AppProvider({ children }: { children: ReactNode }) {
     selectSession(sessionId) {
       dispatch({ type: "select_session", sessionId });
     },
+    selectWorkspace(workspaceId) {
+      dispatch({ type: "select_workspace", workspaceId });
+    },
+    async addWorkspace(path) {
+      try {
+        const workspace = await requestAddWorkspace(path);
+        dispatch({ type: "workspace_added", workspace });
+      } catch (error) {
+        handleApiError(error);
+        throw error;
+      }
+    },
     setSidebarWidth(width) {
       saveSidebarWidth(width);
       dispatch({ type: "set_sidebar_width", width });
@@ -323,7 +338,7 @@ export function AppProvider({ children }: { children: ReactNode }) {
         // network failures keep it.
         if (current.creatingSession) return;
         dispatch({ type: "create_started" });
-        createSession(trimmed, composer, attachments)
+        createSession(trimmed, composer, attachments, current.selectedWorkspaceId ?? undefined)
           .then((started) => {
             dispatch({ type: "session_started", started });
             onSent?.();

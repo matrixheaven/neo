@@ -119,6 +119,7 @@ export interface AppState {
   auth: AuthState;
   bootstrap: WebUiBootstrap | null;
   selectedSessionId: string | null;
+  selectedWorkspaceId: string | null;
   /** A create-session request is in flight (double-submit guard). */
   creatingSession: boolean;
   sidebarWidth: number;
@@ -149,6 +150,7 @@ export function initialAppState(sidebarWidth: number, theme: Theme): AppState {
     auth: "pending",
     bootstrap: null,
     selectedSessionId: null,
+    selectedWorkspaceId: null,
     creatingSession: false,
     sidebarWidth,
     sidebarDrawerOpen: false,
@@ -180,6 +182,8 @@ export type AppAction =
   | { type: "connection_changed"; connection: ConnectionState }
   | { type: "server_message"; message: WebUiServerMessage }
   | { type: "select_session"; sessionId: string | null }
+  | { type: "select_workspace"; workspaceId: string }
+  | { type: "workspace_added"; workspace: WebUiWorkspaceGroup }
   | { type: "set_sidebar_width"; width: number }
   | { type: "set_drawer_open"; open: boolean }
   | { type: "set_sidebar_collapsed"; collapsed: boolean }

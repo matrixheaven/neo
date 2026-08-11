@@ -587,7 +587,9 @@ export interface WebUiSnapshot {
 /** One workspace group of the cross-workspace session aggregation. The
  * workspace path never leaves the service; `label` is display-only. */
 export interface WebUiWorkspaceGroup {
+  id: string;
   label: string;
+  branch?: string | null;
   current: boolean;
   sessions: WebUiSessionSummary[];
 }

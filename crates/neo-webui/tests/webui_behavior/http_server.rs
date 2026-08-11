@@ -484,6 +484,15 @@ impl WebUiHost for FakeHost {
                     },
                 ))
             }
+            WebUiCommand::AddWorkspace { .. } => {
+                Ok(WebUiReply::WorkspaceAdded(WebUiWorkspaceGroup {
+                    id: "workspace_added".to_string(),
+                    label: "added".to_string(),
+                    branch: None,
+                    current: false,
+                    sessions: Vec::new(),
+                }))
+            }
             WebUiCommand::UploadAttachment { mime, base64 } => {
                 use base64::Engine as _;
                 if !mime.starts_with("image/") {
@@ -537,7 +546,9 @@ impl WebUiHost for FakeHost {
             stream_id: String::new(),
             workspace_sequence: 0,
             workspaces: vec![WebUiWorkspaceGroup {
+                id: "workspace_sample".to_string(),
                 label: "sample-workspace".to_string(),
+                branch: Some("main".to_string()),
                 current: true,
                 sessions: summaries,
             }],

@@ -75,7 +75,7 @@ export function App() {
     selectedSession?.streamId === null
       ? "connecting"
       : state.connection;
-  if (connectionBannerState === "connecting") {
+  if (connectionBannerState === "connecting" && selectedSession === undefined) {
     return <Loading />;
   }
 
@@ -106,7 +106,13 @@ export function App() {
               </button>
             </div>
           ) : null}
-          {sessionId === null ? <NewSessionView /> : <SessionView sessionId={sessionId} />}
+          {connectionBannerState === "connecting" ? (
+            <Loading />
+          ) : sessionId === null ? (
+            <NewSessionView />
+          ) : (
+            <SessionView sessionId={sessionId} />
+          )}
         </main>
         <InformationPanel />
       </div>

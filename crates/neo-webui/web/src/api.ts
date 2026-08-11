@@ -150,12 +150,18 @@ export function createSession(
   message: string,
   composer?: WebUiComposer,
   attachments?: string[],
+  workspaceId?: string,
 ): Promise<WebUiSessionStarted> {
   return request<WebUiSessionStarted>("POST", "/api/sessions", {
     message,
+    ...(workspaceId ? { workspace_id: workspaceId } : {}),
     ...(composer ? { composer } : {}),
     ...(attachments && attachments.length > 0 ? { attachments } : {}),
   });
+}
+
+export function addWorkspace(path: string): Promise<import("./protocol").WebUiWorkspaceGroup> {
+  return request("POST", "/api/workspaces", { path });
 }
 
 export function startTurn(

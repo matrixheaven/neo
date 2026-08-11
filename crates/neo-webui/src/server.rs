@@ -27,11 +27,11 @@ use crate::auth::{
     session_cookie_header, session_cookie_value,
 };
 use crate::protocol::{
-    WebUiApprovalBody, WebUiAttachmentBody, WebUiCancelBody, WebUiCancelling, WebUiClaimRequest,
-    WebUiCommand, WebUiCreateSessionBody, WebUiError, WebUiErrorBody, WebUiErrorCode, WebUiHost,
-    WebUiInputAccepted, WebUiInputBody, WebUiMetadataBody, WebUiQuestionBody, WebUiReply,
-    WebUiServerMessage, WebUiSessionScope, WebUiSessionStarted, WebUiStartTurnBody,
-    WebUiWatchRequest,
+    WebUiAddWorkspaceBody, WebUiApprovalBody, WebUiAttachmentBody, WebUiCancelBody,
+    WebUiCancelling, WebUiClaimRequest, WebUiCommand, WebUiCreateSessionBody, WebUiError,
+    WebUiErrorBody, WebUiErrorCode, WebUiHost, WebUiInputAccepted, WebUiInputBody,
+    WebUiMetadataBody, WebUiQuestionBody, WebUiReply, WebUiServerMessage, WebUiSessionScope,
+    WebUiSessionStarted, WebUiStartTurnBody, WebUiWatchRequest,
 };
 use crate::relay::{
     ATTACHMENT_BODY_LIMIT_BYTES, COMMAND_BODY_LIMIT_BYTES, FIRST_SUBSCRIBE_DEADLINE, ObserverQueue,
@@ -104,6 +104,7 @@ fn build_router(app: AppState) -> Router {
         .route("/api/completions", get(completions))
         .route("/api/attachments", post(upload_attachment))
         .route("/api/sessions", get(list_sessions).post(create_session))
+        .route("/api/workspaces", post(add_workspace))
         .route("/api/sessions/{session_id}/snapshot", get(snapshot))
         .route(
             "/api/sessions/{session_id}/agents/{agent_id}/history",
@@ -295,6 +296,7 @@ fn reply_response(app: &AppState, reply: WebUiReply) -> Response {
         WebUiReply::ToolOutput(value) => json(StatusCode::OK, &value),
         WebUiReply::WorkspaceChanges(value) => json(StatusCode::OK, &value),
         WebUiReply::WorkspaceChangeDetail(value) => json(StatusCode::OK, &value),
+        WebUiReply::WorkspaceAdded(value) => json(StatusCode::CREATED, &value),
         WebUiReply::AttachmentUploaded(value) => json(StatusCode::CREATED, &value),
         WebUiReply::AgentHistory(value) => json(StatusCode::OK, &value),
     }
@@ -586,11 +588,27 @@ async fn create_session(State(app): State<AppState>, body: Body) -> Response {
         Err(response) => return response,
     };
     let command = WebUiCommand::CreateSession {
+        workspace_id: parsed.workspace_id,
         message: parsed.message,
         composer: parsed.composer,
         attachments: parsed.attachments,
     };
     match app.host.execute(command).await {
+        Ok(reply) => reply_response(&app, reply),
+        Err(error) => host_error_response(error),
+    }
+}
+
+async fn add_workspace(State(app): State<AppState>, body: Body) -> Response {
+    let parsed: WebUiAddWorkspaceBody = match parse_body(body).await {
+        Ok(parsed) => parsed,
+        Err(response) => return response,
+    };
+    match app
+        .host
+        .execute(WebUiCommand::AddWorkspace { path: parsed.path })
+        .await
+    {
         Ok(reply) => reply_response(&app, reply),
         Err(error) => host_error_response(error),
     }

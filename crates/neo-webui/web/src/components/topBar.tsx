@@ -1,7 +1,7 @@
 /**
  * Fixed 48px top bar. Left: workspace label, current session summary and run
- * state. Right: change entry and branch status — only when the backend
- * provides them (it does not yet, so nothing renders there). Never models,
+ * state. Right: change entry controls. New-session project and branch
+ * selection lives directly above the composer. Never models,
  * permission modes or development modes.
  */
 
@@ -92,7 +92,12 @@ export function TopBar() {
       >
         <PanelLeft size={16} aria-hidden />
       </button>
-      <span className="topbar-workspace">{state.bootstrap?.workspace_label ?? "Neo"}</span>
+      <span className="topbar-workspace">
+        {summary?.workspace_label ??
+          state.workspaces.find((group) => group.id === state.selectedWorkspaceId)?.label ??
+          state.bootstrap?.workspace_label ??
+          "Neo"}
+      </span>
       {title !== null ? (
         <>
           <span className="topbar-separator" aria-hidden>
@@ -114,8 +119,6 @@ export function TopBar() {
         </>
       ) : null}
       <span className="topbar-spacer" />
-      {/* Change entry and branch status render only when the backend provides
-          structured workspace change data; until then this area stays empty. */}
       <button
         type="button"
         className="icon-button information-toggle fixed-summary-toggle"

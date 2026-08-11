@@ -1,7 +1,7 @@
 /**
  * Sidebar (redesign §6): server-side title search, a cross-workspace Pinned
- * section, then collapsible workspace groups (current workspace expanded with
- * a "+" new-session button, others collapsed, most-recent first). Group rows
+ * section, then collapsible workspace groups (current workspace expanded,
+ * others collapsed, most-recent first) with per-project new-session actions. Group rows
  * exclude pinned sessions (they live in the Pinned section) and tuck archived
  * sessions behind a collapsed "已归档 n" entry. Hover icon actions and one
  * shared context menu (right-click, menu key, Shift+F10) never switch the
@@ -338,6 +338,9 @@ export function Sidebar() {
   const [searchResults, setSearchResults] = useState<WebUiSessionSummary[] | null>(null);
   const [renamingId, setRenamingId] = useState<string | null>(null);
   const [selectionClosingDrawer, setSelectionClosingDrawer] = useState(false);
+  const [addingWorkspace, setAddingWorkspace] = useState(false);
+  const [workspacePath, setWorkspacePath] = useState("");
+  const [workspaceSaving, setWorkspaceSaving] = useState(false);
   /** Per-group expanded overrides; absent = current expanded, others collapsed. */
   const [expandedOverrides, setExpandedOverrides] = useState<Record<string, boolean>>({});
   /** Per-group archived-section open flags; absent = collapsed. */
@@ -483,7 +486,9 @@ export function Sidebar() {
         ? state.workspaces
         : [
             {
+              id: "workspace_current",
               label: state.bootstrap?.workspace_label ?? "当前工作区",
+              branch: null,
               current: true,
               sessions: state.summaries,
             },
@@ -531,9 +536,7 @@ export function Sidebar() {
             (entry) => !entry.archived && !pinnedIds.has(entry.session_id),
           );
           const archived = group.sessions.filter((entry) => entry.archived);
-          // Empty groups never render; a lone current workspace still renders
-          // as a group (no flat special case).
-          if (live.length === 0 && archived.length === 0) return null;
+          // Explicitly added projects render before their first session.
           const expanded = expandedOverrides[group.label] ?? group.current;
           const archivedExpanded = archivedOpen[group.label] ?? false;
           const sortedLive = [...live].sort(byUpdated);
@@ -563,17 +566,15 @@ export function Sidebar() {
                       collapsed entry, pinned live in the Pinned section. */}
                   <span className="session-group-count">{live.length}</span>
                 </button>
-                {group.current ? (
-                  <button
-                    type="button"
-                    className="icon-button session-group-new"
-                    aria-label="新会话"
-                    title="新会话"
-                    onClick={() => actions.selectSession(null)}
-                  >
-                    <Plus size={14} aria-hidden />
-                  </button>
-                ) : null}
+                <button
+                  type="button"
+                  className="icon-button session-group-new"
+                  aria-label="新会话"
+                  title="新会话"
+                  onClick={() => actions.selectWorkspace(group.id)}
+                >
+                  <Plus size={14} aria-hidden />
+                </button>
               </div>
               {expanded ? (
                 <>
@@ -631,6 +632,18 @@ export function Sidebar() {
       aria-label="会话列表"
     >
       <div className="sidebar-top">
+        <div className="sidebar-project-heading">
+          <span>项目</span>
+          <button
+            type="button"
+            className="icon-button"
+            aria-label="添加项目"
+            title="添加项目"
+            onClick={() => setAddingWorkspace(true)}
+          >
+            <Plus size={14} aria-hidden />
+          </button>
+        </div>
         <div className="search-box">
           <Search size={14} aria-hidden />
           <input
@@ -656,6 +669,48 @@ export function Sidebar() {
           onClose={closeMenu}
           onRename={(sessionId) => setRenamingId(sessionId)}
         />
+      ) : null}
+      {addingWorkspace ? (
+        <div className="dialog-backdrop" role="presentation">
+          <form
+            className="workspace-dialog"
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="workspace-dialog-title"
+            onSubmit={(event) => {
+              event.preventDefault();
+              const path = workspacePath.trim();
+              if (path === "" || workspaceSaving) return;
+              setWorkspaceSaving(true);
+              actions
+                .addWorkspace(path)
+                .then(() => {
+                  setAddingWorkspace(false);
+                  setWorkspacePath("");
+                })
+                .catch(() => {})
+                .finally(() => setWorkspaceSaving(false));
+            }}
+          >
+            <h2 id="workspace-dialog-title">添加项目</h2>
+            <label htmlFor="workspace-path">项目文件夹</label>
+            <input
+              id="workspace-path"
+              autoFocus
+              value={workspacePath}
+              placeholder="/Users/name/Workspace/project"
+              onChange={(event) => setWorkspacePath(event.target.value)}
+            />
+            <div className="workspace-dialog-actions">
+              <button type="button" onClick={() => setAddingWorkspace(false)}>
+                取消
+              </button>
+              <button type="submit" className="primary-button" disabled={workspaceSaving}>
+                {workspaceSaving ? "添加中…" : "添加"}
+              </button>
+            </div>
+          </form>
+        </div>
       ) : null}
     </aside>
   );

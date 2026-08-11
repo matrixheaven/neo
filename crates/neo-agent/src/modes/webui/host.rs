@@ -32,7 +32,7 @@ use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
-use crate::config::{AppConfig, neo_home, workspace_sessions_dir};
+use crate::config::{AppConfig, ConfigOverrides, neo_home, workspace_sessions_dir};
 use crate::modes::interactive::{TurnChannels, TurnOutcome, TurnRequest};
 use crate::modes::run::{run_prompt_in_session_streaming, run_prompt_streaming};
 use crate::modes::sessions;
@@ -65,6 +65,7 @@ pub(crate) struct WebSessionHost {
     states: Arc<Mutex<HashMap<String, Arc<Mutex<WebSessionState>>>>>,
     starting: Arc<Mutex<HashMap<String, StartingTurn>>>,
     attachments: Arc<Mutex<HashMap<String, StagedAttachment>>>,
+    known_workspaces: Arc<Mutex<Vec<PathBuf>>>,
     /// Serializes lazy session-state creation (JSONL bootstrap) so two
     /// concurrent subscribers can never bootstrap the same session twice.
     bootstrap_lock: Arc<tokio::sync::Mutex<()>>,
@@ -73,12 +74,22 @@ pub(crate) struct WebSessionHost {
 impl WebSessionHost {
     #[must_use]
     pub(crate) fn new(config: AppConfig, relay: Arc<Relay>) -> Self {
+        let known_workspaces = neo_home()
+            .and_then(|home| {
+                crate::json_store::read_or_default(
+                    &home.join("webui_workspaces.json"),
+                    "webui workspace",
+                )
+                .ok()
+            })
+            .unwrap_or_default();
         Self {
             config,
             relay,
             states: Arc::new(Mutex::new(HashMap::new())),
             starting: Arc::new(Mutex::new(HashMap::new())),
             attachments: Arc::new(Mutex::new(HashMap::new())),
+            known_workspaces: Arc::new(Mutex::new(known_workspaces)),
             bootstrap_lock: Arc::new(tokio::sync::Mutex::new(())),
         }
     }
@@ -131,10 +142,17 @@ impl WebSessionHost {
         (workdir, label)
     }
 
-    /// Every known workspace root: the current project dir plus every workdir
-    /// recorded in the global session index (deduplicated, current first).
+    /// Every known workspace root: the current project, explicitly added
+    /// projects and workdirs recorded in the session index.
     fn known_workdirs(&self) -> Vec<PathBuf> {
         let mut dirs = vec![self.config.project_dir.clone()];
+        if let Ok(known) = self.known_workspaces.lock() {
+            for workdir in known.iter().filter(|path| path.is_dir()) {
+                if !dirs.contains(workdir) {
+                    dirs.push(workdir.clone());
+                }
+            }
+        }
         if let Ok(index) = self.session_index()
             && let Ok(entries) = index.list_all()
         {
@@ -145,6 +163,37 @@ impl WebSessionHost {
             }
         }
         dirs
+    }
+
+    fn workspace_for_id(&self, workspace_id: Option<&str>) -> Result<PathBuf, WebUiError> {
+        let Some(workspace_id) = workspace_id else {
+            return Ok(self.config.project_dir.clone());
+        };
+        self.known_workdirs()
+            .into_iter()
+            .find(|path| workspace_id_for(path) == workspace_id)
+            .ok_or_else(|| WebUiError::new(WebUiErrorCode::InvalidRequest))
+    }
+
+    fn config_for_workspace(&self, workspace: PathBuf) -> Result<AppConfig, WebUiError> {
+        let yolo = self.config.permission_mode == neo_agent_core::PermissionMode::Yolo
+            && !self.config.project_trusted
+            && matches!(
+                &self.config.project_trust,
+                crate::trust::ProjectTrustState::NotRequired
+            );
+        let mut config = AppConfig::load(ConfigOverrides {
+            config_path: Some(self.config.config_path.clone()),
+            yolo,
+            auto: !yolo && self.config.permission_mode == neo_agent_core::PermissionMode::Auto,
+            trust_store: None,
+            project_dir: Some(workspace),
+        })
+        .map_err(|_| Self::internal())?;
+        let workflow_definitions = config.workflow_definitions.clone();
+        config.inherit_live_state(&self.config);
+        config.workflow_definitions = workflow_definitions;
+        Ok(config)
     }
 
     /// Get the in-memory state for a session, creating it lazily from the
@@ -237,7 +286,7 @@ impl WebSessionHost {
             session_id.to_owned(),
             session_dir,
             self.relay.publisher(session_id),
-            PerSessionContainers::fresh(&self.config),
+            PerSessionContainers::fresh(&self.config_for_workspace(workspace.clone())?),
             workspace,
             workspace_label,
             Some(summary_sink),
@@ -253,8 +302,11 @@ impl WebSessionHost {
     }
 
     /// Resolve a composer model alias into the typed turn selection.
-    fn resolve_model(&self, alias: &str) -> Option<crate::modes::interactive::SelectedModel> {
-        if let Some(cfg) = self.config.models.get(alias) {
+    fn resolve_model(
+        config: &AppConfig,
+        alias: &str,
+    ) -> Option<crate::modes::interactive::SelectedModel> {
+        if let Some(cfg) = config.models.get(alias) {
             return Some(crate::modes::interactive::SelectedModel {
                 alias: alias.to_owned(),
                 provider: cfg.provider.clone(),
@@ -276,6 +328,7 @@ impl WebSessionHost {
     /// current turn and are never written back to the global `AppConfig`.
     fn build_request(
         &self,
+        config: &AppConfig,
         containers: &PerSessionContainers,
         session_id: Option<String>,
         prompt: Vec<Content>,
@@ -285,24 +338,24 @@ impl WebSessionHost {
         let model = match composer.and_then(|c| c.model.as_deref()) {
             None => None,
             Some(alias) => Some(
-                self.resolve_model(alias)
+                Self::resolve_model(config, alias)
                     .ok_or_else(|| WebUiError::new(WebUiErrorCode::InvalidRequest))?,
             ),
         };
         let reasoning = composer
             .and_then(|composer| composer.reasoning.clone())
-            .unwrap_or_else(|| self.config.runtime.reasoning.clone());
+            .unwrap_or_else(|| config.runtime.reasoning.clone());
         let reasoning_model = composer
             .and_then(|composer| composer.model.as_deref())
-            .unwrap_or(&self.config.default_model);
-        if let Some(model) = self.config.models.get(reasoning_model)
+            .unwrap_or(&config.default_model);
+        if let Some(model) = config.models.get(reasoning_model)
             && !model.reasoning.supports(&reasoning)
         {
             return Err(WebUiError::new(WebUiErrorCode::InvalidRequest));
         }
         let permission_mode = composer
             .and_then(|c| c.permission_mode)
-            .unwrap_or(self.config.permission_mode);
+            .unwrap_or(config.permission_mode);
         if let Some(mode) = composer.and_then(|c| c.permission_mode)
             && let Ok(mut live) = containers.live_permission_mode.write()
         {
@@ -327,7 +380,7 @@ impl WebSessionHost {
         request.plan_mode = Arc::clone(&containers.plan_mode);
         request.goal_mode_authoring = goal_mode_authoring;
         request.mcp_manager.clone_from(&containers.mcp_manager);
-        request.base_config = Some(self.config.clone());
+        request.base_config = Some(config.clone());
         request
             .instruction_registry
             .clone_from(&containers.instruction_registry);
@@ -407,8 +460,9 @@ impl WebSessionHost {
         }
     }
 
-    /// Sessions of every workspace recorded in the global session index,
-    /// grouped by workspace (the current workspace first). Any aggregation
+    /// Sessions grouped under every known workspace (the current workspace
+    /// first). Explicitly added projects remain visible before their first
+    /// session. Any aggregation
     /// failure degrades to the current workspace only. The group label is a
     /// display label; absolute workspace paths never leave the service.
     fn aggregated_workspaces(&self) -> Vec<WebUiWorkspaceGroup> {
@@ -454,6 +508,11 @@ impl WebSessionHost {
                 }
             }
         }
+        for workdir in self.known_workdirs() {
+            if !groups.iter().any(|(dir, _)| *dir == workdir) {
+                groups.push((workdir, Vec::new()));
+            }
+        }
         let workdirs: Vec<PathBuf> = groups.iter().map(|(dir, _)| dir.clone()).collect();
         let mut workspaces: Vec<WebUiWorkspaceGroup> = groups
             .into_iter()
@@ -474,7 +533,10 @@ impl WebSessionHost {
                     .map(|record| self.session_summary(record, &label))
                     .collect();
                 WebUiWorkspaceGroup {
+                    id: workspace_id_for(&dir),
                     label,
+                    branch: crate::git_status::collect_workspace_status(&dir)
+                        .map(|status| status.branch),
                     current: position == 0,
                     sessions,
                 }
@@ -972,6 +1034,13 @@ fn workspace_label_for(workdir: &Path, all: &[PathBuf]) -> String {
     }
 }
 
+fn workspace_id_for(workdir: &Path) -> String {
+    format!(
+        "workspace_{}",
+        sha256_hex(workdir.to_string_lossy().as_bytes())
+    )
+}
+
 fn short_sha256_hex(bytes: &[u8]) -> String {
     use sha2::Digest as _;
     let digest = sha2::Sha256::digest(bytes);
@@ -1072,10 +1141,14 @@ impl WebUiHost for WebSessionHost {
                 Ok(WebUiReply::Snapshot(self.snapshot_for(&session_id).await?))
             }
             WebUiCommand::CreateSession {
+                workspace_id,
                 message,
                 composer,
                 attachments,
-            } => self.create_session(message, composer, attachments).await,
+            } => {
+                self.create_session(workspace_id.as_deref(), message, composer, attachments)
+                    .await
+            }
             WebUiCommand::StartTurn {
                 session_id,
                 message,
@@ -1199,6 +1272,7 @@ impl WebUiHost for WebSessionHost {
             WebUiCommand::WorkspaceChangeDetail { change_id } => {
                 self.workspace_change_detail(&change_id).await
             }
+            WebUiCommand::AddWorkspace { path } => self.add_workspace(path),
         }
     }
 
@@ -1222,8 +1296,46 @@ impl WebUiHost for WebSessionHost {
 }
 
 impl WebSessionHost {
+    fn add_workspace(&self, path: String) -> Result<WebUiReply, WebUiError> {
+        if path.trim().is_empty() {
+            return Err(WebUiError::new(WebUiErrorCode::InvalidRequest));
+        }
+        let workspace = PathBuf::from(path)
+            .canonicalize()
+            .map_err(|_| WebUiError::new(WebUiErrorCode::InvalidRequest))?;
+        if !workspace.is_dir() {
+            return Err(WebUiError::new(WebUiErrorCode::InvalidRequest));
+        }
+        let home = neo_home().ok_or_else(Self::internal)?;
+        crate::json_store::update(
+            &home.join("webui_workspaces.json"),
+            "webui workspace",
+            |paths: &mut Vec<PathBuf>| {
+                if !paths.contains(&workspace) {
+                    paths.push(workspace.clone());
+                }
+            },
+        )
+        .map_err(|_| Self::internal())?;
+        let mut known = self.known_workspaces.lock().map_err(|_| Self::internal())?;
+        if !known.contains(&workspace) {
+            known.push(workspace.clone());
+        }
+        drop(known);
+        let all = self.known_workdirs();
+        Ok(WebUiReply::WorkspaceAdded(WebUiWorkspaceGroup {
+            id: workspace_id_for(&workspace),
+            label: workspace_label_for(&workspace, &all),
+            branch: crate::git_status::collect_workspace_status(&workspace)
+                .map(|status| status.branch),
+            current: workspace == self.config.project_dir,
+            sessions: Vec::new(),
+        }))
+    }
+
     async fn create_session(
         &self,
+        workspace_id: Option<&str>,
         message: String,
         composer: Option<WebUiComposer>,
         attachments: Option<Vec<String>>,
@@ -1231,8 +1343,10 @@ impl WebSessionHost {
         if message.trim().is_empty() {
             return Err(WebUiError::new(WebUiErrorCode::InvalidRequest));
         }
+        let workspace = self.workspace_for_id(workspace_id)?;
+        let config = self.config_for_workspace(workspace.clone())?;
         let turn_id = new_turn_id();
-        let containers = PerSessionContainers::fresh(&self.config);
+        let containers = PerSessionContainers::fresh(&config);
         let (event_tx, event_rx) = mpsc::unbounded_channel();
         let (approval_tx, approval_rx) = mpsc::unbounded_channel();
         let (session_id_tx, session_id_rx) = mpsc::unbounded_channel();
@@ -1261,7 +1375,7 @@ impl WebSessionHost {
         let mut prompt = vec![Content::text(message.clone())];
         let pre_created: Option<String> = if attachments.as_ref().is_some_and(|ids| !ids.is_empty())
         {
-            let created = sessions::create_new_session(&self.config)
+            let created = sessions::create_new_session(&config)
                 .await
                 .map_err(|_| Self::internal())?;
             // The existing-session driver replays the wire file; the
@@ -1269,7 +1383,7 @@ impl WebSessionHost {
             tokio::fs::write(&created.wire_path, b"")
                 .await
                 .map_err(|_| Self::internal())?;
-            let session_dir = sessions::session_dir(&created.session_id, &self.config)
+            let session_dir = sessions::session_dir(&created.session_id, &config)
                 .map_err(|_| Self::internal())?;
             let media = self.attachment_parts(&attachments, &session_dir).await?;
             prompt.extend(media);
@@ -1278,6 +1392,7 @@ impl WebSessionHost {
             None
         };
         let request = self.build_request(
+            &config,
             &containers,
             pre_created.clone(),
             prompt,
@@ -1295,8 +1410,7 @@ impl WebSessionHost {
         let states = Arc::clone(&self.states);
         let starting = Arc::clone(&self.starting);
         let relay = Arc::clone(&self.relay);
-        let config = self.config.clone();
-        let workspace_label = workspace_label_for(&self.config.project_dir, &self.known_workdirs());
+        let workspace_label = workspace_label_for(&workspace, &self.known_workdirs());
         tokio::spawn(launch_new_session_turn(
             states,
             starting,
@@ -1341,6 +1455,8 @@ impl WebSessionHost {
         }
         self.validate_attachment_ids(&attachments)?;
         let state = self.state_for(session_id).await?;
+        let (workspace, _) = self.session_workspace(session_id);
+        let config = self.config_for_workspace(workspace)?;
         // Materialize attachment blobs before the turn-registration lock so
         // the std mutex guard never crosses an `.await`.
         let media = {
@@ -1384,6 +1500,7 @@ impl WebSessionHost {
             let mut prompt = vec![Content::text(message.clone())];
             prompt.extend(media);
             let request = self.build_request(
+                &config,
                 &guard.containers,
                 Some(session_id.to_owned()),
                 prompt,

@@ -293,6 +293,20 @@ export function mockFetch(input: RequestInfo | URL, init?: RequestInit): Promise
     });
     return Promise.resolve(jsonResponse({ items }));
   }
+  if (path === "/api/workspaces" && method === "POST") {
+    return Promise.resolve(
+      jsonResponse(
+        {
+          id: "workspace_added",
+          label: "added",
+          branch: "main",
+          current: false,
+          sessions: [],
+        },
+        201,
+      ),
+    );
+  }
   const snapshotMatch = /^\/api\/sessions\/([^/]+)\/snapshot$/.exec(path);
   if (snapshotMatch) {
     const session = fixture.sessions.find((entry) => entry.session_id === snapshotMatch[1]);

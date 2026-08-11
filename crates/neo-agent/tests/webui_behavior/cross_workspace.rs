@@ -10,7 +10,7 @@ use tokio_tungstenite::tungstenite::Message;
 
 use super::provider::{Step, openai_response_sse};
 use super::session_env::{create_session, start_env, wait_for_phase};
-use super::ws;
+use super::{http as web_http, ws};
 
 /// One foreign workspace with one persisted session: a workspace directory
 /// (its basename is the group label), a session bucket with metadata and a
@@ -172,6 +172,70 @@ async fn cross_workspace_listing_groups_by_label_without_absolute_paths() {
                 && summary["workspace_label"] == foreign_label
                 && summary["title"] == "foreign session"),
         "the foreign session is grouped under its own workspace label: {other_sessions:?}"
+    );
+    let _ = provider;
+}
+
+#[tokio::test]
+async fn added_workspace_creates_and_runs_session_in_that_directory() {
+    let (test_env, provider) = start_env(
+        tempfile::tempdir().expect("launch workspace"),
+        vec![
+            Step::Respond(openai_response_sse("resp-1", "target answer")),
+            Step::Respond(openai_response_sse("resp-title", "Target title")),
+        ],
+    )
+    .await;
+    let target = tempfile::tempdir().expect("target workspace");
+    let target_path = target.path().canonicalize().expect("canonical target");
+    let added = web_http::post_json(
+        test_env.webui.port,
+        &test_env.cookie,
+        "/api/workspaces",
+        &json!({ "path": target_path }),
+    )
+    .await;
+    assert_eq!(added.status, 201, "add workspace: {}", added.body);
+    let added: Value = serde_json::from_str(&added.body).expect("workspace json");
+    let workspace_id = added["id"].as_str().expect("workspace id");
+
+    let created = web_http::post_json(
+        test_env.webui.port,
+        &test_env.cookie,
+        "/api/sessions",
+        &json!({
+            "workspace_id": workspace_id,
+            "message": "work in the selected project"
+        }),
+    )
+    .await;
+    assert_eq!(
+        created.status, 201,
+        "create target session: {}",
+        created.body
+    );
+    let created: Value = serde_json::from_str(&created.body).expect("created json");
+    let session_id = created["session_id"].as_str().expect("session id");
+    let _ = wait_for_phase(&test_env, session_id, "idle").await;
+
+    let indexed = neo_agent_core::session::SessionIndex::new(test_env._home.path())
+        .find(session_id)
+        .expect("read index")
+        .expect("indexed session");
+    assert_eq!(indexed.workdir, target_path);
+    let (_watch, snapshot) = workspace_snapshot(test_env.webui.port, &test_env.cookie).await;
+    let group = snapshot["workspaces"]
+        .as_array()
+        .expect("workspaces")
+        .iter()
+        .find(|group| group["id"] == workspace_id)
+        .expect("target group");
+    assert!(
+        group["sessions"]
+            .as_array()
+            .expect("target sessions")
+            .iter()
+            .any(|summary| summary["session_id"] == session_id)
     );
     let _ = provider;
 }
