@@ -1,0 +1,8 @@
+{
+  "schemaVersion": "aegis.schema.v0",
+  "artifactKey": "browser-placement",
+  "type": "test",
+  "source": "MOCK_PORT=47923 npm --prefix crates/neo-webui/web run test:browser -- --grep '09|10'",
+  "summary": "5 focused Playwright checks passed, covering empty-transcript below placement and non-empty-transcript above placement.",
+  "verifier": "exit 0 and screenshots viewed"
+}

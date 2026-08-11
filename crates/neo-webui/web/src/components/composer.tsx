@@ -13,10 +13,11 @@
 
 import { ArrowUp, ChevronDown, ChevronLeft, Paperclip, Search, Square, X, Zap } from "lucide-react";
 import { useEffect, useRef, useState } from "react";
-import { uploadAttachment } from "../api";
+import { fetchCompletions, uploadAttachment } from "../api";
 import type {
   PermissionMode,
   WebUiComposer,
+  WebUiCompletionItem,
   WebUiContextWindow,
   WebUiDevelopmentMode,
   WebUiModelInfo,
@@ -24,6 +25,7 @@ import type {
 import { useAppActions, useAppState } from "../state/store";
 import { NeoMark } from "./neoMark";
 import { TaskList } from "./taskList";
+import { activeCompletionRange, replaceCompletion } from "./composerCompletion";
 
 const MODE_LABELS: Record<WebUiDevelopmentMode, string> = {
   normal: "普通",
@@ -110,6 +112,11 @@ export function Composer({ centered }: { centered: boolean }) {
   const draft = sessionId !== null ? (view?.draft ?? "") : localDraft;
   const textareaRef = useRef<HTMLTextAreaElement | null>(null);
   const composingRef = useRef(false);
+  const [caret, setCaret] = useState(0);
+  const [completionItems, setCompletionItems] = useState<WebUiCompletionItem[]>([]);
+  const [completionIndex, setCompletionIndex] = useState(0);
+  const [dismissedCompletion, setDismissedCompletion] = useState<string | null>(null);
+  const completionRangeRef = useRef<ReturnType<typeof activeCompletionRange>>(null);
 
   const bootstrap = appState.bootstrap;
   const running =
@@ -149,6 +156,7 @@ export function Composer({ centered }: { centered: boolean }) {
   // -- Welcome banner ----------------------------------------------------------
   const hasUserMessage =
     view?.projection.items.some((item) => item.kind === "user_message") ?? false;
+  const hasTranscript = (view?.projection.items.length ?? 0) > 0;
   const isFreshSession = sessionId === null || !hasUserMessage;
   const [bannerMounted, setBannerMounted] = useState(isFreshSession);
   const [bannerVisible, setBannerVisible] = useState(false);
@@ -225,6 +233,27 @@ export function Composer({ centered }: { centered: boolean }) {
   };
 
   useEffect(autosize, [draft]);
+
+  useEffect(() => {
+    const range = activeCompletionRange(draft, caret);
+    completionRangeRef.current = range;
+    if (range === null || dismissedCompletion === range.query) {
+      setCompletionItems([]);
+      setCompletionIndex(0);
+      return;
+    }
+    const controller = new AbortController();
+    setCompletionItems([]);
+    setCompletionIndex(0);
+    fetchCompletions(range.query, controller.signal)
+      .then((response) => {
+        if (!controller.signal.aborted) setCompletionItems(response.items);
+      })
+      .catch(() => {
+        if (!controller.signal.aborted) setCompletionItems([]);
+      });
+    return () => controller.abort();
+  }, [caret, draft, dismissedCompletion]);
 
   const composerOverrides = (): WebUiComposer | undefined => {
     const composer: WebUiComposer = {};
@@ -316,10 +345,46 @@ export function Composer({ centered }: { centered: boolean }) {
   };
 
   const onKeyDown = (event: React.KeyboardEvent<HTMLTextAreaElement>) => {
+    if (completionItems.length > 0 && completionRangeRef.current !== null) {
+      if (event.key === "ArrowDown" || event.key === "ArrowUp") {
+        event.preventDefault();
+        setCompletionIndex((current) =>
+          event.key === "ArrowDown"
+            ? (current + 1) % completionItems.length
+            : (current - 1 + completionItems.length) % completionItems.length,
+        );
+        return;
+      }
+      if (event.key === "Enter" || event.key === "Tab") {
+        event.preventDefault();
+        const item = completionItems[completionIndex];
+        if (item) selectCompletion(item);
+        return;
+      }
+      if (event.key === "Escape") {
+        event.preventDefault();
+        setDismissedCompletion(completionRangeRef.current.query);
+        return;
+      }
+    }
     if (event.key === "Enter" && !event.shiftKey && !composingRef.current && !event.nativeEvent.isComposing) {
       event.preventDefault();
       submit();
     }
+  };
+
+  const selectCompletion = (item: WebUiCompletionItem) => {
+    const range = completionRangeRef.current;
+    if (range === null) return;
+    const next = replaceCompletion(draft, range, item.value);
+    setDraft(next.text);
+    setCaret(next.caret);
+    setCompletionItems([]);
+    setDismissedCompletion(null);
+    requestAnimationFrame(() => {
+      textareaRef.current?.focus();
+      textareaRef.current?.setSelectionRange(next.caret, next.caret);
+    });
   };
 
   const todos = view?.projection.todos ?? [];
@@ -467,7 +532,10 @@ export function Composer({ centered }: { centered: boolean }) {
           rows={1}
           onChange={(event) => {
             setDraft(event.target.value);
+            setCaret(event.target.selectionStart ?? event.target.value.length);
+            setDismissedCompletion(null);
           }}
+          onSelect={(event) => setCaret(event.currentTarget.selectionStart ?? 0)}
           onKeyDown={onKeyDown}
           onCompositionStart={() => {
             composingRef.current = true;
@@ -476,6 +544,30 @@ export function Composer({ centered }: { centered: boolean }) {
             composingRef.current = false;
           }}
         />
+        {completionItems.length > 0 ? (
+          <div
+            className={`composer-completions ${hasTranscript ? "above" : "below"}`}
+            role="listbox"
+            aria-label="输入候选"
+          >
+            {completionItems.map((item, index) => (
+              <button
+                type="button"
+                role="option"
+                aria-selected={index === completionIndex}
+                className={`composer-completion-row ${index === completionIndex ? "selected" : ""}`}
+                key={`${item.value}:${index}`}
+                onMouseDown={(event) => event.preventDefault()}
+                onClick={() => selectCompletion(item)}
+              >
+                <span className="composer-completion-value">{item.label}</span>
+                {item.description ? (
+                  <span className="composer-completion-description">{item.description}</span>
+                ) : null}
+              </button>
+            ))}
+          </div>
+        ) : null}
         <div className="composer-footer">
           <div className="composer-tools">
             <button

@@ -101,6 +101,7 @@ fn build_router(app: AppState) -> Router {
     Router::new()
         .route("/api/auth/claim", post(claim))
         .route("/api/bootstrap", get(bootstrap))
+        .route("/api/completions", get(completions))
         .route("/api/attachments", post(upload_attachment))
         .route("/api/sessions", get(list_sessions).post(create_session))
         .route("/api/sessions/{session_id}/snapshot", get(snapshot))
@@ -200,6 +201,9 @@ fn finish(response: Response) -> Response {
 
 /// Whitelisted query keys for `GET /api/sessions`.
 const SESSION_LIST_QUERY_KEYS: &[&str] = &["scope", "query", "cursor", "limit"];
+/// Whitelisted query keys for `GET /api/completions`.
+const COMPLETION_QUERY_KEYS: &[&str] = &["query"];
+const COMPLETION_QUERY_MAX_CHARS: usize = 256;
 /// Whitelisted query keys for `GET .../tool-output/...`.
 const TOOL_OUTPUT_QUERY_KEYS: &[&str] = &["start_line", "max_lines"];
 
@@ -255,6 +259,7 @@ async fn fallback(method: Method, uri: Uri) -> Response {
 fn reply_response(app: &AppState, reply: WebUiReply) -> Response {
     match reply {
         WebUiReply::Bootstrap(value) => json(StatusCode::OK, &value),
+        WebUiReply::Completions(value) => json(StatusCode::OK, &value),
         WebUiReply::Sessions(value) => json(StatusCode::OK, &value),
         WebUiReply::Snapshot(mut value) => {
             value.stream_id = app.relay.stream_id().to_string();
@@ -345,6 +350,40 @@ async fn claim(State(app): State<AppState>, headers: HeaderMap, body: Body) -> R
 
 async fn bootstrap(State(app): State<AppState>) -> Response {
     match app.host.execute(WebUiCommand::Bootstrap).await {
+        Ok(reply) => reply_response(&app, reply),
+        Err(error) => host_error_response(error),
+    }
+}
+
+async fn completions(
+    State(app): State<AppState>,
+    params: Result<Query<HashMap<String, String>>, axum::extract::rejection::QueryRejection>,
+) -> Response {
+    let params = match params {
+        Ok(Query(params)) => params,
+        Err(_) => return invalid_request(),
+    };
+    if params
+        .keys()
+        .any(|key| !COMPLETION_QUERY_KEYS.contains(&key.as_str()))
+    {
+        return invalid_request();
+    }
+    let Some(query) = params.get("query") else {
+        return invalid_request();
+    };
+    if query.chars().count() > COMPLETION_QUERY_MAX_CHARS
+        || !matches!(query.chars().next(), Some('/' | '@'))
+    {
+        return invalid_request();
+    }
+    match app
+        .host
+        .execute(WebUiCommand::CompleteInput {
+            query: query.clone(),
+        })
+        .await
+    {
         Ok(reply) => reply_response(&app, reply),
         Err(error) => host_error_response(error),
     }

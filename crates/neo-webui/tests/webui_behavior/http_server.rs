@@ -12,12 +12,12 @@ use neo_agent_core::session::ToolOutputRange;
 use neo_agent_core::{AgentEvent, TodoEventData};
 use neo_webui::Relay;
 use neo_webui::protocol::{
-    WebUiBootstrap, WebUiChangeStatus, WebUiCommand, WebUiCursor, WebUiError, WebUiErrorCode,
-    WebUiEventBody, WebUiHistoryEntry, WebUiHost, WebUiModelInfo, WebUiPendingApproval,
-    WebUiPendingQuestion, WebUiPhase, WebUiReply, WebUiSessionMetadata, WebUiSessionPage,
-    WebUiSessionScope, WebUiSessionState, WebUiSessionSummary, WebUiSnapshot, WebUiSummaryState,
-    WebUiWorkspaceChange, WebUiWorkspaceChangeDetail, WebUiWorkspaceChanges, WebUiWorkspaceGroup,
-    WebUiWorkspaceSnapshot,
+    WebUiBootstrap, WebUiChangeStatus, WebUiCommand, WebUiCompletionItem, WebUiCompletions,
+    WebUiCursor, WebUiError, WebUiErrorCode, WebUiEventBody, WebUiHistoryEntry, WebUiHost,
+    WebUiModelInfo, WebUiPendingApproval, WebUiPendingQuestion, WebUiPhase, WebUiReply,
+    WebUiSessionMetadata, WebUiSessionPage, WebUiSessionScope, WebUiSessionState,
+    WebUiSessionSummary, WebUiSnapshot, WebUiSummaryState, WebUiWorkspaceChange,
+    WebUiWorkspaceChangeDetail, WebUiWorkspaceChanges, WebUiWorkspaceGroup, WebUiWorkspaceSnapshot,
 };
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
@@ -246,6 +246,15 @@ impl WebUiHost for FakeHost {
                         neo_webui::protocol::WebUiDevelopmentMode::Plan,
                     ],
                     sessions: summaries,
+                }))
+            }
+            WebUiCommand::CompleteInput { query } => {
+                Ok(WebUiReply::Completions(WebUiCompletions {
+                    items: vec![WebUiCompletionItem {
+                        value: query.clone(),
+                        label: query,
+                        description: Some("fixture completion".to_string()),
+                    }],
                 }))
             }
             WebUiCommand::ListSessions {

@@ -1,0 +1,8 @@
+{
+  "schemaVersion": "aegis.schema.v0",
+  "artifactKey": "rust-command-catalog",
+  "type": "test",
+  "source": "cargo nextest run -p neo-agent --bin neo completion_catalog_excludes_extension_commands",
+  "summary": "1 passed; 741 skipped; existing command catalog stays canonical.",
+  "verifier": "exit 0"
+}

@@ -649,6 +649,21 @@ const server = createServer(async (req, res) => {
     });
     return;
   }
+  if (path === "/api/completions" && method === "GET") {
+    const query = url.searchParams.get("query") ?? "";
+    const items = query.startsWith("@")
+      ? [
+          { value: "@[crates/neo-webui/src/server.rs]", label: "@[crates/neo-webui/src/server.rs]", description: "file" },
+          { value: "@[crates/neo-webui/web/src/components/composer.tsx]", label: "@[crates/neo-webui/web/src/components/composer.tsx]", description: "file" },
+        ]
+      : [
+          { value: "/plan", label: "/plan", description: "Enter plan mode" },
+          { value: "/review", label: "/review", description: "Review a target" },
+          { value: "/skill:frontend", label: "/skill:frontend", description: "Frontend workflow" },
+        ];
+    json(res, { items });
+    return;
+  }
   if (path === "/api/attachments" && method === "POST") {
     const body = await readBody(req);
     if (typeof body.mime !== "string" || typeof body.base64 !== "string") {

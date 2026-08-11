@@ -1,0 +1,19 @@
+{
+  "schemaVersion": "aegis.schema.v0",
+  "requestedOutcome": "Add slash command and workspace file completion with transcript-aware popup placement",
+  "goal": "Add slash command and workspace file completion with transcript-aware popup placement",
+  "successEvidence": [
+    "Focused Rust and WebUI tests pass; browser confirms below placement on empty transcript and above placement after transcript"
+  ],
+  "stopCondition": "Done after focused verification and scoped commit; otherwise stop on blocker, missing verification, or scope expansion",
+  "nonGoals": [
+    "Execute TUI-only slash dialogs in the browser"
+  ],
+  "scope": "Existing completion owner, WebUI typed query, composer listbox, focused tests and embedded assets",
+  "changeKinds": [
+    "feature"
+  ],
+  "riskHints": [
+    "Do not duplicate completion discovery or expose absolute paths; preserve dirty WebUI edits"
+  ]
+}

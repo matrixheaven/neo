@@ -1,0 +1,18 @@
+{
+  "schemaVersion": "aegis.schema.v0",
+  "affectedLayers": [
+    "neo-agent",
+    "neo-webui",
+    "web"
+  ],
+  "owners": [
+    "prompt_completion and WebSessionHost"
+  ],
+  "invariants": [
+    "Browser receives only structured relative candidates"
+  ],
+  "compatBoundary": "Preserve transcript and session behavior plus pre-existing dirty changes",
+  "nonGoals": [
+    "Execute TUI-only slash dialogs in the browser"
+  ]
+}

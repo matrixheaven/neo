@@ -1,0 +1,8 @@
+{
+  "schemaVersion": "aegis.schema.v0",
+  "artifactKey": "composer-unit",
+  "type": "test",
+  "source": "npm --prefix crates/neo-webui/web run test -- --run test/unit/composer.test.tsx",
+  "summary": "15 focused composer tests passed.",
+  "verifier": "exit 0"
+}

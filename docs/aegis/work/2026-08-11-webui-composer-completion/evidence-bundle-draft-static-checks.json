@@ -1,0 +1,8 @@
+{
+  "schemaVersion": "aegis.schema.v0",
+  "artifactKey": "static-checks",
+  "type": "test",
+  "source": "cargo check -p neo-agent -p neo-webui; cargo fmt --all --check; cargo clippy -p neo-webui --lib -- -D clippy::all; git diff --check",
+  "summary": "All commands exited 0; clippy retained pre-existing warnings outside this task.",
+  "verifier": "exit 0"
+}

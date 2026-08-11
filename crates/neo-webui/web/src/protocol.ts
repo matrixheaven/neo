@@ -631,6 +631,16 @@ export interface WebUiBootstrap {
   sessions?: WebUiSessionSummary[];
 }
 
+export interface WebUiCompletionItem {
+  value: string;
+  label: string;
+  description?: string | null;
+}
+
+export interface WebUiCompletions {
+  items: WebUiCompletionItem[];
+}
+
 /** Body of `POST /api/attachments`: one base64 media payload. */
 export interface WebUiAttachmentBody {
   mime: string;

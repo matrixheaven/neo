@@ -254,6 +254,27 @@ test("08 answer-ft 浮层与 Review 工作区", async ({ page }) => {
   await expect(panel.locator(".review-unified.wrap").first()).toBeVisible();
 });
 
+test("09 空会话命令候选显示在输入框下方", async ({ page }) => {
+  await openApp(page, 1440, 900);
+  await page.getByLabel("输入消息", { exact: true }).fill("/");
+  const popup = page.getByRole("listbox", { name: "输入候选" });
+  await expect(popup).toBeVisible();
+  await expect(popup).toHaveClass(/below/);
+  await expect(page.getByRole("option", { name: /\/plan/ })).toBeVisible();
+  await page.screenshot({ path: `${SHOTS}/09-completion-below.png` });
+});
+
+test("10 已有转录的文件候选显示在输入框上方", async ({ page }) => {
+  await openApp(page, 1440, 900);
+  await openShowcase(page);
+  await page.getByLabel("输入消息", { exact: true }).fill("@");
+  const popup = page.getByRole("listbox", { name: "输入候选" });
+  await expect(popup).toBeVisible();
+  await expect(popup).toHaveClass(/above/);
+  await expect(page.getByRole("option", { name: /composer\.tsx/ })).toBeVisible();
+  await page.screenshot({ path: `${SHOTS}/10-completion-above.png` });
+});
+
 test("08b 固定摘要会为输入区域保留右侧空间", async ({ page }) => {
   await openApp(page, 1440, 900);
   await openShowcase(page);

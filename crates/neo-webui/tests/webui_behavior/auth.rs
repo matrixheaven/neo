@@ -25,6 +25,39 @@ fn claim_request(server: &TestServer, token: &str) -> RawRequest {
 }
 
 #[tokio::test]
+async fn authenticated_completion_query_returns_typed_candidates_and_rejects_bad_triggers() {
+    let server = TestServer::start().await;
+    let cookie = server.claim_cookie().await;
+    let response = raw_request(
+        server.addr,
+        RawRequest {
+            method: "GET".to_string(),
+            path: "/api/completions?query=%2Fplan".to_string(),
+            cookie: Some(cookie.clone()),
+            ..RawRequest::default()
+        },
+    )
+    .await;
+    assert_eq!(response.status, 200);
+    let body: serde_json::Value = serde_json::from_slice(&response.body).expect("completion json");
+    assert_eq!(body["items"][0]["value"], "/plan");
+    assert_eq!(body["items"][0]["description"], "fixture completion");
+
+    let rejected = raw_request(
+        server.addr,
+        RawRequest {
+            method: "GET".to_string(),
+            path: "/api/completions?query=plan".to_string(),
+            cookie: Some(cookie),
+            ..RawRequest::default()
+        },
+    )
+    .await;
+    assert_eq!(rejected.status, 400);
+    assert_eq!(error_code(&rejected), "invalid_request");
+}
+
+#[tokio::test]
 async fn claim_consumes_the_one_time_token_and_sets_a_strict_http_only_cookie() {
     let server = TestServer::start().await;
     let response = raw_request(server.addr, claim_request(&server, &server.token)).await;

@@ -1,0 +1,17 @@
+{
+  "schemaVersion": "aegis.schema.v0",
+  "taskId": "2026-08-11-webui-composer-completion",
+  "currentTodo": "Complete WebUI composer completion",
+  "completedTodos": [
+    "Serve canonical completion candidates",
+    "Render and operate the composer popup",
+    "Verify focused behavior"
+  ],
+  "activeSlice": "Final verification and commit",
+  "evidenceRefs": [
+    "docs/aegis/work/2026-08-11-webui-composer-completion/90-evidence.md"
+  ],
+  "blockedOn": null,
+  "nextStep": "Stage task-owned changes and commit",
+  "updatedAt": "2026-08-11"
+}

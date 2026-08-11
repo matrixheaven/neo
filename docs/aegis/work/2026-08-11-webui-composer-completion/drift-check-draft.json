@@ -1,0 +1,15 @@
+{
+  "schemaVersion": "aegis.schema.v0",
+  "taskId": "2026-08-11-webui-composer-completion",
+  "taskIntentRef": "docs/aegis/work/2026-08-11-webui-composer-completion/task-intent-draft.json",
+  "baselineRefs": [
+    "docs/aegis/specs/2026-08-09-neo-webui-design.md"
+  ],
+  "scopeStatus": "Implementation remains within slash command and workspace-file composer completion.",
+  "compatStatus": "No fallback or duplicate completion catalog added; existing prompt_completion remains canonical.",
+  "retirementStatus": "No prior WebUI completion path existed, so no old path requires retirement.",
+  "newRiskSignals": [
+    "Fixed dist assets overlap pre-existing user changes and require exact staging."
+  ],
+  "decision": "continue"
+}

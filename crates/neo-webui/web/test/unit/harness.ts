@@ -254,6 +254,13 @@ export function mockFetch(input: RequestInfo | URL, init?: RequestInit): Promise
   if (path === "/api/bootstrap") {
     return Promise.resolve(jsonResponse(bootstrapBody()));
   }
+  if (path.startsWith("/api/completions?")) {
+    const query = new URLSearchParams(path.split("?")[1] ?? "").get("query") ?? "";
+    const items = query.startsWith("@")
+      ? [{ value: "@[src/main.rs]", label: "@[src/main.rs]", description: "file" }]
+      : [{ value: "/plan", label: "/plan", description: "Enter plan mode" }];
+    return Promise.resolve(jsonResponse({ items }));
+  }
   if (path.startsWith("/api/sessions?")) {
     const query = new URLSearchParams(path.split("?")[1] ?? "");
     const needle = (query.get("query") ?? "").toLowerCase();

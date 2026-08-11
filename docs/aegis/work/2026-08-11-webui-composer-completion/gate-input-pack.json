@@ -1,0 +1,16 @@
+{
+  "schemaVersion": "aegis.schema.v0",
+  "baselineRefs": [
+    "docs/aegis/specs/2026-08-09-neo-webui-design.md"
+  ],
+  "impactStatement": "docs/aegis/work/2026-08-11-webui-composer-completion/impact-statement-draft.json",
+  "compatPlan": "Preserve transcript and session behavior plus pre-existing dirty changes",
+  "retirementPlan": "No prior WebUI completion path existed, so no old path requires retirement.",
+  "evidenceBundle": [
+    "docs/aegis/work/2026-08-11-webui-composer-completion/evidence-bundle-draft-browser-placement.json",
+    "docs/aegis/work/2026-08-11-webui-composer-completion/evidence-bundle-draft-composer-unit.json",
+    "docs/aegis/work/2026-08-11-webui-composer-completion/evidence-bundle-draft-rust-command-catalog.json",
+    "docs/aegis/work/2026-08-11-webui-composer-completion/evidence-bundle-draft-rust-webui-query.json",
+    "docs/aegis/work/2026-08-11-webui-composer-completion/evidence-bundle-draft-static-checks.json"
+  ]
+}

@@ -112,7 +112,7 @@ use interactive_preflight::{
     InteractivePreflightSpec, PendingInteractiveWorkflow, PreflightAction,
 };
 
-mod prompt_completion;
+pub(crate) mod prompt_completion;
 use prompt_completion::{CompletionCatalog, longest_common_completion_prefix};
 
 #[cfg(test)]

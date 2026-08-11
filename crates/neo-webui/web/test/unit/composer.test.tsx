@@ -378,4 +378,34 @@ describe("composer R6", () => {
     } as never);
     await waitFor(() => expect(screen.queryByText(/描述你的任务/)).toBeNull());
   });
+
+  it("shows slash and file candidates below an empty composer and inserts them", async () => {
+    const user = userEvent.setup();
+    await renderReady();
+    const input = screen.getByLabelText("输入消息") as HTMLTextAreaElement;
+
+    await user.type(input, "/");
+    const popup = await screen.findByRole("listbox", { name: "输入候选" });
+    expect(popup.className).toContain("below");
+    await user.keyboard("{ArrowDown}{Enter}");
+    expect(input.value).toBe("/plan");
+
+    await user.clear(input);
+    await user.type(input, "@");
+    await screen.findByRole("option", { name: /@\[src\/main\.rs\]/ });
+    await user.click(screen.getByRole("option", { name: /@\[src\/main\.rs\]/ }));
+    expect(input.value).toBe("@[src/main.rs]");
+  });
+
+  it("places the completion popup above a composer with transcript", async () => {
+    const user = userEvent.setup();
+    const { socket } = await renderReady();
+    socket.emit(asServerMessage(fixture.long_connection.workspace_snapshot));
+    await user.click(screen.getByText("并行格式化"));
+    socket.emit({ type: "session_snapshot", snapshot: fixture.sessions[1].snapshot } as never);
+    const input = await screen.findByLabelText("输入消息");
+    await user.type(input, "/");
+    const popup = await screen.findByRole("listbox", { name: "输入候选" });
+    expect(popup.className).toContain("above");
+  });
 });

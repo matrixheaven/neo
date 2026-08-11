@@ -419,6 +419,9 @@ pub struct WebUiAgentHistory {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum WebUiCommand {
     Bootstrap,
+    CompleteInput {
+        query: String,
+    },
     ListSessions {
         scope: WebUiSessionScope,
         query: Option<String>,
@@ -511,6 +514,23 @@ pub struct WebUiModelInfo {
     pub capabilities: Vec<String>,
 }
 
+/// One slash-command or workspace-file candidate for the composer.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WebUiCompletionItem {
+    pub value: String,
+    pub label: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+}
+
+/// Bounded completion response. Values are commands or workspace-relative
+/// references; absolute paths never cross the web boundary.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WebUiCompletions {
+    #[serde(default)]
+    pub items: Vec<WebUiCompletionItem>,
+}
+
 /// Initial page payload.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct WebUiBootstrap {
@@ -554,6 +574,7 @@ pub struct WebUiCancelling {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum WebUiReply {
     Bootstrap(WebUiBootstrap),
+    Completions(WebUiCompletions),
     Sessions(WebUiSessionPage),
     Snapshot(WebUiSnapshot),
     SessionCreated {

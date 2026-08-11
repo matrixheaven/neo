@@ -25,7 +25,7 @@ pub(super) fn prompt_completions(
     prompt_completions_with_registry(root, prefix, skill_store, project_trusted, None)
 }
 
-pub(super) fn prompt_completions_with_registry(
+pub(crate) fn prompt_completions_with_registry(
     root: &Path,
     prefix: &str,
     skill_store: Option<&SkillStore>,

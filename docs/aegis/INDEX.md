@@ -620,6 +620,7 @@ Entries are workspace records, not authoritative runtime decisions.
 | 2026-08-10 | work | docs/aegis/work/2026-08-10-media-input-model-lanes/proof-bundle.md | 2026-08-10-media-input-model-lanes proof bundle |
 | 2026-08-10 | spec | docs/aegis/specs/2026-08-10-neo-webui-redesign-design.md | Neo WebUI 重设计说明 |
 | 2026-08-10 | plan | docs/aegis/plans/2026-08-10-neo-webui-redesign.md | Neo WebUI 重设计实施计划 |
+| 2026-08-11 | plan | docs/aegis/plans/2026-08-11-webui-composer-completion.md | Neo WebUI Composer Completion Implementation Plan |
 | 2026-08-11 | work | docs/aegis/work/2026-08-11-webui-loading-performance/10-intent.md | WebUI loading performance and loading screen intent |
 | 2026-08-11 | work | docs/aegis/work/2026-08-11-webui-loading-performance/20-checkpoint.md | WebUI loading performance and loading screen checkpoint |
 | 2026-08-11 | work | docs/aegis/work/2026-08-11-webui-loading-performance/90-evidence.md | WebUI loading performance and loading screen evidence |
@@ -637,3 +638,21 @@ Entries are workspace records, not authoritative runtime decisions.
 | 2026-08-11 | artifact | docs/aegis/work/2026-08-11-webui-loading-performance/resume-state-hint.json | 2026-08-11-webui-loading-performance resume state hint |
 | 2026-08-11 | artifact | docs/aegis/work/2026-08-11-webui-loading-performance/gate-input-pack.json | 2026-08-11-webui-loading-performance gate input pack |
 | 2026-08-11 | work | docs/aegis/work/2026-08-11-webui-loading-performance/proof-bundle.md | 2026-08-11-webui-loading-performance proof bundle |
+| 2026-08-11 | work | docs/aegis/work/2026-08-11-webui-composer-completion/10-intent.md | Neo WebUI Composer Completion intent |
+| 2026-08-11 | work | docs/aegis/work/2026-08-11-webui-composer-completion/20-checkpoint.md | Neo WebUI Composer Completion checkpoint |
+| 2026-08-11 | work | docs/aegis/work/2026-08-11-webui-composer-completion/90-evidence.md | Neo WebUI Composer Completion evidence |
+| 2026-08-11 | work | docs/aegis/work/2026-08-11-webui-composer-completion/99-reflection.md | Neo WebUI Composer Completion reflection |
+| 2026-08-11 | artifact | docs/aegis/work/2026-08-11-webui-composer-completion/task-intent-draft.json | Neo WebUI Composer Completion task intent draft |
+| 2026-08-11 | artifact | docs/aegis/work/2026-08-11-webui-composer-completion/baseline-read-set-hint.json | Neo WebUI Composer Completion baseline read-set hint |
+| 2026-08-11 | artifact | docs/aegis/work/2026-08-11-webui-composer-completion/baseline-usage-draft.json | Neo WebUI Composer Completion baseline usage draft |
+| 2026-08-11 | artifact | docs/aegis/work/2026-08-11-webui-composer-completion/impact-statement-draft.json | Neo WebUI Composer Completion impact statement draft |
+| 2026-08-11 | artifact | docs/aegis/work/2026-08-11-webui-composer-completion/todo-checkpoint-draft.json | Neo WebUI Composer Completion todo checkpoint draft |
+| 2026-08-11 | artifact | docs/aegis/work/2026-08-11-webui-composer-completion/drift-check-draft.json | Neo WebUI Composer Completion drift check draft |
+| 2026-08-11 | artifact | docs/aegis/work/2026-08-11-webui-composer-completion/resume-state-hint.json | 2026-08-11-webui-composer-completion resume state hint |
+| 2026-08-11 | artifact | docs/aegis/work/2026-08-11-webui-composer-completion/evidence-bundle-draft-rust-command-catalog.json | 2026-08-11-webui-composer-completion evidence rust-command-catalog |
+| 2026-08-11 | artifact | docs/aegis/work/2026-08-11-webui-composer-completion/evidence-bundle-draft-rust-webui-query.json | 2026-08-11-webui-composer-completion evidence rust-webui-query |
+| 2026-08-11 | artifact | docs/aegis/work/2026-08-11-webui-composer-completion/evidence-bundle-draft-composer-unit.json | 2026-08-11-webui-composer-completion evidence composer-unit |
+| 2026-08-11 | artifact | docs/aegis/work/2026-08-11-webui-composer-completion/evidence-bundle-draft-browser-placement.json | 2026-08-11-webui-composer-completion evidence browser-placement |
+| 2026-08-11 | artifact | docs/aegis/work/2026-08-11-webui-composer-completion/evidence-bundle-draft-static-checks.json | 2026-08-11-webui-composer-completion evidence static-checks |
+| 2026-08-11 | artifact | docs/aegis/work/2026-08-11-webui-composer-completion/gate-input-pack.json | 2026-08-11-webui-composer-completion gate input pack |
+| 2026-08-11 | work | docs/aegis/work/2026-08-11-webui-composer-completion/proof-bundle.md | 2026-08-11-webui-composer-completion proof bundle |

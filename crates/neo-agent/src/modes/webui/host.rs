@@ -19,10 +19,10 @@ use neo_agent_core::session::{
 use neo_agent_core::{AgentEvent, Content, MediaRef, PendingQuestion};
 use neo_webui::protocol::{
     WebUiAgentHistory, WebUiAttachmentAck, WebUiBootstrap, WebUiChangeStatus, WebUiCommand,
-    WebUiComposer, WebUiDevelopmentMode, WebUiError, WebUiErrorCode, WebUiHost, WebUiModelInfo,
-    WebUiReply, WebUiSessionMetadata, WebUiSessionPage, WebUiSessionScope, WebUiSessionSummary,
-    WebUiSnapshot, WebUiSummaryState, WebUiWorkspaceChange, WebUiWorkspaceChangeDetail,
-    WebUiWorkspaceChanges, WebUiWorkspaceGroup, WebUiWorkspaceSnapshot,
+    WebUiCompletionItem, WebUiCompletions, WebUiComposer, WebUiDevelopmentMode, WebUiError,
+    WebUiErrorCode, WebUiHost, WebUiModelInfo, WebUiReply, WebUiSessionMetadata, WebUiSessionPage,
+    WebUiSessionScope, WebUiSessionSummary, WebUiSnapshot, WebUiSummaryState, WebUiWorkspaceChange,
+    WebUiWorkspaceChangeDetail, WebUiWorkspaceChanges, WebUiWorkspaceGroup, WebUiWorkspaceSnapshot,
 };
 use neo_webui::relay::{
     ATTACHMENT_MAX_BYTES, ATTACHMENTS_PER_MESSAGE_MAX, Relay, SESSION_PAGE_LIMIT,
@@ -32,10 +32,11 @@ use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
-use crate::config::{AppConfig, workspace_sessions_dir};
+use crate::config::{AppConfig, neo_home, workspace_sessions_dir};
 use crate::modes::interactive::{TurnChannels, TurnOutcome, TurnRequest};
 use crate::modes::run::{run_prompt_in_session_streaming, run_prompt_streaming};
 use crate::modes::sessions;
+use crate::resources;
 
 use super::session::{
     ActiveTurnControl, PerSessionContainers, TurnReceivers, WebSessionState, cancel_turn,
@@ -1025,6 +1026,31 @@ impl WebUiHost for WebSessionHost {
                     ],
                     sessions: sessions.items,
                 }))
+            }
+            WebUiCommand::CompleteInput { query } => {
+                let skill_store = resources::load_skill_store(
+                    neo_home().as_deref(),
+                    &self.config.extra_skill_dirs,
+                    &self.config.skill_path,
+                )
+                .ok();
+                let items =
+                    crate::modes::interactive::prompt_completion::prompt_completions_with_registry(
+                        &self.config.project_dir,
+                        &query,
+                        skill_store.as_ref(),
+                        self.config.project_trusted,
+                        Some(&self.config.workflow_definitions),
+                    )
+                    .map_err(|_| Self::internal())?
+                    .into_iter()
+                    .map(|item| WebUiCompletionItem {
+                        value: item.value,
+                        label: item.label,
+                        description: item.description,
+                    })
+                    .collect();
+                Ok(WebUiReply::Completions(WebUiCompletions { items }))
             }
             WebUiCommand::ListSessions {
                 scope,

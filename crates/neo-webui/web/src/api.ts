@@ -22,6 +22,7 @@ import type {
   WebUiSessionPage,
   WebUiSessionStarted,
   WebUiComposer,
+  WebUiCompletions,
   WebUiSnapshot,
   WebUiWatchRequest,
 } from "./protocol";
@@ -59,6 +60,7 @@ async function request<T>(
   method: string,
   path: string,
   body?: unknown,
+  signal?: AbortSignal,
 ): Promise<T> {
   let response: Response;
   try {
@@ -67,6 +69,7 @@ async function request<T>(
       headers: body === undefined ? undefined : JSON_HEADERS,
       body: body === undefined ? undefined : JSON.stringify(body),
       credentials: "same-origin",
+      signal,
     });
   } catch {
     throw new ApiError(0, null);
@@ -111,6 +114,15 @@ export async function claimAccessToken(): Promise<boolean> {
 
 export function fetchBootstrap(): Promise<WebUiBootstrap> {
   return request<WebUiBootstrap>("GET", "/api/bootstrap");
+}
+
+export function fetchCompletions(query: string, signal?: AbortSignal): Promise<WebUiCompletions> {
+  return request<WebUiCompletions>(
+    "GET",
+    `/api/completions?query=${encodeURIComponent(query)}`,
+    undefined,
+    signal,
+  );
 }
 
 export function listSessions(params: {
