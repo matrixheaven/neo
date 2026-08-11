@@ -5,7 +5,7 @@
  * permission modes or development modes.
  */
 
-import { Moon, PanelLeft, PanelRight, Sun } from "lucide-react";
+import { ListFilter, Moon, PanelLeft, Sun } from "lucide-react";
 import { useEffect, useState } from "react";
 import { useAppActions, useAppState } from "../state/store";
 import type { WebUiPhase } from "../protocol";
@@ -134,7 +134,7 @@ export function TopBar() {
           }
         }}
       >
-        <PanelRight size={16} aria-hidden />
+        <ListFilter size={16} aria-hidden />
       </button>
       <button
         type="button"

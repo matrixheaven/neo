@@ -5,10 +5,12 @@ import {
   Clock,
   Files,
   Loader2,
+  Maximize2,
+  Minimize2,
   X,
   XCircle,
 } from "lucide-react";
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, type CSSProperties } from "react";
 import { ApiError, fetchAgentHistory } from "../api";
 import type { AgentSnapshot, WebUiPhase } from "../protocol";
 import { useAppActions, useAppState } from "../state/store";
@@ -31,6 +33,38 @@ const TERMINAL_AGENT_STATES = new Set([
   "aborted",
   "timed_out",
 ]);
+
+const INFORMATION_PANEL_MIN = 430;
+const INFORMATION_PANEL_MAX = 880;
+const INFORMATION_MAIN_MIN = 400;
+const INFORMATION_KEY_STEP = 16;
+
+function informationPanelLimits(): { min: number; max: number } {
+  const appBody = document.querySelector<HTMLElement>(".app-body");
+  const sidebar = document.querySelector<HTMLElement>(".app-body > .sidebar");
+  const resizer = document.querySelector<HTMLElement>(".app-body > .sidebar-resizer");
+  const sidebarWidth = sidebar && getComputedStyle(sidebar).display !== "none"
+    ? sidebar.getBoundingClientRect().width + (resizer?.getBoundingClientRect().width ?? 0)
+    : 0;
+  const available = (appBody?.getBoundingClientRect().width ?? window.innerWidth) - sidebarWidth;
+  return {
+    min: INFORMATION_PANEL_MIN,
+    max: Math.max(
+      INFORMATION_PANEL_MIN,
+      Math.min(INFORMATION_PANEL_MAX, available - INFORMATION_MAIN_MIN),
+    ),
+  };
+}
+
+function defaultInformationPanelWidth(): number {
+  const { min, max } = informationPanelLimits();
+  return Math.round(Math.min(max, Math.max(min, window.innerWidth * 0.42)));
+}
+
+function clampInformationPanelWidth(width: number): number {
+  const { min, max } = informationPanelLimits();
+  return Math.round(Math.min(max, Math.max(min, width)));
+}
 
 /** Read-only projection: expansion ids cannot collide with the main
  * transcript, and unresolved controls are never actionable in a snapshot. */
@@ -344,10 +378,78 @@ export function InformationPanel() {
     : panel.selectedAgent?.id ?? null;
   const [result, setResult] = useState<PanelResult>({ status: "idle" });
   const [refreshKey, setRefreshKey] = useState(0);
+  const [panelWidth, setPanelWidth] = useState(() => defaultInformationPanelWidth());
+  const [fullScreen, setFullScreen] = useState(false);
   const panelRef = useRef<HTMLElement | null>(null);
+  const resizeRef = useRef<{ pointerId: number; startX: number; startWidth: number; latest: number } | null>(null);
+  const resizeFrameRef = useRef<number | null>(null);
   const focusTriggerRef = useRef<HTMLElement | null>(null);
   const previousOpenRef = useRef(false);
   const previousFocusNonceRef = useRef(panel.focusNonce);
+
+  useEffect(() => {
+    const onResize = () => setPanelWidth((width) => clampInformationPanelWidth(width));
+    window.addEventListener("resize", onResize);
+    return () => window.removeEventListener("resize", onResize);
+  }, []);
+
+  const closePanel = useCallback(() => {
+    setFullScreen(false);
+    actions.closeInformationPanel();
+  }, [actions]);
+
+  const toggleFullScreen = useCallback(() => {
+    setFullScreen((current) => {
+      if (current) setPanelWidth(defaultInformationPanelWidth());
+      return !current;
+    });
+  }, []);
+
+  const resizeWithKeyboard = useCallback((event: React.KeyboardEvent<HTMLDivElement>) => {
+    if (event.key !== "ArrowLeft" && event.key !== "ArrowRight") return;
+    event.preventDefault();
+    setPanelWidth((width) => clampInformationPanelWidth(
+      width + (event.key === "ArrowLeft" ? INFORMATION_KEY_STEP : -INFORMATION_KEY_STEP),
+    ));
+  }, []);
+
+  const startResize = useCallback((event: React.PointerEvent<HTMLDivElement>) => {
+    if (event.button !== 0 || fullScreen) return;
+    event.preventDefault();
+    event.currentTarget.setPointerCapture(event.pointerId);
+    const startWidth = panelRef.current?.getBoundingClientRect().width ?? panelWidth;
+    resizeRef.current = {
+      pointerId: event.pointerId,
+      startX: event.clientX,
+      startWidth,
+      latest: startWidth,
+    };
+    document.documentElement.classList.add("resizing");
+  }, [fullScreen, panelWidth]);
+
+  const moveResize = useCallback((event: React.PointerEvent<HTMLDivElement>) => {
+    const drag = resizeRef.current;
+    if (!drag || drag.pointerId !== event.pointerId) return;
+    const separator = event.currentTarget;
+    drag.latest = clampInformationPanelWidth(drag.startWidth - (event.clientX - drag.startX));
+    if (resizeFrameRef.current !== null) return;
+    resizeFrameRef.current = window.requestAnimationFrame(() => {
+      resizeFrameRef.current = null;
+      panelRef.current?.style.setProperty("--information-panel-w", `${drag.latest}px`);
+      separator.setAttribute("aria-valuenow", String(drag.latest));
+    });
+  }, []);
+
+  const finishResize = useCallback((event: React.PointerEvent<HTMLDivElement>) => {
+    const drag = resizeRef.current;
+    if (!drag || drag.pointerId !== event.pointerId) return;
+    if (resizeFrameRef.current !== null) window.cancelAnimationFrame(resizeFrameRef.current);
+    resizeFrameRef.current = null;
+    if (event.currentTarget.hasPointerCapture(event.pointerId)) event.currentTarget.releasePointerCapture(event.pointerId);
+    resizeRef.current = null;
+    document.documentElement.classList.remove("resizing");
+    setPanelWidth(drag.latest);
+  }, []);
 
   useEffect(() => {
     if (
@@ -434,16 +536,33 @@ export function InformationPanel() {
     <aside
       id="information-panel"
       ref={panelRef}
-      className={`information-panel${panel.open ? " open" : ""}`}
+      className={`information-panel${panel.open ? " open" : ""}${fullScreen ? " fullscreen" : ""}`}
+      style={{ "--information-panel-w": `${panelWidth}px` } as CSSProperties}
       aria-label="会话信息区"
       aria-hidden={!panel.open}
       onKeyDown={(event) => {
         if (event.key === "Escape") {
           event.stopPropagation();
-          actions.closeInformationPanel();
+          closePanel();
         }
       }}
     >
+      <div
+        className="information-resizer"
+        role="separator"
+        aria-orientation="vertical"
+        aria-label="调整会话信息区宽度"
+        aria-valuemin={INFORMATION_PANEL_MIN}
+        aria-valuemax={informationPanelLimits().max}
+        aria-valuenow={panelWidth}
+        tabIndex={panel.open && !fullScreen ? 0 : -1}
+        title="拖拽或用左右方向键调整宽度"
+        onPointerDown={startResize}
+        onPointerMove={moveResize}
+        onPointerUp={finishResize}
+        onPointerCancel={finishResize}
+        onKeyDown={resizeWithKeyboard}
+      />
       <header className="information-panel-header">
         <div className="information-tabs" role="tablist" aria-label="会话信息">
           <button
@@ -467,10 +586,20 @@ export function InformationPanel() {
         </div>
         <button
           type="button"
+          className="icon-button information-fullscreen"
+          aria-label={fullScreen ? "恢复会话信息区默认宽度" : "全屏显示会话信息区"}
+          title={fullScreen ? "恢复默认宽度" : "全屏显示"}
+          aria-pressed={fullScreen}
+          onClick={toggleFullScreen}
+        >
+          {fullScreen ? <Minimize2 size={15} aria-hidden /> : <Maximize2 size={15} aria-hidden />}
+        </button>
+        <button
+          type="button"
           className="icon-button information-close"
           aria-label="关闭会话信息区"
           title="关闭会话信息区"
-          onClick={() => actions.closeInformationPanel()}
+          onClick={closePanel}
         >
           <X size={15} aria-hidden />
         </button>

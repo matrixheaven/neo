@@ -1083,6 +1083,13 @@ describe("transcript redesign rows", () => {
     const splitAdded = within(split).getByText("+新增段落").closest(".review-split-side") as HTMLElement;
     expect(splitDeleted.className).toContain("ft-diff-del");
     expect(splitAdded.className).toContain("ft-diff-add");
+    expect(within(split).getAllByRole("rowgroup")).toHaveLength(2);
+
+    const options = within(panel).getByRole("button", { name: "更多 Review 选项" });
+    await user.click(options);
+    const menu = within(panel).getByRole("menu", { name: "Review 选项" });
+    await user.click(within(menu).getByRole("menuitem", { name: "启用富文本预览" }));
+    expect(within(panel).getByRole("region", { name: "docs/guide.md 的富文本预览" })).toBeTruthy();
   });
 
   it("shows a focus preview and routes clicks to Review without inline scrolling", async () => {

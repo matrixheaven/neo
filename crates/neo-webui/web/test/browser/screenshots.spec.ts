@@ -213,7 +213,10 @@ test("08 answer-ft 浮层与 Review 工作区", async ({ page }) => {
   await expect(panel.getByLabel("修改文件树")).toBeVisible();
   await expect(panel.getByRole("table", { name: "统一差异" }).first()).toBeVisible();
   await panel.getByRole("button", { name: "左右差异" }).click();
-  await expect(panel.getByRole("table", { name: "左右差异" }).first()).toBeVisible();
+  const splitDiff = panel.getByRole("table", { name: "左右差异" }).first();
+  await expect(splitDiff).toBeVisible();
+  await expect(splitDiff.locator(".review-split-pane")).toHaveCount(2);
+  await page.screenshot({ path: `${SHOTS}/08-review-split.png` });
   await panel.getByRole("button", { name: "统一差异" }).click();
   await expect(panel.getByRole("table", { name: "统一差异" }).first()).toBeVisible();
   await panel.getByRole("button", { name: "全部收起" }).click();
@@ -238,12 +241,82 @@ test("08 answer-ft 浮层与 Review 工作区", async ({ page }) => {
   await expect(menu.getByRole("menuitem", { name: "刷新" })).toBeVisible();
   await expect(menu.getByRole("menuitem", { name: "启用换行" })).toBeVisible();
   await expect(menu.getByRole("menuitem", { name: "加载完整文件" })).toBeVisible();
+  await expect(menu.getByRole("menuitem", { name: "启用富文本预览" })).toBeVisible();
   await expect(menu.getByRole("menuitem", { name: "启用字级差异" })).toBeVisible();
   await expect(menu.getByRole("menuitem", { name: "隐藏空白改动" })).toBeVisible();
   await expect(menu.getByRole("menuitem", { name: "复制应用命令" })).toBeVisible();
+  await menu.getByRole("menuitem", { name: "启用富文本预览" }).click();
+  await expect(panel.getByRole("region", { name: "web/src/acceptance-notes.md 的富文本预览" })).toBeVisible();
+  await panel.getByRole("button", { name: "更多 Review 选项" }).click();
+  await expect(menu.getByRole("menuitem", { name: "关闭富文本预览" })).toBeVisible();
   await page.screenshot({ path: `${SHOTS}/08-review-options.png` });
   await menu.getByRole("menuitem", { name: "启用换行" }).click();
   await expect(panel.locator(".review-unified.wrap").first()).toBeVisible();
+});
+
+test("08b 固定摘要会为输入区域保留右侧空间", async ({ page }) => {
+  await openApp(page, 1440, 900);
+  await openShowcase(page);
+
+  const composer = page.locator(".session-view > .composer-dock");
+  const before = await composer.boundingBox();
+  if (!before) throw new Error("输入区域未渲染");
+
+  const toggle = page.getByRole("button", { name: "切换固定摘要" });
+  await toggle.click();
+  const summary = page.getByLabel("固定摘要", { exact: true });
+  await expect(summary).toHaveClass(/open/);
+  await expect.poll(async () => (await composer.boundingBox())?.width ?? 0).toBeLessThan(before.width);
+  await expect.poll(() => page.evaluate(() => {
+    const summary = document.querySelector<HTMLElement>(".fixed-summary.open");
+    const dock = document.querySelector<HTMLElement>(".session-view > .composer-dock");
+    if (!summary || !dock) return false;
+    return dock.getBoundingClientRect().right <= summary.getBoundingClientRect().left - 8;
+  })).toBe(true);
+  await page.screenshot({ path: `${SHOTS}/08b-fixed-summary.png` });
+});
+
+test("08c 会话信息区支持限宽拖拽、键盘调整、全屏和关闭", async ({ page }) => {
+  await openApp(page, 1440, 900);
+  await openShowcase(page);
+
+  const panel = page.getByLabel("会话信息区", { exact: true });
+  const resizer = page.getByRole("separator", { name: "调整会话信息区宽度" });
+  await expect(panel).toBeVisible();
+  await expect(resizer).toBeVisible();
+  await expect.poll(async () => (await panel.boundingBox())?.width ?? 0).toBeGreaterThan(400);
+  const defaultWidth = Number(await resizer.getAttribute("aria-valuenow"));
+
+  await resizer.focus();
+  for (let index = 0; index < 40; index += 1) await resizer.press("ArrowLeft");
+  await expect(resizer).toHaveAttribute("aria-valuenow", await resizer.getAttribute("aria-valuemax") ?? "");
+  await expect.poll(async () => Math.round((await panel.boundingBox())?.width ?? 0))
+    .toBe(Number(await resizer.getAttribute("aria-valuemax")));
+
+  const grip = await resizer.boundingBox();
+  if (!grip) throw new Error("信息区拖拽线不可测量");
+  await page.mouse.move(grip.x + grip.width / 2, grip.y + 80);
+  await page.mouse.down();
+  await page.mouse.move(grip.x + 96, grip.y + 80, { steps: 4 });
+  await page.mouse.up();
+  await expect.poll(async () => Number(await resizer.getAttribute("aria-valuenow")))
+    .toBeLessThan(Number(await resizer.getAttribute("aria-valuemax")));
+  await resizer.focus();
+  for (let index = 0; index < 40; index += 1) await resizer.press("ArrowRight");
+  await expect(resizer).toHaveAttribute("aria-valuenow", String(430));
+
+  await panel.getByRole("button", { name: "全屏显示会话信息区" }).click();
+  await expect(panel).toHaveClass(/fullscreen/);
+  await expect(resizer).toBeHidden();
+  await expect.poll(async () => (await panel.boundingBox())?.width ?? 0).toBeGreaterThan(defaultWidth);
+
+  await panel.getByRole("button", { name: "恢复会话信息区默认宽度" }).click();
+  await expect(panel).not.toHaveClass(/fullscreen/);
+  await expect.poll(async () => Math.round((await panel.boundingBox())?.width ?? 0))
+    .toBe(Math.round(defaultWidth));
+
+  await panel.getByRole("button", { name: "关闭会话信息区" }).click();
+  await expect(panel).toBeHidden();
 });
 
 test("09 侧栏多工作区分组", async ({ page }) => {

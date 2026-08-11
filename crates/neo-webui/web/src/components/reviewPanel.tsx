@@ -1,15 +1,16 @@
 import {
+  AlignJustify,
   ChevronDown,
   ChevronRight,
   ChevronsDownUp,
   ChevronsUpDown,
+  Columns2,
   Copy,
   FileCode2,
   FileSearch,
+  FileText,
   FolderOpen,
   MoreHorizontal,
-  PanelRightClose,
-  PanelRightOpen,
   RefreshCw,
   Search,
   WrapText,
@@ -22,6 +23,7 @@ import {
   type FilePreviewLine,
   type ReviewFileChange,
 } from "./transcript";
+import { Markdown } from "./markdown";
 
 export type ReviewSourceState = "ok" | "loading" | "missing" | "error";
 
@@ -191,19 +193,36 @@ function SplitSide({ line, side, wrap }: {
   );
 }
 
-function SplitDiff({ lines, wrap }: { lines: FilePreviewLine[]; wrap: boolean }) {
+function SplitPane({ rows, side, wrap }: {
+  rows: SplitRow[];
+  side: "old" | "new";
+  wrap: boolean;
+}) {
   return (
-    <div className="review-split" role="table" aria-label="左右差异">
-      {splitRows(lines).map((row, index) => row.separator ? (
-        <div className="review-split-separator" key={`${index}:${row.separator.content}`}>
+    <div className="review-split-pane" role="rowgroup">
+      {rows.map((row, index) => row.separator ? (
+        <div className="review-split-separator" key={`${side}:${index}:${row.separator.content}`}>
           {row.separator.content}
         </div>
       ) : (
-        <div className="review-split-row" role="row" key={index}>
-          <SplitSide line={row.left} side="old" wrap={wrap} />
-          <SplitSide line={row.right} side="new" wrap={wrap} />
+        <div className="review-split-row" role="row" key={`${side}:${index}`}>
+          <SplitSide
+            line={side === "old" ? row.left : row.right}
+            side={side}
+            wrap={wrap}
+          />
         </div>
       ))}
+    </div>
+  );
+}
+
+function SplitDiff({ lines, wrap }: { lines: FilePreviewLine[]; wrap: boolean }) {
+  const rows = splitRows(lines);
+  return (
+    <div className="review-split" role="table" aria-label="左右差异">
+      <SplitPane rows={rows} side="old" wrap={wrap} />
+      <SplitPane rows={rows} side="new" wrap={wrap} />
     </div>
   );
 }
@@ -242,6 +261,26 @@ function fileTreeRows(files: ReviewFileChange[]): FileTreeRow[] {
     });
   }
   return rows;
+}
+
+function FileTypeIcon({ path }: { path: string }) {
+  return /\.(?:md|mdx|txt|rst)$/i.test(path)
+    ? <FileText className="review-file-type" size={13} aria-hidden />
+    : <FileCode2 className="review-file-type" size={13} aria-hidden />;
+}
+
+function richPreviewText(file: ReviewFileChange): string {
+  return file.preview.flatMap((line) => {
+    if (line.kind === "separator" || line.kind === "del") return [];
+    if ((line.kind === "add" || line.kind === "context") && line.content.length > 0) {
+      return [line.content.slice(1)];
+    }
+    return [line.content];
+  }).join("\n");
+}
+
+function supportsRichPreview(path: string): boolean {
+  return /\.(?:md|mdx)$/i.test(path);
 }
 
 function ToolbarButton({
@@ -294,6 +333,7 @@ export function ReviewPanel({ target, items, sourceState, refreshKey, onRefresh 
   const [treeQuery, setTreeQuery] = useState("");
   const [wrap, setWrap] = useState(false);
   const [fullFiles, setFullFiles] = useState(false);
+  const [richPreview, setRichPreview] = useState(false);
   const [wordDiff, setWordDiff] = useState(false);
   const [hideWhitespace, setHideWhitespace] = useState(false);
   const [notice, setNotice] = useState("");
@@ -310,6 +350,7 @@ export function ReviewPanel({ target, items, sourceState, refreshKey, onRefresh 
     setJumpQuery("");
     setTreeQuery("");
     setNotice("");
+    setRichPreview(false);
   }, [fileKey, targetKey]);
 
   const jumpTo = (path: string) => {
@@ -353,10 +394,10 @@ export function ReviewPanel({ target, items, sourceState, refreshKey, onRefresh 
       <div className="review-toolbar">
         <div className="review-layout-switch" role="group" aria-label="差异布局">
           <button type="button" aria-pressed={layout === "unified"} onClick={() => setLayout("unified")}>
-            统一差异
+            <AlignJustify size={14} aria-hidden />统一差异
           </button>
           <button type="button" aria-pressed={layout === "split"} onClick={() => setLayout("split")}>
-            左右差异
+            <Columns2 size={14} aria-hidden />左右差异
           </button>
         </div>
         <span className="review-toolbar-spacer" />
@@ -407,7 +448,7 @@ export function ReviewPanel({ target, items, sourceState, refreshKey, onRefresh 
           pressed={treeOpen}
           onClick={() => setTreeOpen((open) => !open)}
         >
-          {treeOpen ? <PanelRightClose size={15} aria-hidden /> : <PanelRightOpen size={15} aria-hidden />}
+          <FolderOpen size={15} aria-hidden />
         </ToolbarButton>
         <div className="review-popover-wrap">
           <ToolbarButton
@@ -433,6 +474,12 @@ export function ReviewPanel({ target, items, sourceState, refreshKey, onRefresh 
                 setFullFiles((value) => !value);
                 setMenuOpen(false);
               }}><FileCode2 size={13} aria-hidden />{fullFiles ? "精简差异" : "加载完整文件"}</button>
+              {files.some((file) => supportsRichPreview(file.path)) ? (
+                <button type="button" role="menuitem" onClick={() => {
+                  setRichPreview((value) => !value);
+                  setMenuOpen(false);
+                }}><FileText size={13} aria-hidden />{richPreview ? "关闭富文本预览" : "启用富文本预览"}</button>
+              ) : null}
               <button type="button" role="menuitem" onClick={() => {
                 setWordDiff((value) => !value);
                 setMenuOpen(false);
@@ -481,6 +528,7 @@ export function ReviewPanel({ target, items, sourceState, refreshKey, onRefresh 
                   }}
                 >
                   <ChevronRight className={open ? "open" : ""} size={14} aria-hidden />
+                  <FileTypeIcon path={file.path} />
                   <span>{file.path}</span>
                   <small><b>+{file.added}</b> <i>−{file.removed}</i></small>
                 </button>
@@ -491,11 +539,18 @@ export function ReviewPanel({ target, items, sourceState, refreshKey, onRefresh 
                         当前协议没有完整文件正文，以下显示全部可用差异。
                       </p>
                     ) : null}
-                    {layout === "unified" ? (
-                      <UnifiedDiff lines={visibleLines} wordDiff={wordDiff} wrap={wrap} />
-                    ) : (
-                      <SplitDiff lines={visibleLines} wrap={wrap} />
-                    )}
+                    <div className="review-code-scroll">
+                      {layout === "unified" ? (
+                        <UnifiedDiff lines={visibleLines} wordDiff={wordDiff} wrap={wrap} />
+                      ) : (
+                        <SplitDiff lines={visibleLines} wrap={wrap} />
+                      )}
+                    </div>
+                    {richPreview && supportsRichPreview(file.path) ? (
+                      <section className="review-rich-preview" aria-label={`${file.path} 的富文本预览`}>
+                        <Markdown text={richPreviewText(file)} />
+                      </section>
+                    ) : null}
                   </div>
                 ) : null}
               </section>
@@ -538,7 +593,7 @@ export function ReviewPanel({ target, items, sourceState, refreshKey, onRefresh 
                   title={row.path}
                   onClick={() => jumpTo(row.path)}
                 >
-                  <FileCode2 size={13} aria-hidden />{row.label}
+                  <FileTypeIcon path={row.path} />{row.label}
                 </button>
               ))}
             </div>
