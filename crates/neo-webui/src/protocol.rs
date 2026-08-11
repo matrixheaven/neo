@@ -213,8 +213,8 @@ pub struct WebUiSnapshot {
     pub history: Vec<WebUiHistoryEntry>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pending_approval: Option<WebUiPendingApproval>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub pending_question: Option<WebUiPendingQuestion>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub pending_questions: Vec<WebUiPendingQuestion>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub todos: Vec<TodoEventData>,
 }

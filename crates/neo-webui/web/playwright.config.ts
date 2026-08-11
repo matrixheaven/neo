@@ -1,6 +1,6 @@
 import { defineConfig } from "@playwright/test";
 
-const PORT = 47921;
+const PORT = Number(process.env.MOCK_PORT ?? 47921);
 
 export default defineConfig({
   testDir: "./test/browser",

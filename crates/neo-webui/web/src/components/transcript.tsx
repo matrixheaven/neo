@@ -8,8 +8,9 @@
  * while away from the bottom.
  */
 
-import { ArrowDown, ChevronRight, FilePenLine } from "lucide-react";
-import { useEffect, useLayoutEffect, useRef, useState } from "react";
+import { ArrowDown, ChevronRight, FilePenLine, ScanSearch } from "lucide-react";
+import { useCallback, useEffect, useLayoutEffect, useRef, useState, type CSSProperties } from "react";
+import { createPortal } from "react-dom";
 import { useAppActions, useAppState } from "../state/store";
 import type {
   AssistantMessageItem,
@@ -51,6 +52,11 @@ function processTurn(item: TranscriptItem): number | null {
     return null;
   }
   return item.turn;
+}
+
+function isPendingInteraction(item: TranscriptItem): boolean {
+  if (item.kind === "approval") return item.resolution === undefined;
+  return item.kind === "question" && !item.resolved;
 }
 
 function attachProcessItemsToTheirTurn(groups: TurnGroup[]): TurnGroup[] {
@@ -128,12 +134,13 @@ export function groupTurns(items: TranscriptItem[]): TurnGroup[] {
       appendUngrouped(turn);
     } else {
       const msg = turn[finalIndex] as AssistantMessageItem;
-      const process = turn.slice(0, finalIndex);
+      const activity = turn.slice(0, finalIndex);
+      const process = activity.filter((item) => !isPendingInteraction(item));
       const trailing = turn.slice(finalIndex + 1);
       groups.push({
         kind: "assist",
         process,
-        activity: [...process],
+        activity,
         msg,
       });
       appendUngrouped(trailing);
@@ -216,7 +223,7 @@ export function presentationItems(
     }
     const runtimeKind = name === "bash" ? "shell" : name === "terminal" ? "terminal" : null;
     const id = commandId(item);
-    return runtimeKind === null || id === null || !items.some(
+    return runtimeKind === null || id === null || !allItems.some(
       (candidate) => candidate.kind === runtimeKind && commandId(candidate) === id,
     );
   });
@@ -287,6 +294,30 @@ function ProcessRows({
   });
 }
 
+type TurnActivitySegment =
+  | { kind: "process"; items: TranscriptItem[] }
+  | { kind: "inline"; item: TranscriptItem };
+
+function turnActivitySegments(activity: TranscriptItem[]): TurnActivitySegment[] {
+  const segments: TurnActivitySegment[] = [];
+  let process: TranscriptItem[] = [];
+  const flushProcess = () => {
+    if (process.length === 0) return;
+    segments.push({ kind: "process", items: process });
+    process = [];
+  };
+  for (const item of activity) {
+    if (isPendingInteraction(item)) {
+      flushProcess();
+      segments.push({ kind: "inline", item });
+    } else {
+      process.push(item);
+    }
+  }
+  flushProcess();
+  return segments;
+}
+
 function failedProcessItem(item: TranscriptItem): boolean {
   if (item.kind === "tool" || item.kind === "shell") return item.status === "failed";
   return item.kind === "terminal" && item.finished && typeof item.exitCode === "number" && item.exitCode !== 0;
@@ -343,12 +374,14 @@ function processSummary(process: TranscriptItem[]): string {
 // cancelled and failed writes cannot appear as edits.
 // ---------------------------------------------------------------------------
 
-interface FilePreviewLine {
+export interface FilePreviewLine {
   content: string;
   kind: "add" | "del" | "context" | "separator" | "created";
+  oldLine?: number;
+  newLine?: number;
 }
 
-interface FileChange {
+export interface ReviewFileChange {
   path: string;
   added: number;
   removed: number;
@@ -360,8 +393,7 @@ interface FileChange {
 
 const COMMITTED_FILE_CHANGE_STATUSES = new Set(["committed", "committed_unsynced"]);
 const INITIAL_FILE_CHANGE_COUNT = 3;
-const HOVER_FILE_PREVIEW_LINE_COUNT = 6;
-const EXPANDED_FILE_PREVIEW_LINE_COUNT = 28;
+const HOVER_FILE_PREVIEW_LINE_COUNT = 40;
 
 function objectValue(value: unknown): Record<string, unknown> | null {
   return value !== null && typeof value === "object" && !Array.isArray(value)
@@ -403,32 +435,44 @@ function localDiffPreviewLines(path: string, diff: string): FilePreviewLine[] {
     sourceLines[2]?.startsWith("@@") === true;
   const previewLines = hasFileHeaders ? sourceLines.slice(2) : sourceLines;
   const lines: FilePreviewLine[] = [];
+  let oldLine = 0;
+  let newLine = 0;
+  let inHunk = false;
   for (const line of previewLines) {
     if (line.startsWith("@@")) {
-      lines.push({ content: "...", kind: "separator" });
+      const header = /^@@ -(\d+)(?:,\d+)? \+(\d+)(?:,\d+)? @@/.exec(line);
+      if (header) {
+        oldLine = Number.parseInt(header[1], 10);
+        newLine = Number.parseInt(header[2], 10);
+        inHunk = true;
+      }
+      lines.push({ content: line, kind: "separator" });
     } else {
-      lines.push({ content: line, kind: diffLineKind(line) });
+      const kind = diffLineKind(line);
+      const oldNumber = inHunk && kind !== "add" ? oldLine : undefined;
+      const newNumber = inHunk && kind !== "del" ? newLine : undefined;
+      lines.push({ content: line, kind, oldLine: oldNumber, newLine: newNumber });
+      if (inHunk && kind !== "add") oldLine += 1;
+      if (inHunk && kind !== "del") newLine += 1;
     }
   }
   return lines;
 }
 
 function createdFilePreviewLines(content: string): FilePreviewLine[] {
-  return splitPreviewLines(content).map((line) => ({ content: line, kind: "created" }));
+  return splitPreviewLines(content).map((line, index) => ({
+    content: line,
+    kind: "created",
+    newLine: index + 1,
+  }));
 }
 
-function appendPreview(entry: FileChange, lines: FilePreviewLine[]): void {
-  const remaining = EXPANDED_FILE_PREVIEW_LINE_COUNT - entry.preview.length;
-  if (remaining <= 0) {
-    entry.previewOmitted ||= lines.length > 0;
-    return;
-  }
-  entry.preview.push(...lines.slice(0, remaining));
-  entry.previewOmitted ||= lines.length > remaining;
+function appendPreview(entry: ReviewFileChange, lines: FilePreviewLine[]): void {
+  entry.preview.push(...lines);
 }
 
-function deriveFileChanges(process: TranscriptItem[]): FileChange[] {
-  const byPath = new Map<string, FileChange>();
+function deriveFileChanges(process: TranscriptItem[]): ReviewFileChange[] {
+  const byPath = new Map<string, ReviewFileChange>();
   for (const item of process) {
     if (item.kind !== "tool") continue;
     const details = objectValue(item.result?.details);
@@ -494,18 +538,16 @@ function foldElapsedSecs(process: TranscriptItem[]): number | null {
 function TurnFold({
   sessionId,
   msg,
-  process,
   activity,
   allItems,
 }: {
   sessionId: string;
   msg: AssistantMessageItem;
-  process: TranscriptItem[];
   activity: TranscriptItem[];
   allItems: TranscriptItem[];
 }) {
-  // All completed activity stays behind its summary. In-progress turns remain
-  // open so streaming progress is visible; an explicit choice wins later.
+  // Completed process rows stay behind their summary while pending controls
+  // remain visible. In-progress turns stay open; an explicit choice wins later.
   const [open, toggle] = useLineExpanded(
     sessionId,
     `fold:${msg.id}`,
@@ -531,31 +573,36 @@ function TurnFold({
         </span>
         <span className="tf-sum">{summary}</span>
       </button>
-      <div className="tf-body">
-        <div className="tf-body-inner">
-          <ProcessRows sessionId={sessionId} items={process} allItems={allItems} />
+      {turnActivitySegments(activity).map((segment) => segment.kind === "inline" ? (
+        <TranscriptItemView key={`inline:${segment.item.id}`} sessionId={sessionId} item={segment.item} />
+      ) : (
+        <div className="tf-body" key={`process:${segment.items[0].id}`}>
+          <div className="tf-body-inner">
+            <ProcessRows sessionId={sessionId} items={segment.items} allItems={allItems} />
+          </div>
         </div>
-      </div>
+      ))}
     </div>
   );
 }
 
-function LocalPreview({ change, expanded }: { change: FileChange; expanded: boolean }) {
-  const lineCount = expanded ? EXPANDED_FILE_PREVIEW_LINE_COUNT : HOVER_FILE_PREVIEW_LINE_COUNT;
-  const lines = change.preview.slice(0, lineCount);
+function LocalPreview({ change }: { change: ReviewFileChange }) {
+  const lines = change.preview.slice(0, HOVER_FILE_PREVIEW_LINE_COUNT);
   const omitted = change.previewOmitted || change.preview.length > lines.length;
   return (
     <pre className="ft-local-diff">
       {lines.map((line, index) => (
         <span className={`ft-preview-line ft-diff-${line.kind}`} key={`${index}:${line.content}`}>
-          <span className="ft-line-no" aria-hidden>{index + 1}</span>
+          <span className="ft-line-no ft-line-old" aria-hidden>{line.oldLine ?? ""}</span>
+          <span className="ft-line-no ft-line-new" aria-hidden>{line.newLine ?? ""}</span>
           <span className="ft-line-gutter" aria-hidden />
           <span className="ft-line-content">{line.content || " "}</span>
         </span>
       ))}
       {lines.length === 0 ? (
         <span className="ft-preview-line ft-diff-empty">
-          <span className="ft-line-no" aria-hidden>·</span>
+          <span className="ft-line-no ft-line-old" aria-hidden />
+          <span className="ft-line-no ft-line-new" aria-hidden>·</span>
           <span className="ft-line-gutter" aria-hidden />
           <span className="ft-line-content">{change.created ? "新建空文件" : "没有可显示的局部内容"}</span>
         </span>
@@ -567,7 +614,7 @@ function LocalPreview({ change, expanded }: { change: FileChange; expanded: bool
   );
 }
 
-function FilePreviewHeader({ change }: { change: FileChange }) {
+function FilePreviewHeader({ change }: { change: ReviewFileChange }) {
   return (
     <div className="ft-preview-header">
       <span className="ft-preview-path" aria-label={change.path}>{change.path}</span>
@@ -605,40 +652,71 @@ function FileChangeRow({
   sessionId,
   messageId,
   change,
+  agentId,
 }: {
   sessionId: string;
   messageId: string;
-  change: FileChange;
+  change: ReviewFileChange;
+  agentId: string | null;
 }) {
-  const [hovering, setHovering] = useState(false);
+  const actions = useAppActions();
+  const [previewVisible, setPreviewVisible] = useState(false);
+  const [previewStyle, setPreviewStyle] = useState<CSSProperties>({});
   const rowRef = useRef<HTMLLIElement>(null);
-  const scrollAfterOpenRef = useRef(false);
+  const hideTimerRef = useRef<number | null>(null);
   const hasPreview = change.hasPreview;
   const path = filePathParts(change.path);
-  const [open, toggle] = useLineExpanded(sessionId, `file:${messageId}:${change.path}`, false);
   const previewId = filePreviewId(messageId, change.path);
-  const label = `${open ? "收起" : "展开"} ${change.path} 的${change.created ? "新建文件内容" : "局部差异"}`;
-  const previewVisible = open || hovering;
+  const label = `在 Review 中查看 ${change.path} 的${change.created ? "新建文件内容" : "局部差异"}`;
 
-  // Hover previews are intentionally passive. Only an explicit expansion
-  // requests room above the fixed composer.
-  useLayoutEffect(() => {
-    if (!open || !scrollAfterOpenRef.current) return;
-    scrollAfterOpenRef.current = false;
+  const updatePreviewPosition = useCallback(() => {
     const row = rowRef.current;
-    if (typeof row?.scrollIntoView === "function") {
-      row.scrollIntoView({ block: "nearest" });
-    }
-  }, [open]);
+    if (!row) return;
+    const rect = row.getBoundingClientRect();
+    const viewportWidth = document.documentElement.clientWidth || window.innerWidth || 1024;
+    const viewportHeight = document.documentElement.clientHeight || window.innerHeight || 768;
+    const composer = document.querySelector<HTMLElement>(".session-view > .composer-dock");
+    const composerTop = composer?.getBoundingClientRect().top ?? viewportHeight;
+    const lowerEdge = Math.min(viewportHeight - 12, composerTop > 0 ? composerTop - 12 : viewportHeight - 12);
+    const width = Math.min(640, Math.max(320, rect.width || 560), viewportWidth - 24);
+    const left = Math.max(12, Math.min(rect.left, viewportWidth - width - 12));
+    const belowRoom = Math.max(0, lowerEdge - rect.bottom - 6);
+    const aboveRoom = Math.max(0, rect.top - 18);
+    const placeBelow = belowRoom >= 220 || belowRoom >= aboveRoom;
+    const room = Math.min(420, placeBelow ? belowRoom : aboveRoom);
+    const top = placeBelow ? rect.bottom + 6 : Math.max(12, rect.top - room - 6);
+    setPreviewStyle({ left, top, width, maxHeight: room });
+  }, []);
 
-  const togglePreview = () => {
-    if (!open) scrollAfterOpenRef.current = true;
-    toggle();
-  };
+  const showPreview = useCallback(() => {
+    if (hideTimerRef.current !== null) window.clearTimeout(hideTimerRef.current);
+    updatePreviewPosition();
+    setPreviewVisible(true);
+  }, [updatePreviewPosition]);
+
+  const hidePreviewSoon = useCallback(() => {
+    if (hideTimerRef.current !== null) window.clearTimeout(hideTimerRef.current);
+    hideTimerRef.current = window.setTimeout(() => setPreviewVisible(false), 90);
+  }, []);
+
+  useEffect(() => () => {
+    if (hideTimerRef.current !== null) window.clearTimeout(hideTimerRef.current);
+  }, []);
+
+  useLayoutEffect(() => {
+    if (!previewVisible) return;
+    const update = () => updatePreviewPosition();
+    window.addEventListener("resize", update);
+    window.addEventListener("scroll", update, true);
+    return () => {
+      window.removeEventListener("resize", update);
+      window.removeEventListener("scroll", update, true);
+    };
+  }, [previewVisible, updatePreviewPosition]);
 
   const contents = (
     <>
-      {hasPreview ? <ChevronRight className={`ft-file-caret ${open ? "open" : ""}`} size={13} aria-hidden /> : null}
+      {hasPreview ? <ScanSearch className="ft-file-caret" size={13} aria-hidden /> : null}
       <span className="ft-path" title={change.path}>
         {path.directory ? <span className="ft-directory">{path.directory}</span> : null}
         <span className="ft-basename">{path.basename}</span>
@@ -653,37 +731,40 @@ function FileChangeRow({
     <li
       ref={rowRef}
       className={`ft-file ${hasPreview ? "has-preview" : ""}`}
-      onMouseEnter={hasPreview ? () => setHovering(true) : undefined}
-      onMouseLeave={hasPreview ? () => setHovering(false) : undefined}
+      onMouseEnter={hasPreview ? showPreview : undefined}
+      onMouseLeave={hasPreview ? hidePreviewSoon : undefined}
     >
-      {hasPreview ? (
-        <button
-          type="button"
-          className="ft-file-head"
-          aria-controls={previewId}
-          aria-expanded={open}
-          aria-label={label}
-          onFocus={hasPreview ? () => setHovering(true) : undefined}
-          onBlur={hasPreview ? () => setHovering(false) : undefined}
-          onClick={togglePreview}
-        >
-          {contents}
-        </button>
-      ) : (
-        <div className="ft-file-head">{contents}</div>
-      )}
-      {hasPreview ? (
-        <div
-          id={previewId}
-          className={`ft-file-preview ${open ? "open" : ""}`}
-          hidden={!previewVisible}
-          role="region"
-          aria-label={`${change.path} 的${change.created ? "文件内容" : "局部差异"}`}
-        >
-          <FilePreviewHeader change={change} />
-          <LocalPreview change={change} expanded={open} />
-        </div>
-      ) : null}
+      <button
+        type="button"
+        className="ft-file-head"
+        aria-describedby={hasPreview && previewVisible ? previewId : undefined}
+        aria-label={label}
+        onFocus={hasPreview ? showPreview : undefined}
+        onBlur={hasPreview ? hidePreviewSoon : undefined}
+        onClick={() => {
+          setPreviewVisible(false);
+          actions.openReview(sessionId, messageId, change.path, agentId);
+        }}
+      >
+        {contents}
+      </button>
+      {hasPreview && previewVisible && typeof document !== "undefined"
+        ? createPortal(
+            <div
+              id={previewId}
+              className="ft-file-preview"
+              style={previewStyle}
+              role="region"
+              aria-label={`${change.path} 的${change.created ? "文件内容" : "局部差异"}`}
+              onMouseEnter={showPreview}
+              onMouseLeave={hidePreviewSoon}
+            >
+              <FilePreviewHeader change={change} />
+              <LocalPreview change={change} />
+            </div>,
+            document.body,
+          )
+        : null}
     </li>
   );
 }
@@ -692,11 +773,14 @@ function AnswerFooter({
   sessionId,
   msg,
   changes,
+  agentId,
 }: {
   sessionId: string;
   msg: AssistantMessageItem;
-  changes: FileChange[];
+  changes: ReviewFileChange[];
+  agentId: string | null;
 }) {
+  const actions = useAppActions();
   const hasAnswer = msg.text.trim() !== "";
   const [showAll, toggleShowAll] = useLineExpanded(sessionId, `files:${msg.id}`, false);
   if (!hasAnswer && changes.length === 0) return null;
@@ -715,10 +799,26 @@ function AnswerFooter({
             {totalAdded > 0 ? <span className="ft-add">+{totalAdded}</span> : null}
             {totalRemoved > 0 ? <span className="ft-del">−{totalRemoved}</span> : null}
             <SummaryChangeRatio added={totalAdded} removed={totalRemoved} />
+            <button
+              type="button"
+              className="ft-review-button"
+              aria-label="在 Review 中查看全部修改"
+              title="在 Review 中查看全部修改"
+              onClick={() => actions.openReview(sessionId, msg.id, changes[0]?.path ?? null, agentId)}
+            >
+              <ScanSearch size={13} aria-hidden />
+              <span>Review</span>
+            </button>
           </div>
           <ul className="ft-files" id={fileListId}>
             {visibleChanges.map((change) => (
-              <FileChangeRow key={change.path} sessionId={sessionId} messageId={msg.id} change={change} />
+              <FileChangeRow
+                key={change.path}
+                sessionId={sessionId}
+                messageId={msg.id}
+                change={change}
+                agentId={agentId}
+              />
             ))}
           </ul>
           {hiddenCount > 0 ? (
@@ -753,20 +853,87 @@ function AssistGroup({
   sessionId,
   group,
   allItems,
+  agentId,
 }: {
   sessionId: string;
   group: { process: TranscriptItem[]; activity: TranscriptItem[]; msg: AssistantMessageItem };
   allItems: TranscriptItem[];
+  agentId: string | null;
 }) {
   const { process, activity, msg } = group;
   const changes = msg.finished ? deriveFileChanges(activity) : [];
   return (
     <div className="a-msg t-item">
       {process.length > 0 ? (
-        <TurnFold sessionId={sessionId} msg={msg} process={process} activity={activity} allItems={allItems} />
+        <TurnFold sessionId={sessionId} msg={msg} activity={activity} allItems={allItems} />
+      ) : activity.length > 0 ? (
+        <ProcessRows sessionId={sessionId} items={activity} allItems={allItems} />
       ) : null}
       <AssistantBody item={msg} />
-      {msg.finished ? <AnswerFooter sessionId={sessionId} msg={msg} changes={changes} /> : null}
+      {msg.finished ? (
+        <AnswerFooter
+          sessionId={sessionId}
+          msg={msg}
+          changes={changes}
+          agentId={agentId}
+        />
+      ) : null}
+    </div>
+  );
+}
+
+export function reviewFilesForMessage(
+  items: TranscriptItem[],
+  messageId: string,
+): ReviewFileChange[] {
+  const group = groupTurns(items).find(
+    (candidate) => candidate.kind === "assist" && candidate.msg.id === messageId,
+  );
+  return group?.kind === "assist" ? deriveFileChanges(group.activity) : [];
+}
+
+export function TranscriptDocument({
+  sessionId,
+  items,
+  agentId = null,
+}: {
+  sessionId: string;
+  items: TranscriptItem[];
+  agentId?: string | null;
+}) {
+  const groups = groupTurns(items);
+  return (
+    <div className="transcript-column">
+      {groups.map((group) => {
+        switch (group.kind) {
+          case "user":
+            return (
+              <TranscriptItemView key={group.item.id} sessionId={sessionId} item={group.item} />
+            );
+          case "assist":
+            return (
+              <AssistGroup
+                key={group.msg.id}
+                sessionId={sessionId}
+                group={group}
+                allItems={items}
+                agentId={agentId}
+              />
+            );
+          case "process":
+            return (
+              <div className="a-msg t-item" key={group.items[0].id}>
+                <ProcessRows sessionId={sessionId} items={group.items} allItems={items} />
+              </div>
+            );
+          case "inline":
+            return (
+              <div className="t-item" key={group.item.id}>
+                <TranscriptItemView sessionId={sessionId} item={group.item} />
+              </div>
+            );
+        }
+      })}
     </div>
   );
 }
@@ -815,8 +982,6 @@ export function TranscriptPane({ sessionId }: { sessionId: string }) {
     }
   };
 
-  const groups = groupTurns(items);
-
   return (
     <>
       <div
@@ -825,32 +990,7 @@ export function TranscriptPane({ sessionId }: { sessionId: string }) {
         onScroll={onScroll}
         aria-label="会话转录"
       >
-        <div className="transcript-column">
-          {groups.map((group) => {
-            switch (group.kind) {
-              case "user":
-                return (
-                  <TranscriptItemView key={group.item.id} sessionId={sessionId} item={group.item} />
-                );
-              case "assist":
-                return <AssistGroup key={group.msg.id} sessionId={sessionId} group={group} allItems={items} />;
-              case "process":
-                // In-progress process rows without a following message stay
-                // visible as-is.
-                return (
-                  <div className="a-msg t-item" key={group.items[0].id}>
-                    <ProcessRows sessionId={sessionId} items={group.items} allItems={items} />
-                  </div>
-                );
-              case "inline":
-                return (
-                  <div className="t-item" key={group.item.id}>
-                    <TranscriptItemView sessionId={sessionId} item={group.item} />
-                  </div>
-                );
-            }
-          })}
-        </div>
+        <TranscriptDocument sessionId={sessionId} items={items} />
       </div>
       {!isAtBottom ? (
         <button

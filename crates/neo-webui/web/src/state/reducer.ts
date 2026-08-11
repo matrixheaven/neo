@@ -45,15 +45,30 @@ function applySnapshot(view: SessionViewState, snapshot: WebUiSnapshot): Session
   if (snapshot.session.context_window) {
     projection = { ...projection, contextWindow: snapshot.session.context_window };
   }
+  // Pending questions arrive over the host-control channel rather than the
+  // canonical event stream. Project the snapshot payload into the derived
+  // transcript so an already-waiting session remains answerable after a
+  // reconnect or first open without altering its recorded history.
+  const pendingQuestions = snapshot.pending_questions ?? [];
+  for (const pendingQuestion of pendingQuestions) {
+    projection = applyAgentEvent(projection, {
+      QuestionRequested: {
+        turn: projection.latestTurn ?? 0,
+        id: pendingQuestion.id,
+        questions: pendingQuestion.questions,
+      },
+    });
+  }
   // The snapshot's waiting items are the final arbiter of pending state.
   // History cards stay in place, but a card that is no longer pending (and
   // has no explicit resolution) must not remain actionable.
   const pendingApprovalId = snapshot.pending_approval?.request_id ?? null;
-  const pendingQuestionId = snapshot.pending_question?.id ?? null;
+  const pendingQuestionIds = pendingQuestions.map((question) => question.id);
+  const pendingQuestionIdSet = new Set(pendingQuestionIds);
   projection = {
     ...projection,
     pendingApprovalId,
-    pendingQuestionId,
+    pendingQuestionIds,
     items: projection.items.map((item) => {
       if (item.kind === "approval") {
         const cardId = item.request.id;
@@ -64,7 +79,7 @@ function applySnapshot(view: SessionViewState, snapshot: WebUiSnapshot): Session
       }
       if (item.kind === "question") {
         const cardId = item.id.replace(/^question:/, "");
-        return { ...item, resolved: cardId !== pendingQuestionId };
+        return { ...item, resolved: !pendingQuestionIdSet.has(cardId) };
       }
       return item;
     }),
@@ -211,7 +226,8 @@ function applySessionMessage(state: AppState, message: WebUiServerMessage): AppS
           projection,
           cursor: message.sequence,
           waitingApproval: projection.pendingApprovalId !== null ? true : current.waitingApproval,
-          waitingQuestion: projection.pendingQuestionId !== null ? true : current.waitingQuestion,
+          waitingQuestion:
+            projection.pendingQuestionIds.length > 0 ? true : current.waitingQuestion,
         };
       });
     }
@@ -232,14 +248,8 @@ function applySessionMessage(state: AppState, message: WebUiServerMessage): AppS
           resyncNeeded: true,
         }));
       }
-      return updateSession(state, message.session_id, (current) => ({
-        ...current,
-        cursor: message.sequence,
-        phase: message.event.phase,
-        waitingApproval: message.event.waiting_approval,
-        waitingQuestion: message.event.waiting_question,
-        currentTurnId: message.event.current_turn_id ?? null,
-        projection:
+      return updateSession(state, message.session_id, (current) => {
+        let projection =
           message.event.token_usage || message.event.context_window
             ? {
                 ...current.projection,
@@ -247,8 +257,35 @@ function applySessionMessage(state: AppState, message: WebUiServerMessage): AppS
                 contextWindow:
                   message.event.context_window ?? current.projection.contextWindow,
               }
-            : current.projection,
-      }));
+            : current.projection;
+        const pendingQuestionIds = projection.pendingQuestionIds;
+        if (!message.event.waiting_question && pendingQuestionIds.length > 0) {
+          const pendingQuestionIdSet = new Set(pendingQuestionIds);
+          projection = {
+            ...projection,
+            pendingQuestionIds: [],
+            items: projection.items.map((item) =>
+              item.kind === "question" &&
+              pendingQuestionIdSet.has(item.id.replace(/^question:/, ""))
+                ? { ...item, resolved: true }
+                : item,
+            ),
+          };
+        }
+        return {
+          ...current,
+          cursor: message.sequence,
+          phase: message.event.phase,
+          waitingApproval: message.event.waiting_approval,
+          waitingQuestion: message.event.waiting_question,
+          currentTurnId: message.event.current_turn_id ?? null,
+          // A live waiting state has no question payload. Reuse the existing
+          // no-cursor watch path to obtain its authoritative snapshot.
+          resyncNeeded:
+            current.resyncNeeded || message.event.waiting_question,
+          projection,
+        };
+      });
     }
 
     case "session_metadata_changed": {
@@ -304,9 +341,15 @@ export function appReducer(state: AppState, action: AppAction): AppState {
         selectedSessionId: action.sessionId,
         activeContextMenu: null,
         sidebarDrawerOpen: false,
-        // Session switching closes the drill-down panel; its data is
-        // discarded, never cached.
-        agentPanel: null,
+        // Session switching changes only the observed UI. It closes the
+        // secondary workspace without touching the background turn.
+        informationPanel: {
+          ...state.informationPanel,
+          open: false,
+          tab: "subagents",
+          selectedAgent: null,
+          review: null,
+        },
       };
       // The previous session keeps its draft/expansion/scroll anchor but
       // drops the full transcript — full transcripts live only on the
@@ -427,10 +470,88 @@ export function appReducer(state: AppState, action: AppAction): AppState {
     case "clear_notice":
       return { ...state, notice: null };
 
-    case "open_agent_panel":
-      return { ...state, agentPanel: action.panel };
+    case "auto_open_information_panel": {
+      if (state.informationPanel.autoOpenedSessionIds.includes(action.sessionId)) {
+        return state;
+      }
+      return {
+        ...state,
+        informationPanel: {
+          ...state.informationPanel,
+          open: !state.informationPanel.fixedSummaryOpen,
+          tab: state.informationPanel.open ? state.informationPanel.tab : "subagents",
+          autoOpenedSessionIds: [
+            ...state.informationPanel.autoOpenedSessionIds,
+            action.sessionId,
+          ],
+        },
+      };
+    }
 
-    case "close_agent_panel":
-      return { ...state, agentPanel: null };
+    case "open_information_panel":
+      return {
+        ...state,
+        informationPanel: {
+          ...state.informationPanel,
+          open: true,
+          fixedSummaryOpen: false,
+          tab: action.tab,
+          focusNonce: state.informationPanel.focusNonce + 1,
+        },
+      };
+
+    case "close_information_panel":
+      return {
+        ...state,
+        informationPanel: {
+          ...state.informationPanel,
+          open: false,
+          selectedAgent: null,
+          review: null,
+        },
+      };
+
+    case "set_fixed_summary_open":
+      return {
+        ...state,
+        informationPanel: {
+          ...state.informationPanel,
+          fixedSummaryOpen: action.open,
+          open: action.open ? false : state.informationPanel.open,
+          selectedAgent: action.open ? null : state.informationPanel.selectedAgent,
+        },
+      };
+
+    case "select_information_agent":
+      return {
+        ...state,
+        informationPanel: {
+          ...state.informationPanel,
+          open: true,
+          fixedSummaryOpen: false,
+          tab: "subagents",
+          selectedAgent: action.agent,
+          focusNonce: state.informationPanel.focusNonce + 1,
+        },
+      };
+
+    case "set_information_panel_tab":
+      return {
+        ...state,
+        informationPanel: { ...state.informationPanel, tab: action.tab },
+      };
+
+    case "open_review":
+      return {
+        ...state,
+        informationPanel: {
+          ...state.informationPanel,
+          open: true,
+          fixedSummaryOpen: false,
+          tab: "review",
+          review: action.target,
+          focusNonce: state.informationPanel.focusNonce + 1,
+        },
+      };
   }
 }

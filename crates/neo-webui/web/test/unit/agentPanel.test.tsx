@@ -5,7 +5,7 @@
  * focus restore, session-switch auto-close and the 404 error state.
  */
 
-import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
+import { cleanup, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import React from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -229,7 +229,120 @@ describe("subagent UI (R4)", () => {
     expect(members[0].querySelector(".agent-pill")).toBeNull();
   });
 
-  it("opens the drill-down panel with the child transcript, Esc closes and focus returns", async () => {
+  it("auto-opens the information column without stealing focus and groups active agents", async () => {
+    const { socket } = await openSession1();
+    const composer = screen.getByLabelText("输入消息");
+    composer.focus();
+    const emit = emitter(socket);
+    emit({ DelegateStarted: { turn: 1, agent: runningAgent() } });
+
+    const panel = screen.getByLabelText("会话信息区");
+    await waitFor(() => expect(panel.classList.contains("open")).toBe(true));
+    expect(panel.getAttribute("aria-hidden")).toBe("false");
+    expect(document.activeElement).toBe(composer);
+    expect(within(panel).getByRole("tab", { name: "Subagents" }).getAttribute("aria-selected"))
+      .toBe("true");
+    expect(within(panel).getByRole("tab", { name: "Review" }).getAttribute("aria-selected"))
+      .toBe("false");
+    expect(within(panel).getByRole("heading", { name: "Active 1" })).toBeTruthy();
+    expect(within(panel).getByRole("heading", { name: "Done 0" })).toBeTruthy();
+    expect(within(panel).getByRole("button", { name: /查看子代理：检查测试覆盖/ })).toBeTruthy();
+    expect(screen.queryByRole("dialog", { name: /子代理详情/ })).toBeNull();
+  });
+
+  it("opens a fixed summary without blocking the transcript and routes changed files to Review", async () => {
+    const user = userEvent.setup();
+    const { socket } = await openSession1();
+    const emit = emitter(socket);
+    emit({ DelegateStarted: { turn: 2, agent: runningAgent() } });
+    emit({
+      ToolExecutionFinished: {
+        turn: 2,
+        id: "summary_file",
+        name: "edit",
+        result: {
+          content: "updated",
+          is_error: false,
+          details: {
+            changes: [{
+              path: "src/summary.ts",
+              status: "committed",
+              added: 1,
+              removed: 0,
+              diff: "@@ -1 +1,2 @@\n existing\n+summary",
+            }],
+          },
+        },
+      },
+    });
+    emit({ MessageStarted: { turn: 2, id: "summary_result" } });
+    emit({ TextDelta: { turn: 2, text: "已整理摘要文件。" } });
+    emit({ MessageFinished: { turn: 2, id: "summary_result", stop_reason: "EndTurn" } });
+
+    const toggle = screen.getByRole("button", { name: "切换固定摘要" });
+    expect(toggle.getAttribute("aria-controls")).toBe("fixed-summary");
+    expect(toggle.getAttribute("aria-expanded")).toBe("false");
+    await user.click(toggle);
+
+    const summary = screen.getByLabelText("固定摘要");
+    expect(summary.classList.contains("open")).toBe(true);
+    expect(summary.getAttribute("aria-hidden")).toBe("false");
+    expect(document.querySelector(".session-view")?.classList.contains("fixed-summary-open")).toBe(true);
+    expect(within(summary).getByRole("button", { name: /查看子代理，共 1 个/ })).toBeTruthy();
+    expect(within(summary).getByRole("button", { name: "查看 1 个修改文件" })).toBeTruthy();
+
+    await user.click(within(summary).getByRole("button", { name: "关闭固定摘要" }));
+    await waitFor(() => expect(summary.getAttribute("aria-hidden")).toBe("true"));
+    expect(document.activeElement).toBe(toggle);
+
+    await user.click(toggle);
+    await user.click(within(summary).getByRole("button", { name: "查看 1 个修改文件" }));
+    const panel = screen.getByLabelText("会话信息区");
+    expect(summary.getAttribute("aria-hidden")).toBe("true");
+    expect(within(panel).getByRole("tab", { name: "Review" }).getAttribute("aria-selected"))
+      .toBe("true");
+  });
+
+  it("keeps a user-selected Review tab during later agent activity", async () => {
+    const user = userEvent.setup();
+    const { socket } = await openSession1();
+    const emit = emitter(socket);
+    emit({ DelegateStarted: { turn: 1, agent: runningAgent() } });
+    const panel = screen.getByLabelText("会话信息区");
+    await waitFor(() => expect(panel.classList.contains("open")).toBe(true));
+    await user.click(within(panel).getByRole("tab", { name: "Review" }));
+
+    emit({
+      DelegateUpdated: {
+        turn: 1,
+        agent: { ...runningAgent(), latest_text: "继续检查 relay 覆盖" },
+      },
+    });
+    await screen.findByRole("button", { name: /查看子代理详情：检查测试覆盖/ });
+    await waitFor(() => expect(
+      within(panel).getByRole("tab", { name: "Review" }).getAttribute("aria-selected"),
+    ).toBe("true"));
+  });
+
+  it("returns focus to the topbar when a roster trigger no longer exists", async () => {
+    const user = userEvent.setup();
+    const { socket } = await openSession1();
+    const emit = emitter(socket);
+    emit({ DelegateStarted: { turn: 1, agent: runningAgent() } });
+    const panel = screen.getByLabelText("会话信息区");
+    const topbarToggle = document.querySelector(".information-toggle") as HTMLElement;
+    const rosterButton = await within(panel).findByRole("button", {
+      name: /查看子代理：检查测试覆盖/,
+    });
+    await user.click(rosterButton);
+    await within(panel).findByText("子代理结论：relay 覆盖达标。");
+
+    await user.click(within(panel).getByRole("button", { name: "关闭会话信息区" }));
+    await waitFor(() => expect(panel.getAttribute("aria-hidden")).toBe("true"));
+    expect(document.activeElement).toBe(topbarToggle);
+  });
+
+  it("opens shared child history, switches tabs, then closes and restores focus", async () => {
     const user = userEvent.setup();
     const { socket } = await openSession1();
     const emit = emitter(socket);
@@ -240,7 +353,8 @@ describe("subagent UI (R4)", () => {
     });
     await user.click(lineButton);
 
-    const dialog = await screen.findByRole("dialog", { name: /子代理详情：检查测试覆盖/ });
+    const panel = screen.getByLabelText("会话信息区");
+    await waitFor(() => expect(panel.classList.contains("open")).toBe(true));
     await waitFor(() =>
       expect(
         recordedRequests.some(
@@ -250,75 +364,24 @@ describe("subagent UI (R4)", () => {
         ),
       ).toBe(true),
     );
-    // Header: state pill, running lag note, token usage from the snapshot.
-    expect(within(dialog).getByText("运行中面板显示截至上次落盘点的内容")).toBeTruthy();
-    expect(within(dialog).getByText("token 16")).toBeTruthy();
-    // Child transcript renders through the shared transcript components.
-    expect(await within(dialog).findByText("子代理结论：relay 覆盖达标。")).toBeTruthy();
-    expect(within(dialog).getByText("检查 relay 测试覆盖")).toBeTruthy();
+    expect(within(panel).getByText("运行中仅显示上次落盘快照；进度状态仍来自当前会话。")).toBeTruthy();
+    expect(within(panel).getByText("token 16")).toBeTruthy();
+    expect(await within(panel).findByText("子代理结论：relay 覆盖达标。")).toBeTruthy();
+    expect(within(panel).getByText("检查 relay 测试覆盖")).toBeTruthy();
+    expect(within(panel).getByText("已编辑 1 个文件")).toBeTruthy();
+    await user.click(within(panel).getByRole("button", { name: /展开工作过程/ }));
+    expect(within(panel).getByRole("button", { name: /展开思考，状态：已完成/ })).toBeTruthy();
+    expect(within(panel).getByRole("button", { name: /编辑 src\/relay.ts/ })).toBeTruthy();
 
-    await user.keyboard("{Escape}");
-    // Close is a reverse transition: the panel stays mounted with `.closing`
-    // until the slide-out animation ends on the panel element itself.
-    const panelEl = document.querySelector(".agent-panel") as HTMLElement;
-    expect(panelEl.className).toContain("closing");
-    expect(screen.queryByRole("dialog")).not.toBeNull();
-    fireEvent.animationEnd(panelEl);
-    await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
+    await user.click(within(panel).getByRole("tab", { name: "Review" }));
+    expect(within(panel).getByRole("tab", { name: "Review" }).getAttribute("aria-selected"))
+      .toBe("true");
+    expect(within(panel).getByText("从最终修改文件列表选择一个文件开始 Review。")).toBeTruthy();
+    await user.click(within(panel).getByRole("tab", { name: "Subagents" }));
+    await user.click(within(panel).getByRole("button", { name: "关闭会话信息区" }));
+    await waitFor(() => expect(panel.getAttribute("aria-hidden")).toBe("true"));
+    expect(panel.classList.contains("open")).toBe(false);
     expect(document.activeElement).toBe(lineButton);
-  });
-
-  it("close button runs the reverse animation before unmount", async () => {
-    const user = userEvent.setup();
-    const { socket } = await openSession1();
-    const emit = emitter(socket);
-    emit({ DelegateStarted: { turn: 1, agent: runningAgent() } });
-
-    await user.click(
-      await screen.findByRole("button", { name: /查看子代理详情：检查测试覆盖/ }),
-    );
-    const dialog = await screen.findByRole("dialog", { name: /子代理详情：检查测试覆盖/ });
-    await user.click(within(dialog).getByRole("button", { name: "关闭子代理详情" }));
-    // Marked closing but not yet unmounted; the animationend settles it.
-    const panelEl = document.querySelector(".agent-panel") as HTMLElement;
-    expect(panelEl.className).toContain("closing");
-    expect(screen.queryByRole("dialog")).not.toBeNull();
-    fireEvent.animationEnd(panelEl);
-    await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
-  });
-
-  it("traps Tab and Shift+Tab inside the open panel", async () => {
-    const user = userEvent.setup();
-    const { socket } = await openSession1();
-    const emit = emitter(socket);
-    emit({ DelegateStarted: { turn: 1, agent: runningAgent() } });
-
-    await user.click(
-      await screen.findByRole("button", { name: /查看子代理详情：检查测试覆盖/ }),
-    );
-    const dialog = await screen.findByRole("dialog", { name: /子代理详情：检查测试覆盖/ });
-    await within(dialog).findByText("子代理结论：relay 覆盖达标。");
-
-    const focusables = Array.from(
-      dialog.querySelectorAll<HTMLElement>(
-        'button:not([disabled]), [href], input:not([disabled]), select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex="-1"])',
-      ),
-    );
-    expect(focusables.length).toBeGreaterThan(1);
-    const first = focusables[0];
-    const last = focusables[focusables.length - 1];
-
-    // Shift+Tab on the first control wraps to the last; Tab on the last wraps
-    // back to the first — focus never leaves the dialog.
-    first.focus();
-    await user.keyboard("{Shift>}{Tab}{/Shift}");
-    expect(document.activeElement).toBe(last);
-    await user.keyboard("{Tab}");
-    expect(document.activeElement).toBe(first);
-    for (let step = 0; step < focusables.length + 2; step++) {
-      await user.keyboard("{Tab}");
-      expect(dialog.contains(document.activeElement)).toBe(true);
-    }
   });
 
   it("opens the panel from a swarm member row", async () => {
@@ -331,7 +394,8 @@ describe("subagent UI (R4)", () => {
       name: /查看子代理详情：relay 覆盖/,
     });
     await user.click(memberButton);
-    const dialog = await screen.findByRole("dialog", { name: /子代理详情：relay 覆盖/ });
+    const panel = screen.getByLabelText("会话信息区");
+    await waitFor(() => expect(panel.classList.contains("open")).toBe(true));
     await waitFor(() =>
       expect(
         recordedRequests.some(
@@ -341,7 +405,7 @@ describe("subagent UI (R4)", () => {
         ),
       ).toBe(true),
     );
-    expect(await within(dialog).findByText("子代理结论：relay 覆盖达标。")).toBeTruthy();
+    expect(await within(panel).findByText("子代理结论：relay 覆盖达标。")).toBeTruthy();
   });
 
   it("closes the panel when switching sessions", async () => {
@@ -353,10 +417,12 @@ describe("subagent UI (R4)", () => {
     await user.click(
       await screen.findByRole("button", { name: /查看子代理详情：检查测试覆盖/ }),
     );
-    await screen.findByRole("dialog", { name: /子代理详情：检查测试覆盖/ });
+    const panel = screen.getByLabelText("会话信息区");
+    await waitFor(() => expect(panel.getAttribute("aria-hidden")).toBe("false"));
 
     (await screen.findByText("并行格式化")).click();
-    await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
+    await waitFor(() => expect(panel.getAttribute("aria-hidden")).toBe("true"));
+    expect(panel.classList.contains("open")).toBe(false);
   });
 
   it("shows a non-sensitive error when the agent history is missing (404)", async () => {
@@ -371,6 +437,7 @@ describe("subagent UI (R4)", () => {
           display_name: "worker",
           state: "completed",
           task_title: "无历史代理",
+          latest_text: "快照结论：已完成静态检查。",
           elapsed: { secs: 4, nanos: 0 },
         },
       },
@@ -379,9 +446,10 @@ describe("subagent UI (R4)", () => {
     await user.click(
       await screen.findByRole("button", { name: /查看子代理详情：无历史代理/ }),
     );
-    const dialog = await screen.findByRole("dialog", { name: /子代理详情：无历史代理/ });
+    const panel = screen.getByLabelText("会话信息区");
     expect(
-      await within(dialog).findByText(/未找到该子代理的历史记录/),
+      await within(panel).findByText(/未找到该子代理的逐条历史；当前仅显示代理结果快照/),
     ).toBeTruthy();
+    expect(within(panel).getByText("快照结论：已完成静态检查。")).toBeTruthy();
   });
 });

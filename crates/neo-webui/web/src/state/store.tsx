@@ -39,6 +39,7 @@ import type {
 import {
   SIDEBAR_DEFAULT,
   initialAppState,
+  type InformationPanelTab,
   type AppState,
 } from "./appState";
 import { appReducer } from "./reducer";
@@ -87,8 +88,19 @@ export interface AppActions {
   submitQuestion(questionId: string, answer: WebUiQuestionAnswer): void;
   patchMetadata(sessionId: string, change: { title?: string; pinned?: boolean; archived?: boolean }): void;
   dismissNotice(): void;
+  autoOpenInformationPanel(sessionId: string): void;
+  openInformationPanel(tab?: InformationPanelTab): void;
+  closeInformationPanel(): void;
+  setFixedSummaryOpen(open: boolean): void;
+  setInformationPanelTab(tab: InformationPanelTab): void;
   openAgentPanel(sessionId: string, agent: AgentSnapshot): void;
-  closeAgentPanel(): void;
+  showAgentList(): void;
+  openReview(
+    sessionId: string,
+    messageId: string,
+    selectedPath: string | null,
+    agentId?: string | null,
+  ): void;
 }
 
 const AppStateContext = createContext<AppState | null>(null);
@@ -413,9 +425,10 @@ export function AppProvider({ children }: { children: ReactNode }) {
       resolveQuestion(selected, turnId, questionId, answer)
         .then(() => {})
         .catch((error: unknown) => {
-          if (error instanceof ApiError && error.status === 409) {
-            dispatch({ type: "question_stale", sessionId: selected, questionId });
-          }
+          // A failed request did not prove that the one-time response was
+          // accepted. Restore the card so the user can retry; a stale reply
+          // still refreshes the authoritative snapshot below.
+          dispatch({ type: "question_stale", sessionId: selected, questionId });
           handleApiError(error, selected);
         });
     },
@@ -430,15 +443,44 @@ export function AppProvider({ children }: { children: ReactNode }) {
       dispatch({ type: "clear_notice" });
     },
 
+    autoOpenInformationPanel(sessionId) {
+      dispatch({ type: "auto_open_information_panel", sessionId });
+    },
+
+    openInformationPanel(tab = "subagents") {
+      dispatch({ type: "open_information_panel", tab });
+    },
+
+    closeInformationPanel() {
+      dispatch({ type: "close_information_panel" });
+    },
+
+    setFixedSummaryOpen(open) {
+      dispatch({ type: "set_fixed_summary_open", open });
+    },
+
+    setInformationPanelTab(tab) {
+      dispatch({ type: "set_information_panel_tab", tab });
+    },
+
     openAgentPanel(sessionId, agent) {
+      if (stateRef.current.selectedSessionId !== sessionId) return;
       dispatch({
-        type: "open_agent_panel",
-        panel: { sessionId, agentId: agent.id, agent },
+        type: "select_information_agent",
+        agent,
       });
     },
 
-    closeAgentPanel() {
-      dispatch({ type: "close_agent_panel" });
+    showAgentList() {
+      dispatch({ type: "select_information_agent", agent: null });
+    },
+
+    openReview(sessionId, messageId, selectedPath, agentId = null) {
+      if (stateRef.current.selectedSessionId !== sessionId) return;
+      dispatch({
+        type: "open_review",
+        target: { sessionId, messageId, agentId, selectedPath },
+      });
     },
   }), [handleApiError]);
 

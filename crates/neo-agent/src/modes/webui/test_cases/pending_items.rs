@@ -1,7 +1,10 @@
 //! Pending approvals and questions: triple-match one-time resolution,
 //! duplicate rejection, closed senders, and answer retry semantics.
 
-use neo_agent_core::{ApprovalAction, ApprovalOption, ApprovalRequest, PermissionOperation};
+use neo_agent_core::{
+    ApprovalAction, ApprovalOption, ApprovalRequest, PermissionOperation, QuestionEventData,
+    QuestionOptionData,
+};
 
 use super::state_fixtures::test_state;
 use super::*;
@@ -30,6 +33,25 @@ fn sample_approval(id: &str) -> (RunPendingApproval, oneshot::Receiver<ApprovalR
         },
         response_rx,
     )
+}
+
+fn sample_question(question: &str) -> QuestionEventData {
+    QuestionEventData {
+        question: question.to_owned(),
+        header: None,
+        body: None,
+        options: vec![
+            QuestionOptionData {
+                label: "Yes".to_owned(),
+                description: None,
+            },
+            QuestionOptionData {
+                label: "No".to_owned(),
+                description: None,
+            },
+        ],
+        multi_select: false,
+    }
 }
 
 #[test]
@@ -218,7 +240,7 @@ fn empty_question_answer_keeps_the_pending_question_for_retry() {
         let mut guard = state.lock().expect("state lock");
         let pending = PendingQuestion {
             id: "question_1".to_owned(),
-            questions: Vec::new(),
+            questions: vec![sample_question("Continue?")],
             workflow_origin: None,
             response_tx,
         };
@@ -278,6 +300,99 @@ fn empty_question_answer_keeps_the_pending_question_for_retry() {
         other => panic!("expected the retried answer, got {other:?}"),
     }
     assert!(!state.lock().expect("state lock").waiting_question);
+}
+
+#[test]
+fn pending_questions_keep_order_and_resolve_independently() {
+    let relay = Relay::new("test_stream");
+    let state = test_state(&relay, "session_1", Some("turn_1"));
+    let (first_tx, mut first_rx) = oneshot::channel();
+    let (second_tx, mut second_rx) = oneshot::channel();
+    {
+        let mut guard = state.lock().expect("state lock");
+        assert!(!guard.register_question(PendingQuestion {
+            id: "question_1".to_owned(),
+            questions: vec![sample_question("Continue?")],
+            workflow_origin: None,
+            response_tx: first_tx,
+        }));
+        assert!(!guard.register_question(PendingQuestion {
+            id: "question_2".to_owned(),
+            questions: vec![
+                sample_question("Run tests?"),
+                sample_question("Run review?")
+            ],
+            workflow_origin: None,
+            response_tx: second_tx,
+        }));
+        assert_eq!(
+            guard
+                .pending_questions
+                .iter()
+                .map(|entry| entry.id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["question_1", "question_2"]
+        );
+    }
+
+    assert_eq!(
+        resolve_question(
+            &state,
+            "turn_1",
+            "question_1",
+            neo_webui::protocol::WebUiQuestionAnswer {
+                selections: vec!["Yes".to_owned(), "No".to_owned()],
+                text: None,
+            },
+        )
+        .expect_err("answer count mismatch rejected")
+        .code,
+        WebUiErrorCode::InvalidRequest
+    );
+    assert_eq!(
+        state.lock().expect("state lock").pending_questions.len(),
+        2,
+        "an invalid answer must not consume either sender"
+    );
+
+    resolve_question(
+        &state,
+        "turn_1",
+        "question_2",
+        neo_webui::protocol::WebUiQuestionAnswer {
+            selections: vec!["Yes".to_owned(), "No".to_owned()],
+            text: None,
+        },
+    )
+    .expect("second question resolves independently");
+    assert_eq!(
+        second_rx.try_recv().expect("second answer").answers,
+        vec!["Yes".to_owned(), "No".to_owned()]
+    );
+    {
+        let guard = state.lock().expect("state lock");
+        assert_eq!(guard.pending_questions.len(), 1);
+        assert_eq!(guard.pending_questions[0].id, "question_1");
+        assert!(guard.waiting_question);
+    }
+
+    resolve_question(
+        &state,
+        "turn_1",
+        "question_1",
+        neo_webui::protocol::WebUiQuestionAnswer {
+            selections: vec!["Yes".to_owned()],
+            text: None,
+        },
+    )
+    .expect("first question still resolves");
+    assert_eq!(
+        first_rx.try_recv().expect("first answer").answers,
+        vec!["Yes".to_owned()]
+    );
+    let guard = state.lock().expect("state lock");
+    assert!(guard.pending_questions.is_empty());
+    assert!(!guard.waiting_question);
 }
 
 #[test]

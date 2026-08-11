@@ -74,6 +74,8 @@ const byUpdated = (a: WebUiSessionSummary, b: WebUiSessionSummary) =>
   (b.updated_at ?? "").localeCompare(a.updated_at ?? "");
 
 const SESSION_PAGE_SIZE = 5;
+const PINNED_SESSION_GROUP = "__pinned__";
+const SEARCH_SESSION_GROUP = "__search__";
 
 interface MenuState {
   sessionId: string;
@@ -173,6 +175,7 @@ function SessionRow({
   summary,
   selected,
   renaming,
+  onSelect,
   onOpenMenu,
   onRenameSubmit,
   onRenameCancel,
@@ -180,6 +183,7 @@ function SessionRow({
   summary: WebUiSessionSummary;
   selected: boolean;
   renaming: boolean;
+  onSelect: () => void;
   onOpenMenu: (menu: MenuState, trigger: HTMLElement | null) => void;
   onRenameSubmit: (title: string) => void;
   onRenameCancel: () => void;
@@ -253,7 +257,7 @@ function SessionRow({
             className="session-main"
             aria-current={selected ? "true" : undefined}
             title={sessionTooltip}
-            onClick={() => actions.selectSession(summary.session_id)}
+            onClick={onSelect}
           >
             <span className="session-title-row">
               <span className="session-activity">
@@ -333,6 +337,7 @@ export function Sidebar() {
   const [query, setQuery] = useState("");
   const [searchResults, setSearchResults] = useState<WebUiSessionSummary[] | null>(null);
   const [renamingId, setRenamingId] = useState<string | null>(null);
+  const [selectionClosingDrawer, setSelectionClosingDrawer] = useState(false);
   /** Per-group expanded overrides; absent = current expanded, others collapsed. */
   const [expandedOverrides, setExpandedOverrides] = useState<Record<string, boolean>>({});
   /** Per-group archived-section open flags; absent = collapsed. */
@@ -341,6 +346,10 @@ export function Sidebar() {
   const [visibleSessionCounts, setVisibleSessionCounts] = useState<Record<string, number>>({});
   const triggerRef = useRef<HTMLElement | null>(null);
   const menuPositionRef = useRef({ x: 0, y: 0 });
+
+  useEffect(() => {
+    if (state.sidebarDrawerOpen) setSelectionClosingDrawer(false);
+  }, [state.sidebarDrawerOpen]);
 
   const openMenu = useCallback(
     (next: MenuState, trigger: HTMLElement | null) => {
@@ -363,6 +372,12 @@ export function Sidebar() {
 
   // Server-side title search only; no transcript scanning, no local index.
   useEffect(() => {
+    setVisibleSessionCounts((previous) =>
+      previous[SEARCH_SESSION_GROUP] === undefined ||
+      previous[SEARCH_SESSION_GROUP] === SESSION_PAGE_SIZE
+        ? previous
+        : { ...previous, [SEARCH_SESSION_GROUP]: SESSION_PAGE_SIZE },
+    );
     if (query.trim() === "") {
       setSearchResults(null);
       return;
@@ -381,6 +396,11 @@ export function Sidebar() {
       summary={summary}
       selected={state.selectedSessionId === summary.session_id}
       renaming={renamingId === summary.session_id}
+      onSelect={() => {
+        setSelectionClosingDrawer(true);
+        actions.setDrawerOpen(false);
+        actions.selectSession(summary.session_id);
+      }}
       onOpenMenu={openMenu}
       onRenameSubmit={(title) => {
         if (title !== "") {
@@ -391,6 +411,47 @@ export function Sidebar() {
       onRenameCancel={() => setRenamingId(null)}
     />
   );
+
+  const renderPageActions = (
+    groupKey: string,
+    renderedCount: number,
+    totalCount: number,
+    visibleCount: number,
+  ) => {
+    if (renderedCount === totalCount && visibleCount <= SESSION_PAGE_SIZE) return null;
+    return (
+      <div className="session-group-page-actions">
+        {renderedCount < totalCount ? (
+          <button
+            type="button"
+            className="session-group-more"
+            onClick={() =>
+              setVisibleSessionCounts((previous) => ({
+                ...previous,
+                [groupKey]: (previous[groupKey] ?? SESSION_PAGE_SIZE) + SESSION_PAGE_SIZE,
+              }))
+            }
+          >
+            展示更多
+          </button>
+        ) : null}
+        {visibleCount > SESSION_PAGE_SIZE ? (
+          <button
+            type="button"
+            className="session-group-more"
+            onClick={() =>
+              setVisibleSessionCounts((previous) => ({
+                ...previous,
+                [groupKey]: SESSION_PAGE_SIZE,
+              }))
+            }
+          >
+            收起
+          </button>
+        ) : null}
+      </div>
+    );
+  };
 
   const menuSummary =
     state.activeContextMenu !== null
@@ -403,10 +464,13 @@ export function Sidebar() {
     const source = searchResults ?? [];
     const items = [...source.filter((entry) => !entry.archived)].sort(byUpdated);
     if (items.length === 0) return null;
+    const visibleCount = visibleSessionCounts[SEARCH_SESSION_GROUP] ?? SESSION_PAGE_SIZE;
+    const visibleItems = items.slice(0, visibleCount);
     return (
       <div className="session-group" role="group" aria-label="搜索结果">
         <div className="session-group-static">搜索结果</div>
-        <ul className="session-list">{items.map(renderRow)}</ul>
+        <ul className="session-list">{visibleItems.map(renderRow)}</ul>
+        {renderPageActions(SEARCH_SESSION_GROUP, visibleItems.length, items.length, visibleCount)}
       </div>
     );
   };
@@ -430,6 +494,9 @@ export function Sidebar() {
       .flatMap((group) => group.sessions)
       .filter((entry) => entry.pinned && !entry.archived)
       .sort(byUpdated);
+    const pinnedVisibleCount =
+      visibleSessionCounts[PINNED_SESSION_GROUP] ?? SESSION_PAGE_SIZE;
+    const visiblePinned = pinned.slice(0, pinnedVisibleCount);
     const pinnedIds = new Set(pinned.map((entry) => entry.session_id));
 
     // Current workspace first; the rest by most recent activity.
@@ -450,7 +517,13 @@ export function Sidebar() {
         {pinned.length > 0 ? (
           <div className="session-group" role="group" aria-label="已置顶">
             <div className="session-group-static">已置顶</div>
-            <ul className="session-list">{pinned.map(renderRow)}</ul>
+            <ul className="session-list">{visiblePinned.map(renderRow)}</ul>
+            {renderPageActions(
+              PINNED_SESSION_GROUP,
+              visiblePinned.length,
+              pinned.length,
+              pinnedVisibleCount,
+            )}
           </div>
         ) : null}
         {ordered.map(({ group }) => {
@@ -507,39 +580,12 @@ export function Sidebar() {
                   {live.length > 0 ? (
                     <ul className="session-list">{visibleLive.map(renderRow)}</ul>
                   ) : null}
-                  {visibleLive.length < sortedLive.length || visibleCount > SESSION_PAGE_SIZE ? (
-                    <div className="session-group-page-actions">
-                      {visibleLive.length < sortedLive.length ? (
-                        <button
-                          type="button"
-                          className="session-group-more"
-                          onClick={() =>
-                            setVisibleSessionCounts((previous) => ({
-                              ...previous,
-                              [group.label]:
-                                (previous[group.label] ?? SESSION_PAGE_SIZE) + SESSION_PAGE_SIZE,
-                            }))
-                          }
-                        >
-                          展开更多
-                        </button>
-                      ) : null}
-                      {visibleCount > SESSION_PAGE_SIZE ? (
-                        <button
-                          type="button"
-                          className="session-group-more"
-                          onClick={() =>
-                            setVisibleSessionCounts((previous) => ({
-                              ...previous,
-                              [group.label]: SESSION_PAGE_SIZE,
-                            }))
-                          }
-                        >
-                          收起
-                        </button>
-                      ) : null}
-                    </div>
-                  ) : null}
+                  {renderPageActions(
+                    group.label,
+                    visibleLive.length,
+                    sortedLive.length,
+                    visibleCount,
+                  )}
                   {archived.length > 0 ? (
                     <div className="session-archived">
                       <button
@@ -581,7 +627,7 @@ export function Sidebar() {
       id="session-sidebar"
       className={`sidebar ${state.sidebarDrawerOpen ? "drawer-open" : ""} ${
         state.sidebarCollapsed ? "sidebar-collapsed" : ""
-      }`}
+      } ${selectionClosingDrawer && !state.sidebarDrawerOpen ? "drawer-close-immediate" : ""}`}
       aria-label="会话列表"
     >
       <div className="sidebar-top">

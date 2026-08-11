@@ -39,7 +39,7 @@ struct FakeSession {
     state: WebUiSessionState,
     metadata: WebUiSessionMetadata,
     pending_approval: Option<WebUiPendingApproval>,
-    pending_question: Option<WebUiPendingQuestion>,
+    pending_questions: Vec<WebUiPendingQuestion>,
     todos: Vec<TodoEventData>,
 }
 
@@ -64,7 +64,7 @@ impl Default for FakeSession {
                 updated_at: None,
             },
             pending_approval: None,
-            pending_question: None,
+            pending_questions: Vec::new(),
             todos: Vec::new(),
         }
     }
@@ -127,7 +127,7 @@ impl FakeHost {
                 session.state.waiting_approval = true;
             }
             AgentEvent::QuestionRequested { id, questions, .. } => {
-                session.pending_question = Some(WebUiPendingQuestion {
+                session.pending_questions.push(WebUiPendingQuestion {
                     id: id.clone(),
                     turn_id: "turn_1".to_string(),
                     questions: questions.clone(),
@@ -195,7 +195,7 @@ impl FakeHost {
                 })
                 .collect(),
             pending_approval: session.pending_approval.clone(),
-            pending_question: session.pending_question.clone(),
+            pending_questions: session.pending_questions.clone(),
             todos: session.todos.clone(),
         })
     }
@@ -395,14 +395,15 @@ impl WebUiHost for FakeHost {
                 let Some(session) = sessions.get_mut(&session_id) else {
                     return Err(WebUiError::new(WebUiErrorCode::NotFound));
                 };
-                let Some(pending) = &session.pending_question else {
+                let Some(index) = session
+                    .pending_questions
+                    .iter()
+                    .position(|pending| pending.id == question_id && pending.turn_id == turn_id)
+                else {
                     return Err(WebUiError::new(WebUiErrorCode::StaleControl));
                 };
-                if pending.id != question_id || pending.turn_id != turn_id {
-                    return Err(WebUiError::new(WebUiErrorCode::StaleControl));
-                }
-                session.pending_question = None;
-                session.state.waiting_question = false;
+                session.pending_questions.remove(index);
+                session.state.waiting_question = !session.pending_questions.is_empty();
                 Ok(WebUiReply::Resolved)
             }
             WebUiCommand::UpdateMetadata {

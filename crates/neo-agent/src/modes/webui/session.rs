@@ -183,7 +183,7 @@ pub(crate) struct WebSessionState {
     pub(crate) waiting_question: bool,
     pub(crate) active: Option<ActiveTurnControl>,
     pub(crate) pending_approval: Option<PendingApprovalEntry>,
-    pub(crate) pending_question: Option<PendingQuestionEntry>,
+    pub(crate) pending_questions: Vec<PendingQuestionEntry>,
     pub(crate) last_todos: Vec<TodoEventData>,
     /// Latest `TokenUsage` seen on the canonical stream (cached like
     /// `last_todos` so snapshots and reconnects restore it immediately).
@@ -230,7 +230,7 @@ impl WebSessionState {
             waiting_question: false,
             active: None,
             pending_approval: None,
-            pending_question: None,
+            pending_questions: Vec::new(),
             last_todos: Vec::new(),
             last_token_usage: None,
             last_context_window: None,
@@ -412,7 +412,7 @@ impl WebSessionState {
         false
     }
 
-    /// Register a pending question. Mirrors [`Self::register_approval`].
+    /// Register a pending question batch in arrival order.
     pub(crate) fn register_question(&mut self, pending: PendingQuestion) -> bool {
         if pending.response_tx.is_closed() {
             return false;
@@ -420,13 +420,15 @@ impl WebSessionState {
         let Some(turn_id) = self.turn_id.clone() else {
             return false;
         };
-        if let Some(existing) = &self.pending_question
-            && existing.id == pending.id
+        if self
+            .pending_questions
+            .iter()
+            .any(|existing| existing.id == pending.id)
         {
             self.turn_error = Some("duplicate question id".to_owned());
             return true;
         }
-        self.pending_question = Some(PendingQuestionEntry {
+        self.pending_questions.push(PendingQuestionEntry {
             turn_id: turn_id.clone(),
             id: pending.id.clone(),
             response_tx: pending.response_tx,
@@ -483,17 +485,11 @@ impl WebSessionState {
         turn_id: &str,
         question_id: &str,
     ) -> Option<oneshot::Sender<QuestionResponse>> {
-        let matches = self.pending_question.as_ref().is_some_and(|entry| {
+        let index = self.pending_questions.iter().position(|entry| {
             entry.turn_id == turn_id && entry.id == question_id && !entry.response_tx.is_closed()
-        });
-        if !matches {
-            return None;
-        }
-        let entry = self
-            .pending_question
-            .take()
-            .expect("pending question present after match");
-        self.waiting_question = false;
+        })?;
+        let entry = self.pending_questions.remove(index);
+        self.waiting_question = !self.pending_questions.is_empty();
         self.emit_state();
         Some(entry.response_tx)
     }
@@ -977,7 +973,7 @@ async fn finalize_turn(
     // Final cleanup drops unresolved one-time senders; the runtime follows its
     // own cancellation path — cancellation is never forged into an answer.
     guard.pending_approval = None;
-    guard.pending_question = None;
+    guard.pending_questions.clear();
     guard.waiting_approval = false;
     guard.waiting_question = false;
     guard.emit_state();
@@ -1061,7 +1057,7 @@ pub(crate) fn cancel_turn(state: &Mutex<WebSessionState>, turn_id: &str) -> Resu
         if guard.phase != WebUiPhase::Finishing {
             guard.phase = WebUiPhase::Finishing;
             guard.pending_approval = None;
-            guard.pending_question = None;
+            guard.pending_questions.clear();
             guard.waiting_approval = false;
             guard.waiting_question = false;
             guard.emit_state();
@@ -1134,6 +1130,19 @@ pub(crate) fn resolve_question(
             .map_err(|_| WebUiError::new(WebUiErrorCode::Internal))?;
         if guard.turn_id.as_deref() != Some(turn_id) {
             return Err(WebUiError::new(WebUiErrorCode::StaleControl));
+        }
+        let expected_answers = guard
+            .pending_questions
+            .iter()
+            .find(|entry| {
+                entry.turn_id == turn_id
+                    && entry.id == question_id
+                    && !entry.response_tx.is_closed()
+            })
+            .map(|entry| entry.web.questions.len())
+            .ok_or_else(|| WebUiError::new(WebUiErrorCode::StaleControl))?;
+        if answers.len() != expected_answers {
+            return Err(WebUiError::new(WebUiErrorCode::InvalidRequest));
         }
         guard
             .take_question_sender(turn_id, question_id)

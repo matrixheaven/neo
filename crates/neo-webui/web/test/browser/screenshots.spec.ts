@@ -90,16 +90,48 @@ test("04 工具展开详情：命令回显、参数、输出与元信息", async
   await page.screenshot({ path: `${SHOTS}/04-tool-expanded-detail.png` });
 });
 
-test("05 agent-line 与详情面板（子转录）", async ({ page }) => {
+test("05 三栏 Subagents 与子转录", async ({ page }) => {
   await openApp(page, 1440, 900);
   await openShowcase(page);
-  await page.getByRole("button", { name: /查看子代理详情：检查测试覆盖/ }).click();
-  const panel = page.getByRole("dialog", { name: "子代理详情：检查测试覆盖" });
+  const trigger = page.getByRole("button", { name: /查看子代理详情：检查测试覆盖/ });
+  const panel = page.getByLabel("会话信息区", { exact: true });
   await expect(panel).toBeVisible();
+  await expect(panel.getByRole("tab", { name: "Subagents" })).toHaveAttribute("aria-selected", "true");
+  await expect(panel.getByRole("heading", { name: "Done 1" })).toBeVisible();
+  await expect(page.getByRole("dialog", { name: /子代理详情/ })).toHaveCount(0);
+  await expect.poll(() => panel.evaluate((element) => element.getBoundingClientRect().width))
+    .toBeGreaterThan(400);
+  const columns = await page.evaluate(() => {
+    const left = document.querySelector<HTMLElement>(".sidebar");
+    const middle = document.querySelector<HTMLElement>(".main-area");
+    const right = document.querySelector<HTMLElement>(".information-panel.open");
+    if (!left || !middle || !right) throw new Error("三栏未渲染");
+    const leftRect = left.getBoundingClientRect();
+    const middleRect = middle.getBoundingClientRect();
+    const rightRect = right.getBoundingClientRect();
+    return {
+      leftRight: leftRect.right,
+      middleLeft: middleRect.left,
+      middleRight: middleRect.right,
+      rightLeft: rightRect.left,
+      middleWidth: middleRect.width,
+      rightWidth: rightRect.width,
+    };
+  });
+  expect(columns.leftRight).toBeLessThanOrEqual(columns.middleLeft + 1);
+  expect(columns.middleRight).toBeLessThanOrEqual(columns.rightLeft + 1);
+  expect(columns.middleWidth).toBeGreaterThan(400);
+  expect(columns.rightWidth).toBeGreaterThan(400);
+
+  await trigger.click();
   await expect(
     panel.getByText("relay 测试覆盖良好：慢连接注销与 1013 关闭都有行为测试。"),
   ).toBeVisible();
-  await page.screenshot({ path: `${SHOTS}/05-agent-line-panel.png` });
+  await expect(panel.getByText("已编辑 1 个文件")).toBeVisible();
+  await page.screenshot({ path: `${SHOTS}/05-three-column-subagents.png` });
+  await panel.getByRole("button", { name: "关闭会话信息区" }).click();
+  await expect(panel).toBeHidden();
+  await expect(trigger).toBeFocused();
 });
 
 test("06 swarm 块：成员列表与聚合条", async ({ page }) => {
@@ -130,7 +162,7 @@ test("07 用户长消息渐变折叠态", async ({ page }) => {
   await page.screenshot({ path: `${SHOTS}/07-long-user-message-collapsed.png` });
 });
 
-test("08 answer-ft：文件修改列表与复制按钮", async ({ page }) => {
+test("08 answer-ft 浮层与 Review 工作区", async ({ page }) => {
   await openApp(page, 1440, 900);
   await openShowcase(page);
   const footer = page.locator(".answer-ft");
@@ -139,36 +171,79 @@ test("08 answer-ft：文件修改列表与复制按钮", async ({ page }) => {
   await expect(footer.locator(".ft-path", { hasText: "web/src/styles.css" })).toBeVisible();
   await expect(footer.locator(".ft-path", { hasText: "web/src/acceptance-notes.md" })).toBeVisible();
   await expect(
-    footer.getByRole("button", { name: "展开 web/src/styles.css 的局部差异" }),
+    footer.getByRole("button", { name: "在 Review 中查看 web/src/styles.css 的局部差异" }),
   ).toBeVisible();
-  const createdFile = footer.getByRole("button", { name: "展开 web/src/acceptance-notes.md 的新建文件内容" });
+  const createdFile = footer.getByRole("button", {
+    name: "在 Review 中查看 web/src/acceptance-notes.md 的新建文件内容",
+  });
   const createdRow = createdFile.locator("..");
   const rowBeforeHover = await createdRow.boundingBox();
   await expect(createdFile).toBeVisible();
   await createdFile.hover();
-  await expect(footer.getByText("# 验收记录")).toBeVisible();
-  await expect(footer.locator(".ft-preview-header").filter({ hasText: "acceptance-notes.md" })).toBeVisible();
-  await expect(footer.locator(".ft-file-preview:not([hidden]) .ft-line-no").first()).toBeVisible();
+  const preview = page.getByRole("region", { name: "web/src/acceptance-notes.md 的文件内容" });
+  await expect(preview).toBeVisible();
+  await expect(preview.getByText("# 验收记录")).toBeVisible();
+  await expect(preview.locator(".ft-preview-header")).toContainText("acceptance-notes.md");
+  await expect(preview.locator(".ft-line-no").first()).toBeVisible();
   const rowAfterHover = await createdRow.boundingBox();
   expect(rowAfterHover?.height).toBe(rowBeforeHover?.height);
   await createdFile.focus();
-  await expect(footer.locator(".ft-file-preview:not([hidden])")).toBeVisible();
-  await createdFile.click();
-  const openPreview = footer.locator(".ft-file-preview.open");
-  await expect(openPreview).toBeVisible();
-  const previewLayout = await page.evaluate(() => {
-    const preview = document.querySelector<HTMLElement>(".answer-ft .ft-file-preview.open");
+  await expect(preview).toBeVisible();
+  const previewLayout = await preview.evaluate((element) => {
     const composerDock = document.querySelector<HTMLElement>(".session-view > .composer-dock");
-    if (!preview || !composerDock) throw new Error("文件预览或输入框未渲染");
+    if (!composerDock) throw new Error("输入框未渲染");
     return {
-      previewBottom: preview.getBoundingClientRect().bottom,
+      attachedToBody: element.parentElement === document.body,
+      previewBottom: element.getBoundingClientRect().bottom,
       composerTop: composerDock.getBoundingClientRect().top,
+      clientHeight: element.clientHeight,
+      scrollHeight: element.scrollHeight,
     };
   });
+  expect(previewLayout.attachedToBody).toBe(true);
   expect(previewLayout.previewBottom).toBeLessThanOrEqual(previewLayout.composerTop + 1);
-  await expect(footer.locator(".ft-summary .ft-add")).toHaveText("+5");
+  expect(previewLayout.scrollHeight).toBeGreaterThan(previewLayout.clientHeight);
+  await expect(footer.locator(".ft-summary .ft-add")).toHaveText("+74");
   await expect(footer.getByRole("button", { name: "复制回答" })).toBeVisible();
-  await page.screenshot({ path: `${SHOTS}/08-answer-footer-files.png` });
+  await page.screenshot({ path: `${SHOTS}/08-answer-footer-preview.png` });
+
+  await createdFile.click();
+  const panel = page.getByLabel("会话信息区", { exact: true });
+  await expect(panel.getByRole("tab", { name: "Review" })).toHaveAttribute("aria-selected", "true");
+  await expect(panel.getByLabel("修改文件树")).toBeVisible();
+  await expect(panel.getByRole("table", { name: "统一差异" }).first()).toBeVisible();
+  await panel.getByRole("button", { name: "左右差异" }).click();
+  await expect(panel.getByRole("table", { name: "左右差异" }).first()).toBeVisible();
+  await panel.getByRole("button", { name: "统一差异" }).click();
+  await expect(panel.getByRole("table", { name: "统一差异" }).first()).toBeVisible();
+  await panel.getByRole("button", { name: "全部收起" }).click();
+  await expect(panel.locator(".review-file-body")).toHaveCount(0);
+  await panel.getByRole("button", { name: "全部展开" }).click();
+  await expect(panel.locator(".review-file-body")).toHaveCount(2);
+  await page.screenshot({ path: `${SHOTS}/08-review-workspace.png` });
+
+  await panel.getByRole("button", { name: "跳转文件" }).click();
+  const jump = panel.getByRole("dialog", { name: "跳转文件" });
+  await jump.getByRole("textbox", { name: "搜索文件" }).fill("styles.css");
+  await expect(jump.getByRole("button", { name: /styles.css/ })).toBeVisible();
+  await page.screenshot({ path: `${SHOTS}/08-review-file-jump.png` });
+  await jump.getByRole("button", { name: /styles.css/ }).click();
+  await expect(panel.getByRole("treeitem", { name: "styles.css" })).toHaveAttribute(
+    "aria-selected",
+    "true",
+  );
+
+  await panel.getByRole("button", { name: "更多 Review 选项" }).click();
+  const menu = panel.getByRole("menu", { name: "Review 选项" });
+  await expect(menu.getByRole("menuitem", { name: "刷新" })).toBeVisible();
+  await expect(menu.getByRole("menuitem", { name: "启用换行" })).toBeVisible();
+  await expect(menu.getByRole("menuitem", { name: "加载完整文件" })).toBeVisible();
+  await expect(menu.getByRole("menuitem", { name: "启用字级差异" })).toBeVisible();
+  await expect(menu.getByRole("menuitem", { name: "隐藏空白改动" })).toBeVisible();
+  await expect(menu.getByRole("menuitem", { name: "复制应用命令" })).toBeVisible();
+  await page.screenshot({ path: `${SHOTS}/08-review-options.png` });
+  await menu.getByRole("menuitem", { name: "启用换行" }).click();
+  await expect(panel.locator(".review-unified.wrap").first()).toBeVisible();
 });
 
 test("09 侧栏多工作区分组", async ({ page }) => {
@@ -181,6 +256,13 @@ test("09 侧栏多工作区分组", async ({ page }) => {
   const neo = page.getByRole("group", { name: "neo" });
   await expect(neo.getByRole("button", { name: /^neo/ })).toHaveAttribute("aria-expanded", "true");
   await expect(neo.getByText("长会话压测", { exact: true })).toBeVisible();
+  await expect(neo.locator(".session-list").first()).toHaveCSS("padding-left", "8px");
+  await expect(neo.locator(".session-time")).toHaveCount(0);
+  await expect(neo.getByRole("button", { name: "长会话压测" })).toHaveAttribute(
+    "title",
+    /更新时间：/,
+  );
+  await expect(neo.locator(".lucide-folder-open")).toBeVisible();
   const playground = page.getByRole("group", { name: "playground" });
   await expect(
     playground.getByRole("button", { name: /^playground/ }),
@@ -265,11 +347,35 @@ test("顶栏在宽窄屏之间保持侧栏与抽屉状态独立", async ({ page 
 test("14 手机单列", async ({ page }) => {
   await openApp(page, 390, 844);
   await page.getByRole("button", { name: "打开会话列表" }).click();
-  await sidebar(page).getByText("有界中继测试", { exact: true }).click();
+  const list = sidebar(page);
+  await list.getByText("有界中继测试", { exact: true }).click();
+  await expect(list).not.toHaveClass(/drawer-open/);
+  await expect(list).toHaveCSS("visibility", "hidden");
+  await expect(list).toHaveCSS("pointer-events", "none");
   await expect(
     page.getByText("42 个行为测试全部通过，慢连接现在会先收到 1013 再被注销。"),
   ).toBeVisible();
+
+  await page.getByRole("button", { name: "打开会话列表" }).click();
+  await expect(list).toHaveClass(/drawer-open/);
+  await page.getByRole("button", { name: "关闭会话列表" }).click();
+  await expect(list).not.toHaveClass(/drawer-close-immediate/);
+  expect(await list.evaluate((element) => getComputedStyle(element).transitionDuration)).not.toBe(
+    "0s",
+  );
   await page.screenshot({ path: `${SHOTS}/14-mobile-single-column.png` });
+
+  const informationToggle = page.getByRole("button", { name: "切换固定摘要" });
+  await informationToggle.click();
+  const panel = page.getByLabel("会话信息区", { exact: true });
+  await expect(panel).toBeVisible();
+  await expect(panel).toHaveCSS("width", "390px");
+  await expect(panel.getByRole("tab", { name: "Subagents" })).toBeVisible();
+  await expect(panel.getByRole("tab", { name: "Review" })).toBeVisible();
+  await page.screenshot({ path: `${SHOTS}/14-mobile-information-panel.png` });
+  await panel.getByRole("button", { name: "关闭会话信息区" }).click();
+  await expect(panel).toBeHidden();
+  await expect(informationToggle).toBeFocused();
 });
 
 test("15 亮色：运行会话", async ({ page }) => {
@@ -302,7 +408,7 @@ test("18 亮色：agent 详情面板", async ({ page }) => {
   await switchToLight(page);
   await openShowcase(page);
   await page.getByRole("button", { name: /查看子代理详情：检查测试覆盖/ }).click();
-  const panel = page.getByRole("dialog", { name: "子代理详情：检查测试覆盖" });
+  const panel = page.getByLabel("会话信息区", { exact: true });
   await expect(panel).toBeVisible();
   await expect(
     panel.getByText("relay 测试覆盖良好：慢连接注销与 1013 关闭都有行为测试。"),

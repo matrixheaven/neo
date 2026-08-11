@@ -252,21 +252,21 @@ describe("sidebar", () => {
     expect(neoGroup.querySelector(".session-group-header .lucide-folder-open")).not.toBeNull();
     expect(neoGroup.querySelector(".session-group-header .session-group-caret")).toBeNull();
 
-    await user.click(screen.getByRole("button", { name: "展开更多" }));
+    await user.click(screen.getByRole("button", { name: "展示更多" }));
     expect(within(neoGroup).getAllByRole("listitem")).toHaveLength(10);
     expect(screen.getByText("会话 07")).toBeTruthy();
     expect(screen.queryByText("会话 01")).toBeNull();
     expect(screen.getByRole("button", { name: "收起" })).toBeTruthy();
 
-    await user.click(screen.getByRole("button", { name: "展开更多" }));
+    await user.click(screen.getByRole("button", { name: "展示更多" }));
     expect(within(neoGroup).getAllByRole("listitem")).toHaveLength(12);
     expect(screen.getByText("会话 01")).toBeTruthy();
-    expect(screen.queryByRole("button", { name: "展开更多" })).toBeNull();
+    expect(screen.queryByRole("button", { name: "展示更多" })).toBeNull();
 
     await user.click(screen.getByRole("button", { name: "收起" }));
     expect(within(neoGroup).getAllByRole("listitem")).toHaveLength(5);
     expect(screen.queryByText("会话 07")).toBeNull();
-    expect(screen.getByRole("button", { name: "展开更多" })).toBeTruthy();
+    expect(screen.getByRole("button", { name: "展示更多" })).toBeTruthy();
     expect(screen.queryByRole("button", { name: "收起" })).toBeNull();
 
     await user.click(within(neoGroup).getByRole("button", { name: /neo/ }));
@@ -312,6 +312,13 @@ describe("sidebar", () => {
     expect(sidebar.classList.contains("drawer-open")).toBe(true);
     expect(sidebar.classList.contains("sidebar-collapsed")).toBe(false);
     expect(screen.getByRole("button", { name: "关闭会话列表" })).toBeTruthy();
+
+    await user.click(screen.getByRole("button", { name: "关闭会话列表" }));
+    expect(sidebar.classList.contains("drawer-close-immediate")).toBe(false);
+    await user.click(screen.getByRole("button", { name: "打开会话列表" }));
+    await user.click(within(sidebar).getByText("有界中继测试", { exact: true }));
+    expect(sidebar.classList.contains("drawer-open")).toBe(false);
+    expect(sidebar.classList.contains("drawer-close-immediate")).toBe(true);
   });
 
   it("updates the top-left control when the viewport enters drawer mode", async () => {
@@ -570,6 +577,49 @@ describe("sidebar", () => {
       ).toBe(true),
     );
     await screen.findByText("搜索结果");
+  });
+
+  it("resets search results to five rows when the keyword changes", async () => {
+    const user = userEvent.setup();
+    vi.stubGlobal(
+      "fetch",
+      vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
+        const url = typeof input === "string" ? input : input instanceof URL ? input.href : input.url;
+        if (url.startsWith("/api/sessions?")) {
+          const keyword = new URLSearchParams(url.split("?")[1] ?? "").get("query") ?? "";
+          return Promise.resolve(
+            new Response(
+              JSON.stringify({
+                items: Array.from({ length: 6 }, (_, index) => ({
+                  session_id: `search_${keyword}_${index}`,
+                  title: `${keyword}会话 ${index + 1}`,
+                  pinned: false,
+                  archived: false,
+                  state: "idle",
+                })),
+              }),
+              { status: 200, headers: { "content-type": "application/json" } },
+            ),
+          );
+        }
+        return mockFetch(input, init);
+      }),
+    );
+    await renderReady();
+    const search = screen.getByLabelText("搜索会话标题");
+
+    await user.type(search, "甲");
+    let results = await screen.findByRole("group", { name: "搜索结果" });
+    expect(within(results).getAllByRole("listitem")).toHaveLength(5);
+    await user.click(within(results).getByRole("button", { name: "展示更多" }));
+    expect(within(results).getAllByRole("listitem")).toHaveLength(6);
+
+    await user.clear(search);
+    await user.type(search, "乙");
+    results = await screen.findByRole("group", { name: "搜索结果" });
+    await within(results).findByText("乙会话 1");
+    expect(within(results).getAllByRole("listitem")).toHaveLength(5);
+    expect(within(results).queryByText("乙会话 6")).toBeNull();
   });
 });
 

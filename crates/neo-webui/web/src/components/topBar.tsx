@@ -5,7 +5,7 @@
  * permission modes or development modes.
  */
 
-import { Moon, PanelLeft, Sun } from "lucide-react";
+import { Moon, PanelLeft, PanelRight, Sun } from "lucide-react";
 import { useEffect, useState } from "react";
 import { useAppActions, useAppState } from "../state/store";
 import type { WebUiPhase } from "../protocol";
@@ -116,6 +116,26 @@ export function TopBar() {
       <span className="topbar-spacer" />
       {/* Change entry and branch status render only when the backend provides
           structured workspace change data; until then this area stays empty. */}
+      <button
+        type="button"
+        className="icon-button information-toggle fixed-summary-toggle"
+        aria-controls={drawerViewport ? "information-panel" : "fixed-summary"}
+        aria-label="切换固定摘要"
+        aria-expanded={drawerViewport
+          ? state.informationPanel.open
+          : state.informationPanel.fixedSummaryOpen}
+        title="切换固定摘要"
+        onClick={() => {
+          if (drawerViewport) {
+            if (state.informationPanel.open) actions.closeInformationPanel();
+            else actions.openInformationPanel("subagents");
+          } else {
+            actions.setFixedSummaryOpen(!state.informationPanel.fixedSummaryOpen);
+          }
+        }}
+      >
+        <PanelRight size={16} aria-hidden />
+      </button>
       <button
         type="button"
         className="icon-button theme-toggle"

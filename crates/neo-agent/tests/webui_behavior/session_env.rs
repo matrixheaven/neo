@@ -170,8 +170,8 @@ pub(crate) async fn wait_for_phase(test_env: &TestEnv, session_id: &str, phase: 
     .unwrap_or_else(|| panic!("timed out waiting for phase {phase} for {session_id}"))
 }
 
-/// Poll the snapshot until the top-level pending-control field
-/// (`pending_approval` / `pending_question`) is non-null, returning it.
+/// Poll the snapshot until the top-level pending-control field is present and
+/// non-empty, returning its value.
 pub(crate) async fn wait_for_pending(
     test_env: &TestEnv,
     session_id: &str,
@@ -184,7 +184,11 @@ pub(crate) async fn wait_for_pending(
         || async {
             let response = http::get(port, &cookie, &path).await;
             let parsed: Value = serde_json::from_str(&response.body).ok()?;
-            parsed.get(field).cloned().filter(|value| !value.is_null())
+            parsed.get(field).cloned().filter(|value| match value {
+                Value::Null => false,
+                Value::Array(items) => !items.is_empty(),
+                _ => true,
+            })
         },
         Duration::from_secs(30),
         field,

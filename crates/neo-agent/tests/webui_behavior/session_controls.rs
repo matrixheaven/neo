@@ -295,8 +295,8 @@ async fn question_surfaces_in_snapshot_and_resolves_to_continue_the_turn() {
     .await;
     let (session_id, turn_id, _) = create_session(&test_env, "ask me something").await;
 
-    let pending = wait_for_pending(&test_env, &session_id, "pending_question").await;
-    let Some(pending) = pending else {
+    let pending = wait_for_pending(&test_env, &session_id, "pending_questions").await;
+    let Some(pending_questions) = pending else {
         let current = snapshot(&test_env, &session_id).await;
         panic!(
             "question never appeared; requests: {:?}; snapshot: {}",
@@ -304,10 +304,40 @@ async fn question_surfaces_in_snapshot_and_resolves_to_continue_the_turn() {
             current
         );
     };
+    let pending = &pending_questions[0];
     assert_eq!(pending["turn_id"], turn_id);
     let question_id = pending["id"].as_str().expect("question id").to_owned();
     let session_snapshot = snapshot(&test_env, &session_id).await;
     assert_eq!(session_snapshot["session"]["waiting_question"], true);
+
+    let wrong_answer_count = json!({
+        "turn_id": turn_id,
+        "question_id": question_id,
+        "answer": { "selections": ["Yes", "No"], "text": null },
+    });
+    let response = http::post_json(
+        test_env.webui.port,
+        &test_env.cookie,
+        &format!("/api/sessions/{session_id}/question"),
+        &wrong_answer_count,
+    )
+    .await;
+    assert_eq!(
+        response.status, 400,
+        "wrong answer count: {}",
+        response.body
+    );
+    assert_eq!(
+        serde_json::from_str::<Value>(&response.body).expect("code")["code"],
+        "invalid_request"
+    );
+    assert_eq!(
+        snapshot(&test_env, &session_id).await["pending_questions"]
+            .as_array()
+            .map(Vec::len),
+        Some(1),
+        "the invalid answer did not consume the pending question"
+    );
 
     let question_body = json!({
         "turn_id": turn_id,
@@ -369,13 +399,14 @@ async fn stale_request_or_question_id_leaves_the_pending_control_resolvable() {
     let (session_id, turn_id, _) = create_session(&test_env, "question then approval").await;
 
     // Pending question: a wrong question id on the right turn is stale.
-    let pending = wait_for_pending(&test_env, &session_id, "pending_question").await;
-    let Some(pending) = pending else {
+    let pending = wait_for_pending(&test_env, &session_id, "pending_questions").await;
+    let Some(pending_questions) = pending else {
         panic!(
             "question never appeared; requests: {:?}",
             provider.requests()
         );
     };
+    let pending = &pending_questions[0];
     let question_id = pending["id"].as_str().expect("question id").to_owned();
 
     let stale_question = json!({

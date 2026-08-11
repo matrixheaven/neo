@@ -4,15 +4,19 @@
  * stable id, unknown tags and append coverage.
  */
 
+import { fireEvent, render } from "@testing-library/react";
+import React from "react";
 import { describe, expect, it } from "vitest";
 import { agentEventTag, type AgentEvent } from "../../src/protocol";
 import {
   groupTurns,
   presentationItems,
   processPresentationItems,
+  TranscriptDocument,
 } from "../../src/components/transcript";
 import {
   readGroupStatusForItems,
+  TranscriptItemView,
   toolPresentation,
 } from "../../src/components/transcriptItems";
 import {
@@ -36,6 +40,7 @@ import {
 import { asServerMessage, loadFixture } from "./fixture";
 import { appReducer } from "../../src/state/reducer";
 import { initialAppState, type AppState } from "../../src/state/appState";
+import { AppProvider } from "../../src/state/store";
 
 const fixture = loadFixture();
 const session1 = fixture.sessions[0];
@@ -133,6 +138,228 @@ describe("transcript presentation", () => {
       status: "failed",
       text: "部分失败",
     });
+    expect(readGroupStatusForItems([{
+      ...read("errored", "finished"),
+      result: { content: "读取失败", is_error: true },
+    }])).toEqual({
+      status: "failed",
+      text: "部分失败",
+    });
+  });
+
+  it("keeps unresolved interactions in order and renders only the paired command runtime", () => {
+    const items: TranscriptItem[] = [
+      { kind: "user_message", id: "user:1", text: "继续任务" },
+      {
+        kind: "thinking",
+        id: "think:1",
+        text: "分析中",
+        finished: true,
+        redacted: false,
+        turn: 1,
+      },
+      {
+        kind: "tool",
+        id: "tool:command_1",
+        name: "Bash",
+        arguments: { command: "npm test" },
+        status: "finished",
+        turn: 1,
+      },
+      {
+        kind: "question",
+        id: "question:1",
+        turn: 1,
+        questions: [{
+          header: "确认",
+          question: "继续吗？",
+          options: [{ label: "继续" }],
+          multi_select: false,
+        }],
+        resolved: false,
+      },
+      {
+        kind: "shell",
+        id: "shell:command_1",
+        command: "npm test",
+        cwd: "/workspace",
+        status: "finished",
+        stdout: "通过",
+        stderr: "",
+        truncated: false,
+        exitCode: 0,
+        turn: 1,
+      },
+      {
+        kind: "tool",
+        id: "tool:read_1",
+        name: "Read",
+        arguments: { path: "src/app.ts" },
+        status: "finished",
+        turn: 1,
+      },
+      {
+        kind: "approval",
+        id: "approval:1",
+        request: {
+          turn: 1,
+          id: "approval_1",
+          operation: "bash",
+          presentation: { kind: "command", title: "运行测试", command: "npm test" },
+          options: [{ label: "允许", action: { kind: "approve" } }],
+        },
+      },
+      {
+        kind: "assistant_message",
+        id: "assistant:1",
+        text: "最终回复",
+        finished: true,
+        turn: 1,
+      },
+    ];
+
+    const groups = groupTurns(items);
+    expect(groups.map((group) => group.kind)).toEqual(["user", "assist"]);
+    const assist = groups[1];
+    expect(assist?.kind).toBe("assist");
+    if (!assist || assist.kind !== "assist") return;
+    expect(assist.activity.map((item) => item.id)).toEqual([
+      "think:1",
+      "tool:command_1",
+      "question:1",
+      "shell:command_1",
+      "tool:read_1",
+      "approval:1",
+    ]);
+    expect(assist.process.map((item) => item.id)).toEqual([
+      "think:1",
+      "tool:command_1",
+      "shell:command_1",
+      "tool:read_1",
+    ]);
+    expect(assist.msg.id).toBe("assistant:1");
+
+    const view = render(
+      React.createElement(
+        AppProvider,
+        null,
+        React.createElement(TranscriptDocument, { sessionId: "test", items }),
+      ),
+    );
+    const question = view.getByRole("group", { name: "提问" });
+    const approval = view.getByRole("group", { name: "审批请求：运行测试" });
+    const commandRows = Array.from(view.container.querySelectorAll(".tool-line"))
+      .filter((row) => row.querySelector(".tl-mono")?.textContent === "npm test");
+    const runtime = commandRows[0];
+    const answer = view.getByText("最终回复").closest(".msg") as HTMLElement;
+    expect(question.closest(".tf-body")).toBeNull();
+    expect(approval.closest(".tf-body")).toBeNull();
+    expect(view.container.querySelectorAll(".question-row")).toHaveLength(1);
+    expect(view.container.querySelectorAll(".approval-row:not(.question-row)")).toHaveLength(1);
+    expect(commandRows).toHaveLength(1);
+    expect(runtime.classList.contains("kind-shell")).toBe(true);
+    expect((view.getByRole("button", { name: "继续" }) as HTMLButtonElement).disabled).toBe(false);
+    expect((view.getByRole("button", { name: "允许" }) as HTMLButtonElement).disabled).toBe(false);
+    expect(question.compareDocumentPosition(runtime) & Node.DOCUMENT_POSITION_FOLLOWING).not.toBe(0);
+    expect(runtime.compareDocumentPosition(approval) & Node.DOCUMENT_POSITION_FOLLOWING).not.toBe(0);
+    expect(approval.compareDocumentPosition(answer) & Node.DOCUMENT_POSITION_FOLLOWING).not.toBe(0);
+    view.unmount();
+  });
+
+  it("treats result errors as failed TodoList aliases without progress or completed tasks", () => {
+    for (const [index, name] of ["TodoList", "SetTodoList"].entries()) {
+      const id = `todo_${index}`;
+      let projection = emptyProjection();
+      projection = applyAgentEvent(projection, {
+        ToolExecutionStarted: {
+          turn: 1,
+          id,
+          name,
+          arguments: {
+            todos: [{ title: "不应显示为成功进度", status: "done" }],
+          },
+        },
+      });
+      projection = applyAgentEvent(projection, {
+        ToolExecutionFinished: {
+          turn: 1,
+          id,
+          name,
+          result: { content: "任务清单无效", is_error: true },
+        },
+      });
+      const item = projection.items.find(
+        (entry): entry is ToolItem => entry.kind === "tool" && entry.id === `tool:${id}`,
+      ) as ToolItem;
+      const view = render(
+        React.createElement(
+          AppProvider,
+          null,
+          React.createElement(TranscriptItemView, { sessionId: "test", item }),
+        ),
+      );
+
+      expect(item.status).toBe("failed");
+      expect(view.container.querySelector(".tool-line.status-failed")).not.toBeNull();
+      expect(view.container.querySelector('[role="progressbar"]')).toBeNull();
+      expect(view.container.textContent).toContain("任务清单无效");
+      view.unmount();
+
+      const staleStatusItem: ToolItem = {
+        ...item,
+        status: "finished",
+        result: {
+          content: "任务清单无效",
+          is_error: true,
+          details: { todos: [{ title: "不应显示为完成任务", status: "done" }] },
+        },
+      };
+      const staleView = render(
+        React.createElement(
+          AppProvider,
+          null,
+          React.createElement(TranscriptItemView, { sessionId: "test", item: staleStatusItem }),
+        ),
+      );
+
+      expect(staleView.container.querySelector(".tool-line.status-failed")).not.toBeNull();
+      expect(staleView.container.querySelector('[data-status-icon="failed"]')).not.toBeNull();
+      expect(staleView.container.querySelector('[role="progressbar"]')).toBeNull();
+      fireEvent.click(staleView.getByRole("button", { name: /更新任务清单/ }));
+      expect(staleView.container.querySelector(".tl-todos")).toBeNull();
+      expect(staleView.container.textContent).toContain("任务清单无效");
+      expect(staleView.container.textContent).not.toContain("不应显示为完成任务");
+      staleView.unmount();
+    }
+  });
+
+  it("shows only the skill name and destination for MoveSkill errors", () => {
+    const source = "/private/workspace/skills/release";
+    const item: ToolItem = {
+      kind: "tool",
+      id: "tool:move_skill",
+      name: "MoveSkill",
+      arguments: { source, destination_parent: "~/.neo/skills" },
+      status: "finished",
+      result: { content: `无法移动 ${source}`, is_error: true },
+      output: { id: "output_move_skill", byte_len: 200, line_count: 2, complete: true },
+      turn: 1,
+    };
+    const view = render(
+      React.createElement(
+        AppProvider,
+        null,
+        React.createElement(TranscriptItemView, { sessionId: "test", item }),
+      ),
+    );
+
+    fireEvent.click(view.getByRole("button", { name: /移动技能 release/ }));
+    expect(view.getByText("技能：release")).toBeTruthy();
+    expect(view.getByText("目标目录：~/.neo/skills")).toBeTruthy();
+    expect(view.getByText("无法移动 release")).toBeTruthy();
+    expect(view.queryByText(/完整输出/)).toBeNull();
+    expect(view.container.textContent).not.toContain(source);
+    view.unmount();
   });
 
   it("hides delegated control tools when their card already carries the activity", () => {
@@ -415,7 +642,7 @@ describe("snapshot rebuild", () => {
         },
       },
     ];
-    delete snapshot.pending_question;
+    snapshot.pending_questions = [];
     let state = initialAppState(280, "dark");
     state = appReducer(state, { type: "select_session", sessionId: session1.session_id });
     state = appReducer(state, {
@@ -423,11 +650,122 @@ describe("snapshot rebuild", () => {
       message: { type: "session_snapshot", snapshot },
     });
     const view = state.sessions[session1.session_id];
-    expect(view.projection.pendingQuestionId).toBeNull();
+    expect(view.projection.pendingQuestionIds).toEqual([]);
     const question = view.projection.items.find(
       (item): item is QuestionItem => item.kind === "question",
     ) as QuestionItem;
     expect(question.resolved).toBe(true);
+  });
+
+  it("hydrates pending questions in stable order and resolves each independently", () => {
+    let state = stateWithSnapshot();
+    state = appReducer(state, {
+      type: "server_message",
+      message: {
+        type: "session_state",
+        stream_id: fixture.stream_id,
+        session_id: session1.session_id,
+        sequence: session1.snapshot.watermark + 1,
+        event: {
+          ...session1.snapshot.session,
+          waiting_question: true,
+        },
+      },
+    });
+    expect(state.sessions[session1.session_id].resyncNeeded).toBe(true);
+
+    const snapshot = structuredClone(session1.snapshot);
+    snapshot.watermark += 1;
+    snapshot.session.waiting_question = true;
+    snapshot.pending_questions = [
+      {
+        id: "question_first",
+        turn_id: "turn_01",
+        questions: [
+          {
+            question: "使用哪种界面？",
+            options: [{ label: "深色" }, { label: "浅色" }],
+            multi_select: false,
+          },
+        ],
+      },
+      {
+        id: "question_second",
+        turn_id: "turn_01",
+        questions: [
+          {
+            header: "检查",
+            question: "执行哪些检查？",
+            options: [{ label: "测试" }, { label: "审查" }],
+            multi_select: true,
+          },
+        ],
+      },
+    ];
+    state = appReducer(state, {
+      type: "server_message",
+      message: { type: "session_snapshot", snapshot },
+    });
+    let view = state.sessions[session1.session_id];
+    let questions = view.projection.items.filter(
+      (item): item is QuestionItem => item.kind === "question",
+    );
+    expect(questions.map((question) => question.id)).toEqual([
+      "question:question_first",
+      "question:question_second",
+    ]);
+    expect(questions.every((question) => !question.resolved)).toBe(true);
+    expect(view.projection.pendingQuestionIds).toEqual([
+      "question_first",
+      "question_second",
+    ]);
+    expect(view.resyncNeeded).toBe(false);
+
+    state = appReducer(state, {
+      type: "server_message",
+      message: {
+        type: "session_state",
+        stream_id: fixture.stream_id,
+        session_id: session1.session_id,
+        sequence: snapshot.watermark + 1,
+        event: { ...snapshot.session, waiting_question: true },
+      },
+    });
+    expect(state.sessions[session1.session_id].resyncNeeded).toBe(true);
+
+    const refreshed = structuredClone(snapshot);
+    refreshed.watermark += 1;
+    refreshed.pending_questions = [snapshot.pending_questions[1]];
+    state = appReducer(state, {
+      type: "server_message",
+      message: { type: "session_snapshot", snapshot: refreshed },
+    });
+    view = state.sessions[session1.session_id];
+    questions = view.projection.items.filter(
+      (item): item is QuestionItem => item.kind === "question",
+    );
+    expect(questions).toHaveLength(1);
+    expect(questions[0].id).toBe("question:question_second");
+    expect(questions[0].resolved).toBe(false);
+    expect(view.projection.pendingQuestionIds).toEqual(["question_second"]);
+    expect(view.resyncNeeded).toBe(false);
+
+    state = appReducer(state, {
+      type: "server_message",
+      message: {
+        type: "session_state",
+        stream_id: fixture.stream_id,
+        session_id: session1.session_id,
+        sequence: refreshed.watermark + 1,
+        event: { ...refreshed.session, waiting_question: false },
+      },
+    });
+    view = state.sessions[session1.session_id];
+    const resolved = view.projection.items.find(
+      (item): item is QuestionItem => item.kind === "question",
+    ) as QuestionItem;
+    expect(resolved.resolved).toBe(true);
+    expect(view.projection.pendingQuestionIds).toEqual([]);
   });
 });
 
@@ -954,6 +1292,41 @@ describe("append coverage and unknown tags", () => {
       "第二段思考",
       "第三段思考",
     ]);
+  });
+
+  it("finishes open thinking for every terminal turn reason", () => {
+    for (const stopReason of ["EndTurn", "ToolUse", "MaxTokens", "Cancelled", "Error"] as const) {
+      let projection = emptyProjection();
+      projection = applyAgentEvent(projection, {
+        ThinkingStarted: { turn: 1, id: "first" },
+      });
+      projection = applyAgentEvent(projection, {
+        ThinkingDelta: { turn: 1, text: "第一段未闭合思考" },
+      });
+      projection = applyAgentEvent(projection, {
+        ThinkingStarted: { turn: 1, id: "second" },
+      });
+      projection = applyAgentEvent(projection, {
+        ThinkingDelta: { turn: 1, text: "第二段未闭合思考" },
+      });
+      if (stopReason === "Error") {
+        projection = applyAgentEvent(projection, {
+          Error: { turn: 1, message: "模型请求失败" },
+        });
+      }
+      projection = applyAgentEvent(projection, {
+        TurnFinished: { turn: 1, stop_reason: stopReason },
+      });
+
+      const thinking = projection.items.filter(
+        (item): item is ThinkingItem => item.kind === "thinking",
+      );
+      expect({ stopReason, finished: thinking.map((item) => item.finished) }).toEqual({
+        stopReason,
+        finished: [true, true],
+      });
+      expect(projection.liveThinkingId).toBeNull();
+    }
   });
 
   it("folds late Delegate and WaitDelegate items back into their assistant turn", () => {

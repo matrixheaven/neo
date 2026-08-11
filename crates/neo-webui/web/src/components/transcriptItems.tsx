@@ -77,7 +77,8 @@ function argumentsPreview(value: unknown): string {
 }
 
 function toolStatusText(item: ToolItem | ShellItem): string {
-  switch (item.status) {
+  const status = item.kind === "tool" ? displayToolStatus(item) : item.status;
+  switch (status) {
     case "queued": {
       const position = item.queuePosition;
       const waiting = item.queueWaitingMs;
@@ -93,6 +94,10 @@ function toolStatusText(item: ToolItem | ShellItem): string {
     case "failed":
       return "失败";
   }
+}
+
+function displayToolStatus(item: ToolItem): ToolStatus {
+  return item.result?.is_error ? "failed" : item.status;
 }
 
 function statusIcon(status: ToolStatus) {
@@ -179,8 +184,8 @@ export function AssistantBody({ item }: { item: AssistantMessageItem }) {
 }
 
 // ---------------------------------------------------------------------------
-// Think: single line with breathing title while streaming; expanded by
-// default during streaming, auto-collapses when the stream finishes.
+// Think: a single line with a spinner while streaming; expanded by default
+// during streaming, auto-collapses when the stream finishes.
 // ---------------------------------------------------------------------------
 
 function Think({ sessionId, item }: { sessionId: string; item: ThinkingItem }) {
@@ -216,7 +221,11 @@ function Think({ sessionId, item }: { sessionId: string; item: ThinkingItem }) {
         <>
           {lineCaret()}
           <span className="think-icon" data-thinking-icon aria-hidden>
-            <Lightbulb size={14} />
+            {live ? (
+              <Loader2 size={14} className="spin" data-thinking-spinner />
+            ) : (
+              <Lightbulb size={14} data-thinking-completed-icon />
+            )}
           </span>
           <span className="think-title">思考</span>
         </>
@@ -478,13 +487,17 @@ export function toolPresentation(name: string, args: unknown): ToolPresentation 
         target: argumentText(args, ["name", "skill"]) ?? "",
         icon: "skill",
       };
-    case "moveskill":
+    case "moveskill": {
+      const source = argumentText(args, ["source"]);
       return {
         action: "移动技能",
-        target: argumentText(args, ["name", "skill", "source"]) ?? "",
+        target: source === null
+          ? argumentText(args, ["name", "skill"]) ?? ""
+          : pathPresentation(source).target,
         secondary: argumentText(args, ["destination_parent"]) ?? undefined,
         icon: "skill",
       };
+    }
     case "summarizesessions":
       return {
         action: "整理会话",
@@ -721,6 +734,7 @@ function todoEntries(value: unknown): TodoEntry[] | null {
 }
 
 function todoEntriesFor(item: ToolItem): TodoEntry[] | null {
+  if (displayToolStatus(item) === "failed") return null;
   const result = objectArgument(item.result?.details);
   const completed = todoEntries(result?.todos);
   if (completed !== null) return completed;
@@ -763,9 +777,7 @@ function TodoProgress({ entries, compact = false }: { entries: TodoEntry[]; comp
       aria-valuemax={total}
       aria-valuenow={completed}
     >
-      <span className="tl-todo-progress-count">
-        {compact ? `${completed}/${total}` : `已完成 ${completed}/${total}`}
-      </span>
+      <span className="tl-todo-progress-count">{`${completed}/${total}`}</span>
       <span className="tl-todo-progress-track" aria-hidden>
         <span className="tl-todo-progress-fill" style={{ width: `${progress}%` }} />
       </span>
@@ -827,6 +839,26 @@ function SkillToolDetails({ item, status }: { item: ToolItem; status: string }) 
   );
 }
 
+function MoveSkillToolDetails({ item, status }: { item: ToolItem; status: string }) {
+  const source = argumentText(item.arguments, ["source"]);
+  const skillName = source === null
+    ? argumentText(item.arguments, ["name", "skill"]) ?? "未命名技能"
+    : pathPresentation(source).target;
+  const destination = argumentText(item.arguments, ["destination_parent"]);
+  const errorContent = item.result?.content || "移动技能失败";
+  const error = item.result?.is_error
+    ? source === null ? "移动技能失败" : errorContent.split(source).join(skillName)
+    : null;
+  return (
+    <>
+      <p className="tl-meta">技能：{skillName}</p>
+      {destination ? <p className="tl-meta">目标目录：{destination}</p> : null}
+      {error ? <OutputBlock text={error} /> : null}
+      <ToolMeta item={item} status={status} />
+    </>
+  );
+}
+
 function FileToolDetails({ item, status, kind }: {
   item: ToolItem;
   status: string;
@@ -876,7 +908,12 @@ function FileToolDetails({ item, status, kind }: {
 function TodoToolDetails({ item, status }: { item: ToolItem; status: string }) {
   const entries = todoEntriesFor(item);
   if (entries === null) {
-    return <GenericToolDetails item={item} echo={commandEchoOf(item.arguments)} status={status} />;
+    return (
+      <>
+        <ToolResultView item={item} includeSuccess={false} />
+        <ToolMeta item={item} status={status} />
+      </>
+    );
   }
   return (
     <>
@@ -899,15 +936,14 @@ function TodoToolDetails({ item, status }: { item: ToolItem; status: string }) {
 
 function Tool({ sessionId, item }: { sessionId: string; item: ToolItem }) {
   const [open, toggle] = useLineExpanded(sessionId, item.id, false);
+  const displayStatus = displayToolStatus(item);
   const status = toolStatusText(item);
   const echo = commandEchoOf(item.arguments);
   const presentation = toolPresentation(item.name, item.arguments);
   const toolName = normalizedToolName(item.name);
   const isTodoList = toolName === "todolist" || toolName === "settodolist";
   const todoEntries = isTodoList ? todoEntriesFor(item) : null;
-  const completedTodos = todoEntries?.filter((entry) => entry.status === "done").length ?? 0;
   const summary = [
-    todoEntries ? `${completedTodos}/${todoEntries.length} 已完成` : null,
     presentation.target,
     presentation.secondary,
   ].filter(Boolean).join(" · ");
@@ -916,13 +952,13 @@ function Tool({ sessionId, item }: { sessionId: string; item: ToolItem }) {
     : `${presentation.action} ${summary}`;
   return (
     <Line
-      className={`tool-line status-${item.status}`}
+      className={`tool-line status-${displayStatus}`}
       label={`${heading}，状态：${status}`}
       open={open}
       onToggle={toggle}
       head={
         <>
-          {resultIcon(item.status)}
+          {resultIcon(displayStatus)}
           {toolIconView(presentation.icon)}
           <span className="tl-name">{presentation.action}</span>
           {presentation.target ? <span className="tl-mono">{presentation.target}</span> : null}
@@ -935,6 +971,8 @@ function Tool({ sessionId, item }: { sessionId: string; item: ToolItem }) {
       <div className="tl-detail">
         {toolName === "skill" ? (
           <SkillToolDetails item={item} status={status} />
+        ) : toolName === "moveskill" ? (
+          <MoveSkillToolDetails item={item} status={status} />
         ) : toolName === "edit" ? (
           <FileToolDetails item={item} status={status} kind="edit" />
         ) : toolName === "write" ? (
@@ -944,7 +982,7 @@ function Tool({ sessionId, item }: { sessionId: string; item: ToolItem }) {
         ) : (
           <GenericToolDetails item={item} echo={echo} status={status} />
         )}
-        {item.output ? (
+        {toolName !== "moveskill" && item.output ? (
           <FullOutput sessionId={sessionId} itemId={item.id} outputRef={item.output} />
         ) : null}
       </div>
@@ -954,10 +992,10 @@ function Tool({ sessionId, item }: { sessionId: string; item: ToolItem }) {
 
 /** Adjacent, completed reads are one user-visible operation until expanded. */
 export function readGroupStatusForItems(items: ToolItem[]): { status: ToolStatus; text: string } {
-  if (items.some((item) => item.status === "failed")) {
+  if (items.some((item) => displayToolStatus(item) === "failed")) {
     return { status: "failed", text: "部分失败" };
   }
-  if (items.some((item) => item.status !== "finished")) {
+  if (items.some((item) => displayToolStatus(item) !== "finished")) {
     return { status: "running", text: "读取中" };
   }
   return { status: "finished", text: "已完成" };
@@ -1071,28 +1109,39 @@ function Terminal({ sessionId, item }: { sessionId: string; item: TerminalItem }
   );
 }
 
+function workflowDisplayStatus(state: string): ToolStatus {
+  if (state === "completed") return "finished";
+  if (state === "failed" || state === "cancelled" || state === "resource_limited") {
+    return "failed";
+  }
+  return "running";
+}
+
 function WorkflowLine({ sessionId, item }: { sessionId: string; item: WorkflowItem }) {
   const [open, toggle] = useLineExpanded(sessionId, item.id, false);
   const workflow = item.workflow;
+  const displayStatus = workflowDisplayStatus(workflow.state);
   const elapsed = formatElapsed(
     workflow.started_at_ms && workflow.updated_at_ms
       ? Math.round((workflow.updated_at_ms - workflow.started_at_ms) / 1000)
       : undefined,
   );
   const status =
-    (item.finished
+    (displayStatus === "finished"
       ? `已完成${workflow.terminal_reason ? `（${workflow.terminal_reason}）` : ""}`
+      : displayStatus === "failed"
+        ? `失败${workflow.terminal_reason ? `（${workflow.terminal_reason}）` : ""}`
       : `运行中${workflow.current_phase ? ` · ${workflow.current_phase}` : ""}`) +
     (elapsed ? ` · ${elapsed}` : "");
   return (
     <Line
-      className={`tool-line kind-workflow ${item.finished ? "status-finished" : "status-running"}`}
+      className={`tool-line kind-workflow status-${displayStatus}`}
       label={`工作流 ${workflow.title}，状态：${status}`}
       open={open}
       onToggle={toggle}
       head={
         <>
-          {resultIcon(item.finished ? "finished" : "running")}
+          {resultIcon(displayStatus)}
           <span className="tl-ic">
             <Workflow size={13} aria-hidden />
           </span>
@@ -1179,17 +1228,34 @@ function QuestionRow({ sessionId, item }: { sessionId: string; item: QuestionIte
   const view = state.sessions[sessionId];
   const submitted = view?.submittedQuestionIds.includes(questionId) ?? false;
   const disabled = item.resolved || submitted;
-  const [selections, setSelections] = useState<string[]>([]);
-  const [note, setNote] = useState("");
-  const toggleSelection = (question: QuestionEventData, label: string) => {
+  const [selections, setSelections] = useState<string[][]>(() =>
+    item.questions.map(() => []),
+  );
+  const [notes, setNotes] = useState<string[]>(() => item.questions.map(() => ""));
+  const toggleSelection = (index: number, question: QuestionEventData, label: string) => {
+    if (!question.multi_select) {
+      setNotes((current) =>
+        item.questions.map((_, questionIndex) =>
+          questionIndex === index ? "" : (current[questionIndex] ?? ""),
+        ),
+      );
+    }
     setSelections((current) =>
-      question.multi_select
-        ? current.includes(label)
-          ? current.filter((entry) => entry !== label)
-          : [...current, label]
-        : [label],
+      item.questions.map((_, questionIndex) => {
+        const selected = current[questionIndex] ?? [];
+        if (questionIndex !== index) return selected;
+        if (!question.multi_select) return [label];
+        return selected.includes(label)
+          ? selected.filter((entry) => entry !== label)
+          : [...selected, label];
+      }),
     );
   };
+  const answers = item.questions.map((_, index) => {
+    const selectionsForQuestion = selections[index] ?? [];
+    const note = notes[index]?.trim();
+    return [...selectionsForQuestion, ...(note ? [note] : [])].join(", ");
+  });
   return (
     <div
       className={`approval-row question-row ${item.resolved ? "resolved" : ""}`}
@@ -1203,13 +1269,13 @@ function QuestionRow({ sessionId, item }: { sessionId: string; item: QuestionIte
           {item.resolved ? "已回答" : submitted ? "已提交，等待确认" : "等待回答"}
         </span>
       </div>
-      {item.questions.map((question) => (
-        <div className="ar-question" key={question.header}>
+      {item.questions.map((question, index) => (
+        <div className="ar-question" key={`${question.header}:${index}`}>
           <p className="ar-question-text">{question.question}</p>
           {question.body ? <p className="ar-desc">{question.body}</p> : null}
           <div className="ar-chips">
             {question.options.map((option) => {
-              const selected = selections.includes(option.label);
+              const selected = (selections[index] ?? []).includes(option.label);
               return (
                 <button
                   key={option.label}
@@ -1218,42 +1284,51 @@ function QuestionRow({ sessionId, item }: { sessionId: string; item: QuestionIte
                   aria-pressed={selected}
                   disabled={disabled}
                   title={option.description ?? option.label}
-                  onClick={() => toggleSelection(question, option.label)}
+                  onClick={() => toggleSelection(index, question, option.label)}
                 >
                   {option.label}
                 </button>
               );
             })}
           </div>
+          {!item.resolved ? (
+            <input
+              type="text"
+              className="ar-other"
+              aria-label={`第 ${index + 1} 题的其他回答（可选）`}
+              placeholder="其他回答（可选）"
+              value={notes[index] ?? ""}
+              disabled={disabled}
+              onChange={(event) => {
+                const value = event.target.value;
+                if (!question.multi_select && value.trim() !== "") {
+                  setSelections((current) =>
+                    item.questions.map((_, questionIndex) =>
+                      questionIndex === index ? [] : (current[questionIndex] ?? []),
+                    ),
+                  );
+                }
+                setNotes((current) =>
+                  item.questions.map((_, questionIndex) =>
+                    questionIndex === index ? value : (current[questionIndex] ?? ""),
+                  ),
+                );
+              }}
+            />
+          ) : null}
         </div>
       ))}
       {!item.resolved ? (
-        <>
-          <input
-            type="text"
-            className="ar-other"
-            aria-label="补充说明（可选）"
-            placeholder="补充说明（可选）"
-            value={note}
-            disabled={disabled}
-            onChange={(event) => setNote(event.target.value)}
-          />
-          <div className="ar-actions">
-            <button
-              type="button"
-              className="chip-button primary"
-              disabled={disabled || selections.length === 0}
-              onClick={() =>
-                actions.submitQuestion(questionId, {
-                  selections,
-                  ...(note.trim() !== "" ? { text: note.trim() } : {}),
-                })
-              }
-            >
-              提交回答
-            </button>
-          </div>
-        </>
+        <div className="ar-actions">
+          <button
+            type="button"
+            className="chip-button primary"
+            disabled={disabled || answers.some((answer) => answer === "")}
+            onClick={() => actions.submitQuestion(questionId, { selections: answers })}
+          >
+            提交回答
+          </button>
+        </div>
       ) : null}
     </div>
   );

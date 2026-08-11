@@ -82,6 +82,11 @@ const LONG_USER_TEXT = [
   "以上每一项都要有截图证据，性能项要有 DOM 探测证据。",
 ].join("\n");
 
+const ACCEPTANCE_NOTES = [
+  "# 验收记录",
+  ...Array.from({ length: 71 }, (_, index) => `- 验收项 ${index + 1}`),
+].join("\n");
+
 function showcaseAgent(state) {
   return {
     id: SHOWCASE_AGENT_ID,
@@ -223,7 +228,7 @@ function showcaseSnapshot() {
           name: "write",
           arguments: {
             path: "web/src/acceptance-notes.md",
-            content: "# 验收记录\n- 转录行式层级\n- 侧栏工作区分组",
+            content: ACCEPTANCE_NOTES,
           },
         },
       },
@@ -244,9 +249,9 @@ function showcaseSnapshot() {
                   path: "web/src/acceptance-notes.md",
                   status: "committed_unsynced",
                   operation: "created",
-                  added: 3,
+                  added: 72,
                   removed: 0,
-                  content: "# 验收记录\n- 转录行式层级\n- 侧栏工作区分组",
+                  content: ACCEPTANCE_NOTES,
                 },
               ],
             },
@@ -521,7 +526,7 @@ function agentHistory(sessionId, agentId) {
   if (agentId !== SHOWCASE_AGENT_ID && !agentId.startsWith("agent_")) return null;
   return {
     agent_id: agentId,
-    watermark: 5,
+    watermark: 7,
     history: [
       {
         sequence: 1,
@@ -544,6 +549,44 @@ function agentHistory(sessionId, agentId) {
       { sequence: 4, event: { ThinkingFinished: { turn: 1, redacted: false } } },
       {
         sequence: 5,
+        event: {
+          ToolExecutionStarted: {
+            turn: 1,
+            id: "agent_edit",
+            name: "edit",
+            arguments: {
+              path: "web/src/relay.ts",
+              old: "const covered = false;",
+              new: "const covered = true;",
+            },
+          },
+        },
+      },
+      {
+        sequence: 6,
+        event: {
+          ToolExecutionFinished: {
+            turn: 1,
+            id: "agent_edit",
+            name: "edit",
+            result: {
+              content: "已更新 relay.ts",
+              is_error: false,
+              details: {
+                changes: [{
+                  path: "web/src/relay.ts",
+                  status: "committed",
+                  added: 1,
+                  removed: 1,
+                  diff: "--- a/web/src/relay.ts\n+++ b/web/src/relay.ts\n@@ -1 +1 @@\n-const covered = false;\n+const covered = true;",
+                }],
+              },
+            },
+          },
+        },
+      },
+      {
+        sequence: 7,
         event: {
           MessageAppended: {
             message: {

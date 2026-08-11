@@ -92,6 +92,29 @@ export function dropTranscript(view: SessionViewState): SessionViewState {
 export type AuthState = "pending" | "ok" | "failed";
 export type ConnectionState = "connecting" | "open" | "reconnecting";
 
+export type InformationPanelTab = "subagents" | "review";
+
+export interface ReviewTarget {
+  sessionId: string;
+  messageId: string;
+  agentId: string | null;
+  selectedPath: string | null;
+}
+
+export interface InformationPanelState {
+  open: boolean;
+  /** Desktop-only compact presentation; data remains in the current session projection. */
+  fixedSummaryOpen: boolean;
+  tab: InformationPanelTab;
+  selectedAgent: AgentSnapshot | null;
+  review: ReviewTarget | null;
+  /** Increments only for user-triggered opens so the non-blocking automatic
+   * reveal never steals focus from the composer. */
+  focusNonce: number;
+  /** Each session auto-reveals at most once per browser run. */
+  autoOpenedSessionIds: string[];
+}
+
 export interface AppState {
   auth: AuthState;
   bootstrap: WebUiBootstrap | null;
@@ -116,19 +139,9 @@ export interface AppState {
   connection: ConnectionState;
   /** Non-sensitive one-line notice (e.g. input too large, stale refresh). */
   notice: string | null;
-  /** Drill-down panel for a child agent (R4 §5.2). UI-only state: the panel
-   * data is fetched lazily and discarded on close; switching sessions closes
-   * the panel. */
-  agentPanel: AgentPanelTarget | null;
-}
-
-/** Which child agent the drill-down panel shows. The snapshot is carried for
- * the header (title/state/elapsed/tokens) so the header never waits on the
- * history fetch. */
-export interface AgentPanelTarget {
-  sessionId: string;
-  agentId: string;
-  agent: AgentSnapshot;
+  /** UI-only secondary workspace. Child history is fetched lazily and never
+   * copied into app state; Review stores only a stable source locator. */
+  informationPanel: InformationPanelState;
 }
 
 export function initialAppState(sidebarWidth: number, theme: Theme): AppState {
@@ -149,7 +162,15 @@ export function initialAppState(sidebarWidth: number, theme: Theme): AppState {
     sessions: {},
     connection: "connecting",
     notice: null,
-    agentPanel: null,
+    informationPanel: {
+      open: false,
+      fixedSummaryOpen: false,
+      tab: "subagents",
+      selectedAgent: null,
+      review: null,
+      focusNonce: 0,
+      autoOpenedSessionIds: [],
+    },
   };
 }
 
@@ -178,5 +199,10 @@ export type AppAction =
   | { type: "question_stale"; sessionId: string; questionId: string }
   | { type: "notice"; text: string }
   | { type: "clear_notice" }
-  | { type: "open_agent_panel"; panel: AgentPanelTarget }
-  | { type: "close_agent_panel" };
+  | { type: "auto_open_information_panel"; sessionId: string }
+  | { type: "open_information_panel"; tab: InformationPanelTab }
+  | { type: "close_information_panel" }
+  | { type: "set_fixed_summary_open"; open: boolean }
+  | { type: "select_information_agent"; agent: AgentSnapshot | null }
+  | { type: "set_information_panel_tab"; tab: InformationPanelTab }
+  | { type: "open_review"; target: ReviewTarget };

@@ -156,7 +156,7 @@ export function bootstrapBody(): Record<string, unknown> {
 export function agentHistoryBody(agentId: string): Record<string, unknown> {
   return {
     agent_id: agentId,
-    watermark: 2,
+    watermark: 7,
     history: [
       {
         sequence: 1,
@@ -168,6 +168,62 @@ export function agentHistoryBody(agentId: string): Record<string, unknown> {
       },
       {
         sequence: 2,
+        event: {
+          ThinkingStarted: { turn: 1, id: "agent_thinking", kind: "full" },
+        },
+      },
+      {
+        sequence: 3,
+        event: {
+          ThinkingDelta: { turn: 1, text: "核对慢连接与关闭路径。" },
+        },
+      },
+      {
+        sequence: 4,
+        event: {
+          ThinkingFinished: { turn: 1, redacted: false },
+        },
+      },
+      {
+        sequence: 5,
+        event: {
+          ToolExecutionStarted: {
+            turn: 1,
+            id: "agent_edit",
+            name: "edit",
+            arguments: {
+              path: "src/relay.ts",
+              old: "const covered = false;",
+              new: "const covered = true;",
+            },
+          },
+        },
+      },
+      {
+        sequence: 6,
+        event: {
+          ToolExecutionFinished: {
+            turn: 1,
+            id: "agent_edit",
+            name: "edit",
+            result: {
+              content: "updated src/relay.ts",
+              is_error: false,
+              details: {
+                changes: [{
+                  path: "src/relay.ts",
+                  status: "committed",
+                  added: 1,
+                  removed: 1,
+                  diff: "--- a/src/relay.ts\n+++ b/src/relay.ts\n@@ -1 +1 @@\n-const covered = false;\n+const covered = true;",
+                }],
+              },
+            },
+          },
+        },
+      },
+      {
+        sequence: 7,
         event: {
           MessageAppended: {
             message: {

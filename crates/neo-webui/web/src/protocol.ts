@@ -117,7 +117,7 @@ export interface QuestionOption {
 
 export interface QuestionEventData {
   question: string;
-  header: string;
+  header?: string | null;
   body?: string | null;
   options: QuestionOption[];
   multi_select: boolean;
@@ -325,13 +325,6 @@ export type AgentEvent =
         turn: number;
         id: string;
         questions: QuestionEventData[];
-      };
-    }
-  | {
-      QuestionResolved: {
-        turn: number;
-        question_id: string;
-        [key: string]: unknown;
       };
     }
   | {
@@ -559,7 +552,7 @@ export interface WebUiSnapshot {
   metadata: WebUiSessionMetadata;
   history: WebUiHistoryEntry[];
   pending_approval?: WebUiPendingApproval | null;
-  pending_question?: WebUiPendingQuestion | null;
+  pending_questions?: WebUiPendingQuestion[];
   todos?: TodoEventData[];
 }
 

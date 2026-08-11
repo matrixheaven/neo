@@ -5,7 +5,7 @@
  */
 
 import { NeoMark } from "./components/neoMark";
-import { AgentPanelHost } from "./components/agentPanel";
+import { FixedSummary, InformationPanel } from "./components/agentPanel";
 import { Composer } from "./components/composer";
 import { Sidebar } from "./components/sidebar";
 import { SidebarResizer } from "./components/sidebarResizer";
@@ -50,8 +50,9 @@ function SessionView({ sessionId }: { sessionId: string }) {
     return <NewSessionView />;
   }
   return (
-    <div className="session-view">
+    <div className={`session-view${state.informationPanel.fixedSummaryOpen ? " fixed-summary-open" : ""}`}>
       <TranscriptPane sessionId={sessionId} />
+      <FixedSummary sessionId={sessionId} />
       <Composer centered={false} />
     </div>
   );
@@ -108,8 +109,8 @@ export function App() {
           ) : null}
           {sessionId === null ? <NewSessionView /> : <SessionView sessionId={sessionId} />}
         </main>
+        <InformationPanel />
       </div>
-      <AgentPanelHost />
     </div>
   );
 }

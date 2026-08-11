@@ -186,7 +186,7 @@ describe("transcript redesign rows", () => {
     );
   });
 
-  it("breathes while thinking streams and auto-collapses on finish", async () => {
+  it("shows a spinner while thinking streams and auto-collapses on finish", async () => {
     const { socket, container } = await openSession1();
     let sequence = 9;
     const emit = (event: unknown) => {
@@ -206,6 +206,8 @@ describe("transcript redesign rows", () => {
     const runningLine = bar.closest(".think") as HTMLElement;
     expect(runningLine.querySelector("[data-status-icon]")).toBeNull();
     expect(runningLine.querySelector("[data-thinking-icon]")).not.toBeNull();
+    expect(runningLine.querySelector("[data-thinking-spinner]")).not.toBeNull();
+    expect(runningLine.querySelector("[data-thinking-completed-icon]")).toBeNull();
     expect(runningLine.querySelector(".line-tail")).toBeNull();
     await screen.findByText("实时思考内容");
 
@@ -219,6 +221,8 @@ describe("transcript redesign rows", () => {
     ).toBe("false");
     expect(line.querySelector("[data-status-icon]")).toBeNull();
     expect(line.querySelector("[data-thinking-icon]")).not.toBeNull();
+    expect(line.querySelector("[data-thinking-spinner]")).toBeNull();
+    expect(line.querySelector("[data-thinking-completed-icon]")).not.toBeNull();
     expect(line.querySelector(".line-tail")).toBeNull();
   });
 
@@ -289,6 +293,33 @@ describe("transcript redesign rows", () => {
     expect(finishedLine.querySelector('[data-status-icon="running"]')).toBeNull();
     expect(finishedLine.querySelector(".line-tail")).toBeNull();
     expect(finishedLine.querySelector(".tl-status")).toBeNull();
+
+    for (const [offset, state] of ["failed", "cancelled", "resource_limited"].entries()) {
+      const title = `终止工作流 ${state}`;
+      emit(
+        {
+          WorkflowFinished: {
+            turn: 2,
+            workflow: {
+              id: `wf_session_${state}`,
+              title,
+              state,
+              started_at_ms: 1723000002000,
+              updated_at_ms: 1723000004000,
+              terminal_reason: state,
+            },
+          },
+        },
+        11 + offset,
+      );
+      const failed = await screen.findByRole("button", {
+        name: new RegExp(`工作流 ${title}，状态：失败（${state}）`),
+      });
+      const failedLine = failed.closest(".kind-workflow") as HTMLElement;
+      expect(failedLine.querySelector('[data-status-icon="failed"]')).not.toBeNull();
+      expect(failedLine.querySelector('[data-status-icon="finished"]')).toBeNull();
+      expect(failed.textContent).not.toContain("已完成");
+    }
   });
 
   it("respects a manual collapse choice across the stream finish", async () => {
@@ -656,6 +687,8 @@ describe("transcript redesign rows", () => {
     expect(within(todoLine).getByText("检查展示")).toBeTruthy();
     expect(within(todoLine).getByLabelText("待处理")).toBeTruthy();
     expect(within(todoButton).getByRole("progressbar", { name: "任务进度：0/2" })).toBeTruthy();
+    expect(within(todoButton).getByText("0/2")).toBeTruthy();
+    expect(within(todoButton).queryByText("已完成 0/2")).toBeNull();
 
     await user.click(setTodoButton);
     const setTodoLine = setTodoButton.closest(".tool-line") as HTMLElement;
@@ -719,7 +752,7 @@ describe("transcript redesign rows", () => {
     expect(screen.getByRole("button", { name: /展开思考/ })).toBeTruthy();
   });
 
-  it("derives the answer footer file list from edit tools and copies the answer", async () => {
+  it("shows a body-level file preview, opens Review, and copies the answer", async () => {
     const user = userEvent.setup();
     const writeText = vi.fn<(text: string) => Promise<void>>().mockResolvedValue(undefined);
     Object.defineProperty(navigator, "clipboard", {
@@ -734,14 +767,25 @@ describe("transcript redesign rows", () => {
     expect(within(footer).getByTitle("src/app.ts")).toBeTruthy();
     expect(within(footer).getByText("已编辑 1 个文件")).toBeTruthy();
     expect(footer.querySelector(".ft-summary .ft-add")?.textContent).toBe("+1");
-    await user.click(within(footer).getByRole("button", { name: "展开 src/app.ts 的局部差异" }));
-    expect(within(footer).getByText("+c")).toBeTruthy();
+    const fileButton = within(footer).getByRole("button", {
+      name: "在 Review 中查看 src/app.ts 的局部差异",
+    });
+    await user.hover(fileButton);
+    const preview = await screen.findByRole("region", { name: "src/app.ts 的局部差异" });
+    expect(preview.parentElement).toBe(document.body);
+    expect(within(preview).getByText("+c")).toBeTruthy();
+    await user.click(fileButton);
+    const panel = screen.getByLabelText("会话信息区");
+    expect(within(panel).getByRole("tab", { name: "Review" }).getAttribute("aria-selected"))
+      .toBe("true");
+    expect(panel.querySelector('.review-file[id*="src%2Fapp.ts"]')).not.toBeNull();
+    expect(document.body.querySelector(".ft-file-preview")).toBeNull();
     await user.click(within(footer).getByRole("button", { name: "复制回答" }));
     await waitFor(() => expect(writeText).toHaveBeenCalledWith("已修改 app.ts。"));
     await screen.findByRole("button", { name: "已复制" });
   });
 
-  it("shows committed files in batches and expands local diffs", async () => {
+  it("shows committed files in batches, floating previews, and Review controls", async () => {
     const user = userEvent.setup();
     const { socket } = await openSession1();
     let sequence = 9;
@@ -798,10 +842,10 @@ describe("transcript redesign rows", () => {
                 path: "src/new file.ts",
                 status: "committed",
                 operation: "created",
-                added: 4,
+                added: 72,
                 removed: 0,
                 content: Array.from(
-                  { length: 36 },
+                  { length: 72 },
                   (_, index) => `export const line${index} = ${index};`,
                 ).join("\n"),
               },
@@ -867,7 +911,7 @@ describe("transcript redesign rows", () => {
     const answer = await screen.findByText("文件变更已整理。");
     const footer = answer.closest(".a-msg")?.querySelector(".answer-ft") as HTMLElement;
     expect(within(footer).getByText("已编辑 4 个文件")).toBeTruthy();
-    expect(footer.querySelector(".ft-summary .ft-add")?.textContent).toBe("+37");
+    expect(footer.querySelector(".ft-summary .ft-add")?.textContent).toBe("+105");
     expect(footer.querySelector(".ft-summary .ft-del")?.textContent).toBe("−2");
     expect(within(footer).getAllByRole("listitem")).toHaveLength(3);
     expect(within(footer).queryByTitle("src/new file.ts")).toBeNull();
@@ -884,56 +928,164 @@ describe("transcript redesign rows", () => {
     expect(within(footer).queryByTitle("src/skipped.ts")).toBeNull();
 
     const createdButton = within(footer).getByRole("button", {
-      name: "展开 src/new file.ts 的新建文件内容",
+      name: "在 Review 中查看 src/new file.ts 的新建文件内容",
     });
-    const createdPreviewId = createdButton.getAttribute("aria-controls");
-    expect(/\s/.test(createdPreviewId ?? "")).toBe(false);
-    const createdPreview = document.getElementById(createdPreviewId ?? "") as HTMLElement;
-    expect(createdPreview).not.toBeNull();
-    expect(createdPreview.hasAttribute("hidden")).toBe(true);
+    expect(createdButton.getAttribute("aria-describedby")).toBeNull();
     await user.hover(createdButton);
-    expect(createdPreview.hasAttribute("hidden")).toBe(false);
-    expect(createdPreview.getAttribute("aria-hidden")).toBeNull();
-    await user.unhover(createdButton);
-    expect(createdPreview.hasAttribute("hidden")).toBe(true);
-
-    createdButton.focus();
-    await user.keyboard("{Enter}");
-    expect(createdButton.getAttribute("aria-expanded")).toBe("true");
-    expect(createdPreview.hasAttribute("hidden")).toBe(false);
+    const createdPreview = await screen.findByRole("region", {
+      name: "src/new file.ts 的文件内容",
+    });
+    const createdPreviewId = createdButton.getAttribute("aria-describedby");
+    expect(createdPreview.id).toBe(createdPreviewId);
+    expect(/\s/.test(createdPreviewId ?? "")).toBe(false);
+    expect(createdPreview.parentElement).toBe(document.body);
+    expect(createdPreview.style.maxHeight).toMatch(/px$/);
     expect(within(createdPreview).getByText("export const line0 = 0;")).toBeTruthy();
-    expect(within(createdPreview).queryByText("export const line30 = 30;")).toBeNull();
+    expect(within(createdPreview).getByText("export const line39 = 39;")).toBeTruthy();
+    expect(within(createdPreview).queryByText("export const line40 = 40;")).toBeNull();
     expect(within(createdPreview).getByText("其余内容未显示")).toBeTruthy();
+    const createdLine = within(createdPreview).getByText("export const line39 = 39;")
+      .closest(".ft-preview-line") as HTMLElement;
+    expect(createdLine.querySelector(".ft-line-new")?.textContent).toBe("40");
+    await user.unhover(createdButton);
+    await waitFor(() => expect(screen.queryByRole("region", {
+      name: "src/new file.ts 的文件内容",
+    })).toBeNull());
 
-    const diffButton = within(footer).getByRole("button", { name: "展开 src/one.ts 的局部差异" });
-    const diffPreviewId = diffButton.getAttribute("aria-controls");
-    expect(diffPreviewId).toBeTruthy();
-    const diffPreview = document.getElementById(diffPreviewId ?? "") as HTMLElement;
-    expect(diffPreview).not.toBeNull();
-    expect(diffPreview.hasAttribute("hidden")).toBe(true);
+    const diffButton = within(footer).getByRole("button", {
+      name: "在 Review 中查看 src/one.ts 的局部差异",
+    });
     await user.hover(diffButton);
-    expect(diffPreview.hasAttribute("hidden")).toBe(false);
+    const diffPreview = await screen.findByRole("region", { name: "src/one.ts 的局部差异" });
+    expect(diffPreview.parentElement).toBe(document.body);
     expect(within(diffPreview).queryByText("--- a/src/one.ts")).toBeNull();
     expect(within(diffPreview).queryByText("+++ b/src/one.ts")).toBeNull();
     expect(within(diffPreview).getByText("---removed body")).toBeTruthy();
     expect(within(diffPreview).getByText("+++added body")).toBeTruthy();
     expect(within(diffPreview).getByText("--- src/one.ts")).toBeTruthy();
     expect(within(diffPreview).getByText("+++ src/one.ts")).toBeTruthy();
+    const removedLine = within(diffPreview).getByText("---removed body")
+      .closest(".ft-preview-line") as HTMLElement;
+    const addedLine = within(diffPreview).getByText("+++added body")
+      .closest(".ft-preview-line") as HTMLElement;
+    expect(removedLine.querySelector(".ft-line-old")?.textContent).toBe("1");
+    expect(removedLine.querySelector(".ft-line-new")?.textContent).toBe("");
+    expect(addedLine.querySelector(".ft-line-old")?.textContent).toBe("");
+    expect(addedLine.querySelector(".ft-line-new")?.textContent).toBe("1");
     await user.unhover(diffButton);
-    expect(diffPreview.hasAttribute("hidden")).toBe(true);
-    await user.click(diffButton);
-    expect(within(diffPreview).getByText("+edit20")).toBeTruthy();
-    expect(within(diffPreview).queryByText("+edit21")).toBeNull();
-    expect(within(diffPreview).getByText("其余内容未显示")).toBeTruthy();
-    expect(diffPreview.textContent?.indexOf("---removed body")).toBeLessThan(
-      diffPreview.textContent?.indexOf("+edit0") ?? 0,
-    );
+    await waitFor(() => expect(screen.queryByRole("region", {
+      name: "src/one.ts 的局部差异",
+    })).toBeNull());
 
     await user.click(within(footer).getByRole("button", { name: "收起其余文件" }));
     expect(within(footer).getAllByRole("listitem")).toHaveLength(3);
+
+    await user.click(within(footer).getByRole("button", {
+      name: "在 Review 中查看 src/one.ts 的局部差异",
+    }));
+    const panel = screen.getByLabelText("会话信息区");
+    expect(within(panel).getByRole("tab", { name: "Review" }).getAttribute("aria-selected"))
+      .toBe("true");
+    expect(within(panel).getByLabelText("修改文件树")).toBeTruthy();
+    expect(within(panel).getAllByRole("table", { name: "统一差异" }).length).toBeGreaterThan(0);
+
+    await user.click(within(panel).getByRole("button", { name: "左右差异" }));
+    expect(within(panel).getAllByRole("table", { name: "左右差异" }).length).toBeGreaterThan(0);
+    await user.click(within(panel).getByRole("button", { name: "统一差异" }));
+
+    await user.click(within(panel).getByRole("button", { name: "全部收起" }));
+    expect(panel.querySelectorAll(".review-file-body")).toHaveLength(0);
+    await user.click(within(panel).getByRole("button", { name: "全部展开" }));
+    expect(panel.querySelectorAll(".review-file-body")).toHaveLength(4);
+
+    const jumpButton = within(panel).getByRole("button", { name: "跳转文件" });
+    expect(jumpButton.getAttribute("aria-expanded")).toBe("false");
+    await user.click(jumpButton);
+    expect(jumpButton.getAttribute("aria-expanded")).toBe("true");
+    const jump = within(panel).getByRole("dialog", { name: "跳转文件" });
+    await user.type(within(jump).getByRole("textbox", { name: "搜索文件" }), "two.ts");
+    await user.click(within(jump).getByRole("button", { name: /two.ts/ }));
+    expect(jumpButton.getAttribute("aria-expanded")).toBe("false");
+    expect(within(panel).getByRole("treeitem", { name: "two.ts" }).getAttribute("aria-selected"))
+      .toBe("true");
+    expect(within(panel).getByRole("treeitem", { name: "one.ts" })).toBeTruthy();
+
+    const optionsButton = within(panel).getByRole("button", { name: "更多 Review 选项" });
+    expect(optionsButton.getAttribute("aria-expanded")).toBe("false");
+    await user.click(optionsButton);
+    expect(optionsButton.getAttribute("aria-expanded")).toBe("true");
+    const menu = within(panel).getByRole("menu", { name: "Review 选项" });
+    expect(within(menu).getByRole("menuitem", { name: "刷新" })).toBeTruthy();
+    expect(within(menu).getByRole("menuitem", { name: "启用换行" })).toBeTruthy();
+    expect(within(menu).getByRole("menuitem", { name: "加载完整文件" })).toBeTruthy();
+    expect(within(menu).getByRole("menuitem", { name: "启用字级差异" })).toBeTruthy();
+    expect(within(menu).getByRole("menuitem", { name: "隐藏空白改动" })).toBeTruthy();
+    expect(within(menu).getByRole("menuitem", { name: "复制应用命令" })).toBeTruthy();
+    await user.click(within(menu).getByRole("menuitem", { name: "刷新" }));
+    expect(optionsButton.getAttribute("aria-expanded")).toBe("false");
+    expect(within(panel).getByRole("status").textContent).toContain("已刷新当前转录中的修改");
   });
 
-  it("scrolls a clicked file preview above the composer without moving on hover", async () => {
+  it("renders Markdown edits as real changes in both Review layouts", async () => {
+    const user = userEvent.setup();
+    const { socket } = await openSession1();
+    let sequence = 9;
+    const emit = (event: unknown) => {
+      socket.emit({
+        type: "session_event",
+        stream_id: fixture.stream_id,
+        session_id: "session_0001",
+        sequence: sequence++,
+        event: event as never,
+      });
+    };
+
+    emit({
+      ToolExecutionFinished: {
+        turn: 2,
+        id: "markdown_edit",
+        name: "edit",
+        result: {
+          content: "updated docs/guide.md",
+          is_error: false,
+          details: {
+            changes: [{
+              path: "docs/guide.md",
+              status: "committed",
+              added: 1,
+              removed: 1,
+              diff: "--- docs/guide.md\n+++ docs/guide.md\n@@ -1,3 +1,3 @@\n # 更新说明\n \n-旧段落\n+新增段落\n",
+            }],
+          },
+        },
+      },
+    });
+    emit({ MessageStarted: { turn: 2, id: "markdown_result" } });
+    emit({ TextDelta: { turn: 2, text: "已更新说明文档。" } });
+    emit({ MessageFinished: { turn: 2, id: "markdown_result", stop_reason: "EndTurn" } });
+
+    const answer = await screen.findByText("已更新说明文档。");
+    const footer = answer.closest(".a-msg")?.querySelector(".answer-ft") as HTMLElement;
+    await user.click(within(footer).getByRole("button", {
+      name: "在 Review 中查看 docs/guide.md 的局部差异",
+    }));
+
+    const panel = screen.getByLabelText("会话信息区");
+    const unified = within(panel).getByRole("table", { name: "统一差异" });
+    const unifiedDeleted = within(unified).getByText("-旧段落").closest(".review-diff-line") as HTMLElement;
+    const unifiedAdded = within(unified).getByText("+新增段落").closest(".review-diff-line") as HTMLElement;
+    expect(unifiedDeleted.className).toContain("ft-diff-del");
+    expect(unifiedAdded.className).toContain("ft-diff-add");
+
+    await user.click(within(panel).getByRole("button", { name: "左右差异" }));
+    const split = within(panel).getByRole("table", { name: "左右差异" });
+    const splitDeleted = within(split).getByText("-旧段落").closest(".review-split-side") as HTMLElement;
+    const splitAdded = within(split).getByText("+新增段落").closest(".review-split-side") as HTMLElement;
+    expect(splitDeleted.className).toContain("ft-diff-del");
+    expect(splitAdded.className).toContain("ft-diff-add");
+  });
+
+  it("shows a focus preview and routes clicks to Review without inline scrolling", async () => {
     const user = userEvent.setup();
     const { socket } = await openSession1();
     const scrollIntoView = vi.fn();
@@ -948,16 +1100,19 @@ describe("transcript redesign rows", () => {
       const answer = await screen.findByText("已修改 app.ts。");
       const footer = answer.closest(".a-msg")?.querySelector(".answer-ft") as HTMLElement;
       const previewButton = within(footer).getByRole("button", {
-        name: "展开 src/app.ts 的局部差异",
+        name: "在 Review 中查看 src/app.ts 的局部差异",
       });
 
-      await user.hover(previewButton);
+      previewButton.focus();
+      const preview = await screen.findByRole("region", { name: "src/app.ts 的局部差异" });
+      expect(preview.parentElement).toBe(document.body);
       expect(scrollIntoView).not.toHaveBeenCalled();
-      await user.unhover(previewButton);
 
       await user.click(previewButton);
-      await waitFor(() => expect(scrollIntoView).toHaveBeenCalledWith({ block: "nearest" }));
-      expect(scrollIntoView).toHaveBeenCalledTimes(1);
+      expect(screen.getByLabelText("会话信息区").querySelector('[role="tab"][aria-selected="true"]')
+        ?.textContent).toContain("Review");
+      expect(document.body.querySelector(".ft-file-preview")).toBeNull();
+      expect(scrollIntoView).not.toHaveBeenCalled();
     } finally {
       if (originalScrollIntoView) {
         Object.defineProperty(HTMLElement.prototype, "scrollIntoView", originalScrollIntoView);
@@ -1077,6 +1232,208 @@ describe("session view", () => {
       socket.emit(asServerMessage(envelope));
     }
     await waitFor(() => expect(screen.queryByRole("group", { name: /审批请求/ })).toBeNull());
+  });
+
+  it("keeps single-choice other answers exclusive and restores a failed submission", async () => {
+    const user = userEvent.setup();
+    let questionAttempts = 0;
+    vi.stubGlobal(
+      "fetch",
+      vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
+        const url =
+          typeof input === "string" ? input : input instanceof URL ? input.href : input.url;
+        if (url === "/api/sessions/session_0001/question" && init?.method === "POST") {
+          questionAttempts += 1;
+          if (questionAttempts === 1) {
+            void mockFetch(input, init);
+            return Promise.resolve(
+              new Response(JSON.stringify({ code: "internal" }), {
+                status: 500,
+                headers: { "content-type": "application/json" },
+              }),
+            );
+          }
+        }
+        return mockFetch(input, init);
+      }),
+    );
+    const { socket } = await openSession1();
+    socket.emit({
+      type: "session_state",
+      stream_id: fixture.stream_id,
+      session_id: "session_0001",
+      sequence: session1.snapshot.watermark + 1,
+      event: { ...session1.snapshot.session, waiting_question: true },
+    });
+    await waitFor(() =>
+      expect(socket.watchSessionIds()).toEqual(["session_0001", "session_0001"]),
+    );
+    const snapshot = structuredClone(session1.snapshot);
+    snapshot.watermark += 1;
+    snapshot.session.waiting_question = true;
+    snapshot.pending_questions = [
+      {
+        id: "question_live",
+        turn_id: "turn_01",
+        questions: [
+          {
+            header: "界面",
+            question: "使用哪种界面？",
+            options: [{ label: "深色" }, { label: "浅色" }],
+            multi_select: false,
+          },
+          {
+            header: "检查",
+            question: "要执行哪些检查？",
+            options: [{ label: "测试" }, { label: "审查" }],
+            multi_select: true,
+          },
+        ],
+      },
+    ];
+    socket.emit({ type: "session_snapshot", snapshot });
+
+    const question = await screen.findByRole("group", { name: "提问" });
+    const dark = within(question).getByRole("button", { name: "深色" });
+    const light = within(question).getByRole("button", { name: "浅色" });
+    const test = within(question).getByRole("button", { name: "测试" });
+    const review = within(question).getByRole("button", { name: "审查" });
+    const singleOther = within(question).getByRole("textbox", {
+      name: "第 1 题的其他回答（可选）",
+    });
+    const multiOther = within(question).getByRole("textbox", {
+      name: "第 2 题的其他回答（可选）",
+    });
+
+    await user.click(dark);
+    await user.type(singleOther, "跟随系统");
+    expect(dark.getAttribute("aria-pressed")).toBe("false");
+    await user.click(light);
+    expect(singleOther).toHaveProperty("value", "");
+    await user.type(singleOther, "高对比");
+    expect(light.getAttribute("aria-pressed")).toBe("false");
+
+    await user.click(test);
+    await user.click(review);
+    await user.type(multiOther, "类型检查");
+    expect(test.getAttribute("aria-pressed")).toBe("true");
+    expect(review.getAttribute("aria-pressed")).toBe("true");
+    const submit = within(question).getByRole("button", { name: "提交回答" });
+    await user.click(submit);
+    await waitFor(() => expect(questionAttempts).toBe(1));
+    await screen.findByText("网络请求失败，请稍后重试。");
+    await waitFor(() => expect(submit).toHaveProperty("disabled", false));
+
+    await user.click(submit);
+    await waitFor(() => expect(questionAttempts).toBe(2));
+    const requests = recordedRequests.filter(
+      (entry) => entry.url === "/api/sessions/session_0001/question",
+    );
+    expect(requests).toHaveLength(2);
+    expect(requests[0].body).toEqual({
+      turn_id: "turn_01",
+      question_id: "question_live",
+      answer: { selections: ["高对比", "测试, 审查, 类型检查"] },
+    });
+    expect(submit).toHaveProperty("disabled", true);
+  });
+
+  it("keeps concurrent question batches ordered and independently answerable", async () => {
+    const user = userEvent.setup();
+    const { socket } = await openSession1();
+    socket.emit({
+      type: "session_state",
+      stream_id: fixture.stream_id,
+      session_id: "session_0001",
+      sequence: session1.snapshot.watermark + 1,
+      event: { ...session1.snapshot.session, waiting_question: true },
+    });
+    await waitFor(() =>
+      expect(socket.watchSessionIds()).toEqual(["session_0001", "session_0001"]),
+    );
+
+    const snapshot = structuredClone(session1.snapshot);
+    snapshot.watermark += 1;
+    snapshot.session.waiting_question = true;
+    snapshot.pending_questions = [
+      {
+        id: "question_first",
+        turn_id: "turn_01",
+        questions: [
+          {
+            question: "选择界面？",
+            options: [{ label: "深色" }, { label: "浅色" }],
+            multi_select: false,
+          },
+        ],
+      },
+      {
+        id: "question_second",
+        turn_id: "turn_01",
+        questions: [
+          {
+            header: "检查",
+            question: "执行检查？",
+            options: [{ label: "测试" }, { label: "跳过" }],
+            multi_select: false,
+          },
+        ],
+      },
+    ];
+    socket.emit({ type: "session_snapshot", snapshot });
+
+    let questions = await screen.findAllByRole("group", { name: "提问" });
+    expect(questions).toHaveLength(2);
+    expect(questions[0].textContent).toContain("选择界面？");
+    expect(questions[1].textContent).toContain("执行检查？");
+    await user.click(within(questions[0]).getByRole("button", { name: "深色" }));
+    await user.click(within(questions[0]).getByRole("button", { name: "提交回答" }));
+    await waitFor(() =>
+      expect(
+        recordedRequests.filter(
+          (entry) => entry.url === "/api/sessions/session_0001/question",
+        ),
+      ).toHaveLength(1),
+    );
+
+    socket.emit({
+      type: "session_state",
+      stream_id: fixture.stream_id,
+      session_id: "session_0001",
+      sequence: snapshot.watermark + 1,
+      event: { ...snapshot.session, waiting_question: true },
+    });
+    await waitFor(() => expect(socket.watchSessionIds()).toHaveLength(3));
+    const refreshed = structuredClone(snapshot);
+    refreshed.watermark += 1;
+    refreshed.pending_questions = [snapshot.pending_questions[1]];
+    socket.emit({ type: "session_snapshot", snapshot: refreshed });
+
+    await waitFor(() => expect(screen.queryByText("选择界面？")).toBeNull());
+    questions = screen.getAllByRole("group", { name: "提问" });
+    expect(questions).toHaveLength(1);
+    expect(questions[0].textContent).toContain("执行检查？");
+    await user.click(within(questions[0]).getByRole("button", { name: "测试" }));
+    await user.click(within(questions[0]).getByRole("button", { name: "提交回答" }));
+
+    await waitFor(() => {
+      const requests = recordedRequests.filter(
+        (entry) => entry.url === "/api/sessions/session_0001/question",
+      );
+      expect(requests).toHaveLength(2);
+      expect(requests.map((entry) => entry.body)).toEqual([
+        {
+          turn_id: "turn_01",
+          question_id: "question_first",
+          answer: { selections: ["深色"] },
+        },
+        {
+          turn_id: "turn_01",
+          question_id: "question_second",
+          answer: { selections: ["测试"] },
+        },
+      ]);
+    });
   });
 
   it("projects TodoUpdated into the floating task list above the composer", async () => {

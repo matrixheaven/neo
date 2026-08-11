@@ -396,10 +396,11 @@ impl WebSessionHost {
                 .pending_approval
                 .as_ref()
                 .map(|entry| entry.web.clone()),
-            pending_question: guard
-                .pending_question
-                .as_ref()
-                .map(|entry| entry.web.clone()),
+            pending_questions: guard
+                .pending_questions
+                .iter()
+                .map(|entry| entry.web.clone())
+                .collect(),
             todos: guard.last_todos.clone(),
         }
     }
@@ -1343,7 +1344,7 @@ impl WebSessionHost {
                 };
                 return Err(WebUiError::new(code));
             }
-            if guard.pending_approval.is_some() || guard.pending_question.is_some() {
+            if guard.pending_approval.is_some() || !guard.pending_questions.is_empty() {
                 return Err(WebUiError::new(WebUiErrorCode::TurnTransition));
             }
             // Validate the composer (model alias, reasoning effort) before

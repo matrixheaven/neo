@@ -199,7 +199,7 @@ export interface TranscriptProjection {
   /** Current pending approval request id (mirrors ApprovalRequested until
    * ApprovalResolved or the next snapshot). */
   pendingApprovalId: string | null;
-  pendingQuestionId: string | null;
+  pendingQuestionIds: string[];
   /** Latest TokenUsage payload on the stream (latest-wins). */
   latestUsage: AgentTokenUsage | null;
   /** Latest ContextWindowUpdated payload on the stream (latest-wins). */
@@ -222,7 +222,7 @@ export function emptyProjection(): TranscriptProjection {
     items: [],
     todos: [],
     pendingApprovalId: null,
-    pendingQuestionId: null,
+    pendingQuestionIds: [],
     latestUsage: null,
     contextWindow: null,
     latestTurn: null,
@@ -349,7 +349,6 @@ const KNOWN_SILENT_TAGS = new Set([
   "RunStarted",
   "TurnStarted",
   "RunFinished",
-  "TurnFinished",
   "SteeringQueued",
   "FollowUpQueued",
   "QueueDrained",
@@ -614,6 +613,27 @@ export function applyAgentEvent(
         coverage,
       };
     }
+    case "TurnFinished": {
+      const b = body as { turn: number; stop_reason: StopReason };
+      const items = projection.items.map((item) =>
+        item.kind === "thinking" && item.turn === b.turn && !item.finished
+          ? { ...item, finished: true }
+          : item,
+      );
+      const live = projection.liveThinkingId === null
+        ? null
+        : items.find((item) => item.id === projection.liveThinkingId);
+      return {
+        ...projection,
+        items,
+        liveThinkingId:
+          live === null ||
+          live === undefined ||
+          (live.kind === "thinking" && live.turn === b.turn)
+            ? null
+            : projection.liveThinkingId,
+      };
+    }
 
     // -- Tool lifecycle.
     case "ToolExecutionQueued": {
@@ -763,23 +783,11 @@ export function applyAgentEvent(
       return {
         ...projection,
         items: upsertById(projection.items, item),
-        pendingQuestionId: b.id,
+        pendingQuestionIds: projection.pendingQuestionIds.includes(b.id)
+          ? projection.pendingQuestionIds
+          : [...projection.pendingQuestionIds, b.id],
       };
     }
-    case "QuestionResolved": {
-      const b = body as { question_id?: string; id?: string };
-      const questionId = b.question_id ?? b.id ?? "";
-      const id = `question:${questionId}`;
-      return {
-        ...projection,
-        items: replaceItem(projection.items, id, (item) =>
-          item.kind === "question" ? { ...item, resolved: true } : item,
-        ),
-        pendingQuestionId:
-          projection.pendingQuestionId === questionId ? null : projection.pendingQuestionId,
-      };
-    }
-
     // -- Shell commands.
     case "ShellCommandQueued":
     case "ShellCommandStarted": {
