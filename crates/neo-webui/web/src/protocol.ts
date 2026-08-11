@@ -469,9 +469,37 @@ export type WebUiSummaryState =
 
 export type WebUiInputDelivery = "follow_up" | "steer";
 
+export type ReasoningSelection =
+  | { mode: "off" }
+  | { mode: "on" }
+  | { mode: "effort"; effort: string }
+  | { mode: "budget_tokens"; budget_tokens: number };
+
+export type ReasoningCapability =
+  | { type: "none" }
+  | { type: "toggle"; disable_supported: boolean }
+  | {
+      type: "effort";
+      values: string[];
+      disable_supported: boolean;
+    }
+  | {
+      type: "budget_tokens";
+      min?: number | null;
+      max?: number | null;
+      disable_supported: boolean;
+    }
+  | {
+      type: "combined";
+      toggle: boolean;
+      effort: string[];
+      budget?: { min?: number | null; max?: number | null } | null;
+      disable_supported: boolean;
+    };
+
 export interface WebUiComposer {
   model?: string;
-  reasoning_effort?: string;
+  reasoning?: ReasoningSelection;
   permission_mode?: PermissionMode;
   development_mode?: WebUiDevelopmentMode;
 }
@@ -619,12 +647,16 @@ export interface WebUiQuestionAnswer {
 export interface WebUiModelInfo {
   alias: string;
   provider: string;
+  display_name?: string | null;
   context_window?: number | null;
   capabilities?: string[];
+  reasoning: ReasoningCapability;
 }
 
 export interface WebUiBootstrap {
   workspace_label?: string | null;
+  default_model: string;
+  default_reasoning: ReasoningSelection;
   models?: WebUiModelInfo[];
   permission_modes?: PermissionMode[];
   development_modes?: WebUiDevelopmentMode[];

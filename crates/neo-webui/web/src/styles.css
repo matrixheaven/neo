@@ -3219,8 +3219,7 @@ button.ft-file-head:focus-visible {
   color: var(--danger);
 }
 
-.mode-pill[data-active="true"],
-.reasoning-pill[data-active="true"] {
+.mode-pill[data-active="true"] {
   background: var(--accent-soft);
   color: var(--accent);
 }
@@ -3247,6 +3246,180 @@ button.ft-file-head:focus-visible {
   box-shadow: var(--shadow-low);
   overflow: hidden;
   z-index: 40;
+}
+
+.model-menu-shell {
+  position: absolute;
+  bottom: calc(100% + 8px);
+  left: 0;
+  z-index: 40;
+  display: flex;
+  align-items: flex-end;
+  gap: 8px;
+}
+
+.model-menu-shell .pill-popover {
+  position: relative;
+  inset: auto;
+  flex: none;
+}
+
+.model-settings-popover {
+  width: 248px;
+  max-height: none;
+}
+
+.model-settings-list {
+  overflow: visible;
+}
+
+.model-settings-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  width: 100%;
+  min-height: 36px;
+  padding: 8px 10px;
+  border: 0;
+  border-radius: 7px;
+  background: transparent;
+  color: var(--text);
+  font: inherit;
+  font-size: 12.5px;
+  font-weight: 550;
+  text-align: left;
+  cursor: pointer;
+}
+
+.model-settings-row:hover,
+.model-settings-row:focus-visible,
+.model-settings-row.selected {
+  background: var(--accent-soft);
+}
+
+.model-settings-row.disabled {
+  color: var(--text-faint);
+  cursor: default;
+}
+
+.model-settings-value {
+  display: inline-flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 6px;
+  min-width: 0;
+  max-width: 150px;
+  color: var(--text-dim);
+  font-weight: 450;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.model-pill-reasoning {
+  color: var(--text-faint);
+}
+
+.model-submenu {
+  width: min(320px, calc(100vw - 16px));
+  max-height: min(440px, calc(100vh - 96px));
+}
+
+.model-submenu-title {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-height: 34px;
+  padding: 8px 10px 6px;
+  color: var(--text-faint);
+  font-size: 11.5px;
+  font-weight: 600;
+}
+
+.model-submenu-back {
+  display: none;
+  align-items: center;
+  justify-content: center;
+  width: 24px;
+  height: 24px;
+  padding: 0;
+  border: 0;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--text-dim);
+  cursor: pointer;
+}
+
+.model-submenu-back:hover,
+.model-submenu-back:focus-visible {
+  background: var(--accent-soft);
+}
+
+.model-catalog .model-row,
+.reasoning-submenu .model-row {
+  flex-wrap: nowrap;
+  align-items: center;
+}
+
+.model-catalog .model-row-meta {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.model-row-check {
+  flex: none;
+  margin-left: auto;
+  color: var(--accent);
+}
+
+.model-provider-heading {
+  position: sticky;
+  top: 0;
+  z-index: 1;
+  padding: 8px 10px 4px;
+  background: var(--surface-raised);
+  color: var(--text-faint);
+  font-size: 10.5px;
+  font-weight: 600;
+  text-transform: uppercase;
+}
+
+.reasoning-budget-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 6px;
+  padding: 6px;
+  border-top: 1px solid var(--line);
+}
+
+.reasoning-budget-row input {
+  min-width: 0;
+  padding: 7px 9px;
+  border: 1px solid var(--line);
+  border-radius: 7px;
+  background: var(--surface);
+  color: var(--text);
+  font: inherit;
+  font-size: 12px;
+}
+
+.reasoning-budget-row button {
+  padding: 0 10px;
+  border: 0;
+  border-radius: 7px;
+  background: var(--accent);
+  color: var(--on-accent);
+  font: inherit;
+  font-size: 12px;
+  cursor: pointer;
+}
+
+.reasoning-budget-row button:disabled {
+  opacity: 0.45;
+  cursor: default;
 }
 
 .pill-popover-search {
@@ -3626,6 +3799,26 @@ button.ft-file-head:focus-visible {
     left: max(8px, min(calc(50% - 150px), calc(100% - 308px)));
     width: min(300px, calc(100% - 16px));
     max-width: calc(100% - 16px);
+  }
+
+  .model-menu-shell {
+    right: 8px;
+    left: 8px;
+    width: auto;
+  }
+
+  .model-menu-shell .pill-popover {
+    width: 100%;
+    max-width: none;
+  }
+
+  .model-menu-shell[data-pane="models"] .model-settings-popover,
+  .model-menu-shell[data-pane="reasoning"] .model-settings-popover {
+    display: none;
+  }
+
+  .model-submenu-back {
+    display: inline-flex;
   }
 
   .composer {

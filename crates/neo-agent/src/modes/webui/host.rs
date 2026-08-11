@@ -289,14 +289,17 @@ impl WebSessionHost {
                     .ok_or_else(|| WebUiError::new(WebUiErrorCode::InvalidRequest))?,
             ),
         };
-        let reasoning = match composer.and_then(|c| c.reasoning_effort.as_deref()) {
-            None => self.config.runtime.reasoning.clone(),
-            Some(effort) => {
-                let effort = neo_ai::ReasoningEffort::try_from(effort)
-                    .map_err(|_| WebUiError::new(WebUiErrorCode::InvalidRequest))?;
-                neo_ai::ReasoningSelection::Effort { effort }
-            }
-        };
+        let reasoning = composer
+            .and_then(|composer| composer.reasoning.clone())
+            .unwrap_or_else(|| self.config.runtime.reasoning.clone());
+        let reasoning_model = composer
+            .and_then(|composer| composer.model.as_deref())
+            .unwrap_or(&self.config.default_model);
+        if let Some(model) = self.config.models.get(reasoning_model)
+            && !model.reasoning.supports(&reasoning)
+        {
+            return Err(WebUiError::new(WebUiErrorCode::InvalidRequest));
+        }
         let permission_mode = composer
             .and_then(|c| c.permission_mode)
             .unwrap_or(self.config.permission_mode);
@@ -1001,8 +1004,10 @@ impl WebUiHost for WebSessionHost {
                     .map(|(alias, model)| WebUiModelInfo {
                         alias: alias.clone(),
                         provider: model.provider.clone(),
+                        display_name: model.display_name.clone(),
                         context_window: model.max_context_tokens,
                         capabilities: model.capabilities.clone(),
+                        reasoning: model.reasoning.clone(),
                     })
                     .collect();
                 let sessions = self.list_sessions(WebUiSessionScope::Active, None, None, None)?;
@@ -1013,6 +1018,8 @@ impl WebUiHost for WebSessionHost {
                         .file_name()
                         .and_then(|name| name.to_str())
                         .map(str::to_owned),
+                    default_model: self.config.default_model.clone(),
+                    default_reasoning: self.config.runtime.reasoning.clone(),
                     models,
                     permission_modes: vec![
                         neo_agent_core::PermissionMode::Ask,
@@ -1371,7 +1378,7 @@ impl WebSessionHost {
             if guard.pending_approval.is_some() || !guard.pending_questions.is_empty() {
                 return Err(WebUiError::new(WebUiErrorCode::TurnTransition));
             }
-            // Validate the composer (model alias, reasoning effort) before
+            // Validate the composer (model alias and reasoning selection) before
             // registering the turn: an invalid request must leave the session
             // untouched instead of registering a turn that can never run.
             let mut prompt = vec![Content::text(message.clone())];

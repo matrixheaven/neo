@@ -623,24 +623,33 @@ const server = createServer(async (req, res) => {
   if (path === "/api/bootstrap") {
     json(res, {
       workspace_label: "neo",
+      default_model: "gpt-5-codex",
+      default_reasoning: { mode: "effort", effort: "high" },
       models: [
         {
           alias: "gpt-5-codex",
           provider: "openai",
           context_window: 272000,
           capabilities: ["reasoning"],
+          reasoning: {
+            type: "effort",
+            values: ["low", "medium", "high", "xhigh"],
+            disable_supported: true,
+          },
         },
         {
           alias: "claude-sonnet-4.5",
           provider: "anthropic",
           context_window: 200000,
           capabilities: [],
+          reasoning: { type: "none" },
         },
         {
           alias: "kimi-k2",
           provider: "moonshot",
           context_window: 128000,
           capabilities: [],
+          reasoning: { type: "none" },
         },
       ],
       permission_modes: ["ask", "auto", "yolo"],

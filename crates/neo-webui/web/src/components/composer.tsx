@@ -11,11 +11,24 @@
  * overrides only; nothing is written back to global settings or persisted.
  */
 
-import { ArrowUp, ChevronDown, ChevronLeft, Paperclip, Search, Square, X, Zap } from "lucide-react";
+import {
+  ArrowUp,
+  Check,
+  ChevronDown,
+  ChevronLeft,
+  ChevronRight,
+  Paperclip,
+  Search,
+  Square,
+  X,
+  Zap,
+} from "lucide-react";
 import { useEffect, useRef, useState } from "react";
 import { fetchCompletions, uploadAttachment } from "../api";
 import type {
   PermissionMode,
+  ReasoningCapability,
+  ReasoningSelection,
   WebUiComposer,
   WebUiCompletionItem,
   WebUiContextWindow,
@@ -39,17 +52,122 @@ const PERMISSION_LABELS: Record<PermissionMode, string> = {
   yolo: "免确认",
 };
 
-const REASONING_EFFORTS = ["low", "medium", "high"] as const;
 const REASONING_LABELS: Record<string, string> = {
-  low: "低推理",
-  medium: "中推理",
-  high: "高推理",
+  minimal: "极简",
+  low: "低",
+  medium: "中",
+  high: "高",
+  xhigh: "极高",
+  max: "最大",
 };
 
 const MAX_ATTACHMENTS = 4;
 const MAX_ATTACHMENT_BYTES = 8 * 1024 * 1024;
 
 type ComposerMenu = "model" | "permission" | "development";
+type ModelMenuPane = "root" | "models" | "reasoning";
+
+const NO_REASONING: ReasoningCapability = { type: "none" };
+
+function reasoningLabel(selection: ReasoningSelection): string {
+  switch (selection.mode) {
+    case "off":
+      return "关闭";
+    case "on":
+      return "开启";
+    case "effort":
+      return REASONING_LABELS[selection.effort] ?? selection.effort;
+    case "budget_tokens":
+      return `${selection.budget_tokens.toLocaleString()} 个令牌`;
+  }
+}
+
+function reasoningKey(selection: ReasoningSelection): string {
+  switch (selection.mode) {
+    case "effort":
+      return `effort:${selection.effort}`;
+    case "budget_tokens":
+      return `budget:${selection.budget_tokens}`;
+    default:
+      return selection.mode;
+  }
+}
+
+function budgetBounds(capability: ReasoningCapability) {
+  if (capability.type === "budget_tokens") {
+    return { min: capability.min ?? null, max: capability.max ?? null };
+  }
+  if (capability.type === "combined") return capability.budget ?? null;
+  return null;
+}
+
+function supportsReasoning(
+  capability: ReasoningCapability,
+  selection: ReasoningSelection,
+): boolean {
+  if (selection.mode === "off") {
+    return capability.type === "none" || capability.disable_supported;
+  }
+  if (selection.mode === "on") {
+    return (
+      capability.type === "toggle" ||
+      (capability.type === "combined" && capability.toggle)
+    );
+  }
+  if (selection.mode === "effort") {
+    const values =
+      capability.type === "effort"
+        ? capability.values
+        : capability.type === "combined"
+          ? capability.effort
+          : [];
+    return values.includes(selection.effort);
+  }
+  const bounds = budgetBounds(capability);
+  return (
+    bounds !== null &&
+    (bounds.min == null || selection.budget_tokens >= bounds.min) &&
+    (bounds.max == null || selection.budget_tokens <= bounds.max)
+  );
+}
+
+function reasoningChoices(capability: ReasoningCapability): ReasoningSelection[] {
+  if (capability.type === "none") return [];
+  const choices: ReasoningSelection[] = [];
+  if (capability.disable_supported) choices.push({ mode: "off" });
+  const efforts =
+    capability.type === "effort"
+      ? capability.values
+      : capability.type === "combined"
+        ? capability.effort
+        : [];
+  if (efforts.length > 0) {
+    choices.push(...efforts.map((effort) => ({ mode: "effort" as const, effort })));
+    return choices;
+  }
+  const bounds = budgetBounds(capability);
+  if (bounds !== null) {
+    const values = [1024, 8192, bounds.max ?? 24576].filter(
+      (value, index, all) =>
+        all.indexOf(value) === index &&
+        (bounds.min == null || value >= bounds.min) &&
+        (bounds.max == null || value <= bounds.max),
+    );
+    choices.push(...values.map((budget_tokens) => ({ mode: "budget_tokens" as const, budget_tokens })));
+    return choices;
+  }
+  if (
+    capability.type === "toggle" ||
+    (capability.type === "combined" && capability.toggle)
+  ) {
+    choices.push({ mode: "on" });
+  }
+  return choices;
+}
+
+function defaultReasoning(capability: ReasoningCapability): ReasoningSelection {
+  return reasoningChoices(capability)[0] ?? { mode: "off" };
+}
 
 /** Compact token count: 83700 → "83.7k", 256000 → "256k". */
 export function formatTokens(value: number): string {
@@ -129,7 +247,7 @@ export function Composer({ centered }: { centered: boolean }) {
   const [model, setModel] = useState("");
   const [permissionMode, setPermissionMode] = useState("");
   const [developmentMode, setDevelopmentMode] = useState("");
-  const [reasoningEffort, setReasoningEffort] = useState("");
+  const [reasoning, setReasoning] = useState<ReasoningSelection | null>(null);
 
   // -- Attachment queue ------------------------------------------------------
   const [attachments, setAttachments] = useState<QueuedAttachment[]>([]);
@@ -142,8 +260,9 @@ export function Composer({ centered }: { centered: boolean }) {
 
   // -- Per-turn menus ---------------------------------------------------------
   const [openMenu, setOpenMenu] = useState<ComposerMenu | null>(null);
-  const [modelMenuPage, setModelMenuPage] = useState<"quick" | "all">("quick");
+  const [modelMenuPane, setModelMenuPane] = useState<ModelMenuPane>("root");
   const [modelQuery, setModelQuery] = useState("");
+  const [budgetInput, setBudgetInput] = useState("");
   const modelWrapRef = useRef<HTMLDivElement | null>(null);
   const permissionWrapRef = useRef<HTMLDivElement | null>(null);
   const developmentWrapRef = useRef<HTMLDivElement | null>(null);
@@ -262,7 +381,7 @@ export function Composer({ centered }: { centered: boolean }) {
     if (developmentMode !== "") {
       composer.development_mode = developmentMode as WebUiDevelopmentMode;
     }
-    if (reasoningEffort !== "") composer.reasoning_effort = reasoningEffort;
+    if (reasoning !== null) composer.reasoning = reasoning;
     return Object.keys(composer).length > 0 ? composer : undefined;
   };
 
@@ -393,27 +512,51 @@ export function Composer({ centered }: { centered: boolean }) {
   const models = bootstrap?.models ?? [];
   const permissionModes = bootstrap?.permission_modes ?? [];
   const developmentModes = bootstrap?.development_modes ?? [];
+  const defaultModel = bootstrap?.default_model ?? "";
+  const activeModelAlias = model === "" ? defaultModel : model;
   const selectedModel: WebUiModelInfo | undefined = models.find(
-    (entry) => entry.alias === model,
+    (entry) => entry.alias === activeModelAlias,
   );
-  const reasoningCapable = (selectedModel?.capabilities ?? []).includes("reasoning");
+  const reasoningCapability = selectedModel?.reasoning ?? NO_REASONING;
+  const configuredReasoning = bootstrap?.default_reasoning ?? { mode: "off" };
+  const effectiveReasoning =
+    reasoning !== null && supportsReasoning(reasoningCapability, reasoning)
+      ? reasoning
+      : supportsReasoning(reasoningCapability, configuredReasoning)
+        ? configuredReasoning
+        : defaultReasoning(reasoningCapability);
+  const reasoningCapable = reasoningCapability.type !== "none";
+  const availableReasoning = reasoningChoices(reasoningCapability);
+  const bounds = budgetBounds(reasoningCapability);
+  const customBudget = Number(budgetInput);
+  const customBudgetValid =
+    budgetInput !== "" &&
+    Number.isSafeInteger(customBudget) &&
+    customBudget >= 0 &&
+    customBudget <= 4_294_967_295 &&
+    supportsReasoning(reasoningCapability, {
+      mode: "budget_tokens",
+      budget_tokens: customBudget,
+    });
 
-  const nextReasoningEffort = (current: string): string => {
-    const index = REASONING_EFFORTS.indexOf(
-      current as (typeof REASONING_EFFORTS)[number],
-    );
-    return REASONING_EFFORTS[index + 1] ?? "";
-  };
-
-  const quickModels = models.slice(0, 4);
   const filteredModels = models.filter((entry) => {
     const needle = modelQuery.trim().toLowerCase();
     if (needle === "") return true;
     return (
       entry.alias.toLowerCase().includes(needle) ||
+      (entry.display_name ?? "").toLowerCase().includes(needle) ||
       entry.provider.toLowerCase().includes(needle)
     );
   });
+  const groupedModels = filteredModels.reduce<Map<string, WebUiModelInfo[]>>(
+    (groups, entry) => {
+      const group = groups.get(entry.provider) ?? [];
+      group.push(entry);
+      groups.set(entry.provider, group);
+      return groups;
+    },
+    new Map(),
+  );
 
   const toggleMenu = (menu: ComposerMenu, button: HTMLButtonElement) => {
     menuButtonRef.current = button;
@@ -422,10 +565,27 @@ export function Composer({ centered }: { centered: boolean }) {
       return;
     }
     if (menu === "model") {
-      setModelMenuPage("quick");
+      setModelMenuPane("root");
       setModelQuery("");
+      setBudgetInput("");
     }
     setOpenMenu(menu);
+  };
+
+  const selectModel = (entry: WebUiModelInfo | null) => {
+    if (entry === null) {
+      setModel("");
+      setReasoning(null);
+      setModelMenuPane("root");
+      return;
+    }
+    setModel(entry.alias);
+    setReasoning(
+      supportsReasoning(entry.reasoning, effectiveReasoning)
+        ? effectiveReasoning
+        : defaultReasoning(entry.reasoning),
+    );
+    setModelMenuPane("root");
   };
 
   const modelOption = (entry: WebUiModelInfo) => (
@@ -433,29 +593,36 @@ export function Composer({ centered }: { centered: boolean }) {
       type="button"
       key={entry.alias}
       role="option"
-      aria-selected={model === entry.alias}
-      className={`model-row ${model === entry.alias ? "selected" : ""}`}
-      onClick={() => {
-        setModel(entry.alias);
-        setOpenMenu(null);
-      }}
+      aria-selected={model !== "" && activeModelAlias === entry.alias}
+      className={`model-row ${model !== "" && activeModelAlias === entry.alias ? "selected" : ""}`}
+      onClick={() => selectModel(entry)}
     >
-      <span className="model-row-name">{entry.alias}</span>
+      <span className="model-row-name">{entry.display_name ?? entry.alias}</span>
       <span className="model-row-meta">
-        {entry.provider}
+        {entry.display_name ? entry.alias : entry.provider}
         {entry.context_window ? ` · ${formatTokens(entry.context_window)}` : ""}
       </span>
-      {(entry.capabilities ?? []).length > 0 ? (
-        <span className="model-row-caps">
-          {(entry.capabilities ?? []).map((capability) => (
-            <span key={capability} className="cap-chip">
-              {capability}
-            </span>
-          ))}
-        </span>
+      {model !== "" && activeModelAlias === entry.alias ? (
+        <Check className="model-row-check" size={14} />
       ) : null}
     </button>
   );
+
+  const onModelMenuKeyDown = (event: React.KeyboardEvent<HTMLDivElement>) => {
+    if (event.key !== "ArrowDown" && event.key !== "ArrowUp") return;
+    if (event.target instanceof HTMLInputElement && event.target.type === "number") return;
+    const panel = (event.target as HTMLElement).closest(".pill-popover");
+    if (!(panel instanceof HTMLElement)) return;
+    const controls = [...panel.querySelectorAll<HTMLElement>("button:not(:disabled), input:not(:disabled)")];
+    if (controls.length === 0) return;
+    event.preventDefault();
+    const current = controls.indexOf(document.activeElement as HTMLElement);
+    const next =
+      event.key === "ArrowDown"
+        ? (current + 1 + controls.length) % controls.length
+        : (current - 1 + controls.length) % controls.length;
+    controls[next]?.focus();
+  };
 
   const contextWindow = view?.projection.contextWindow ?? null;
 
@@ -595,80 +762,175 @@ export function Composer({ centered }: { centered: boolean }) {
                 <button
                   type="button"
                   className="composer-pill model-pill"
-                  aria-label="模型（仅下一回合）"
+                  aria-label="模型与推理（仅下一回合）"
                   aria-expanded={openMenu === "model"}
-                  aria-haspopup="listbox"
-                  title={model === "" ? "默认模型" : model}
+                  aria-haspopup="dialog"
+                  title="选择模型与推理强度（仅下一回合）"
                   onClick={(event) => {
                     toggleMenu("model", event.currentTarget);
                   }}
                 >
                   <span className="model-pill-name">
-                    {model === "" ? "默认模型" : model}
+                    {selectedModel?.display_name ?? (activeModelAlias || "默认模型")}
                   </span>
+                  {reasoningCapable ? (
+                    <span className="model-pill-reasoning">
+                      {reasoningLabel(effectiveReasoning)}
+                    </span>
+                  ) : null}
                   <ChevronDown size={12} aria-hidden />
                 </button>
                 {openMenu === "model" ? (
-                  <div className="pill-popover" role="dialog" aria-label="选择模型">
-                    {modelMenuPage === "all" ? (
-                      <div className="pill-popover-search">
-                        <Search size={13} aria-hidden />
-                        <input
+                  <div
+                    className="model-menu-shell"
+                    data-pane={modelMenuPane}
+                    role="dialog"
+                    aria-label="选择模型与推理"
+                    onKeyDown={onModelMenuKeyDown}
+                  >
+                    <div className="pill-popover model-settings-popover">
+                      <div className="pill-popover-list model-settings-list">
+                        <button
+                          type="button"
                           autoFocus
-                          aria-label="搜索模型"
-                          placeholder="搜索模型…"
-                          value={modelQuery}
-                          onChange={(event) => setModelQuery(event.target.value)}
-                        />
+                          className={`model-settings-row ${modelMenuPane === "models" ? "selected" : ""}`}
+                          onClick={() => setModelMenuPane("models")}
+                        >
+                          <span>模型</span>
+                          <span className="model-settings-value">
+                            {selectedModel?.display_name ?? (activeModelAlias || "默认模型")}
+                            <ChevronRight size={14} aria-hidden />
+                          </span>
+                        </button>
+                        {reasoningCapable ? (
+                          <button
+                            type="button"
+                            className={`model-settings-row ${modelMenuPane === "reasoning" ? "selected" : ""}`}
+                            onClick={() => setModelMenuPane("reasoning")}
+                          >
+                            <span>推理强度</span>
+                            <span className="model-settings-value">
+                              {reasoningLabel(effectiveReasoning)}
+                              <ChevronRight size={14} aria-hidden />
+                            </span>
+                          </button>
+                        ) : (
+                          <div className="model-settings-row disabled">
+                            <span>推理强度</span>
+                            <span className="model-settings-value">不支持</span>
+                          </div>
+                        )}
                       </div>
-                    ) : null}
-                    <div className="pill-popover-list" role="listbox" aria-label="模型列表">
-                      {modelMenuPage === "quick" ? (
-                        <>
+                    </div>
+                    {modelMenuPane === "models" ? (
+                      <div className="pill-popover model-submenu" aria-label="选择模型">
+                        <div className="model-submenu-title">
+                          <button
+                            type="button"
+                            className="model-submenu-back"
+                            aria-label="返回"
+                            onClick={() => setModelMenuPane("root")}
+                          >
+                            <ChevronLeft size={14} aria-hidden />
+                          </button>
+                          <span>模型</span>
+                        </div>
+                        <div className="pill-popover-search">
+                          <Search size={13} aria-hidden />
+                          <input
+                            autoFocus
+                            aria-label="搜索模型"
+                            placeholder="搜索模型…"
+                            value={modelQuery}
+                            onChange={(event) => setModelQuery(event.target.value)}
+                          />
+                        </div>
+                        <div className="pill-popover-list model-catalog" role="listbox" aria-label="模型列表">
                           <button
                             type="button"
                             role="option"
                             aria-selected={model === ""}
                             className={`model-row ${model === "" ? "selected" : ""}`}
-                            onClick={() => {
-                              setModel("");
-                              setOpenMenu(null);
-                            }}
+                            onClick={() => selectModel(null)}
                           >
-                            <span className="model-row-name">默认模型</span>
-                            <span className="model-row-meta">跟随会话配置</span>
+                            <span className="model-row-name">跟随会话配置</span>
+                            <span className="model-row-meta">{defaultModel || "默认模型"}</span>
+                            {model === "" ? <Check className="model-row-check" size={14} /> : null}
                           </button>
-                          {quickModels.map(modelOption)}
-                          <button
-                            type="button"
-                            className="model-row"
-                            aria-label="更多模型"
-                            onClick={() => setModelMenuPage("all")}
-                          >
-                            <span className="model-row-name">更多模型</span>
-                            <span className="model-row-meta">查看完整列表</span>
-                          </button>
-                        </>
-                      ) : (
-                        <>
-                          <button
-                            type="button"
-                            className="model-row"
-                            onClick={() => {
-                              setModelQuery("");
-                              setModelMenuPage("quick");
-                            }}
-                          >
-                            <ChevronLeft size={13} aria-hidden />
-                            <span className="model-row-name">返回快捷模型</span>
-                          </button>
-                          {filteredModels.map(modelOption)}
+                          {[...groupedModels].map(([provider, entries]) => (
+                            <div className="model-provider-group" key={provider}>
+                              <div className="model-provider-heading">{provider}</div>
+                              {entries.map(modelOption)}
+                            </div>
+                          ))}
                           {filteredModels.length === 0 ? (
                             <div className="pill-popover-empty">没有匹配的模型</div>
                           ) : null}
-                        </>
-                      )}
-                    </div>
+                        </div>
+                      </div>
+                    ) : null}
+                    {modelMenuPane === "reasoning" ? (
+                      <div className="pill-popover model-submenu reasoning-submenu" aria-label="选择推理强度">
+                        <div className="model-submenu-title">
+                          <button
+                            type="button"
+                            className="model-submenu-back"
+                            aria-label="返回"
+                            onClick={() => setModelMenuPane("root")}
+                          >
+                            <ChevronLeft size={14} aria-hidden />
+                          </button>
+                          <span>推理强度</span>
+                        </div>
+                        <div className="pill-popover-list" role="listbox" aria-label="推理强度列表">
+                          {availableReasoning.map((choice) => {
+                            const selected = reasoningKey(choice) === reasoningKey(effectiveReasoning);
+                            return (
+                              <button
+                                type="button"
+                                role="option"
+                                aria-selected={selected}
+                                className={`model-row ${selected ? "selected" : ""}`}
+                                key={reasoningKey(choice)}
+                                onClick={() => {
+                                  setReasoning(choice);
+                                  setModelMenuPane("root");
+                                }}
+                              >
+                                <span className="model-row-name">{reasoningLabel(choice)}</span>
+                                {selected ? <Check className="model-row-check" size={14} /> : null}
+                              </button>
+                            );
+                          })}
+                          {bounds !== null ? (
+                            <div className="reasoning-budget-row">
+                              <input
+                                type="number"
+                                aria-label="自定义推理预算"
+                                placeholder="自定义令牌数"
+                                min={bounds.min ?? undefined}
+                                max={bounds.max ?? undefined}
+                                value={budgetInput}
+                                onChange={(event) => setBudgetInput(event.target.value)}
+                              />
+                              <button
+                                type="button"
+                                disabled={!customBudgetValid}
+                                onClick={() => {
+                                  setReasoning({
+                                    mode: "budget_tokens",
+                                    budget_tokens: customBudget,
+                                  });
+                                  setModelMenuPane("root");
+                                }}
+                              >
+                                应用
+                              </button>
+                            </div>
+                          ) : null}
+                        </div>
+                      </div>
+                    ) : null}
                   </div>
                 ) : null}
               </div>
@@ -780,18 +1042,6 @@ export function Composer({ centered }: { centered: boolean }) {
                   </div>
                 ) : null}
               </div>
-            ) : null}
-            {reasoningCapable ? (
-              <button
-                type="button"
-                className="composer-pill reasoning-pill"
-                data-active={reasoningEffort !== ""}
-                aria-label="推理强度（仅下一回合）"
-                title="点击切换推理强度（仅下一回合）"
-                onClick={() => setReasoningEffort(nextReasoningEffort(reasoningEffort))}
-              >
-                {reasoningEffort === "" ? "推理" : REASONING_LABELS[reasoningEffort]}
-              </button>
             ) : null}
           </div>
           <div className="composer-actions">

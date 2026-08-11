@@ -130,18 +130,38 @@ export const workspaceSessions = (
 export function bootstrapBody(): Record<string, unknown> {
   return {
     workspace_label: "neo",
+    default_model: "gpt-5-codex",
+    default_reasoning: { mode: "effort", effort: "high" },
     models: [
       {
         alias: "gpt-5-codex",
         provider: "openai",
         context_window: 256000,
         capabilities: ["reasoning"],
+        reasoning: {
+          type: "effort",
+          values: ["low", "medium", "high", "xhigh"],
+          disable_supported: true,
+        },
       },
       {
         alias: "claude-sonnet",
         provider: "anthropic",
         context_window: 200000,
         capabilities: [],
+        reasoning: { type: "none" },
+      },
+      {
+        alias: "deepseek-reasoner",
+        provider: "deepseek",
+        context_window: 128000,
+        capabilities: ["reasoning"],
+        reasoning: {
+          type: "budget_tokens",
+          min: 1024,
+          max: 32768,
+          disable_supported: true,
+        },
       },
     ],
     permission_modes: ["ask", "auto", "yolo"],

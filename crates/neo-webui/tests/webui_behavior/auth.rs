@@ -185,7 +185,7 @@ async fn unknown_json_or_query_fields_are_rejected() {
             origin: Some(server.origin()),
             cookie: Some(cookie.clone()),
             content_type: Some("application/json".to_string()),
-            body: br#"{"message":"hello"}"#.to_vec(),
+            body: br#"{"message":"hello","composer":{"reasoning":{"mode":"effort","effort":"xhigh"}}}"#.to_vec(),
             ..RawRequest::default()
         },
     )
@@ -215,6 +215,10 @@ async fn unknown_json_or_query_fields_are_rejected() {
         post(
             "/api/sessions".to_string(),
             br#"{"message":"hi","composer":{"model":"m","bogus":1}}"#,
+        ),
+        post(
+            "/api/sessions".to_string(),
+            br#"{"message":"hi","composer":{"reasoning_effort":"high"}}"#,
         ),
         post(
             format!("/api/sessions/{session_id}/turns"),

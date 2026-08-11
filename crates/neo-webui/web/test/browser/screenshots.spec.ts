@@ -48,7 +48,7 @@ test("01 宽屏新会话：欢迎 banner 与 pill 行", async ({ page }) => {
   await openApp(page, 1440, 900);
   await expect(page.getByLabel("输入消息", { exact: true })).toBeVisible();
   await expect(page.getByRole("note")).toContainText("描述你的任务，回车发送");
-  await expect(page.getByRole("button", { name: "模型（仅下一回合）" })).toBeVisible();
+  await expect(page.getByRole("button", { name: "模型与推理（仅下一回合）" })).toBeVisible();
   await page.screenshot({ path: `${SHOTS}/01-wide-new-session.png` });
 });
 
@@ -396,8 +396,8 @@ test("09 侧栏多工作区分组", async ({ page }) => {
 
 test("10 composer 模型 pill 覆盖层", async ({ page }) => {
   await openApp(page, 1440, 900);
-  await page.getByRole("button", { name: "模型（仅下一回合）" }).click();
-  const overlay = page.getByRole("dialog", { name: "选择模型" });
+  await page.getByRole("button", { name: "模型与推理（仅下一回合）" }).click();
+  const overlay = page.getByRole("dialog", { name: "选择模型与推理" });
   await expect(overlay).toBeVisible();
   const box = await overlay.boundingBox();
   if (!box) throw new Error("model menu has no box");
@@ -405,13 +405,27 @@ test("10 composer 模型 pill 覆盖层", async ({ page }) => {
     ([x, y]) => document.elementFromPoint(x, y)?.closest('[role="dialog"]')?.getAttribute("aria-label"),
     [box.x + box.width / 2, box.y + box.height / 2] as const,
   );
-  expect(paintedDialog).toBe("选择模型");
-  await overlay.getByRole("button", { name: "更多模型" }).click();
+  expect(paintedDialog).toBe("选择模型与推理");
+  await overlay.getByRole("button", { name: /^模型/ }).click();
   await expect(overlay.getByLabel("搜索模型")).toBeVisible();
-  await expect(overlay.getByRole("option", { name: /gpt-5-codex/ })).toBeVisible();
+  await expect(overlay.getByRole("option", { name: /gpt-5-codex openai/ })).toBeVisible();
   await expect(overlay.getByRole("option", { name: /claude-sonnet-4.5/ })).toBeVisible();
   await expect(overlay.getByRole("option", { name: /kimi-k2/ })).toBeVisible();
   await page.screenshot({ path: `${SHOTS}/10-composer-model-pill-overlay.png` });
+
+  await page.setViewportSize({ width: 375, height: 800 });
+  await expect(overlay.locator(".model-settings-popover")).toBeHidden();
+  const narrowBox = await overlay.locator(".model-submenu").boundingBox();
+  if (!narrowBox) throw new Error("narrow model menu has no box");
+  expect(narrowBox.x).toBeGreaterThanOrEqual(0);
+  expect(narrowBox.x + narrowBox.width).toBeLessThanOrEqual(375);
+  await page.screenshot({ path: `${SHOTS}/10b-composer-model-pill-narrow.png` });
+
+  await page.setViewportSize({ width: 1440, height: 900 });
+  await overlay.getByRole("option", { name: /gpt-5-codex openai/ }).click();
+  await overlay.getByRole("button", { name: /^推理强度/ }).click();
+  await expect(overlay.getByRole("option", { name: "极高" })).toBeVisible();
+  await page.screenshot({ path: `${SHOTS}/10c-composer-reasoning-overlay.png` });
 });
 
 test("11 composer 附件队列", async ({ page }) => {
@@ -521,8 +535,8 @@ test("16 亮色：侧栏分组", async ({ page }) => {
 test("17 亮色：composer pill 覆盖层", async ({ page }) => {
   await openApp(page, 1440, 900);
   await switchToLight(page);
-  await page.getByRole("button", { name: "模型（仅下一回合）" }).click();
-  await expect(page.getByRole("dialog", { name: "选择模型" })).toBeVisible();
+  await page.getByRole("button", { name: "模型与推理（仅下一回合）" }).click();
+  await expect(page.getByRole("dialog", { name: "选择模型与推理" })).toBeVisible();
   await page.screenshot({ path: `${SHOTS}/17-light-composer-pill.png` });
 });
 

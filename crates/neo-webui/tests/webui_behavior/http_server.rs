@@ -231,11 +231,15 @@ impl WebUiHost for FakeHost {
                 }
                 Ok(WebUiReply::Bootstrap(WebUiBootstrap {
                     workspace_label: Some("sample-workspace".to_string()),
+                    default_model: "fake-model".to_string(),
+                    default_reasoning: neo_ai::ReasoningSelection::Off,
                     models: vec![WebUiModelInfo {
                         alias: "fake-model".to_string(),
                         provider: "fake-provider".to_string(),
+                        display_name: None,
                         context_window: Some(128_000),
                         capabilities: vec!["streaming".to_string()],
+                        reasoning: neo_ai::ReasoningCapability::None,
                     }],
                     permission_modes: vec![
                         neo_agent_core::PermissionMode::Ask,

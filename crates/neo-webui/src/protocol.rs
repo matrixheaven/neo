@@ -14,6 +14,7 @@ use neo_agent_core::{
     AgentEvent, AgentTokenUsage, ApprovalAction, ApprovalOption, ApprovalPresentation,
     PermissionMode, QuestionEventData, TodoEventData,
 };
+use neo_ai::{ReasoningCapability, ReasoningSelection};
 use serde::{Deserialize, Serialize};
 
 /// Body of `POST /api/auth/claim`. The token is sensitive: it must never be
@@ -81,7 +82,7 @@ pub struct WebUiComposer {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub model: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub reasoning_effort: Option<String>,
+    pub reasoning: Option<ReasoningSelection>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub permission_mode: Option<PermissionMode>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -509,9 +510,12 @@ pub struct WebUiModelInfo {
     pub alias: String,
     pub provider: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub display_name: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub context_window: Option<u32>,
     #[serde(default)]
     pub capabilities: Vec<String>,
+    pub reasoning: ReasoningCapability,
 }
 
 /// One slash-command or workspace-file candidate for the composer.
@@ -536,6 +540,8 @@ pub struct WebUiCompletions {
 pub struct WebUiBootstrap {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub workspace_label: Option<String>,
+    pub default_model: String,
+    pub default_reasoning: ReasoningSelection,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub models: Vec<WebUiModelInfo>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]

@@ -6,7 +6,7 @@
  * showing only until the first canonical user message.
  */
 
-import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import React from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -184,25 +184,22 @@ describe("composer R6", () => {
     await waitFor(() => expect(screen.queryByText("diagram.png")).toBeNull());
   });
 
-  it("opens the full model list from more models and writes the choice into the composer field", async () => {
+  it("searches the grouped model submenu and writes the choice into the composer field", async () => {
     const user = userEvent.setup();
     await renderReady();
-    await user.click(screen.getByRole("button", { name: "模型（仅下一回合）" }));
-    expect(screen.getByRole("option", { name: /默认模型/ })).toBeTruthy();
-    await user.click(screen.getByRole("button", { name: "更多模型" }));
+    await user.click(screen.getByRole("button", { name: "模型与推理（仅下一回合）" }));
+    const dialog = screen.getByRole("dialog", { name: "选择模型与推理" });
+    await user.click(within(dialog).getByRole("button", { name: /^模型/ }));
     const search = await screen.findByLabelText("搜索模型");
-    // Rows carry alias · provider · context size · capability chips.
     screen.getByText("openai · 256k");
-    screen.getByText("reasoning");
 
     await user.type(search, "claude");
-    expect(screen.queryByText("gpt-5-codex")).toBeNull();
+    expect(screen.queryByText("openai · 256k")).toBeNull();
     await user.click(screen.getByRole("option", { name: /claude-sonnet/ }));
-    // Pill shows the truncated alias; no reasoning pill for this model.
     expect(
-      screen.getByRole("button", { name: "模型（仅下一回合）" }).textContent,
+      screen.getByRole("button", { name: "模型与推理（仅下一回合）" }).textContent,
     ).toContain("claude-sonnet");
-    expect(screen.queryByRole("button", { name: "推理强度（仅下一回合）" })).toBeNull();
+    expect(within(dialog).getByText("不支持")).toBeTruthy();
 
     await user.type(screen.getByLabelText("输入消息"), "换个模型试试{Enter}");
     await waitFor(() => {
@@ -215,22 +212,23 @@ describe("composer R6", () => {
   it("opens the full model list and selects a model with the keyboard", async () => {
     const user = userEvent.setup();
     await renderReady();
-    const pill = screen.getByRole("button", { name: "模型（仅下一回合）" });
+    const pill = screen.getByRole("button", { name: "模型与推理（仅下一回合）" });
 
     pill.focus();
     await user.keyboard("{Enter}");
-    const moreModels = await screen.findByRole("button", { name: "更多模型" });
-    moreModels.focus();
+    const dialog = await screen.findByRole("dialog", { name: "选择模型与推理" });
+    const modelRow = within(dialog).getByRole("button", { name: /^模型/ });
+    modelRow.focus();
     await user.keyboard("{Enter}");
 
     const search = await screen.findByLabelText("搜索模型");
     expect(document.activeElement).toBe(search);
-    expect(screen.getByRole("button", { name: /返回快捷模型/ })).toBeTruthy();
+    expect(screen.getByRole("button", { name: "返回" })).toBeTruthy();
 
     const model = screen.getByRole("option", { name: /claude-sonnet/ });
     model.focus();
     await user.keyboard("{Enter}");
-    expect(screen.queryByRole("dialog", { name: "选择模型" })).toBeNull();
+    expect(screen.getByRole("dialog", { name: "选择模型与推理" })).toBeTruthy();
     expect(pill.textContent).toContain("claude-sonnet");
   });
 
@@ -238,7 +236,7 @@ describe("composer R6", () => {
     const user = userEvent.setup();
     await renderReady();
     for (const [buttonName, dialogName] of [
-      ["模型（仅下一回合）", "选择模型"],
+      ["模型与推理（仅下一回合）", "选择模型与推理"],
       ["权限模式（仅下一回合）", "选择权限模式"],
       ["开发模式（仅下一回合）", "选择开发模式"],
     ]) {
@@ -250,30 +248,50 @@ describe("composer R6", () => {
       expect(document.activeElement).toBe(pill);
     }
 
-    await user.click(screen.getByRole("button", { name: "模型（仅下一回合）" }));
-    await screen.findByRole("dialog", { name: "选择模型" });
+    await user.click(screen.getByRole("button", { name: "模型与推理（仅下一回合）" }));
+    await screen.findByRole("dialog", { name: "选择模型与推理" });
     await user.click(screen.getByLabelText("输入消息"));
-    await waitFor(() => expect(screen.queryByRole("dialog", { name: "选择模型" })).toBeNull());
+    await waitFor(() =>
+      expect(screen.queryByRole("dialog", { name: "选择模型与推理" })).toBeNull(),
+    );
     // Outside click leaves focus where the user clicked.
     expect(document.activeElement).toBe(screen.getByLabelText("输入消息"));
   });
 
-  it("shows the reasoning pill only for capable models", async () => {
+  it("offers only the selected model reasoning values and sends the structured choice", async () => {
     const user = userEvent.setup();
     await renderReady();
-    expect(screen.queryByRole("button", { name: "推理强度（仅下一回合）" })).toBeNull();
-
-    await user.click(screen.getByRole("button", { name: "模型（仅下一回合）" }));
-    await user.click(await screen.findByRole("option", { name: /gpt-5-codex/ }));
-    await user.click(
-      await screen.findByRole("button", { name: "推理强度（仅下一回合）" }),
-    );
+    await user.click(screen.getByRole("button", { name: "模型与推理（仅下一回合）" }));
+    const dialog = screen.getByRole("dialog", { name: "选择模型与推理" });
+    await user.click(within(dialog).getByRole("button", { name: /^推理强度/ }));
+    await user.click(screen.getByRole("option", { name: "极高" }));
     await user.type(screen.getByLabelText("输入消息"), "带推理{Enter}");
     await waitFor(() => {
       const creates = postedBodies("/api/sessions");
-      expect((creates[0].composer as { reasoning_effort?: string }).reasoning_effort).toBe(
-        "low",
-      );
+      expect((creates[0].composer as { reasoning?: unknown }).reasoning).toEqual({
+        mode: "effort",
+        effort: "xhigh",
+      });
+    });
+  });
+
+  it("accepts a model-bounded custom reasoning budget", async () => {
+    const user = userEvent.setup();
+    await renderReady();
+    await user.click(screen.getByRole("button", { name: "模型与推理（仅下一回合）" }));
+    const dialog = screen.getByRole("dialog", { name: "选择模型与推理" });
+    await user.click(within(dialog).getByRole("button", { name: /^模型/ }));
+    await user.click(screen.getByRole("option", { name: /deepseek-reasoner/ }));
+    await user.click(within(dialog).getByRole("button", { name: /^推理强度/ }));
+    await user.type(screen.getByLabelText("自定义推理预算"), "12000");
+    await user.click(screen.getByRole("button", { name: "应用" }));
+    await user.type(screen.getByLabelText("输入消息"), "预算推理{Enter}");
+    await waitFor(() => {
+      const creates = postedBodies("/api/sessions");
+      expect((creates[0].composer as { reasoning?: unknown }).reasoning).toEqual({
+        mode: "budget_tokens",
+        budget_tokens: 12000,
+      });
     });
   });
 
@@ -323,10 +341,12 @@ describe("composer R6", () => {
     const user = userEvent.setup();
     await renderReady();
 
-    await user.click(screen.getByRole("button", { name: "模型（仅下一回合）" }));
-    await user.click(await screen.findByRole("option", { name: /gpt-5-codex/ }));
-    await user.click(screen.getByRole("button", { name: "模型（仅下一回合）" }));
-    await user.click(await screen.findByRole("option", { name: /默认模型/ }));
+    await user.click(screen.getByRole("button", { name: "模型与推理（仅下一回合）" }));
+    const dialog = screen.getByRole("dialog", { name: "选择模型与推理" });
+    await user.click(within(dialog).getByRole("button", { name: /^模型/ }));
+    await user.click(await screen.findByRole("option", { name: /gpt-5-codex openai/ }));
+    await user.click(within(dialog).getByRole("button", { name: /^模型/ }));
+    await user.click(await screen.findByRole("option", { name: /跟随会话配置/ }));
     await user.type(screen.getByLabelText("输入消息"), "使用默认模型{Enter}");
     await waitFor(() => {
       const creates = postedBodies("/api/sessions");
