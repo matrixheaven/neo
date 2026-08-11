@@ -193,80 +193,13 @@ function SplitSide({ line, side, wrap }: {
   );
 }
 
-function ScrollableDiff({
-  children,
-  className,
-  label,
-}: {
-  children: ReactNode;
-  className: string;
-  label: string;
-}) {
-  const contentRef = useRef<HTMLDivElement | null>(null);
-  const scrollbarRef = useRef<HTMLDivElement | null>(null);
-  const trackRef = useRef<HTMLDivElement | null>(null);
-
-  useEffect(() => {
-    const content = contentRef.current;
-    const scrollbar = scrollbarRef.current;
-    const track = trackRef.current;
-    if (!content || !scrollbar || !track) return;
-
-    const update = () => {
-      track.style.width = `${content.scrollWidth}px`;
-      scrollbar.hidden = content.scrollWidth <= content.clientWidth + 1;
-      scrollbar.scrollLeft = content.scrollLeft;
-    };
-    const fromContent = () => {
-      if (scrollbar.scrollLeft !== content.scrollLeft) scrollbar.scrollLeft = content.scrollLeft;
-    };
-    const fromScrollbar = () => {
-      if (content.scrollLeft !== scrollbar.scrollLeft) content.scrollLeft = scrollbar.scrollLeft;
-    };
-    const frame = window.requestAnimationFrame(update);
-    const observer = typeof ResizeObserver === "undefined" ? null : new ResizeObserver(update);
-    observer?.observe(content);
-    if (observer && content.firstElementChild instanceof HTMLElement) {
-      observer.observe(content.firstElementChild);
-    }
-    window.addEventListener("resize", update);
-    content.addEventListener("scroll", fromContent, { passive: true });
-    scrollbar.addEventListener("scroll", fromScrollbar, { passive: true });
-    return () => {
-      window.cancelAnimationFrame(frame);
-      observer?.disconnect();
-      window.removeEventListener("resize", update);
-      content.removeEventListener("scroll", fromContent);
-      scrollbar.removeEventListener("scroll", fromScrollbar);
-    };
-  });
-
-  return (
-    <div className="review-scroll-area">
-      <div
-        ref={scrollbarRef}
-        className="review-sticky-horizontal-scroll"
-        aria-label={label}
-        tabIndex={0}
-        hidden
-      >
-        <div ref={trackRef} className="review-sticky-horizontal-track" />
-      </div>
-      <div ref={contentRef} className={className}>{children}</div>
-    </div>
-  );
-}
-
 function SplitPane({ rows, side, wrap }: {
   rows: SplitRow[];
   side: "old" | "new";
   wrap: boolean;
 }) {
   return (
-    <ScrollableDiff
-      className="review-split-pane"
-      label={`${side === "old" ? "左侧" : "右侧"}对比横向滚动`}
-    >
+    <div className="review-split-pane">
       <div role="rowgroup">
         {rows.map((row, index) => row.separator ? (
           <div className="review-split-separator" key={`${side}:${index}:${row.separator.content}`}>
@@ -282,7 +215,85 @@ function SplitPane({ rows, side, wrap }: {
           </div>
         ))}
       </div>
-    </ScrollableDiff>
+    </div>
+  );
+}
+
+function ReviewHorizontalControls({
+  layout,
+  path,
+  rootRef,
+  updateKey,
+}: {
+  layout: DiffLayout;
+  path: string | null;
+  rootRef: React.RefObject<HTMLDivElement | null>;
+  updateKey: string;
+}) {
+  const scrollbarRefs = useRef<Array<HTMLDivElement | null>>([]);
+  const trackRefs = useRef<Array<HTMLDivElement | null>>([]);
+
+  useEffect(() => {
+    const section = path ? document.getElementById(reviewFileId(path)) : null;
+    if (!section || !rootRef.current?.contains(section)) return;
+    const selector = layout === "unified" ? ".review-code-scroll" : ".review-split-pane";
+    const contents = [...section.querySelectorAll<HTMLElement>(selector)];
+    const cleanups: Array<() => void> = [];
+
+    scrollbarRefs.current.forEach((scrollbar, index) => {
+      const content = contents[index];
+      const track = trackRefs.current[index];
+      if (!scrollbar || !track || !content) {
+        if (scrollbar) scrollbar.hidden = true;
+        return;
+      }
+      const update = () => {
+        track.style.width = `${content.scrollWidth}px`;
+        scrollbar.hidden = content.scrollWidth <= content.clientWidth + 1;
+        scrollbar.scrollLeft = content.scrollLeft;
+      };
+      const fromContent = () => {
+        if (scrollbar.scrollLeft !== content.scrollLeft) scrollbar.scrollLeft = content.scrollLeft;
+      };
+      const fromScrollbar = () => {
+        if (content.scrollLeft !== scrollbar.scrollLeft) content.scrollLeft = scrollbar.scrollLeft;
+      };
+      const observer = typeof ResizeObserver === "undefined" ? null : new ResizeObserver(update);
+      observer?.observe(content);
+      if (observer && content.firstElementChild instanceof HTMLElement) {
+        observer.observe(content.firstElementChild);
+      }
+      content.addEventListener("scroll", fromContent, { passive: true });
+      scrollbar.addEventListener("scroll", fromScrollbar, { passive: true });
+      update();
+      cleanups.push(() => {
+        observer?.disconnect();
+        content.removeEventListener("scroll", fromContent);
+        scrollbar.removeEventListener("scroll", fromScrollbar);
+      });
+    });
+    return () => cleanups.forEach((cleanup) => cleanup());
+  }, [layout, path, rootRef, updateKey]);
+
+  const sides = layout === "unified" ? ["上下"] : ["左侧", "右侧"];
+  return (
+    <div className={`review-horizontal-controls ${layout}`}>
+      {sides.map((side, index) => (
+        <div
+          key={side}
+          ref={(element) => { scrollbarRefs.current[index] = element; }}
+          className="review-horizontal-scroll"
+          aria-label={`${side}对比横向滚动`}
+          tabIndex={0}
+          hidden
+        >
+          <div
+            ref={(element) => { trackRefs.current[index] = element; }}
+            className="review-horizontal-track"
+          />
+        </div>
+      ))}
+    </div>
   );
 }
 
@@ -407,6 +418,7 @@ export function ReviewPanel({ target, items, sourceState, refreshKey, onRefresh 
   const [hideWhitespace, setHideWhitespace] = useState(false);
   const [notice, setNotice] = useState("");
   const jumpRef = useRef<HTMLDivElement | null>(null);
+  const diffScrollRef = useRef<HTMLDivElement | null>(null);
 
   useEffect(() => {
     const path = target?.selectedPath && files.some((file) => file.path === target.selectedPath)
@@ -568,8 +580,21 @@ export function ReviewPanel({ target, items, sourceState, refreshKey, onRefresh 
       </div>
       {notice ? <p className="review-notice" role="status">{notice}</p> : null}
       <div className={`review-workspace${treeOpen ? " tree-open" : ""}`}>
-        <div className="review-diff-scroll">
-          {files.map((file) => {
+        <div className="review-diff-column">
+          <div
+            className="review-diff-scroll"
+            ref={diffScrollRef}
+            onScroll={(event) => {
+              const viewportTop = event.currentTarget.scrollTop + 35;
+              let visiblePath = files[0]?.path ?? null;
+              for (const section of event.currentTarget.querySelectorAll<HTMLElement>(".review-file")) {
+                if (section.offsetTop > viewportTop) break;
+                visiblePath = section.dataset.reviewPath ?? visiblePath;
+              }
+              if (visiblePath && visiblePath !== selectedPath) setSelectedPath(visiblePath);
+            }}
+          >
+            {files.map((file) => {
             const open = expanded.has(file.path);
             const hiddenWhitespace = hideWhitespace ? whitespaceOnlyPairs(file.preview) : new Set<number>();
             const visibleLines = compactLines(
@@ -579,6 +604,7 @@ export function ReviewPanel({ target, items, sourceState, refreshKey, onRefresh 
             return (
               <section
                 id={reviewFileId(file.path)}
+                data-review-path={file.path}
                 className={`review-file${selectedPath === file.path ? " selected" : ""}`}
                 key={file.path}
               >
@@ -609,12 +635,9 @@ export function ReviewPanel({ target, items, sourceState, refreshKey, onRefresh 
                       </p>
                     ) : null}
                     {layout === "unified" ? (
-                      <ScrollableDiff
-                        className="review-code-scroll"
-                        label="上下对比横向滚动"
-                      >
+                      <div className="review-code-scroll">
                         <UnifiedDiff lines={visibleLines} wordDiff={wordDiff} wrap={wrap} />
-                      </ScrollableDiff>
+                      </div>
                     ) : (
                       <SplitDiff lines={visibleLines} wrap={wrap} />
                     )}
@@ -627,7 +650,14 @@ export function ReviewPanel({ target, items, sourceState, refreshKey, onRefresh 
                 ) : null}
               </section>
             );
-          })}
+            })}
+          </div>
+          <ReviewHorizontalControls
+            layout={layout}
+            path={selectedPath}
+            rootRef={diffScrollRef}
+            updateKey={`${fileKey}:${expanded.has(selectedPath ?? "")}:${wrap}:${fullFiles}:${wordDiff}:${hideWhitespace}`}
+          />
         </div>
         {treeOpen ? (
           <aside className="review-tree" aria-label="修改文件树">

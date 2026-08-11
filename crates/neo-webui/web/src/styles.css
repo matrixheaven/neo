@@ -2415,9 +2415,15 @@ button.ft-file-head:focus-visible {
   min-width: 0;
   overflow-x: hidden;
   overflow-y: auto;
-  container-type: size;
   padding-bottom: 40px;
   scroll-behavior: smooth;
+}
+
+.review-diff-column {
+  min-width: 0;
+  min-height: 0;
+  display: grid;
+  grid-template-rows: minmax(0, 1fr) auto;
 }
 
 .review-file {
@@ -2511,40 +2517,47 @@ button.ft-file-head:focus-visible {
   display: none;
 }
 
-.review-scroll-area {
+.review-horizontal-controls {
+  z-index: 6;
   min-width: 0;
-  position: relative;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  background: var(--surface-raised);
 }
 
-.review-sticky-horizontal-scroll {
-  position: sticky;
-  z-index: 6;
-  top: calc(100cqh - 12px);
+.review-horizontal-controls.split {
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+}
+
+.review-horizontal-scroll {
+  min-width: 0;
   height: 12px;
-  margin-bottom: -12px;
   overflow-x: auto;
   overflow-y: hidden;
   border-top: 1px solid var(--line);
-  background: var(--surface-raised);
   scrollbar-color: var(--text-faint) var(--well);
   scrollbar-width: thin;
 }
 
-.review-sticky-horizontal-scroll::-webkit-scrollbar {
+.review-horizontal-controls.split > .review-horizontal-scroll:first-child {
+  border-right: 1px solid var(--line-strong);
+}
+
+.review-horizontal-scroll::-webkit-scrollbar {
   height: 10px;
 }
 
-.review-sticky-horizontal-scroll::-webkit-scrollbar-track {
+.review-horizontal-scroll::-webkit-scrollbar-track {
   background: var(--well);
 }
 
-.review-sticky-horizontal-scroll::-webkit-scrollbar-thumb {
+.review-horizontal-scroll::-webkit-scrollbar-thumb {
   border: 2px solid var(--well);
   border-radius: 5px;
   background: var(--text-faint);
 }
 
-.review-sticky-horizontal-track {
+.review-horizontal-track {
   height: 1px;
 }
 
@@ -2608,7 +2621,7 @@ button.ft-file-head:focus-visible {
   scrollbar-width: none;
 }
 
-.review-split > .review-scroll-area:first-child {
+.review-split > .review-split-pane:first-child {
   border-right: 1px solid var(--line-strong);
 }
 
