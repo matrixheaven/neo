@@ -2415,6 +2415,7 @@ button.ft-file-head:focus-visible {
   min-width: 0;
   overflow-x: hidden;
   overflow-y: auto;
+  container-type: size;
   padding-bottom: 40px;
   scroll-behavior: smooth;
 }
@@ -2502,7 +2503,49 @@ button.ft-file-head:focus-visible {
   max-width: 100%;
   overflow-x: auto;
   overflow-y: hidden;
-  scrollbar-gutter: stable;
+  scrollbar-width: none;
+}
+
+.review-code-scroll::-webkit-scrollbar,
+.review-split-pane::-webkit-scrollbar {
+  display: none;
+}
+
+.review-scroll-area {
+  min-width: 0;
+  position: relative;
+}
+
+.review-sticky-horizontal-scroll {
+  position: sticky;
+  z-index: 6;
+  top: calc(100cqh - 12px);
+  height: 12px;
+  margin-bottom: -12px;
+  overflow-x: auto;
+  overflow-y: hidden;
+  border-top: 1px solid var(--line);
+  background: var(--surface-raised);
+  scrollbar-color: var(--text-faint) var(--well);
+  scrollbar-width: thin;
+}
+
+.review-sticky-horizontal-scroll::-webkit-scrollbar {
+  height: 10px;
+}
+
+.review-sticky-horizontal-scroll::-webkit-scrollbar-track {
+  background: var(--well);
+}
+
+.review-sticky-horizontal-scroll::-webkit-scrollbar-thumb {
+  border: 2px solid var(--well);
+  border-radius: 5px;
+  background: var(--text-faint);
+}
+
+.review-sticky-horizontal-track {
+  height: 1px;
 }
 
 .review-unified {
@@ -2562,12 +2605,11 @@ button.ft-file-head:focus-visible {
   min-width: 0;
   overflow-x: auto;
   overflow-y: hidden;
-  scrollbar-gutter: stable;
-  border-right: 1px solid var(--line-strong);
+  scrollbar-width: none;
 }
 
-.review-split-pane:last-child {
-  border-right: 0;
+.review-split > .review-scroll-area:first-child {
+  border-right: 1px solid var(--line-strong);
 }
 
 .review-split-side {

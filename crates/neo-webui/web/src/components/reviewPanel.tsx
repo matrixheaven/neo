@@ -137,7 +137,7 @@ function UnifiedDiff({ lines, wordDiff, wrap }: {
 }) {
   const ranges = wordDiff ? wordRanges(lines) : new Map<number, [number, number]>();
   return (
-    <div className={`review-unified${wrap ? " wrap" : ""}`} role="table" aria-label="统一差异">
+    <div className={`review-unified${wrap ? " wrap" : ""}`} role="table" aria-label="上下对比">
       {lines.map((line, index) => (
         <div className={`review-diff-line ft-diff-${line.kind}`} role="row" key={`${index}:${line.content}`}>
           <span className="review-line-no" role="cell">{line.oldLine ?? ""}</span>
@@ -193,34 +193,103 @@ function SplitSide({ line, side, wrap }: {
   );
 }
 
+function ScrollableDiff({
+  children,
+  className,
+  label,
+}: {
+  children: ReactNode;
+  className: string;
+  label: string;
+}) {
+  const contentRef = useRef<HTMLDivElement | null>(null);
+  const scrollbarRef = useRef<HTMLDivElement | null>(null);
+  const trackRef = useRef<HTMLDivElement | null>(null);
+
+  useEffect(() => {
+    const content = contentRef.current;
+    const scrollbar = scrollbarRef.current;
+    const track = trackRef.current;
+    if (!content || !scrollbar || !track) return;
+
+    const update = () => {
+      track.style.width = `${content.scrollWidth}px`;
+      scrollbar.hidden = content.scrollWidth <= content.clientWidth + 1;
+      scrollbar.scrollLeft = content.scrollLeft;
+    };
+    const fromContent = () => {
+      if (scrollbar.scrollLeft !== content.scrollLeft) scrollbar.scrollLeft = content.scrollLeft;
+    };
+    const fromScrollbar = () => {
+      if (content.scrollLeft !== scrollbar.scrollLeft) content.scrollLeft = scrollbar.scrollLeft;
+    };
+    const frame = window.requestAnimationFrame(update);
+    const observer = typeof ResizeObserver === "undefined" ? null : new ResizeObserver(update);
+    observer?.observe(content);
+    if (observer && content.firstElementChild instanceof HTMLElement) {
+      observer.observe(content.firstElementChild);
+    }
+    window.addEventListener("resize", update);
+    content.addEventListener("scroll", fromContent, { passive: true });
+    scrollbar.addEventListener("scroll", fromScrollbar, { passive: true });
+    return () => {
+      window.cancelAnimationFrame(frame);
+      observer?.disconnect();
+      window.removeEventListener("resize", update);
+      content.removeEventListener("scroll", fromContent);
+      scrollbar.removeEventListener("scroll", fromScrollbar);
+    };
+  });
+
+  return (
+    <div className="review-scroll-area">
+      <div
+        ref={scrollbarRef}
+        className="review-sticky-horizontal-scroll"
+        aria-label={label}
+        tabIndex={0}
+        hidden
+      >
+        <div ref={trackRef} className="review-sticky-horizontal-track" />
+      </div>
+      <div ref={contentRef} className={className}>{children}</div>
+    </div>
+  );
+}
+
 function SplitPane({ rows, side, wrap }: {
   rows: SplitRow[];
   side: "old" | "new";
   wrap: boolean;
 }) {
   return (
-    <div className="review-split-pane" role="rowgroup">
-      {rows.map((row, index) => row.separator ? (
-        <div className="review-split-separator" key={`${side}:${index}:${row.separator.content}`}>
-          {row.separator.content}
-        </div>
-      ) : (
-        <div className="review-split-row" role="row" key={`${side}:${index}`}>
-          <SplitSide
-            line={side === "old" ? row.left : row.right}
-            side={side}
-            wrap={wrap}
-          />
-        </div>
-      ))}
-    </div>
+    <ScrollableDiff
+      className="review-split-pane"
+      label={`${side === "old" ? "左侧" : "右侧"}对比横向滚动`}
+    >
+      <div role="rowgroup">
+        {rows.map((row, index) => row.separator ? (
+          <div className="review-split-separator" key={`${side}:${index}:${row.separator.content}`}>
+            {row.separator.content}
+          </div>
+        ) : (
+          <div className="review-split-row" role="row" key={`${side}:${index}`}>
+            <SplitSide
+              line={side === "old" ? row.left : row.right}
+              side={side}
+              wrap={wrap}
+            />
+          </div>
+        ))}
+      </div>
+    </ScrollableDiff>
   );
 }
 
 function SplitDiff({ lines, wrap }: { lines: FilePreviewLine[]; wrap: boolean }) {
   const rows = splitRows(lines);
   return (
-    <div className="review-split" role="table" aria-label="左右差异">
+    <div className="review-split" role="table" aria-label="左右对比">
       <SplitPane rows={rows} side="old" wrap={wrap} />
       <SplitPane rows={rows} side="new" wrap={wrap} />
     </div>
@@ -394,10 +463,10 @@ export function ReviewPanel({ target, items, sourceState, refreshKey, onRefresh 
       <div className="review-toolbar">
         <div className="review-layout-switch" role="group" aria-label="差异布局">
           <button type="button" aria-pressed={layout === "unified"} onClick={() => setLayout("unified")}>
-            <AlignJustify size={14} aria-hidden />统一差异
+            <AlignJustify size={14} aria-hidden />上下对比
           </button>
           <button type="button" aria-pressed={layout === "split"} onClick={() => setLayout("split")}>
-            <Columns2 size={14} aria-hidden />左右差异
+            <Columns2 size={14} aria-hidden />左右对比
           </button>
         </div>
         <span className="review-toolbar-spacer" />
@@ -539,13 +608,16 @@ export function ReviewPanel({ target, items, sourceState, refreshKey, onRefresh 
                         当前协议没有完整文件正文，以下显示全部可用差异。
                       </p>
                     ) : null}
-                    <div className="review-code-scroll">
-                      {layout === "unified" ? (
+                    {layout === "unified" ? (
+                      <ScrollableDiff
+                        className="review-code-scroll"
+                        label="上下对比横向滚动"
+                      >
                         <UnifiedDiff lines={visibleLines} wordDiff={wordDiff} wrap={wrap} />
-                      ) : (
-                        <SplitDiff lines={visibleLines} wrap={wrap} />
-                      )}
-                    </div>
+                      </ScrollableDiff>
+                    ) : (
+                      <SplitDiff lines={visibleLines} wrap={wrap} />
+                    )}
                     {richPreview && supportsRichPreview(file.path) ? (
                       <section className="review-rich-preview" aria-label={`${file.path} 的富文本预览`}>
                         <Markdown text={richPreviewText(file)} />

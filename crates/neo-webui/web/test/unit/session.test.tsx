@@ -987,11 +987,11 @@ describe("transcript redesign rows", () => {
     expect(within(panel).getByRole("tab", { name: "Review" }).getAttribute("aria-selected"))
       .toBe("true");
     expect(within(panel).getByLabelText("修改文件树")).toBeTruthy();
-    expect(within(panel).getAllByRole("table", { name: "统一差异" }).length).toBeGreaterThan(0);
+    expect(within(panel).getAllByRole("table", { name: "上下对比" }).length).toBeGreaterThan(0);
 
-    await user.click(within(panel).getByRole("button", { name: "左右差异" }));
-    expect(within(panel).getAllByRole("table", { name: "左右差异" }).length).toBeGreaterThan(0);
-    await user.click(within(panel).getByRole("button", { name: "统一差异" }));
+    await user.click(within(panel).getByRole("button", { name: "左右对比" }));
+    expect(within(panel).getAllByRole("table", { name: "左右对比" }).length).toBeGreaterThan(0);
+    await user.click(within(panel).getByRole("button", { name: "上下对比" }));
 
     await user.click(within(panel).getByRole("button", { name: "全部收起" }));
     expect(panel.querySelectorAll(".review-file-body")).toHaveLength(0);
@@ -1071,14 +1071,14 @@ describe("transcript redesign rows", () => {
     }));
 
     const panel = screen.getByLabelText("会话信息区");
-    const unified = within(panel).getByRole("table", { name: "统一差异" });
+    const unified = within(panel).getByRole("table", { name: "上下对比" });
     const unifiedDeleted = within(unified).getByText("-旧段落").closest(".review-diff-line") as HTMLElement;
     const unifiedAdded = within(unified).getByText("+新增段落").closest(".review-diff-line") as HTMLElement;
     expect(unifiedDeleted.className).toContain("ft-diff-del");
     expect(unifiedAdded.className).toContain("ft-diff-add");
 
-    await user.click(within(panel).getByRole("button", { name: "左右差异" }));
-    const split = within(panel).getByRole("table", { name: "左右差异" });
+    await user.click(within(panel).getByRole("button", { name: "左右对比" }));
+    const split = within(panel).getByRole("table", { name: "左右对比" });
     const splitDeleted = within(split).getByText("-旧段落").closest(".review-split-side") as HTMLElement;
     const splitAdded = within(split).getByText("+新增段落").closest(".review-split-side") as HTMLElement;
     expect(splitDeleted.className).toContain("ft-diff-del");

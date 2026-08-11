@@ -211,14 +211,43 @@ test("08 answer-ft 浮层与 Review 工作区", async ({ page }) => {
   const panel = page.getByLabel("会话信息区", { exact: true });
   await expect(panel.getByRole("tab", { name: "Review" })).toHaveAttribute("aria-selected", "true");
   await expect(panel.getByLabel("修改文件树")).toBeVisible();
-  await expect(panel.getByRole("table", { name: "统一差异" }).first()).toBeVisible();
-  await panel.getByRole("button", { name: "左右差异" }).click();
-  const splitDiff = panel.getByRole("table", { name: "左右差异" }).first();
+  await expect(panel.getByRole("table", { name: "上下对比" }).first()).toBeVisible();
+  const unifiedScrollbar = panel.getByLabel("上下对比横向滚动").first();
+  await expect(unifiedScrollbar).toBeVisible();
+  await unifiedScrollbar.evaluate((element) => {
+    element.scrollLeft = 48;
+    element.dispatchEvent(new Event("scroll"));
+  });
+  await expect.poll(async () => panel.locator(".review-code-scroll").first().evaluate(
+    (element) => element.scrollLeft,
+  )).toBeGreaterThan(0);
+  const longFileScrollbar = panel.getByLabel("上下对比横向滚动").nth(1);
+  const reviewViewport = panel.locator(".review-diff-scroll");
+  await reviewViewport.evaluate((element) => {
+    const longFile = element.querySelectorAll<HTMLElement>(".review-file")[1];
+    element.scrollTop = (longFile?.offsetTop ?? 0) + 80;
+  });
+  await expect.poll(async () => reviewViewport.evaluate((element) => element.scrollTop))
+    .toBeGreaterThan(200);
+  await expect(longFileScrollbar).toBeVisible();
+  const [scrollbarBox, viewportBox] = await Promise.all([
+    longFileScrollbar.boundingBox(),
+    reviewViewport.boundingBox(),
+  ]);
+  if (!scrollbarBox || !viewportBox) throw new Error("Review 横向滚动条不可测量");
+  expect(scrollbarBox.y).toBeGreaterThanOrEqual(viewportBox.y);
+  expect(scrollbarBox.y + scrollbarBox.height).toBeLessThanOrEqual(viewportBox.y + viewportBox.height + 1);
+  await page.screenshot({ path: `${SHOTS}/08-review-sticky-scroll.png` });
+  await reviewViewport.evaluate((element) => { element.scrollTop = 0; });
+  await panel.getByRole("button", { name: "左右对比" }).click();
+  const splitDiff = panel.getByRole("table", { name: "左右对比" }).first();
   await expect(splitDiff).toBeVisible();
   await expect(splitDiff.locator(".review-split-pane")).toHaveCount(2);
   await page.screenshot({ path: `${SHOTS}/08-review-split.png` });
-  await panel.getByRole("button", { name: "统一差异" }).click();
-  await expect(panel.getByRole("table", { name: "统一差异" }).first()).toBeVisible();
+  await expect(panel.getByLabel("左侧对比横向滚动").first()).toBeVisible();
+  await expect(panel.getByLabel("右侧对比横向滚动").first()).toBeVisible();
+  await panel.getByRole("button", { name: "上下对比" }).click();
+  await expect(panel.getByRole("table", { name: "上下对比" }).first()).toBeVisible();
   await panel.getByRole("button", { name: "全部收起" }).click();
   await expect(panel.locator(".review-file-body")).toHaveCount(0);
   await panel.getByRole("button", { name: "全部展开" }).click();
