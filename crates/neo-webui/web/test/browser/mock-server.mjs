@@ -668,7 +668,11 @@ const server = createServer(async (req, res) => {
       : [
           { value: "/plan", label: "/plan", description: "Enter plan mode" },
           { value: "/review", label: "/review", description: "Review a target" },
-          { value: "/skill:frontend", label: "/skill:frontend", description: "Frontend workflow" },
+          {
+            value: "/skill:subagent-driven-development",
+            label: "/skill:subagent-driven-development",
+            description: "Use when executing implementation plans with independent tasks in the current session and additional coordination details that are secondary to the command label",
+          },
         ];
     json(res, { items });
     return;

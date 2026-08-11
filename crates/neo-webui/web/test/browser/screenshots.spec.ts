@@ -305,6 +305,14 @@ test("09 空会话命令候选显示在输入框下方", async ({ page }) => {
   await expect(popup).toBeVisible();
   await expect(popup).toHaveClass(/below/);
   await expect(page.getByRole("option", { name: /\/plan/ })).toBeVisible();
+  await expect.poll(() => popup.locator(".composer-completion-value").evaluateAll(
+    (labels) => labels.every((label) => label.scrollWidth <= label.clientWidth),
+  )).toBe(true);
+  const longDescription = popup.getByRole("option", { name: /subagent-driven-development/ })
+    .locator(".composer-completion-description");
+  await expect.poll(() => longDescription.evaluate(
+    (description) => description.scrollWidth > description.clientWidth,
+  )).toBe(true);
   await page.screenshot({ path: `${SHOTS}/09-completion-below.png` });
 });
 
