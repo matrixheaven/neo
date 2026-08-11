@@ -27,6 +27,7 @@ use neo_webui::protocol::{
 use neo_webui::relay::{
     ATTACHMENT_MAX_BYTES, ATTACHMENTS_PER_MESSAGE_MAX, Relay, SESSION_PAGE_LIMIT,
 };
+use serde::{Deserialize, Serialize};
 use tokio::sync::{mpsc, oneshot};
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
@@ -58,6 +59,19 @@ struct StartingTurn {
 struct StagedAttachment {
     mime: String,
 }
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+struct WebUiProjectPreference {
+    display_name: Option<String>,
+    #[serde(default)]
+    pinned: bool,
+    #[serde(default)]
+    removed: bool,
+    #[serde(default)]
+    read_at_by_session: HashMap<String, String>,
+}
+
+type WebUiProjectPreferences = HashMap<String, WebUiProjectPreference>;
 
 pub(crate) struct WebSessionHost {
     config: AppConfig,
@@ -96,6 +110,18 @@ impl WebSessionHost {
 
     fn internal() -> WebUiError {
         WebUiError::new(WebUiErrorCode::Internal)
+    }
+
+    fn project_preferences(&self) -> WebUiProjectPreferences {
+        neo_home()
+            .and_then(|home| {
+                crate::json_store::read_or_default(
+                    &home.join("webui_projects.json"),
+                    "webui project",
+                )
+                .ok()
+            })
+            .unwrap_or_default()
     }
 
     /// The session bucket directory used by the metadata store (the same
@@ -483,6 +509,12 @@ impl WebSessionHost {
                 groups[0].1.iter().map(|record| record.id.clone()).collect();
             let mut bucket_records: HashMap<PathBuf, Vec<SessionRecord>> = HashMap::new();
             for entry in latest.into_values() {
+                // Temporary test workspaces disappear after their test. Keep
+                // their session files, but do not surface dead directories as
+                // projects in the sidebar.
+                if !entry.workdir.is_dir() {
+                    continue;
+                }
                 if entry.session_dir == current_bucket
                     || current_ids.contains(entry.session_id.as_str())
                 {
@@ -513,12 +545,22 @@ impl WebSessionHost {
                 groups.push((workdir, Vec::new()));
             }
         }
+        let preferences = self.project_preferences();
+        groups.retain(|(dir, _)| {
+            !preferences
+                .get(&workspace_id_for(dir))
+                .is_some_and(|preference| preference.removed)
+        });
         let workdirs: Vec<PathBuf> = groups.iter().map(|(dir, _)| dir.clone()).collect();
         let mut workspaces: Vec<WebUiWorkspaceGroup> = groups
             .into_iter()
             .enumerate()
             .map(|(position, (dir, mut records))| {
-                let label = workspace_label_for(&dir, &workdirs);
+                let workspace_id = workspace_id_for(&dir);
+                let preference = preferences.get(&workspace_id);
+                let label = preference
+                    .and_then(|preference| preference.display_name.clone())
+                    .unwrap_or_else(|| workspace_label_for(&dir, &workdirs));
                 // Same ordering as the session list: pinned first, then
                 // updated_at descending, then id ascending.
                 records.sort_by(|left, right| {
@@ -530,14 +572,26 @@ impl WebSessionHost {
                 });
                 let sessions = records
                     .into_iter()
-                    .map(|record| self.session_summary(record, &label))
+                    .map(|record| {
+                        let mut summary = self.session_summary(record, &label);
+                        summary.unread = summary.updated_at.as_ref().is_some_and(|updated_at| {
+                            preference.is_some_and(|preference| {
+                                preference
+                                    .read_at_by_session
+                                    .get(&summary.session_id)
+                                    .is_none_or(|read_at| updated_at > read_at)
+                            })
+                        });
+                        summary
+                    })
                     .collect();
                 WebUiWorkspaceGroup {
-                    id: workspace_id_for(&dir),
+                    id: workspace_id,
                     label,
                     branch: crate::git_status::collect_workspace_status(&dir)
                         .map(|status| status.branch),
                     current: position == 0,
+                    pinned: preference.is_some_and(|preference| preference.pinned),
                     sessions,
                 }
             })
@@ -551,9 +605,11 @@ impl WebSessionHost {
                     .filter_map(|session| session.updated_at.clone())
                     .max()
             };
-            recent(right)
-                .cmp(&recent(left))
-                .then_with(|| left.label.cmp(&right.label))
+            right.pinned.cmp(&left.pinned).then_with(|| {
+                recent(right)
+                    .cmp(&recent(left))
+                    .then_with(|| left.label.cmp(&right.label))
+            })
         });
         workspaces
     }
@@ -582,6 +638,7 @@ impl WebSessionHost {
             updated_at: record.updated_at.clone(),
             pinned: record.pinned,
             archived: record.archived,
+            unread: false,
             state,
             workspace_label: workspace_label.to_owned(),
         }
@@ -1273,6 +1330,22 @@ impl WebUiHost for WebSessionHost {
                 self.workspace_change_detail(&change_id).await
             }
             WebUiCommand::AddWorkspace { path } => self.add_workspace(path),
+            WebUiCommand::RevealWorkspace { workspace_id } => self.reveal_workspace(&workspace_id),
+            WebUiCommand::UpdateWorkspace {
+                workspace_id,
+                label,
+                pinned,
+                removed,
+                mark_read,
+                read_session_id,
+            } => self.update_workspace(
+                &workspace_id,
+                label,
+                pinned,
+                removed,
+                mark_read,
+                read_session_id.as_deref(),
+            ),
         }
     }
 
@@ -1296,6 +1369,93 @@ impl WebUiHost for WebSessionHost {
 }
 
 impl WebSessionHost {
+    fn update_workspace(
+        &self,
+        workspace_id: &str,
+        label: Option<String>,
+        pinned: Option<bool>,
+        removed: Option<bool>,
+        mark_read: bool,
+        read_session_id: Option<&str>,
+    ) -> Result<WebUiReply, WebUiError> {
+        if !self
+            .known_workdirs()
+            .iter()
+            .any(|path| workspace_id_for(path) == workspace_id)
+        {
+            return Err(WebUiError::new(WebUiErrorCode::NotFound));
+        }
+        let read_at_by_session = mark_read.then(|| {
+            self.aggregated_workspaces()
+                .into_iter()
+                .find(|group| group.id == workspace_id)
+                .map(|group| {
+                    group
+                        .sessions
+                        .into_iter()
+                        .filter_map(|session| {
+                            session
+                                .updated_at
+                                .map(|updated_at| (session.session_id, updated_at))
+                        })
+                        .collect::<HashMap<_, _>>()
+                })
+                .unwrap_or_default()
+        });
+        let read_session = read_session_id.and_then(|session_id| {
+            self.aggregated_workspaces()
+                .into_iter()
+                .find(|group| group.id == workspace_id)
+                .and_then(|group| {
+                    group
+                        .sessions
+                        .into_iter()
+                        .find(|session| session.session_id == session_id)
+                })
+                .and_then(|session| {
+                    session
+                        .updated_at
+                        .map(|updated_at| (session.session_id, updated_at))
+                })
+        });
+        let home = neo_home().ok_or_else(Self::internal)?;
+        crate::json_store::update(
+            &home.join("webui_projects.json"),
+            "webui project",
+            |preferences: &mut WebUiProjectPreferences| {
+                let preference = preferences.entry(workspace_id.to_owned()).or_default();
+                if let Some(label) = label {
+                    preference.display_name =
+                        (!label.trim().is_empty()).then(|| label.trim().to_owned());
+                }
+                if let Some(pinned) = pinned {
+                    preference.pinned = pinned;
+                }
+                if let Some(removed) = removed {
+                    preference.removed = removed;
+                }
+                if let Some(read_at_by_session) = read_at_by_session {
+                    preference.read_at_by_session = read_at_by_session;
+                }
+                if let Some((session_id, updated_at)) = read_session {
+                    preference.read_at_by_session.insert(session_id, updated_at);
+                }
+            },
+        )
+        .map_err(|_| Self::internal())?;
+        Ok(WebUiReply::Resolved)
+    }
+
+    fn reveal_workspace(&self, workspace_id: &str) -> Result<WebUiReply, WebUiError> {
+        let workspace = self
+            .known_workdirs()
+            .into_iter()
+            .find(|path| workspace_id_for(path) == workspace_id)
+            .ok_or_else(|| WebUiError::new(WebUiErrorCode::NotFound))?;
+        reveal_in_file_manager(&workspace).map_err(|_| Self::internal())?;
+        Ok(WebUiReply::Resolved)
+    }
+
     fn add_workspace(&self, path: String) -> Result<WebUiReply, WebUiError> {
         if path.trim().is_empty() {
             return Err(WebUiError::new(WebUiErrorCode::InvalidRequest));
@@ -1322,15 +1482,14 @@ impl WebSessionHost {
             known.push(workspace.clone());
         }
         drop(known);
-        let all = self.known_workdirs();
-        Ok(WebUiReply::WorkspaceAdded(WebUiWorkspaceGroup {
-            id: workspace_id_for(&workspace),
-            label: workspace_label_for(&workspace, &all),
-            branch: crate::git_status::collect_workspace_status(&workspace)
-                .map(|status| status.branch),
-            current: workspace == self.config.project_dir,
-            sessions: Vec::new(),
-        }))
+        let workspace_id = workspace_id_for(&workspace);
+        self.update_workspace(&workspace_id, None, None, Some(false), false, None)?;
+        let group = self
+            .aggregated_workspaces()
+            .into_iter()
+            .find(|group| group.id == workspace_id)
+            .ok_or_else(Self::internal)?;
+        Ok(WebUiReply::WorkspaceAdded(group))
     }
 
     async fn create_session(
@@ -1545,6 +1704,30 @@ impl WebSessionHost {
             state: started,
         })
     }
+}
+
+#[cfg(target_os = "macos")]
+fn reveal_in_file_manager(path: &Path) -> std::io::Result<()> {
+    std::process::Command::new("open")
+        .arg(path)
+        .spawn()
+        .map(|_| ())
+}
+
+#[cfg(target_os = "windows")]
+fn reveal_in_file_manager(path: &Path) -> std::io::Result<()> {
+    std::process::Command::new("explorer")
+        .arg(path)
+        .spawn()
+        .map(|_| ())
+}
+
+#[cfg(all(unix, not(target_os = "macos")))]
+fn reveal_in_file_manager(path: &Path) -> std::io::Result<()> {
+    std::process::Command::new("xdg-open")
+        .arg(path)
+        .spawn()
+        .map(|_| ())
 }
 
 /// Temp-phase launch: wait only for the first legitimate session id (while

@@ -101,6 +101,29 @@ describe("sidebar", () => {
     expect(screen.queryByText("并行格式化")).toBeNull();
   });
 
+  it("removes a project by archiving its sessions without deleting them", async () => {
+    const user = userEvent.setup();
+    const { socket } = await renderReady();
+    socket.emit(asServerMessage(fixture.long_connection.workspace_snapshot));
+
+    const group = await screen.findByRole("group", { name: "neo" });
+    await user.click(within(group).getByRole("button", { name: "项目操作" }));
+    const menu = await screen.findByRole("menu", { name: "neo 项目操作" });
+    await user.click(within(menu).getByRole("menuitem", { name: "移除项目" }));
+
+    expect(screen.queryByRole("group", { name: "neo" })).toBeNull();
+    await waitFor(() =>
+      expect(
+        recordedRequests.filter(
+          (entry) =>
+            entry.method === "PATCH" &&
+            entry.url.startsWith("/api/sessions/") &&
+            (entry.body as { archived?: boolean }).archived === true,
+        ),
+      ).toHaveLength(2),
+    );
+  });
+
   it("adds a project from its local directory path", async () => {
     const user = userEvent.setup();
     await renderReady();

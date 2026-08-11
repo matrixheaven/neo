@@ -510,6 +510,7 @@ export interface WebUiSessionSummary {
   updated_at?: string | null;
   pinned: boolean;
   archived: boolean;
+  unread?: boolean;
   state: WebUiSummaryState;
   workspace_label?: string;
 }
@@ -591,6 +592,7 @@ export interface WebUiWorkspaceGroup {
   label: string;
   branch?: string | null;
   current: boolean;
+  pinned?: boolean;
   sessions: WebUiSessionSummary[];
 }
 

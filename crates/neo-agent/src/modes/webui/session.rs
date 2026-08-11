@@ -138,6 +138,9 @@ impl SessionSummarySink {
             updated_at: record.as_ref().and_then(|record| record.updated_at.clone()),
             pinned: record.as_ref().is_some_and(|record| record.pinned),
             archived: record.as_ref().is_some_and(|record| record.archived),
+            // Live summary changes are new activity; the workspace snapshot
+            // computes the persisted read watermark on reconnect.
+            unread: true,
             state,
             workspace_label: workspace_label.to_owned(),
         };

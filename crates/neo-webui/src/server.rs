@@ -31,7 +31,7 @@ use crate::protocol::{
     WebUiCancelling, WebUiClaimRequest, WebUiCommand, WebUiCreateSessionBody, WebUiError,
     WebUiErrorBody, WebUiErrorCode, WebUiHost, WebUiInputAccepted, WebUiInputBody,
     WebUiMetadataBody, WebUiQuestionBody, WebUiReply, WebUiServerMessage, WebUiSessionScope,
-    WebUiSessionStarted, WebUiStartTurnBody, WebUiWatchRequest,
+    WebUiSessionStarted, WebUiStartTurnBody, WebUiUpdateWorkspaceBody, WebUiWatchRequest,
 };
 use crate::relay::{
     ATTACHMENT_BODY_LIMIT_BYTES, COMMAND_BODY_LIMIT_BYTES, FIRST_SUBSCRIBE_DEADLINE, ObserverQueue,
@@ -105,6 +105,11 @@ fn build_router(app: AppState) -> Router {
         .route("/api/attachments", post(upload_attachment))
         .route("/api/sessions", get(list_sessions).post(create_session))
         .route("/api/workspaces", post(add_workspace))
+        .route(
+            "/api/workspaces/{workspace_id}/reveal",
+            post(reveal_workspace),
+        )
+        .route("/api/workspaces/{workspace_id}", patch(update_workspace))
         .route("/api/sessions/{session_id}/snapshot", get(snapshot))
         .route(
             "/api/sessions/{session_id}/agents/{agent_id}/history",
@@ -607,6 +612,46 @@ async fn add_workspace(State(app): State<AppState>, body: Body) -> Response {
     match app
         .host
         .execute(WebUiCommand::AddWorkspace { path: parsed.path })
+        .await
+    {
+        Ok(reply) => reply_response(&app, reply),
+        Err(error) => host_error_response(error),
+    }
+}
+
+async fn reveal_workspace(
+    State(app): State<AppState>,
+    Path(workspace_id): Path<String>,
+) -> Response {
+    match app
+        .host
+        .execute(WebUiCommand::RevealWorkspace { workspace_id })
+        .await
+    {
+        Ok(reply) => reply_response(&app, reply),
+        Err(error) => host_error_response(error),
+    }
+}
+
+async fn update_workspace(
+    State(app): State<AppState>,
+    Path(workspace_id): Path<String>,
+    body: Body,
+) -> Response {
+    let parsed: WebUiUpdateWorkspaceBody = match parse_body(body).await {
+        Ok(parsed) => parsed,
+        Err(response) => return response,
+    };
+    match app
+        .host
+        .execute(WebUiCommand::UpdateWorkspace {
+            workspace_id,
+            label: parsed.label,
+            pinned: parsed.pinned,
+            removed: parsed.removed,
+            mark_read: parsed.mark_read,
+            read_session_id: parsed.read_session_id,
+        })
         .await
     {
         Ok(reply) => reply_response(&app, reply),

@@ -36,6 +36,7 @@ import type {
   WebUiComposer,
   WebUiQuestionAnswer,
   WebUiServerMessage,
+  WebUiWorkspaceGroup,
 } from "../protocol";
 import {
   SIDEBAR_DEFAULT,
@@ -75,7 +76,7 @@ function saveSidebarWidth(width: number): void {
 export interface AppActions {
   selectSession(sessionId: string | null): void;
   selectWorkspace(workspaceId: string): void;
-  addWorkspace(path: string): Promise<void>;
+  addWorkspace(path: string): Promise<WebUiWorkspaceGroup>;
   setSidebarWidth(width: number): void;
   setDrawerOpen(open: boolean): void;
   setSidebarCollapsed(collapsed: boolean): void;
@@ -292,6 +293,7 @@ export function AppProvider({ children }: { children: ReactNode }) {
       try {
         const workspace = await requestAddWorkspace(path);
         dispatch({ type: "workspace_added", workspace });
+        return workspace;
       } catch (error) {
         handleApiError(error);
         throw error;

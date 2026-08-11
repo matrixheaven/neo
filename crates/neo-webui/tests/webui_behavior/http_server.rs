@@ -165,6 +165,7 @@ impl FakeHost {
             updated_at: session.metadata.updated_at.clone(),
             pinned: session.metadata.pinned,
             archived: session.metadata.archived,
+            unread: false,
             state: match session.state.phase {
                 WebUiPhase::Idle => WebUiSummaryState::Idle,
                 WebUiPhase::Failed => WebUiSummaryState::Failed,
@@ -215,6 +216,7 @@ impl WebUiHost for FakeHost {
                         updated_at: session.metadata.updated_at.clone(),
                         pinned: session.metadata.pinned,
                         archived: session.metadata.archived,
+                        unread: false,
                         state: match session.state.phase {
                             WebUiPhase::Idle => WebUiSummaryState::Idle,
                             WebUiPhase::Failed => WebUiSummaryState::Failed,
@@ -276,6 +278,7 @@ impl WebUiHost for FakeHost {
                         updated_at: session.metadata.updated_at.clone(),
                         pinned: session.metadata.pinned,
                         archived: session.metadata.archived,
+                        unread: false,
                         state: WebUiSummaryState::Idle,
                         workspace_label: "sample-workspace".to_string(),
                     })
@@ -490,8 +493,12 @@ impl WebUiHost for FakeHost {
                     label: "added".to_string(),
                     branch: None,
                     current: false,
+                    pinned: false,
                     sessions: Vec::new(),
                 }))
+            }
+            WebUiCommand::RevealWorkspace { .. } | WebUiCommand::UpdateWorkspace { .. } => {
+                Ok(WebUiReply::Resolved)
             }
             WebUiCommand::UploadAttachment { mime, base64 } => {
                 use base64::Engine as _;
@@ -550,6 +557,7 @@ impl WebUiHost for FakeHost {
                 label: "sample-workspace".to_string(),
                 branch: Some("main".to_string()),
                 current: true,
+                pinned: false,
                 sessions: summaries,
             }],
         })

@@ -164,6 +164,23 @@ export function addWorkspace(path: string): Promise<import("./protocol").WebUiWo
   return request("POST", "/api/workspaces", { path });
 }
 
+export function revealWorkspace(workspaceId: string): Promise<void> {
+  return request("POST", `/api/workspaces/${encodeURIComponent(workspaceId)}/reveal`);
+}
+
+export function updateWorkspace(
+  workspaceId: string,
+  change: {
+    label?: string;
+    pinned?: boolean;
+    removed?: boolean;
+    mark_read?: boolean;
+    read_session_id?: string;
+  },
+): Promise<void> {
+  return request("PATCH", `/api/workspaces/${encodeURIComponent(workspaceId)}`, change);
+}
+
 export function startTurn(
   sessionId: string,
   message: string,

@@ -104,6 +104,8 @@ pub struct WebUiSessionSummary {
     pub pinned: bool,
     #[serde(default)]
     pub archived: bool,
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub unread: bool,
     pub state: WebUiSummaryState,
     pub workspace_label: String,
 }
@@ -159,6 +161,10 @@ pub struct WebUiSessionMetadata {
     pub archived: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub updated_at: Option<String>,
+}
+
+fn is_false(value: &bool) -> bool {
+    !value
 }
 
 /// A pending approval surfaced to the browser.
@@ -232,6 +238,8 @@ pub struct WebUiWorkspaceGroup {
     pub branch: Option<String>,
     #[serde(default)]
     pub current: bool,
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub pinned: bool,
     #[serde(default)]
     pub sessions: Vec<WebUiSessionSummary>,
 }
@@ -498,6 +506,17 @@ pub enum WebUiCommand {
     AddWorkspace {
         path: String,
     },
+    RevealWorkspace {
+        workspace_id: String,
+    },
+    UpdateWorkspace {
+        workspace_id: String,
+        label: Option<String>,
+        pinned: Option<bool>,
+        removed: Option<bool>,
+        mark_read: bool,
+        read_session_id: Option<String>,
+    },
 }
 
 /// Answer to a pending question.
@@ -695,6 +714,17 @@ pub struct WebUiCreateSessionBody {
 #[serde(deny_unknown_fields)]
 pub struct WebUiAddWorkspaceBody {
     pub path: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct WebUiUpdateWorkspaceBody {
+    pub label: Option<String>,
+    pub pinned: Option<bool>,
+    pub removed: Option<bool>,
+    #[serde(default)]
+    pub mark_read: bool,
+    pub read_session_id: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]

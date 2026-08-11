@@ -407,6 +407,7 @@ async fn workspace_subscription_updates_background_session_without_full_transcri
         updated_at: None,
         pinned: false,
         archived: false,
+        unread: false,
         state: WebUiSummaryState::Running,
         workspace_label: "workspace".to_string(),
     });
@@ -456,6 +457,7 @@ async fn workspace_subscription_updates_background_session_without_full_transcri
         updated_at: None,
         pinned: false,
         archived: false,
+        unread: false,
         state: WebUiSummaryState::Idle,
         workspace_label: "workspace".to_string(),
     });
