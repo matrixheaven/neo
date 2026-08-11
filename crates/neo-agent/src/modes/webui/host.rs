@@ -199,8 +199,8 @@ impl WebSessionHost {
     }
 
     /// Fresh in-memory state for a session not yet registered: read the
-    /// canonical JSONL history and ingest it (publishing under the bootstrap
-    /// lock so two concurrent subscribers never bootstrap twice).
+    /// canonical JSONL history and build one snapshot projection under the
+    /// bootstrap lock so two concurrent subscribers never bootstrap twice.
     async fn bootstrap_state(
         &self,
         session_id: &str,
@@ -241,9 +241,7 @@ impl WebSessionHost {
             workspace_label,
             Some(summary_sink),
         );
-        for event in events {
-            state.ingest_event(event);
-        }
+        state.bootstrap_projection(events);
         let state = Arc::new(Mutex::new(state));
         let mut states = self.states.lock().map_err(|_| Self::internal())?;
         Ok(Arc::clone(

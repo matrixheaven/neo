@@ -2,6 +2,8 @@
 //! and the release/rebuild round-trip of an idle session's projection.
 
 use neo_agent_core::{AgentTokenUsage, Content, StopReason};
+use neo_webui::relay::{CONNECTION_QUEUE_MESSAGES, OutboundMessage, SubscriptionLayer};
+use std::sync::Arc;
 
 use super::state_fixtures::{test_state, user_message};
 use super::*;
@@ -278,4 +280,45 @@ fn released_projection_rebuilds_contiguous_history_ending_at_last_sequence() {
         (1..=4).collect::<Vec<u64>>(),
         "rebuilt sequences stay contiguous and end at the last known sequence"
     );
+}
+
+#[test]
+fn fresh_projection_bootstrap_does_not_publish_history_to_observer() {
+    let relay = Relay::new("test_stream");
+    let subscription = relay.subscribe_session(1, "session_1", None);
+    let state = test_state(&relay, "session_1", None);
+    let event_count = CONNECTION_QUEUE_MESSAGES + 1;
+    let events = (0..event_count)
+        .map(|index| user_message(&format!("history {index}")))
+        .collect();
+
+    {
+        let mut guard = state.lock().expect("state lock");
+        guard.bootstrap_projection(events);
+        assert_eq!(guard.history.len(), event_count);
+        assert_eq!(guard.last_sequence, event_count as u64);
+    }
+    assert!(
+        !subscription.queue.is_closed(),
+        "persisted history must not overflow the live observer queue"
+    );
+    assert!(
+        subscription.queue.drain_sendable().is_empty(),
+        "persisted history reaches the browser only through the snapshot"
+    );
+
+    relay.deliver_snapshot(
+        1,
+        SubscriptionLayer::Session,
+        Arc::from(r#"{"type":"session_snapshot"}"#),
+    );
+    {
+        let mut guard = state.lock().expect("state lock");
+        guard.ingest_event(user_message("live"));
+        assert_eq!(guard.last_sequence, event_count as u64 + 1);
+    }
+    let delivered = subscription.queue.drain_sendable();
+    assert_eq!(delivered.len(), 2, "snapshot precedes the next live event");
+    assert!(matches!(delivered[0], OutboundMessage::SessionJson(_)));
+    assert!(matches!(delivered[1], OutboundMessage::SessionJson(_)));
 }

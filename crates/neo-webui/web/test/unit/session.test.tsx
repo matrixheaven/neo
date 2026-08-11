@@ -1538,7 +1538,7 @@ describe("session view", () => {
     expect(types.filter((type) => type === "watch_session")).toHaveLength(1);
   });
 
-  it("keeps the initial connection status while the first handshake retries", async () => {
+  it("keeps the loading page while the first handshake retries", async () => {
     FakeWebSocket.autoOpen = false;
     renderApp();
     await waitFor(() => expect(FakeWebSocket.instances).toHaveLength(1));
@@ -1546,10 +1546,12 @@ describe("session view", () => {
     FakeWebSocket.instances[0].closeWith(1013);
 
     expect(screen.queryByText("连接已断开，正在重连…")).toBeNull();
-    expect(screen.getByText("正在连接…")).toBeTruthy();
+    expect(screen.getByText("加载中…")).toBeTruthy();
+    expect(screen.getByRole("img", { name: "Neo" })).toBeTruthy();
+    expect(screen.queryByRole("banner")).toBeNull();
   });
 
-  it("shows initial connection status when reopening unloaded history during reconnect", async () => {
+  it("shows the loading page when reopening unloaded history during reconnect", async () => {
     const { socket } = await openSession1();
 
     (await screen.findByText("并行格式化")).click();
@@ -1563,21 +1565,21 @@ describe("session view", () => {
     await screen.findByText("连接已断开，正在重连…");
 
     (await screen.findByText("有界中继测试")).click();
-    await screen.findByText("正在连接…");
+    await screen.findByText("加载中…");
     expect(screen.queryByText("连接已断开，正在重连…")).toBeNull();
   });
 
-  it("shows initial connection status while an open socket loads an unseen history snapshot", async () => {
+  it("shows the loading page while an open socket loads an unseen history snapshot", async () => {
     const { socket } = await openSession1();
 
     (await screen.findByText("并行格式化")).click();
     await waitFor(() => expect(socket.watchSessionIds()).toEqual(["session_0001", "session_0002"]));
-    await screen.findByText("正在连接…");
+    await screen.findByText("加载中…");
     expect(screen.queryByText("连接已断开，正在重连…")).toBeNull();
 
     socket.emit({ type: "session_snapshot", snapshot: fixture.sessions[1].snapshot });
     await screen.findByText("另一个会话并行跑格式化。");
-    expect(screen.queryByText("正在连接…")).toBeNull();
+    expect(screen.queryByText("加载中…")).toBeNull();
   });
 
   it("switching sessions keeps the background summary updating and drops the old transcript", async () => {

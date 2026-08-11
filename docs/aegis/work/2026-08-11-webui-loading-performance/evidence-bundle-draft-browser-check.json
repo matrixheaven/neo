@@ -1,0 +1,8 @@
+{
+  "schemaVersion": "aegis.schema.v0",
+  "artifactKey": "browser-check",
+  "type": "visual",
+  "source": "agent-browser desktop 1440x900 and mobile 390x844",
+  "summary": "Loading gate filled both viewports, stayed centered without overflow, used loading-breathe at 1.6s, and reported no browser errors.",
+  "verifier": "agent-browser"
+}

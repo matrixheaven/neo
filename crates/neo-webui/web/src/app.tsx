@@ -25,9 +25,9 @@ function AccessFailed() {
 
 function Loading() {
   return (
-    <div className="gate" role="status">
+    <div className="gate loading-gate" role="status">
       <NeoMark size={40} />
-      <p>正在连接工作区…</p>
+      <p>加载中…</p>
     </div>
   );
 }
@@ -75,6 +75,9 @@ export function App() {
     selectedSession?.streamId === null
       ? "connecting"
       : state.connection;
+  if (connectionBannerState === "connecting") {
+    return <Loading />;
+  }
 
   return (
     <div className="app-shell">
@@ -90,11 +93,7 @@ export function App() {
           />
         ) : null}
         <main className="main-area">
-          {connectionBannerState === "connecting" ? (
-            <div className="connection-banner" role="status">
-              正在连接…
-            </div>
-          ) : connectionBannerState === "reconnecting" ? (
+          {connectionBannerState === "reconnecting" ? (
             <div className="connection-banner" role="status">
               连接已断开，正在重连…
             </div>

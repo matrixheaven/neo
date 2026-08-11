@@ -1,0 +1,16 @@
+{
+  "schemaVersion": "aegis.schema.v0",
+  "affectedLayers": [
+    "WebSessionHost persisted projection, relay sequence initialization, WebUI loading presentation"
+  ],
+  "owners": [
+    "WebSessionHost for history restore; App for loading presentation"
+  ],
+  "invariants": [
+    "Canonical JSONL remains append-only; historical restore never republishes old events as live traffic; loading UI never cancels or changes a turn."
+  ],
+  "compatBoundary": "Existing session snapshots and live event ordering remain unchanged after bootstrap.",
+  "nonGoals": [
+    "History pagination, transcript virtualization, session metadata indexing, or unrelated Review panel work."
+  ]
+}

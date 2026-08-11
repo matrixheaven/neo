@@ -1,0 +1,8 @@
+{
+  "schemaVersion": "aegis.schema.v0",
+  "artifactKey": "web-build",
+  "type": "build",
+  "source": "npm run build",
+  "summary": "Production WebUI build completed successfully.",
+  "verifier": "vite"
+}

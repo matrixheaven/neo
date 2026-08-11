@@ -1,0 +1,17 @@
+{
+  "schemaVersion": "aegis.schema.v0",
+  "taskId": "2026-08-11-webui-loading-performance",
+  "lastCheckpointRef": "docs/aegis/work/2026-08-11-webui-loading-performance/todo-checkpoint-draft.json",
+  "resumeInstruction": "Do not repeat exploration; verify staged paths exclude unrelated .gitignore and generated dist changes.",
+  "knownPartialWork": [
+    "Backend bootstrap repair, loading page, focused tests, production build, desktop and mobile browser checks."
+  ],
+  "mustReadBeforeContinuing": [
+    "docs/aegis/work/2026-08-11-webui-loading-performance/10-intent.md",
+    "docs/aegis/work/2026-08-11-webui-loading-performance/20-checkpoint.md",
+    "docs/aegis/work/2026-08-11-webui-loading-performance/todo-checkpoint-draft.json"
+  ],
+  "unsafeToAssume": [
+    "Tracked dist assets are task-owned; they contain pre-existing unrelated WebUI changes."
+  ]
+}

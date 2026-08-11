@@ -1,0 +1,8 @@
+{
+  "schemaVersion": "aegis.schema.v0",
+  "artifactKey": "backend-regression",
+  "type": "test",
+  "source": "cargo test --package neo-agent --bin neo -- modes::webui::session::projection::fresh_projection_bootstrap_does_not_publish_history_to_observer --exact --nocapture --include-ignored",
+  "summary": "One exact backend regression passed; bootstrap history over the live queue limit stayed out of the observer queue and the next live sequence remained contiguous.",
+  "verifier": "cargo test"
+}

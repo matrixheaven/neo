@@ -518,6 +518,15 @@ impl WebSessionState {
         self.projection_released = true;
     }
 
+    /// Restore a session that is entering this service from persisted history.
+    /// The snapshot owns the history payload, so reserve its sequence block
+    /// without sending thousands of old events through the live observer queue.
+    pub(crate) fn bootstrap_projection(&mut self, events: Vec<AgentEvent>) {
+        let count = u64::try_from(events.len()).unwrap_or(u64::MAX);
+        self.last_sequence = self.publisher.reserve_history_sequences(count);
+        self.rebuild_projection(events);
+    }
+
     /// Rebuild a released projection from the canonical JSONL event stream.
     /// Sequences are synthetic: a contiguous block ending at the retained
     /// last known sequence, so the snapshot stays consistent with the relay

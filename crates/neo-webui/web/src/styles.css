@@ -199,6 +199,27 @@ button {
   margin: 0;
 }
 
+.loading-gate .neo-mark {
+  animation: loading-breathe 1.6s ease-in-out infinite;
+}
+
+.loading-gate p {
+  margin: 0;
+  letter-spacing: 0;
+}
+
+@keyframes loading-breathe {
+  0%,
+  100% {
+    opacity: 0.35;
+    transform: scale(0.94);
+  }
+  50% {
+    opacity: 1;
+    transform: scale(1);
+  }
+}
+
 .neo-mark {
   color: var(--accent);
 }

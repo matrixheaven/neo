@@ -1,0 +1,19 @@
+{
+  "schemaVersion": "aegis.schema.v0",
+  "requestedOutcome": "Stop persisted history bootstrap from overflowing the live relay queue and show a centered Neo loading screen while the workspace or selected session snapshot is loading.",
+  "goal": "Stop persisted history bootstrap from overflowing the live relay queue and show a centered Neo loading screen while the workspace or selected session snapshot is loading.",
+  "successEvidence": [
+    "A focused backend regression proves bootstrap history is not published live; focused frontend tests prove the full-screen loading state; browser checks show the centered animated mark on desktop and mobile."
+  ],
+  "stopCondition": "Stop when focused backend and frontend checks pass, browser loading state is visually verified, and only task-owned hunks are staged.",
+  "nonGoals": [
+    "History pagination, transcript virtualization, session metadata indexing, or unrelated Review panel work."
+  ],
+  "scope": "crates/neo-agent/src/modes/webui, crates/neo-webui/web/src/app.tsx, loading styles, focused tests",
+  "changeKinds": [
+    "bugfix and bounded UI state change"
+  ],
+  "riskHints": [
+    "relay sequence continuity, snapshot watermark, reduced-motion behavior, dirty overlapping frontend files"
+  ]
+}

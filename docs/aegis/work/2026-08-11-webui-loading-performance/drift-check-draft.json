@@ -1,0 +1,15 @@
+{
+  "schemaVersion": "aegis.schema.v0",
+  "taskId": "2026-08-11-webui-loading-performance",
+  "taskIntentRef": "docs/aegis/work/2026-08-11-webui-loading-performance/task-intent-draft.json",
+  "baselineRefs": [
+    "docs/aegis/specs/2026-08-09-neo-webui-design.md"
+  ],
+  "scopeStatus": "not-yet-verified",
+  "compatStatus": "not-yet-verified",
+  "retirementStatus": "not-yet-verified",
+  "newRiskSignals": [
+    "relay sequence continuity, snapshot watermark, reduced-motion behavior, dirty overlapping frontend files"
+  ],
+  "decision": "needs-baseline-readback"
+}

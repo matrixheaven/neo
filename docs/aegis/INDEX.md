@@ -620,3 +620,20 @@ Entries are workspace records, not authoritative runtime decisions.
 | 2026-08-10 | work | docs/aegis/work/2026-08-10-media-input-model-lanes/proof-bundle.md | 2026-08-10-media-input-model-lanes proof bundle |
 | 2026-08-10 | spec | docs/aegis/specs/2026-08-10-neo-webui-redesign-design.md | Neo WebUI 重设计说明 |
 | 2026-08-10 | plan | docs/aegis/plans/2026-08-10-neo-webui-redesign.md | Neo WebUI 重设计实施计划 |
+| 2026-08-11 | work | docs/aegis/work/2026-08-11-webui-loading-performance/10-intent.md | WebUI loading performance and loading screen intent |
+| 2026-08-11 | work | docs/aegis/work/2026-08-11-webui-loading-performance/20-checkpoint.md | WebUI loading performance and loading screen checkpoint |
+| 2026-08-11 | work | docs/aegis/work/2026-08-11-webui-loading-performance/90-evidence.md | WebUI loading performance and loading screen evidence |
+| 2026-08-11 | work | docs/aegis/work/2026-08-11-webui-loading-performance/99-reflection.md | WebUI loading performance and loading screen reflection |
+| 2026-08-11 | artifact | docs/aegis/work/2026-08-11-webui-loading-performance/task-intent-draft.json | WebUI loading performance and loading screen task intent draft |
+| 2026-08-11 | artifact | docs/aegis/work/2026-08-11-webui-loading-performance/baseline-read-set-hint.json | WebUI loading performance and loading screen baseline read-set hint |
+| 2026-08-11 | artifact | docs/aegis/work/2026-08-11-webui-loading-performance/baseline-usage-draft.json | WebUI loading performance and loading screen baseline usage draft |
+| 2026-08-11 | artifact | docs/aegis/work/2026-08-11-webui-loading-performance/impact-statement-draft.json | WebUI loading performance and loading screen impact statement draft |
+| 2026-08-11 | artifact | docs/aegis/work/2026-08-11-webui-loading-performance/todo-checkpoint-draft.json | WebUI loading performance and loading screen todo checkpoint draft |
+| 2026-08-11 | artifact | docs/aegis/work/2026-08-11-webui-loading-performance/drift-check-draft.json | WebUI loading performance and loading screen drift check draft |
+| 2026-08-11 | artifact | docs/aegis/work/2026-08-11-webui-loading-performance/evidence-bundle-draft-backend-regression.json | 2026-08-11-webui-loading-performance evidence backend-regression |
+| 2026-08-11 | artifact | docs/aegis/work/2026-08-11-webui-loading-performance/evidence-bundle-draft-frontend-regression.json | 2026-08-11-webui-loading-performance evidence frontend-regression |
+| 2026-08-11 | artifact | docs/aegis/work/2026-08-11-webui-loading-performance/evidence-bundle-draft-web-build.json | 2026-08-11-webui-loading-performance evidence web-build |
+| 2026-08-11 | artifact | docs/aegis/work/2026-08-11-webui-loading-performance/evidence-bundle-draft-browser-check.json | 2026-08-11-webui-loading-performance evidence browser-check |
+| 2026-08-11 | artifact | docs/aegis/work/2026-08-11-webui-loading-performance/resume-state-hint.json | 2026-08-11-webui-loading-performance resume state hint |
+| 2026-08-11 | artifact | docs/aegis/work/2026-08-11-webui-loading-performance/gate-input-pack.json | 2026-08-11-webui-loading-performance gate input pack |
+| 2026-08-11 | work | docs/aegis/work/2026-08-11-webui-loading-performance/proof-bundle.md | 2026-08-11-webui-loading-performance proof bundle |

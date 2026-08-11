@@ -1,0 +1,15 @@
+{
+  "schemaVersion": "aegis.schema.v0",
+  "baselineRefs": [
+    "docs/aegis/specs/2026-08-09-neo-webui-design.md"
+  ],
+  "impactStatement": "docs/aegis/work/2026-08-11-webui-loading-performance/impact-statement-draft.json",
+  "compatPlan": "Existing session snapshots and live event ordering remain unchanged after bootstrap.",
+  "retirementPlan": "not-yet-verified",
+  "evidenceBundle": [
+    "docs/aegis/work/2026-08-11-webui-loading-performance/evidence-bundle-draft-backend-regression.json",
+    "docs/aegis/work/2026-08-11-webui-loading-performance/evidence-bundle-draft-browser-check.json",
+    "docs/aegis/work/2026-08-11-webui-loading-performance/evidence-bundle-draft-frontend-regression.json",
+    "docs/aegis/work/2026-08-11-webui-loading-performance/evidence-bundle-draft-web-build.json"
+  ]
+}

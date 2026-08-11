@@ -319,6 +319,13 @@ impl EventPublisher {
     pub fn publish(&self, event: WebUiEventBody) -> u64 {
         self.relay.publish(&self.session_id, event)
     }
+
+    /// Reserve transport sequences for persisted history restored into a
+    /// snapshot. No event is cached or delivered to observers.
+    pub fn reserve_history_sequences(&self, count: u64) -> u64 {
+        self.relay
+            .reserve_history_sequences(&self.session_id, count)
+    }
 }
 
 /// Result of an atomic subscribe.
@@ -581,6 +588,13 @@ fn resume(stream_id: &str, window: &SessionRelay, after: Option<&WebUiCursor>) -
 }
 
 impl RelayInner {
+    fn reserve_history_sequences(&self, session_id: &str, count: u64) -> u64 {
+        let mut state = self.state.lock().expect("relay state poisoned");
+        let session = state.sessions.entry(session_id.to_string()).or_default();
+        session.sequence = session.sequence.saturating_add(count);
+        session.sequence
+    }
+
     fn publish(&self, session_id: &str, event: WebUiEventBody) -> u64 {
         let mut state = self.state.lock().expect("relay state poisoned");
         // Sequences are 1-based per session: the first published event is
