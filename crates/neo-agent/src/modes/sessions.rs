@@ -109,9 +109,13 @@ pub(crate) async fn create_new_session(config: &AppConfig) -> anyhow::Result<Cre
 }
 
 pub(crate) fn index_new_session(config: &AppConfig, session_id: &str) -> anyhow::Result<()> {
-    let neo_home = crate::config::neo_home()
-        .context("could not resolve Neo home directory for the global session index")?;
-    SessionIndex::new(&neo_home)
+    let neo_home = config.sessions_dir.parent().ok_or_else(|| {
+        anyhow::anyhow!(
+            "sessions dir {} has no parent directory",
+            config.sessions_dir.display()
+        )
+    })?;
+    SessionIndex::new(neo_home)
         .append(&SessionIndexEntry {
             session_id: session_id.to_owned(),
             session_dir: workspace_sessions_dir(config),
@@ -500,6 +504,20 @@ mod tests {
                 .build()
                 .expect("build test runtime");
             runtime.block_on(async {
+                let unrelated_home = temp.path().join("unrelated-neo-home");
+                let isolated_session_id = "session_00000000-0000-4000-8000-000000000001";
+                temp_env::with_var("NEO_HOME", Some(unrelated_home.as_os_str()), || {
+                    index_new_session(&config, isolated_session_id)
+                })
+                .expect("index session from config");
+                assert!(
+                    SessionIndex::new(&neo_home)
+                        .find(isolated_session_id)
+                        .expect("read isolated session index")
+                        .is_some()
+                );
+                assert!(!unrelated_home.join("session_index.jsonl").exists());
+
                 let created = create_new_session(&config).await.expect("create session");
                 let session_dir = workspace_sessions_dir(&config).join(&created.session_id);
 

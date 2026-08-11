@@ -345,6 +345,38 @@ impl SessionIndex {
         Ok(entries)
     }
 
+    /// Read entries whose session bucket exists under `sessions_root`.
+    pub fn list_all_in_sessions_root(
+        &self,
+        sessions_root: &Path,
+    ) -> Result<Vec<SessionIndexEntry>, SessionIndexError> {
+        let canonical_root = match std::fs::canonicalize(sessions_root) {
+            Ok(root) => root,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+            Err(error) => return Err(SessionIndexError::Io(error)),
+        };
+        let mut entries = Vec::new();
+
+        for mut entry in self.list_all()? {
+            let bucket_dir = if entry.session_dir.is_absolute() {
+                entry.session_dir.clone()
+            } else {
+                sessions_root.join(&entry.session_dir)
+            };
+            let canonical_bucket = match std::fs::canonicalize(&bucket_dir) {
+                Ok(bucket) => bucket,
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+                Err(error) => return Err(SessionIndexError::Io(error)),
+            };
+            if canonical_bucket.starts_with(&canonical_root) {
+                entry.session_dir = bucket_dir;
+                entries.push(entry);
+            }
+        }
+
+        Ok(entries)
+    }
+
     /// Read every indexed session and enrich it with its per-workspace metadata.
     ///
     /// Returns summaries sorted by `updated_at` descending. Entries whose
@@ -353,15 +385,11 @@ impl SessionIndex {
         &self,
         sessions_root: &Path,
     ) -> Result<Vec<SessionSummary>, SessionIndexError> {
-        let entries = self.list_all()?;
+        let entries = self.list_all_in_sessions_root(sessions_root)?;
         let mut summaries = Vec::new();
 
         for entry in entries {
-            let bucket_dir = if entry.session_dir.is_absolute() {
-                entry.session_dir.clone()
-            } else {
-                sessions_root.join(&entry.session_dir)
-            };
+            let bucket_dir = entry.session_dir;
             let metadata_path = bucket_dir.join("sessions.metadata.json");
 
             let content = match std::fs::read_to_string(&metadata_path) {
@@ -616,6 +644,35 @@ mod tests {
         let index = SessionIndex::new(tmp.path());
         let entries = index.list_all().unwrap();
         assert!(entries.is_empty());
+    }
+
+    #[test]
+    fn list_all_in_sessions_root_skips_external_and_missing_buckets() {
+        let tmp = TempDir::new().unwrap();
+        let sessions_root = tmp.path().join("sessions");
+        let current_bucket = sessions_root.join("wd_current");
+        let external_bucket = tmp.path().join("other-home/sessions/wd_external");
+        std::fs::create_dir_all(&current_bucket).unwrap();
+        std::fs::create_dir_all(&external_bucket).unwrap();
+        let index = SessionIndex::new(tmp.path());
+
+        for (suffix, session_dir) in [
+            ("001", current_bucket.clone()),
+            ("002", external_bucket),
+            ("003", sessions_root.join("wd_missing")),
+        ] {
+            index
+                .append(&SessionIndexEntry {
+                    session_id: format!("session_00000000-0000-4000-8000-000000000{suffix}"),
+                    session_dir,
+                    workdir: tmp.path().join(format!("workspace-{suffix}")),
+                })
+                .unwrap();
+        }
+
+        let entries = index.list_all_in_sessions_root(&sessions_root).unwrap();
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].session_dir, current_bucket);
     }
 
     #[tokio::test]

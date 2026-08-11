@@ -133,8 +133,12 @@ impl WebSessionHost {
     /// The global session index handle (cross-workspace aggregation and
     /// per-session bucket resolution both read it).
     fn session_index(&self) -> Result<SessionIndex, WebUiError> {
-        let neo_home = crate::config::neo_home().ok_or_else(Self::internal)?;
-        Ok(SessionIndex::new(&neo_home))
+        let neo_home = self
+            .config
+            .sessions_dir
+            .parent()
+            .ok_or_else(Self::internal)?;
+        Ok(SessionIndex::new(neo_home))
     }
 
     /// The bucket directory that actually owns `session_id` (its indexed
@@ -142,7 +146,11 @@ impl WebSessionHost {
     /// otherwise).
     fn session_bucket_for(&self, session_id: &str) -> PathBuf {
         if let Ok(index) = self.session_index()
-            && let Ok(Some(entry)) = index.find(session_id)
+            && let Ok(entries) = index.list_all_in_sessions_root(&self.config.sessions_dir)
+            && let Some(entry) = entries
+                .into_iter()
+                .rev()
+                .find(|entry| entry.session_id == session_id)
         {
             return entry.session_dir;
         }
@@ -180,7 +188,7 @@ impl WebSessionHost {
             }
         }
         if let Ok(index) = self.session_index()
-            && let Ok(entries) = index.list_all()
+            && let Ok(entries) = index.list_all_in_sessions_root(&self.config.sessions_dir)
         {
             for entry in entries {
                 if !dirs.contains(&entry.workdir) {
@@ -497,7 +505,7 @@ impl WebSessionHost {
         let mut groups: Vec<(PathBuf, Vec<SessionRecord>)> =
             vec![(self.config.project_dir.clone(), current_records)];
         if let Ok(index) = self.session_index()
-            && let Ok(entries) = index.list_all()
+            && let Ok(entries) = index.list_all_in_sessions_root(&self.config.sessions_dir)
         {
             // The index is append-only: the latest entry per session id wins.
             let mut latest: HashMap<String, neo_agent_core::session::SessionIndexEntry> =
@@ -509,9 +517,6 @@ impl WebSessionHost {
                 groups[0].1.iter().map(|record| record.id.clone()).collect();
             let mut bucket_records: HashMap<PathBuf, Vec<SessionRecord>> = HashMap::new();
             for entry in latest.into_values() {
-                // Temporary test workspaces disappear after their test. Keep
-                // their session files, but do not surface dead directories as
-                // projects in the sidebar.
                 if !entry.workdir.is_dir() {
                     continue;
                 }
