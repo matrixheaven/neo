@@ -62,7 +62,7 @@ fn render_shows_hint() {
     let visible = visible_lines(&state, 80);
     let joined = visible.join("\n");
     assert!(
-        joined.contains("↑↓ navigate · R refresh · D delete · Enter add · Esc close"),
+        joined.contains("↑↓ navigate · Enter models · R refresh · D delete · Esc close"),
         "hint missing: {joined}"
     );
 }
@@ -142,11 +142,30 @@ fn enter_on_add_row_returns_add() {
 }
 
 #[test]
-fn enter_on_source_row_does_not_submit() {
+fn enter_on_source_row_selects_provider() {
     let mut state = manager(vec![source("OpenAI", &["openai"])], None);
     let result = state.handle_input(&InputEvent::Submit);
-    assert_eq!(result, InputResult::Handled);
-    assert!(state.action.is_none());
+    assert_eq!(result, InputResult::Submitted);
+    assert_eq!(
+        state.action,
+        Some(ProviderManagerAction::SelectProvider("openai".to_owned()))
+    );
+}
+
+#[test]
+fn enter_on_grouped_source_uses_active_provider_id() {
+    let mut state = manager(
+        vec![source("Mega", &["openai", "anthropic"])],
+        Some("anthropic"),
+    );
+    let result = state.handle_input(&InputEvent::Submit);
+    assert_eq!(result, InputResult::Submitted);
+    assert_eq!(
+        state.action,
+        Some(ProviderManagerAction::SelectProvider(
+            "anthropic".to_owned()
+        ))
+    );
 }
 
 #[test]

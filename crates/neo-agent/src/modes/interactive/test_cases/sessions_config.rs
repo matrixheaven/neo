@@ -927,3 +927,95 @@ async fn refresh_config_preserves_session_theme_override() {
         "the override marker must survive a config refresh"
     );
 }
+
+fn provider_switch_controller() -> InteractiveController {
+    let mut config = test_config_with_models(
+        &test_workspace_root(),
+        test_workspace_root().join(".neo/sessions"),
+        BTreeMap::from([
+            (
+                "aap/gpt-4.1".to_owned(),
+                ModelConfig {
+                    provider: "aap".to_owned(),
+                    model: "gpt-4.1".to_owned(),
+                    display_name: Some("Aap Model".into()),
+                    ..ModelConfig::default()
+                },
+            ),
+            (
+                "zzp/claude".to_owned(),
+                ModelConfig {
+                    provider: "zzp".to_owned(),
+                    model: "claude".to_owned(),
+                    display_name: Some("Zzp Model".into()),
+                    ..ModelConfig::default()
+                },
+            ),
+        ]),
+    );
+    config.default_model = "aap/gpt-4.1".to_owned();
+    config.default_provider = "aap".to_owned();
+    config.providers = BTreeMap::from([
+        (
+            "aap".to_owned(),
+            crate::config::ProviderConfig {
+                display_name: Some("Aap".into()),
+                ..crate::config::ProviderConfig::default()
+            },
+        ),
+        (
+            "zzp".to_owned(),
+            crate::config::ProviderConfig {
+                display_name: Some("Zzp".into()),
+                ..crate::config::ProviderConfig::default()
+            },
+        ),
+    ]);
+    controller_for_config(&config)
+}
+
+#[tokio::test]
+async fn enter_on_active_provider_row_opens_model_selector_scoped_to_provider() {
+    let mut controller = provider_switch_controller();
+    controller.open_provider_picker();
+
+    // Selection starts on the active provider row; Enter drills into its models.
+    controller
+        .handle_input_event(InputEvent::Submit)
+        .await
+        .expect("submit active provider row");
+
+    let Some(OverlayKind::TabbedModelSelector(selector)) = controller
+        .chrome()
+        .focused_overlay()
+        .map(|overlay| &overlay.kind)
+    else {
+        panic!("expected tabbed model selector overlay");
+    };
+    assert_eq!(selector.active_tab(), "aap");
+}
+
+#[tokio::test]
+async fn enter_on_other_provider_row_opens_model_selector_scoped_to_that_provider() {
+    let mut controller = provider_switch_controller();
+    controller.open_provider_picker();
+
+    // Move to the other provider row, then Enter drills into its models.
+    controller
+        .handle_input_event(InputEvent::Action(KeybindingAction::SelectDown))
+        .await
+        .expect("move to other provider row");
+    controller
+        .handle_input_event(InputEvent::Submit)
+        .await
+        .expect("submit other provider row");
+
+    let Some(OverlayKind::TabbedModelSelector(selector)) = controller
+        .chrome()
+        .focused_overlay()
+        .map(|overlay| &overlay.kind)
+    else {
+        panic!("expected tabbed model selector overlay");
+    };
+    assert_eq!(selector.active_tab(), "zzp");
+}

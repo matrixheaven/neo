@@ -190,6 +190,10 @@ impl InteractiveController {
             neo_tui::dialogs::ProviderManagerAction::Refresh(provider_id) => {
                 self.start_provider_model_refresh(provider_id);
             }
+            neo_tui::dialogs::ProviderManagerAction::SelectProvider(provider_id) => {
+                self.tui.chrome_mut().close_focused_overlay();
+                self.open_model_picker_for_provider(&provider_id);
+            }
         }
     }
 

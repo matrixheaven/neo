@@ -240,4 +240,30 @@ impl InteractiveController {
             },
         );
     }
+
+    /// Open the model picker scoped to a provider's models, with no model
+    /// pre-selected so the user confirms the choice explicitly.
+    pub(super) fn open_model_picker_for_provider(&mut self, provider_id: &str) {
+        let Some(config) = &self.local_config else {
+            self.push_status("No config available");
+            return;
+        };
+        let entries = model_entries_from_config(config);
+        let current_alias = self
+            .active_model
+            .as_ref()
+            .map(|m| format!("{}/{}", m.provider, m.model))
+            .unwrap_or_default();
+        let theme = self.tui.chrome().theme();
+        self.tui.chrome_mut().open_tabbed_model_selector(
+            neo_tui::dialogs::TabbedModelSelectorOptions {
+                models: entries,
+                current_alias,
+                selected_alias: None,
+                current_reasoning: self.current_reasoning.clone(),
+                initial_tab_id: Some(provider_id.to_owned()),
+                theme,
+            },
+        );
+    }
 }

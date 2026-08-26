@@ -39,6 +39,8 @@ pub enum ProviderManagerAction {
     DeleteSource(Vec<String>),
     /// User requested a model refresh for one provider.
     Refresh(String),
+    /// User chose a source row to open its models in the model selector.
+    SelectProvider(String),
     /// User chose to close the dialog.
     Close,
 }
@@ -59,6 +61,7 @@ enum Row {
 pub struct ProviderManagerState {
     rows: Vec<Row>,
     selected_index: usize,
+    active_provider_id: Option<String>,
     theme: TuiTheme,
     confirm: Option<ConfirmState>,
     action: Option<ProviderManagerAction>,
@@ -71,7 +74,7 @@ struct ConfirmState {
 }
 
 const ADD_ROW_LABEL: &str = "[ Add New Platform ]";
-const HEADER_HINT: &str = "↑↓ navigate · R refresh · D delete · Enter add · Esc close";
+const HEADER_HINT: &str = "↑↓ navigate · Enter models · R refresh · D delete · Esc close";
 
 impl ProviderManagerState {
     /// Create a new provider manager with the given options.
@@ -82,6 +85,7 @@ impl ProviderManagerState {
         Self {
             rows,
             selected_index,
+            active_provider_id: opts.active_provider_id.clone(),
             theme: opts.theme,
             confirm: None,
             action: None,
@@ -99,6 +103,7 @@ impl ProviderManagerState {
         let previous_first_id = previous_row.and_then(Row::first_provider_id);
 
         self.rows = build_rows(opts);
+        self.active_provider_id.clone_from(&opts.active_provider_id);
         self.theme = opts.theme;
         self.confirm = None;
         self.action = None;
@@ -191,10 +196,11 @@ impl ProviderManagerState {
     /// Handle keyboard input.
     ///
     /// Delete confirmation is armed with `d`/`D` on a source row, confirmed with
-    /// `y`/`Y`, and cancelled with `n`/`N` or Esc. Enter on the add row returns
-    /// [`InputResult::Submitted`] and sets [`ProviderManagerAction::Add`]. Esc
-    /// otherwise returns [`InputResult::Cancelled`] and sets
-    /// [`ProviderManagerAction::Close`].
+    /// `y`/`Y`, and cancelled with `n`/`N` or Esc. Enter on a source row returns
+    /// [`InputResult::Submitted`] and sets [`ProviderManagerAction::SelectProvider`]
+    /// to open that provider's models; Enter on the add row sets
+    /// [`ProviderManagerAction::Add`]. Esc otherwise returns
+    /// [`InputResult::Cancelled`] and sets [`ProviderManagerAction::Close`].
     pub fn handle_input(&mut self, input: &InputEvent) -> InputResult {
         if self.action.is_some() {
             return InputResult::Handled;
@@ -209,7 +215,7 @@ impl ProviderManagerState {
         match input {
             InputEvent::Action(action) => self.handle_action_input(*action),
             InputEvent::Key(key) => self.handle_named_key(key),
-            InputEvent::Submit => self.confirm_add_row(),
+            InputEvent::Submit => self.confirm_selected_row(),
             InputEvent::Cancel => self.close(),
             InputEvent::Insert(character) => self.handle_insert(*character),
             _ => InputResult::Ignored,
@@ -257,7 +263,7 @@ impl ProviderManagerState {
             KeybindingAction::SelectDown => self.move_selection_down(),
             KeybindingAction::SelectPageUp => self.move_selection_page_up(),
             KeybindingAction::SelectPageDown => self.move_selection_page_down(),
-            KeybindingAction::SelectConfirm => self.confirm_add_row(),
+            KeybindingAction::SelectConfirm => self.confirm_selected_row(),
             KeybindingAction::SelectCancel => self.close(),
             _ => InputResult::Ignored,
         }
@@ -283,13 +289,36 @@ impl ProviderManagerState {
         InputResult::Handled
     }
 
-    fn confirm_add_row(&mut self) -> InputResult {
-        if matches!(self.rows.get(self.selected_index), Some(Row::Add)) {
-            self.action = Some(ProviderManagerAction::Add);
-            InputResult::Submitted
-        } else {
-            InputResult::Handled
+    fn confirm_selected_row(&mut self) -> InputResult {
+        match &self.rows.get(self.selected_index) {
+            Some(Row::Add) => {
+                self.action = Some(ProviderManagerAction::Add);
+                InputResult::Submitted
+            }
+            Some(Row::Source { provider_ids, .. }) => {
+                let provider_ids = provider_ids.clone();
+                self.select_provider(&provider_ids)
+            }
+            None => InputResult::Handled,
         }
+    }
+
+    fn select_provider(&mut self, provider_ids: &[String]) -> InputResult {
+        let Some(provider_id) = self.target_provider_id(provider_ids) else {
+            return InputResult::Handled;
+        };
+        self.action = Some(ProviderManagerAction::SelectProvider(provider_id));
+        InputResult::Submitted
+    }
+
+    /// Choose which provider id a source row scopes the model selector to:
+    /// the active provider when the row group contains it, otherwise the first.
+    fn target_provider_id(&self, provider_ids: &[String]) -> Option<String> {
+        self.active_provider_id
+            .as_ref()
+            .filter(|active| provider_ids.iter().any(|id| id == *active))
+            .cloned()
+            .or_else(|| provider_ids.first().cloned())
     }
 
     fn close(&mut self) -> InputResult {
