@@ -49,7 +49,7 @@ test("01 宽屏新会话：欢迎 banner 与 pill 行", async ({ page }) => {
   await expect(page.getByLabel("输入消息", { exact: true })).toBeVisible();
   await expect(page.getByRole("note")).toContainText("描述你的任务，回车发送");
   await expect(page.getByRole("button", { name: "模型与推理（仅下一回合）" })).toBeVisible();
-  await expect(page.getByLabel("选择项目")).toHaveValue("workspace_sample");
+  await expect(page.getByLabel("选择项目")).toContainText("workspace_sample");
   await expect(page.locator(".workspace-branch")).toContainText("main");
   await page.screenshot({ path: `${SHOTS}/01-wide-new-session.png` });
 });

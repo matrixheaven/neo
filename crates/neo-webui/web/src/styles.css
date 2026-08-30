@@ -3114,7 +3114,10 @@ button.ft-file-head:focus-visible {
   font-size: 12px;
 }
 
-.workspace-bar select {
+.workspace-trigger {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
   min-width: 0;
   max-width: 36ch;
   border: 0;
@@ -3122,6 +3125,19 @@ button.ft-file-head:focus-visible {
   color: var(--text);
   font: inherit;
   font-weight: 600;
+  cursor: pointer;
+  padding: 2px 4px;
+  border-radius: 6px;
+}
+
+.workspace-trigger:hover {
+  background: var(--hover);
+}
+
+/* The workspace bar sits above the composer, so its pickers open downward. */
+.workspace-bar .pill-popover {
+  bottom: auto;
+  top: calc(100% + 6px);
 }
 
 .workspace-branch {
@@ -3130,6 +3146,118 @@ button.ft-file-head:focus-visible {
   gap: 5px;
   margin-left: 4px;
   color: var(--text-dim);
+  font-weight: 500;
+}
+
+/* -- Picker popover: search / list / footer zones ------------------------------ */
+
+.picker-popover {
+  width: min(280px, calc(100vw - 16px));
+  max-height: 340px;
+}
+
+.picker-zone {
+  padding: 6px 8px;
+}
+
+.picker-zone-search {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  border-bottom: 1px solid var(--line);
+  color: var(--text-faint);
+}
+
+.picker-zone-search input {
+  flex: 1;
+  min-width: 0;
+  border: 0;
+  background: transparent;
+  color: var(--text);
+  font: inherit;
+  padding: 3px 0;
+}
+
+.picker-zone-search input:focus {
+  outline: none;
+}
+
+.picker-zone-list {
+  border-bottom: 1px solid var(--line);
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-height: 32px;
+}
+
+.picker-empty {
+  margin: 0;
+  padding: 4px 6px;
+  color: var(--text-faint);
+  font-size: var(--font-size-aux);
+}
+
+.picker-item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  border: 0;
+  background: transparent;
+  color: var(--text);
+  font: inherit;
+  text-align: left;
+  padding: 5px 6px;
+  border-radius: 6px;
+  cursor: pointer;
+}
+
+.picker-item:hover,
+.picker-item:focus-visible {
+  background: var(--hover);
+  outline: none;
+}
+
+.picker-item.selected {
+  font-weight: 600;
+}
+
+.picker-item-label {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.picker-current {
+  flex: none;
+  font-size: var(--font-size-micro);
+  color: var(--accent);
+}
+
+.picker-zone-footer {
+  padding: 4px 4px;
+}
+
+.picker-footer-action {
+  width: 100%;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  border: 0;
+  background: transparent;
+  color: var(--text-dim);
+  font: inherit;
+  text-align: left;
+  padding: 5px 6px;
+  border-radius: 6px;
+  cursor: pointer;
+}
+
+.picker-footer-action:hover {
+  background: var(--hover);
+  color: var(--text);
 }
 
 .session-view > .composer-dock {

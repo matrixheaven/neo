@@ -568,3 +568,82 @@ describe("queue panel", () => {
     );
   });
 });
+
+describe("workspace and branch pickers", () => {
+  beforeEach(() => {
+    resetHarness();
+    vi.stubGlobal("fetch", vi.fn(mockFetch));
+    vi.stubGlobal("WebSocket", FakeWebSocket);
+    window.history.replaceState(null, "", "/");
+  });
+
+  afterEach(() => {
+    cleanup();
+    vi.unstubAllGlobals();
+  });
+
+  it("renders the three-zone workspace picker, filters and switches selection", async () => {
+    const { socket } = await renderReady();
+    socket.emit(asServerMessage(fixture.long_connection.workspace_snapshot));
+
+    fireEvent.click(await screen.findByLabelText("选择项目"));
+    const dialog = await screen.findByRole("dialog", { name: "搜索工作区" });
+    // Three zones separated by rules: search, list, footer action.
+    expect(dialog.querySelector<HTMLInputElement>(".picker-zone-search input")).not.toBeNull();
+    expect(dialog.querySelector(".picker-zone-footer .picker-footer-action")).not.toBeNull();
+    expect(dialog.textContent).toContain("打开新文件夹作为工作区");
+    // The current workspace is marked and listed.
+    expect(dialog.textContent).toContain("neo");
+
+    // Filtering the search narrows the list.
+    fireEvent.change(dialog.querySelector<HTMLInputElement>(".picker-zone-search input") as HTMLInputElement, {
+      target: { value: "不存在的名字" },
+    });
+    expect(dialog.textContent).toContain("无匹配项");
+
+    // The footer opens the shared add-project dialog.
+    fireEvent.click(dialog.querySelector(".picker-footer-action") as HTMLElement);
+    await screen.findByRole("dialog", { name: "添加项目" });
+  });
+
+  it("lists branches, switches selection and creates a branch from the footer", async () => {
+    const { socket } = await renderReady();
+    socket.emit(asServerMessage(fixture.long_connection.workspace_snapshot));
+
+    fireEvent.click(await screen.findByLabelText("选择分支"));
+    const dialog = await screen.findByRole("dialog", { name: "搜索分支" });
+    // Fixture mock lists main + feature + topic/one with main as current.
+    const feature = await within(dialog).findByRole("option", { name: /feature/ });
+    expect(feature.textContent).not.toContain("当前");
+    expect(within(dialog).getByRole("option", { name: /main/ }).className).toContain("selected");
+
+    // Selecting an existing branch checks it out and closes the picker.
+    fireEvent.click(feature);
+    await waitFor(() =>
+      expect(
+        recordedRequests.filter((entry) => entry.url.endsWith("/checkout")),
+      ).toHaveLength(1),
+    );
+    expect(postedBodies("/api/workspaces/workspace_sample/checkout")[0]).toEqual({
+      name: "feature",
+      create: false,
+    });
+
+    // Footer switches into create mode; the search field becomes the name.
+    fireEvent.click(await screen.findByLabelText("选择分支"));
+    const createDialog = await screen.findByRole("dialog", { name: "搜索分支" });
+    fireEvent.click(within(createDialog).getByRole("button", { name: "创建并检出新分支" }));
+    const nameInput = within(createDialog).getByLabelText("新分支名称", { selector: "input" }) as HTMLInputElement;
+    fireEvent.change(nameInput, { target: { value: "topic/new-work" } });
+    fireEvent.click(within(createDialog).getByRole("button", { name: "创建并检出" }));
+    await waitFor(() =>
+      expect(
+        recordedRequests.filter((entry) => entry.url.endsWith("/checkout")),
+      ).toHaveLength(2),
+    );
+    expect(postedBodies("/api/workspaces/workspace_sample/checkout")[1]).toEqual({
+      name: "topic/new-work",
+      create: true,
+    });
+  });
+});

@@ -18,11 +18,12 @@ use neo_agent_core::session::{
 };
 use neo_agent_core::{AgentEvent, Content, MediaRef, PendingQuestion};
 use neo_webui::protocol::{
-    WebUiAgentHistory, WebUiAttachmentAck, WebUiBootstrap, WebUiChangeStatus, WebUiCommand,
-    WebUiCompletionItem, WebUiCompletions, WebUiComposer, WebUiDevelopmentMode, WebUiError,
-    WebUiErrorCode, WebUiHost, WebUiModelInfo, WebUiReply, WebUiSessionMetadata, WebUiSessionPage,
-    WebUiSessionScope, WebUiSessionSummary, WebUiSnapshot, WebUiSummaryState, WebUiWorkspaceChange,
-    WebUiWorkspaceChangeDetail, WebUiWorkspaceChanges, WebUiWorkspaceGroup, WebUiWorkspaceSnapshot,
+    WebUiAgentHistory, WebUiAttachmentAck, WebUiBootstrap, WebUiBranchList, WebUiChangeStatus,
+    WebUiCommand, WebUiCompletionItem, WebUiCompletions, WebUiComposer, WebUiDevelopmentMode,
+    WebUiError, WebUiErrorCode, WebUiHost, WebUiModelInfo, WebUiReply, WebUiSessionMetadata,
+    WebUiSessionPage, WebUiSessionScope, WebUiSessionSummary, WebUiSnapshot, WebUiSummaryState,
+    WebUiWorkspaceChange, WebUiWorkspaceChangeDetail, WebUiWorkspaceChanges, WebUiWorkspaceGroup,
+    WebUiWorkspaceSnapshot,
 };
 use neo_webui::relay::{
     ATTACHMENT_MAX_BYTES, ATTACHMENTS_PER_MESSAGE_MAX, Relay, SESSION_PAGE_LIMIT,
@@ -1347,6 +1348,12 @@ impl WebUiHost for WebSessionHost {
                 self.workspace_change_detail(&change_id).await
             }
             WebUiCommand::AddWorkspace { path } => self.add_workspace(path),
+            WebUiCommand::ListBranches { workspace_id } => self.list_branches(&workspace_id).await,
+            WebUiCommand::CheckoutBranch {
+                workspace_id,
+                name,
+                create,
+            } => self.checkout_branch(&workspace_id, &name, create).await,
             WebUiCommand::RevealWorkspace { workspace_id } => self.reveal_workspace(&workspace_id),
             WebUiCommand::UpdateWorkspace {
                 workspace_id,
@@ -1507,6 +1514,60 @@ impl WebSessionHost {
             .find(|group| group.id == workspace_id)
             .ok_or_else(Self::internal)?;
         Ok(WebUiReply::WorkspaceAdded(group))
+    }
+
+    /// List local branches of one workspace; read on demand with the shared
+    /// git collector off the async runtime. Non-repositories produce the
+    /// empty list, never an error.
+    async fn list_branches(&self, workspace_id: &str) -> Result<WebUiReply, WebUiError> {
+        let workspace = self.workspace_for_id(Some(workspace_id))?;
+        let list = tokio::task::spawn_blocking(move || {
+            crate::git_status::list_branches(&workspace)
+        })
+        .await
+        .map_err(|_| Self::internal())?;
+        Ok(WebUiReply::Branches(WebUiBranchList {
+            current: list.as_ref().and_then(|branches| branches.current.clone()),
+            branches: list
+                .map(|branches| branches.branches)
+                .unwrap_or_default(),
+        }))
+    }
+
+    /// Check out (optionally create) a workspace branch. Git failures are
+    /// logged with the stderr tail and surfaced as a stable 400; success
+    /// returns the re-aggregated workspace group so the browser refreshes
+    /// the branch label in place.
+    async fn checkout_branch(
+        &self,
+        workspace_id: &str,
+        name: &str,
+        create: bool,
+    ) -> Result<WebUiReply, WebUiError> {
+        let workspace = self.workspace_for_id(Some(workspace_id))?;
+        let name = name.trim().to_owned();
+        if name.is_empty() {
+            return Err(WebUiError::new(WebUiErrorCode::InvalidRequest));
+        }
+        let result = tokio::task::spawn_blocking(move || {
+            crate::git_status::checkout_branch(&workspace, &name, create)
+        })
+        .await
+        .map_err(|_| Self::internal())?;
+        if let Err(message) = result {
+            tracing::warn!(
+                workspace = %workspace_id,
+                message = %message,
+                "webui branch checkout failed"
+            );
+            return Err(WebUiError::new(WebUiErrorCode::InvalidRequest));
+        }
+        let group = self
+            .aggregated_workspaces()
+            .into_iter()
+            .find(|group| group.id == workspace_id)
+            .ok_or_else(Self::internal)?;
+        Ok(WebUiReply::WorkspaceUpdated(group))
     }
 
     async fn create_session(

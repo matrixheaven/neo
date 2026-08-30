@@ -677,6 +677,102 @@ fn new_file_diff_preview(workspace_root: &Path, path: &Path) -> GitChangeDiff {
     GitChangeDiff { diff, truncated }
 }
 
+// ── Branch listing and checkout (webui workspace/branch picker) ──────────
+
+/// Local branches of one workspace: the current branch plus every local
+/// branch name in short form (no `refs/heads/` prefix).
+pub(crate) struct GitBranchList {
+    pub(crate) current: Option<String>,
+    pub(crate) branches: Vec<String>,
+}
+
+/// List local branches with `git for-each-ref`. Returns `None` when the
+/// workspace is not a repository, git fails, or the repository has no
+/// branches yet (unborn `HEAD`): the picker then has nothing to offer.
+pub(crate) fn list_branches(workspace_root: &Path) -> Option<GitBranchList> {
+    list_branches_with_program("git", workspace_root)
+}
+
+pub(crate) fn list_branches_with_program(
+    program: &str,
+    workspace_root: &Path,
+) -> Option<GitBranchList> {
+    let output = Command::new(program)
+        .arg("-C")
+        .arg(workspace_root)
+        .args(["for-each-ref", "refs/heads", "--format=%(refname:short)"])
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let branches = String::from_utf8_lossy(&output.stdout)
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+        .map(str::to_owned)
+        .collect::<Vec<_>>();
+    if branches.is_empty() {
+        return None;
+    }
+    let current = collect_workspace_status_with_program(program, workspace_root)
+        .map(|status| status.branch);
+    Some(GitBranchList { current, branches })
+}
+
+/// Branch names the web boundary accepts: a conservative whitelist. Git
+/// rejects invalid names anyway, but option injection (leading `-`),
+/// whitespace and control characters are refused up front.
+fn branch_name_is_acceptable(name: &str) -> bool {
+    !name.is_empty()
+        && !name.starts_with('-')
+        && !name.contains("..")
+        && name
+            .chars()
+            .all(|character| character.is_ascii_alphanumeric() || matches!(character, '/' | '.' | '_' | '-' | '+'))
+}
+
+/// Check out an existing branch (`create = false`) or create and check out a
+/// new one (`create = true`). The error carries the git stderr tail for
+/// server-side logging only; it never crosses the web boundary.
+pub(crate) fn checkout_branch(
+    workspace_root: &Path,
+    name: &str,
+    create: bool,
+) -> Result<(), String> {
+    checkout_branch_with_program("git", workspace_root, name, create)
+}
+
+pub(crate) fn checkout_branch_with_program(
+    program: &str,
+    workspace_root: &Path,
+    name: &str,
+    create: bool,
+) -> Result<(), String> {
+    if !branch_name_is_acceptable(name) {
+        return Err("rejected branch name".to_owned());
+    }
+    let mut command = Command::new(program);
+    command.arg("-C").arg(workspace_root).arg("checkout");
+    if create {
+        command.arg("-b");
+    }
+    command.arg(name);
+    let output = command.output().map_err(|error| error.to_string())?;
+    if output.status.success() {
+        return Ok(());
+    }
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    let tail = stderr
+        .lines()
+        .rev()
+        .find(|line| !line.trim().is_empty())
+        .unwrap_or("git checkout failed")
+        .to_owned();
+    Err(tail)
+}
+
+
 #[cfg(test)]
 mod tests {
     use base64::Engine as _;

@@ -203,3 +203,92 @@ async fn workspace_change_detail_rejects_forged_or_outside_reference() {
         );
     }
 }
+
+/// The workspace/branch picker API at the product boundary: branches list the
+/// real repository refs, checkout switches (create + checkout for new
+/// branches), and the reply carries the refreshed workspace group so the
+/// browser updates the branch label in place.
+#[tokio::test]
+async fn branch_picker_lists_and_checks_out_workspace_branches() {
+    let project = tempfile::tempdir().expect("project tempdir");
+    prepare_repository(project.path());
+    git(project.path(), &["branch", "feature"]);
+    let project_path: PathBuf = project.path().to_path_buf();
+    let (test_env, _provider) = start_env(project, Vec::new()).await;
+    let port = test_env.webui.port;
+    let cookie = &test_env.cookie;
+
+    // The current workspace is known to the service; discover its id through
+    // the add route (re-adding a known directory is idempotent and returns
+    // the group with its id).
+    let added = http::post_json(port, cookie, "/api/workspaces", &serde_json::json!({
+        "path": project_path.to_string_lossy()
+    }))
+    .await;
+    assert_eq!(added.status, 201, "{}", added.body);
+    let workspace_id = serde_json::from_str::<Value>(&added.body)
+        .expect("group json")["id"]
+        .as_str()
+        .expect("workspace id")
+        .to_owned();
+
+    let listed = http::get(
+        port,
+        cookie,
+        &format!("/api/workspaces/{workspace_id}/branches"),
+    )
+    .await;
+    assert_eq!(listed.status, 200, "{}", listed.body);
+    let branches: Value = serde_json::from_str(&listed.body).expect("branches json");
+    let names: Vec<String> = branches["branches"]
+        .as_array()
+        .expect("branch array")
+        .iter()
+        .map(|name| name.as_str().expect("branch name").to_owned())
+        .collect();
+    assert!(names.contains(&"feature".to_owned()), "{names:?}");
+    assert!(
+        branches["current"].as_str().is_some_and(|current| names.contains(&current.to_owned())),
+        "{}",
+        listed.body
+    );
+
+    // Check out the existing feature branch; the reply is the refreshed group.
+    let checked_out = http::post_json(
+        port,
+        cookie,
+        &format!("/api/workspaces/{workspace_id}/checkout"),
+        &serde_json::json!({ "name": "feature", "create": false }),
+    )
+    .await;
+    assert_eq!(checked_out.status, 200, "{}", checked_out.body);
+    let group: Value = serde_json::from_str(&checked_out.body).expect("group json");
+    assert_eq!(group["id"], workspace_id.as_str());
+    assert_eq!(group["branch"], "feature");
+
+    // Create + check out a brand-new branch from the picker footer.
+    let created = http::post_json(
+        port,
+        cookie,
+        &format!("/api/workspaces/{workspace_id}/checkout"),
+        &serde_json::json!({ "name": "topic/new-work", "create": true }),
+    )
+    .await;
+    assert_eq!(created.status, 200, "{}", created.body);
+    assert_eq!(
+        serde_json::from_str::<Value>(&created.body).expect("group json")["branch"],
+        "topic/new-work"
+    );
+
+    // Option-like and traversal names never reach git.
+    for hostile in ["-evil", "../escape", "a b"] {
+        let rejected = http::post_json(
+            port,
+            cookie,
+            &format!("/api/workspaces/{workspace_id}/checkout"),
+            &serde_json::json!({ "name": hostile, "create": true }),
+        )
+        .await;
+        assert_eq!(rejected.status, 400, "{hostile}: {}", rejected.body);
+    }
+}

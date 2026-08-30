@@ -605,6 +605,13 @@ export interface WebUiWorkspaceGroup {
   sessions: WebUiSessionSummary[];
 }
 
+/** Body of `GET /api/workspaces/<id>/branches`: local branch names plus the
+ * current one. Empty when the workspace is not a git repository. */
+export interface WebUiBranchList {
+  current?: string | null;
+  branches: string[];
+}
+
 export type WebUiServerMessage =
   | {
       type: "workspace_snapshot";

@@ -35,6 +35,7 @@ import type {
   WebUiWorkspaceGroup,
 } from "../protocol";
 import { useAppActions, useAppState } from "../state/store";
+import { AddWorkspaceDialog } from "./addWorkspaceDialog";
 
 export function summaryStateText(state: WebUiSummaryState): string | null {
   switch (state) {
@@ -449,8 +450,6 @@ export function Sidebar() {
   const [renamingId, setRenamingId] = useState<string | null>(null);
   const [selectionClosingDrawer, setSelectionClosingDrawer] = useState(false);
   const [addingWorkspace, setAddingWorkspace] = useState(false);
-  const [workspacePath, setWorkspacePath] = useState("");
-  const [workspaceSaving, setWorkspaceSaving] = useState(false);
   const [projectPreferences, setProjectPreferences] = useState(loadProjectPreferences);
   const [projectMenu, setProjectMenu] = useState<{
     workspaceId: string;
@@ -1000,50 +999,15 @@ export function Sidebar() {
         );
       })() : null}
       {addingWorkspace ? (
-        <div className="dialog-backdrop" role="presentation">
-          <form
-            className="workspace-dialog"
-            role="dialog"
-            aria-modal="true"
-            aria-labelledby="workspace-dialog-title"
-            onSubmit={(event) => {
-              event.preventDefault();
-              const path = workspacePath.trim();
-              if (path === "" || workspaceSaving) return;
-              setWorkspaceSaving(true);
-              actions
-                .addWorkspace(path)
-                .then((workspace) => {
-                  updateProjectPreference(workspace.id, { removed: false });
-                  workspace.sessions.forEach((session) =>
-                    actions.patchMetadata(session.session_id, { archived: false }),
-                  );
-                  setAddingWorkspace(false);
-                  setWorkspacePath("");
-                })
-                .catch(() => {})
-                .finally(() => setWorkspaceSaving(false));
-            }}
-          >
-            <h2 id="workspace-dialog-title">添加项目</h2>
-            <label htmlFor="workspace-path">项目文件夹</label>
-            <input
-              id="workspace-path"
-              autoFocus
-              value={workspacePath}
-              placeholder="/Users/name/Workspace/project"
-              onChange={(event) => setWorkspacePath(event.target.value)}
-            />
-            <div className="workspace-dialog-actions">
-              <button type="button" onClick={() => setAddingWorkspace(false)}>
-                取消
-              </button>
-              <button type="submit" className="primary-button" disabled={workspaceSaving}>
-                {workspaceSaving ? "添加中…" : "添加"}
-              </button>
-            </div>
-          </form>
-        </div>
+        <AddWorkspaceDialog
+          onClose={() => setAddingWorkspace(false)}
+          onAdded={(workspace) => {
+            updateProjectPreference(workspace.id, { removed: false });
+            workspace.sessions.forEach((session) =>
+              actions.patchMetadata(session.session_id, { archived: false }),
+            );
+          }}
+        />
       ) : null}
     </aside>
   );

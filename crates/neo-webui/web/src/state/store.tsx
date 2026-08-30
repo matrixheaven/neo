@@ -19,9 +19,11 @@ import {
   addWorkspace as requestAddWorkspace,
   cancelTurn,
   claimAccessToken,
+  checkoutBranch as requestCheckoutBranch,
   createSession,
   fetchBootstrap,
   fetchSnapshot,
+  listBranches as requestListBranches,
   openEventsSocket,
   queueControl,
   resolveApproval,
@@ -34,6 +36,7 @@ import {
 import type {
   AgentSnapshot,
   ApprovalAction,
+  WebUiBranchList,
   WebUiComposer,
   WebUiQuestionAnswer,
   WebUiServerMessage,
@@ -78,6 +81,10 @@ export interface AppActions {
   selectSession(sessionId: string | null): void;
   selectWorkspace(workspaceId: string): void;
   addWorkspace(path: string): Promise<WebUiWorkspaceGroup>;
+  /** Local branches of one workspace (empty when it is not a repository). */
+  listBranches(workspaceId: string): Promise<WebUiBranchList>;
+  /** Check out an existing branch or create + check out a new one. */
+  checkoutBranch(workspaceId: string, name: string, create: boolean): Promise<WebUiWorkspaceGroup>;
   setSidebarWidth(width: number): void;
   setDrawerOpen(open: boolean): void;
   setSidebarCollapsed(collapsed: boolean): void;
@@ -302,6 +309,23 @@ export function AppProvider({ children }: { children: ReactNode }) {
         return workspace;
       } catch (error) {
         handleApiError(error);
+        throw error;
+      }
+    },
+    async listBranches(workspaceId) {
+      return requestListBranches(workspaceId);
+    },
+    async checkoutBranch(workspaceId, name, create) {
+      try {
+        const workspace = await requestCheckoutBranch(workspaceId, name, create);
+        dispatch({ type: "workspace_updated", workspace });
+        return workspace;
+      } catch (error) {
+        if (error instanceof ApiError && error.status === 400) {
+          dispatch({ type: "notice", text: "分支切换失败（可能有未提交的修改），请先处理工作区状态。" });
+        } else {
+          handleApiError(error);
+        }
         throw error;
       }
     },

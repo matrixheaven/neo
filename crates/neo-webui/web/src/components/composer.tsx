@@ -34,10 +34,13 @@ import type {
   WebUiComposer,
   WebUiCompletionItem,
   WebUiContextWindow,
+  WebUiBranchList,
   WebUiDevelopmentMode,
   WebUiModelInfo,
 } from "../protocol";
 import { useAppActions, useAppState } from "../state/store";
+import { AddWorkspaceDialog } from "./addWorkspaceDialog";
+import { PickerPopover } from "./pickerPopover";
 import { NeoMark } from "./neoMark";
 import { QueuePanel } from "./queuePanel";
 import { TaskList } from "./taskList";
@@ -67,7 +70,7 @@ const REASONING_LABELS: Record<string, string> = {
 const MAX_ATTACHMENTS = 4;
 const MAX_ATTACHMENT_BYTES = 8 * 1024 * 1024;
 
-type ComposerMenu = "model" | "permission" | "development";
+type ComposerMenu = "model" | "permission" | "development" | "workspace" | "branch";
 type ModelMenuPane = "root" | "models" | "reasoning";
 
 const NO_REASONING: ReasoningCapability = { type: "none" };
@@ -269,11 +272,21 @@ export function Composer({ centered }: { centered: boolean }) {
   const modelWrapRef = useRef<HTMLDivElement | null>(null);
   const permissionWrapRef = useRef<HTMLDivElement | null>(null);
   const developmentWrapRef = useRef<HTMLDivElement | null>(null);
+  const workspaceWrapRef = useRef<HTMLDivElement | null>(null);
+  const branchWrapRef = useRef<HTMLDivElement | null>(null);
   const menuButtonRef = useRef<HTMLButtonElement | null>(null);
   const menuWasOpenRef = useRef(false);
   // Esc closes return focus to the pill; outside clicks leave focus where
   // the user clicked.
   const closeViaEscRef = useRef(false);
+
+  // -- Workspace / branch pickers ----------------------------------------------
+  const [workspaceSearch, setWorkspaceSearch] = useState("");
+  const [branchSearch, setBranchSearch] = useState("");
+  const [branchList, setBranchList] = useState<WebUiBranchList | null>(null);
+  const [branchLoading, setBranchLoading] = useState(false);
+  const [branchCreating, setBranchCreating] = useState(false);
+  const [addingWorkspace, setAddingWorkspace] = useState(false);
 
   // -- Welcome banner ----------------------------------------------------------
   const hasUserMessage =
@@ -327,7 +340,11 @@ export function Composer({ centered }: { centered: boolean }) {
         ? modelWrapRef.current
         : openMenu === "permission"
           ? permissionWrapRef.current
-          : developmentWrapRef.current;
+          : openMenu === "workspace"
+            ? workspaceWrapRef.current
+            : openMenu === "branch"
+              ? branchWrapRef.current
+              : developmentWrapRef.current;
     const onPointerDown = (event: MouseEvent) => {
       if (activeMenuWrap && !activeMenuWrap.contains(event.target as Node)) {
         setOpenMenu(null);
@@ -572,8 +589,44 @@ export function Composer({ centered }: { centered: boolean }) {
       setModelQuery("");
       setBudgetInput("");
     }
+    if (menu === "workspace") {
+      setWorkspaceSearch("");
+    }
+    if (menu === "branch") {
+      setBranchSearch("");
+      setBranchCreating(false);
+      setBranchList(null);
+      setBranchLoading(true);
+    }
     setOpenMenu(menu);
   };
+
+  // Branch list loads when the branch picker opens (once per open).
+  useEffect(() => {
+    if (openMenu !== "branch") return;
+    const workspaceId = selectedWorkspace?.id;
+    if (workspaceId === undefined) {
+      setBranchLoading(false);
+      return;
+    }
+    let cancelled = false;
+    actions
+      .listBranches(workspaceId)
+      .then((list) => {
+        if (!cancelled) setBranchList(list);
+      })
+      .catch(() => {
+        if (!cancelled) setBranchList({ branches: [] });
+      })
+      .finally(() => {
+        if (!cancelled) setBranchLoading(false);
+      });
+    return () => {
+      cancelled = true;
+    };
+    // selectedWorkspace is derived from appState.workspaces + selection.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [openMenu]);
 
   const selectModel = (entry: WebUiModelInfo | null) => {
     if (entry === null) {
@@ -642,23 +695,121 @@ export function Composer({ centered }: { centered: boolean }) {
       ) : null}
       {centered && selectedWorkspace ? (
         <div className="workspace-bar" aria-label="新会话项目">
-          <Folder size={14} aria-hidden />
-          <select
-            aria-label="选择项目"
-            value={selectedWorkspace.id}
-            onChange={(event) => actions.selectWorkspace(event.target.value)}
-          >
-            {appState.workspaces.map((workspace) => (
-              <option key={workspace.id} value={workspace.id}>
-                {workspace.label}
-              </option>
-            ))}
-          </select>
+          <div className="pill-wrap" ref={workspaceWrapRef}>
+            <button
+              type="button"
+              className="workspace-trigger"
+              aria-label="选择项目"
+              aria-expanded={openMenu === "workspace"}
+              aria-haspopup="dialog"
+              title="选择项目"
+              onClick={(event) => {
+                toggleMenu("workspace", event.currentTarget);
+              }}
+            >
+              <Folder size={14} aria-hidden />
+              {selectedWorkspace.label}
+              <ChevronDown size={12} aria-hidden />
+            </button>
+            {openMenu === "workspace" ? (
+              <PickerPopover
+                searchPlaceholder="搜索工作区"
+                searchLabel="搜索工作区"
+                search={workspaceSearch}
+                onSearch={setWorkspaceSearch}
+                items={appState.workspaces
+                  .filter((workspace) =>
+                    workspace.label.toLowerCase().includes(workspaceSearch.trim().toLowerCase()),
+                  )
+                  .map((workspace) => ({
+                    id: workspace.id,
+                    label: workspace.label,
+                    current: workspace.id === selectedWorkspace.id,
+                  }))}
+                onSelect={(id) => {
+                  actions.selectWorkspace(id);
+                  setOpenMenu(null);
+                }}
+                footerLabel="打开新文件夹作为工作区"
+                onFooter={() => {
+                  setOpenMenu(null);
+                  setAddingWorkspace(true);
+                }}
+              />
+            ) : null}
+          </div>
           {selectedWorkspace.branch ? (
-            <span className="workspace-branch">
-              <GitBranch size={13} aria-hidden />
-              {selectedWorkspace.branch}
-            </span>
+            <div className="pill-wrap" ref={branchWrapRef}>
+              <button
+                type="button"
+                className="workspace-branch workspace-trigger"
+                aria-label="选择分支"
+                aria-expanded={openMenu === "branch"}
+                aria-haspopup="dialog"
+                title="选择分支"
+                onClick={(event) => {
+                  toggleMenu("branch", event.currentTarget);
+                }}
+              >
+                <GitBranch size={13} aria-hidden />
+                {selectedWorkspace.branch}
+                <ChevronDown size={11} aria-hidden />
+              </button>
+              {openMenu === "branch" ? (
+                <PickerPopover
+                  searchPlaceholder={branchCreating ? "新分支名称" : "搜索分支"}
+                  searchLabel={branchCreating ? "新分支名称" : "搜索分支"}
+                  search={branchSearch}
+                  onSearch={setBranchSearch}
+                  items={
+                    branchCreating
+                      ? []
+                      : branchLoading
+                        ? []
+                        : (branchList?.branches ?? [])
+                            .filter((branch) =>
+                              branch.toLowerCase().includes(branchSearch.trim().toLowerCase()),
+                            )
+                            .map((branch) => ({
+                              id: branch,
+                              label: branch,
+                              current: branch === selectedWorkspace.branch,
+                            }))
+                  }
+                  emptyText={
+                    branchCreating
+                      ? "输入名称后创建并检出"
+                      : branchLoading
+                        ? "加载中…"
+                        : "无匹配项"
+                  }
+                  onSelect={(branch) => {
+                    if (branch === selectedWorkspace.branch) {
+                      setOpenMenu(null);
+                      return;
+                    }
+                    actions
+                      .checkoutBranch(selectedWorkspace.id, branch, false)
+                      .then(() => setOpenMenu(null))
+                      .catch(() => {});
+                  }}
+                  footerLabel={branchCreating ? "创建并检出" : "创建并检出新分支"}
+                  onFooter={() => {
+                    if (!branchCreating) {
+                      setBranchCreating(true);
+                      setBranchSearch("");
+                      return;
+                    }
+                    const name = branchSearch.trim();
+                    if (name === "") return;
+                    actions
+                      .checkoutBranch(selectedWorkspace.id, name, true)
+                      .then(() => setOpenMenu(null))
+                      .catch(() => {});
+                  }}
+                />
+              ) : null}
+            </div>
           ) : null}
         </div>
       ) : null}
@@ -1121,6 +1272,12 @@ export function Composer({ centered }: { centered: boolean }) {
           </div>
         </div>
       </div>
+      {addingWorkspace ? (
+        <AddWorkspaceDialog
+          onClose={() => setAddingWorkspace(false)}
+          onAdded={(workspace) => actions.selectWorkspace(workspace.id)}
+        />
+      ) : null}
     </div>
   );
 }

@@ -307,6 +307,27 @@ export function mockFetch(input: RequestInfo | URL, init?: RequestInit): Promise
       ),
     );
   }
+  const branchesMatch = /^\/api\/workspaces\/([^/]+)\/branches$/.exec(path);
+  if (branchesMatch && method === "GET") {
+    return Promise.resolve(
+      jsonResponse({ current: "main", branches: ["main", "feature", "topic/one"] }),
+    );
+  }
+  const checkoutMatch = /^\/api\/workspaces\/([^/]+)\/checkout$/.exec(path);
+  if (checkoutMatch && method === "POST") {
+    return Promise.resolve(
+      jsonResponse(
+        {
+          id: checkoutMatch[1],
+          label: "neo",
+          branch: body?.name ?? "main",
+          current: true,
+          sessions: [],
+        },
+        200,
+      ),
+    );
+  }
   const snapshotMatch = /^\/api\/sessions\/([^/]+)\/snapshot$/.exec(path);
   if (snapshotMatch) {
     const session = fixture.sessions.find((entry) => entry.session_id === snapshotMatch[1]);

@@ -394,6 +394,27 @@ pub struct WebUiWorkspaceChanges {
     pub changes: Vec<WebUiWorkspaceChange>,
 }
 
+/// Local branches of one workspace (body of
+/// `GET /api/workspaces/<id>/branches`). Empty when the workspace is not a
+/// git repository or has no branches; the picker then offers nothing.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WebUiBranchList {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub current: Option<String>,
+    #[serde(default)]
+    pub branches: Vec<String>,
+}
+
+/// Body of `POST /api/workspaces/<id>/checkout`: check out an existing
+/// branch or create and check out a new one.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct WebUiCheckoutBody {
+    pub name: String,
+    #[serde(default)]
+    pub create: bool,
+}
+
 /// Body of `GET /api/workspace/changes/<change_id>`: a length-bounded
 /// unified-diff preview for one change.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -524,6 +545,14 @@ pub enum WebUiCommand {
     AddWorkspace {
         path: String,
     },
+    ListBranches {
+        workspace_id: String,
+    },
+    CheckoutBranch {
+        workspace_id: String,
+        name: String,
+        create: bool,
+    },
     RevealWorkspace {
         workspace_id: String,
     },
@@ -649,6 +678,8 @@ pub enum WebUiReply {
     WorkspaceChanges(WebUiWorkspaceChanges),
     WorkspaceChangeDetail(WebUiWorkspaceChangeDetail),
     WorkspaceAdded(WebUiWorkspaceGroup),
+    WorkspaceUpdated(WebUiWorkspaceGroup),
+    Branches(WebUiBranchList),
     AttachmentUploaded(WebUiAttachmentAck),
     AgentHistory(WebUiAgentHistory),
 }

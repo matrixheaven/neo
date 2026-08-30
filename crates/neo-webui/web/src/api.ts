@@ -10,6 +10,7 @@ import type {
   WebUiAgentHistory,
   WebUiAttachmentAck,
   WebUiBootstrap,
+  WebUiBranchList,
   WebUiCursor,
   WebUiErrorBody,
   WebUiErrorCode,
@@ -163,6 +164,25 @@ export function createSession(
 
 export function addWorkspace(path: string): Promise<import("./protocol").WebUiWorkspaceGroup> {
   return request("POST", "/api/workspaces", { path });
+}
+
+export function listBranches(workspaceId: string): Promise<WebUiBranchList> {
+  return request<WebUiBranchList>(
+    "GET",
+    `/api/workspaces/${encodeURIComponent(workspaceId)}/branches`,
+  );
+}
+
+export function checkoutBranch(
+  workspaceId: string,
+  name: string,
+  create: boolean,
+): Promise<import("./protocol").WebUiWorkspaceGroup> {
+  return request<import("./protocol").WebUiWorkspaceGroup>(
+    "POST",
+    `/api/workspaces/${encodeURIComponent(workspaceId)}/checkout`,
+    { name, create },
+  );
 }
 
 export function revealWorkspace(workspaceId: string): Promise<void> {

@@ -32,7 +32,7 @@ use crate::protocol::{
     WebUiErrorBody, WebUiErrorCode, WebUiHost, WebUiInputAccepted, WebUiInputBody,
     WebUiMetadataBody, WebUiQueueControlBody, WebUiQuestionBody, WebUiReply, WebUiServerMessage,
     WebUiSessionScope, WebUiSessionStarted, WebUiStartTurnBody, WebUiUpdateWorkspaceBody,
-    WebUiWatchRequest,
+    WebUiCheckoutBody, WebUiWatchRequest,
 };
 use crate::relay::{
     ATTACHMENT_BODY_LIMIT_BYTES, COMMAND_BODY_LIMIT_BYTES, FIRST_SUBSCRIBE_DEADLINE, ObserverQueue,
@@ -106,6 +106,8 @@ fn build_router(app: AppState) -> Router {
         .route("/api/attachments", post(upload_attachment))
         .route("/api/sessions", get(list_sessions).post(create_session))
         .route("/api/workspaces", post(add_workspace))
+        .route("/api/workspaces/{workspace_id}/branches", get(list_branches))
+        .route("/api/workspaces/{workspace_id}/checkout", post(checkout_branch))
         .route(
             "/api/workspaces/{workspace_id}/reveal",
             post(reveal_workspace),
@@ -304,6 +306,8 @@ fn reply_response(app: &AppState, reply: WebUiReply) -> Response {
         WebUiReply::WorkspaceChanges(value) => json(StatusCode::OK, &value),
         WebUiReply::WorkspaceChangeDetail(value) => json(StatusCode::OK, &value),
         WebUiReply::WorkspaceAdded(value) => json(StatusCode::CREATED, &value),
+        WebUiReply::WorkspaceUpdated(value) => json(StatusCode::OK, &value),
+        WebUiReply::Branches(value) => json(StatusCode::OK, &value),
         WebUiReply::AttachmentUploaded(value) => json(StatusCode::CREATED, &value),
         WebUiReply::AgentHistory(value) => json(StatusCode::OK, &value),
     }
@@ -653,6 +657,43 @@ async fn update_workspace(
             removed: parsed.removed,
             mark_read: parsed.mark_read,
             read_session_id: parsed.read_session_id,
+        })
+        .await
+    {
+        Ok(reply) => reply_response(&app, reply),
+        Err(error) => host_error_response(error),
+    }
+}
+
+async fn list_branches(
+    State(app): State<AppState>,
+    Path(workspace_id): Path<String>,
+) -> Response {
+    match app
+        .host
+        .execute(WebUiCommand::ListBranches { workspace_id })
+        .await
+    {
+        Ok(reply) => reply_response(&app, reply),
+        Err(error) => host_error_response(error),
+    }
+}
+
+async fn checkout_branch(
+    State(app): State<AppState>,
+    Path(workspace_id): Path<String>,
+    body: Body,
+) -> Response {
+    let parsed: WebUiCheckoutBody = match parse_body(body).await {
+        Ok(parsed) => parsed,
+        Err(response) => return response,
+    };
+    match app
+        .host
+        .execute(WebUiCommand::CheckoutBranch {
+            workspace_id,
+            name: parsed.name,
+            create: parsed.create,
         })
         .await
     {

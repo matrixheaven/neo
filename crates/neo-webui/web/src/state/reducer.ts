@@ -384,6 +384,17 @@ export function appReducer(state: AppState, action: AppAction): AppState {
       };
     }
 
+    case "workspace_updated": {
+      // In-place group refresh (e.g. after a branch checkout): selection and
+      // order stay untouched.
+      return {
+        ...state,
+        workspaces: state.workspaces.map((group) =>
+          group.id === action.workspace.id ? action.workspace : group,
+        ),
+      };
+    }
+
     case "set_sidebar_width":
       return { ...state, sidebarWidth: clampSidebar(action.width) };
 

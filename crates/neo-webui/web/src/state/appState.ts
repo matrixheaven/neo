@@ -184,6 +184,7 @@ export type AppAction =
   | { type: "select_session"; sessionId: string | null }
   | { type: "select_workspace"; workspaceId: string }
   | { type: "workspace_added"; workspace: WebUiWorkspaceGroup }
+  | { type: "workspace_updated"; workspace: WebUiWorkspaceGroup }
   | { type: "set_sidebar_width"; width: number }
   | { type: "set_drawer_open"; open: boolean }
   | { type: "set_sidebar_collapsed"; collapsed: boolean }

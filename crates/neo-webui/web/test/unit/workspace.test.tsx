@@ -747,9 +747,10 @@ describe("composer", () => {
     const user = userEvent.setup();
     const { socket } = await renderReady();
     socket.emit(asServerMessage(fixture.long_connection.workspace_snapshot));
-    const project = await screen.findByLabelText("选择项目");
-    await user.selectOptions(project, "workspace_playground");
-    expect((project as HTMLSelectElement).value).toBe("workspace_playground");
+    fireEvent.click(await screen.findByLabelText("选择项目"));
+    const picker = await screen.findByRole("dialog", { name: "搜索工作区" });
+    fireEvent.click(within(picker).getByRole("option", { name: /playground/ }));
+    expect(screen.getByText("playground", { selector: ".workspace-trigger" })).toBeTruthy();
     expect(screen.getByText("feature", { selector: ".workspace-branch" })).toBeTruthy();
 
     await user.type(screen.getByLabelText("输入消息"), "在另一个项目工作{Enter}");
