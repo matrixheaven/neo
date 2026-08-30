@@ -1,8 +1,9 @@
-//! Turn drain loop: batched event processing never starves approvals, and
-//! every value queued before the task completed is still published before
-//! the projection is released.
+//! Turn drain loop: batched event processing never starves approvals, every
+//! value queued before the task completed is still published before the
+//! projection is released, and buffered streaming events flush periodically
+//! while the model round is still running.
 
-use neo_agent_core::{ApprovalAction, ApprovalOption, ApprovalRequest, PermissionOperation};
+use neo_agent_core::{ApprovalAction, ApprovalOption, ApprovalRequest, Content, PermissionOperation, StopReason};
 use neo_webui::protocol::WebUiServerMessage;
 
 use super::state_fixtures::{test_state, user_message};
@@ -194,5 +195,86 @@ async fn drain_loop_publishes_events_queued_before_task_completion_was_observed(
         "no late event may be dropped: all 300 events plus the finishing \
          and idle state envelopes reached the relay before the release"
     );
+    assert_eq!(guard.phase, WebUiPhase::Idle);
+}
+
+/// The periodic streaming flush releases the persistence filter's buffered
+/// deltas while the model round is still running: the browser observes the
+/// delta event before the round-boundary `MessageAppended`, instead of one
+/// combined flush when the reply completes. Paused time keeps the interval
+/// deterministic (no real waits).
+#[tokio::test(start_paused = true)]
+async fn drain_loop_flushes_buffered_streaming_events_before_the_round_boundary() {
+    let relay = Relay::new("test_stream");
+    let (event_tx, event_rx) = mpsc::unbounded_channel();
+    let (approval_tx, approval_rx) = mpsc::unbounded_channel();
+    let (session_tx, session_rx) = mpsc::unbounded_channel();
+    let (question_tx, question_rx) = mpsc::unbounded_channel();
+    let cancel_token = CancellationToken::new();
+    let steer_input = neo_agent_core::SteerInputHandle::new();
+    let state = test_state(&relay, "session_1", Some("turn_1"));
+    let task = tokio::spawn(async move {
+        event_tx
+            .send(Ok(AgentEvent::MessageStarted {
+                turn: 1,
+                id: "message_1".to_owned(),
+                phase: neo_ai::MessagePhase::Unknown,
+            }))
+            .expect("send event");
+        event_tx
+            .send(Ok(AgentEvent::TextDelta {
+                turn: 1,
+                text: "streaming".to_owned(),
+            }))
+            .expect("send event");
+        // Hold the round open past one flush interval so the drain loop's
+        // periodic flush publishes the buffered delta before the boundary.
+        tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+        event_tx
+            .send(Ok(AgentEvent::MessageAppended {
+                message: AgentMessage::assistant(
+                    vec![Content::text("streaming")],
+                    Vec::new(),
+                    StopReason::EndTurn,
+                ),
+            }))
+            .expect("send event");
+        drop(event_tx);
+        drop(approval_tx);
+        drop(session_tx);
+        drop(question_tx);
+        Ok(TurnOutcome::default())
+    });
+    drain_turn_loop(
+        Arc::clone(&state),
+        "turn_1".to_owned(),
+        TurnReceivers {
+            events: event_rx,
+            approvals: approval_rx,
+            session_ids: session_rx,
+            questions: question_rx,
+            task,
+            cancel_token,
+            steer_input,
+        },
+    )
+    .await;
+
+    let envelopes = relay_envelopes(&relay, "session_1", 0);
+    let event_index = |predicate: &dyn Fn(&AgentEvent) -> bool| {
+        envelopes.iter().position(|envelope| match envelope {
+            WebUiServerMessage::SessionEvent { event, .. } => predicate(event),
+            _ => false,
+        })
+    };
+    let delta_index =
+        event_index(&|event| matches!(event, AgentEvent::TextDelta { text, .. } if text == "streaming"));
+    let appended_index = event_index(&|event| matches!(event, AgentEvent::MessageAppended { .. }));
+    assert_eq!(
+        delta_index.map(|index| index < appended_index.expect("appended event published")),
+        Some(true),
+        "the buffered delta must reach the relay before the round-boundary append"
+    );
+    let guard = state.lock().expect("state lock");
     assert_eq!(guard.phase, WebUiPhase::Idle);
 }

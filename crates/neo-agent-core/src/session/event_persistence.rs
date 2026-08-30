@@ -115,6 +115,17 @@ impl SessionEventPersistence {
         }
     }
 
+    /// Drain the currently buffered attempt events (already coalesced up to
+    /// this point) without waiting for the assistant `MessageAppended`
+    /// boundary. Used by the webui drain loop's periodic flush so live
+    /// consumers see streamed content while the model round is still
+    /// running. The buffer keeps accumulating afterwards; whatever remains
+    /// flushes at the boundary as before.
+    #[must_use]
+    pub fn take_buffered(&mut self) -> Vec<AgentEvent> {
+        std::mem::take(&mut self.attempt)
+    }
+
     fn push_attempt_event(&mut self, event: &AgentEvent) {
         match (self.attempt.last_mut(), event) {
             (

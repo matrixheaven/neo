@@ -43,6 +43,11 @@ use crate::theme_draft::ThemeDraftStore;
 /// `MAX_TURN_EVENTS_PER_TICK` so a text flood can never starve approvals).
 const MAX_EVENTS_PER_WAKEUP: usize = 256;
 
+/// Cadence at which the drain loop releases the streaming events buffered by
+/// the JSONL persistence filter, so live web consumers see deltas while the
+/// model round is still running instead of one flush at the round boundary.
+const STREAM_FLUSH_INTERVAL: std::time::Duration = std::time::Duration::from_millis(120);
+
 /// Per-session mutable turn containers, created fresh for every session.
 pub(crate) struct PerSessionContainers {
     pub(crate) live_permission_mode: Arc<RwLock<PermissionMode>>,
@@ -327,16 +332,22 @@ impl WebSessionState {
     /// Ingest one raw runtime event: apply the JSONL-equivalent retry filter,
     /// update the output-reference set and todo projection first, then publish
     /// the valid events into the relay and record them in the history. The
-    /// first published event of a `starting` turn moves the phase to `running`.
+    /// first ingested event of a `starting` turn moves the phase to `running`
+    /// — before the persistence filter's empty check, so a turn whose first
+    /// model round is still buffering is already visibly running.
     pub(crate) fn ingest_event(&mut self, event: AgentEvent) {
-        let valid = self.persistence.persisted_events(&event);
-        if valid.is_empty() {
-            return;
-        }
         if self.phase == WebUiPhase::Starting && self.turn_id.is_some() {
             self.phase = WebUiPhase::Running;
             self.emit_state();
         }
+        let valid = self.persistence.persisted_events(&event);
+        self.publish_history_batch(valid);
+    }
+
+    /// Publish persisted events into the relay and record them in the
+    /// canonical history. Streaming events released early by the drain loop's
+    /// periodic flush take the exact same path.
+    fn publish_history_batch(&mut self, valid: Vec<AgentEvent>) {
         for event in valid {
             collect_output_refs(&event, &mut self.output_refs);
             self.cache_session_metrics(&event);
@@ -352,6 +363,16 @@ impl WebSessionState {
             });
             self.last_sequence = sequence;
         }
+    }
+
+    /// Release the streaming events currently buffered by the JSONL
+    /// persistence filter (coalesced deltas so far) so live consumers see
+    /// content while the model round is still running. Content streamed
+    /// afterwards keeps buffering until the next periodic flush or the
+    /// assistant `MessageAppended` boundary.
+    pub(crate) fn flush_streaming_batch(&mut self) {
+        let buffered = self.persistence.take_buffered();
+        self.publish_history_batch(buffered);
     }
 
     /// Cache the latest usage/context-window values from one canonical event
@@ -762,6 +783,11 @@ pub(crate) async fn drain_turn_loop(
     let mut session_ids_open = true;
     let mut task_done = false;
     let mut pending_event: Option<AnyhowResult<AgentEvent>> = None;
+    let mut streaming_flush = tokio::time::interval(STREAM_FLUSH_INTERVAL);
+    streaming_flush.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+    // Consume the immediate first tick so the periodic flush fires from the
+    // second tick onwards; an empty-buffer flush would be a no-op anyway.
+    streaming_flush.tick().await;
 
     while !task_done {
         tokio::select! {
@@ -804,6 +830,9 @@ pub(crate) async fn drain_turn_loop(
             }
             _ = &mut receivers.task => {
                 task_done = true;
+            }
+            _ = streaming_flush.tick() => {
+                flush_streaming_locked(&state, &turn_id);
             }
         }
         // Process at most MAX_EVENTS_PER_WAKEUP events per wakeup, then check
@@ -862,6 +891,16 @@ fn ingest_locked(state: &Mutex<WebSessionState>, turn_id: &str, event: AgentEven
         return;
     }
     guard.ingest_event(event);
+}
+
+fn flush_streaming_locked(state: &Mutex<WebSessionState>, turn_id: &str) {
+    let Ok(mut guard) = state.lock() else {
+        return;
+    };
+    if guard.turn_id.as_deref() != Some(turn_id) {
+        return;
+    }
+    guard.flush_streaming_batch();
 }
 
 fn record_error_locked(state: &Mutex<WebSessionState>, turn_id: &str, error: anyhow::Error) {

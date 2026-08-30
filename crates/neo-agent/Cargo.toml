@@ -51,6 +51,7 @@ futures.workspace = true
 http.workspace = true
 portable-pty = "0.9"
 sha2.workspace = true
+tokio = { workspace = true, features = ["test-util"] }
 tokio-tungstenite = "0.24"
 
 [lints]
