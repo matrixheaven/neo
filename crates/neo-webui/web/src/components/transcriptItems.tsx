@@ -57,6 +57,7 @@ import type {
 import { CodeBlock, CopyButton, OutputBlock } from "./codeBlock";
 import { Line, useLineExpanded } from "./collapsible";
 import { FullOutput } from "./fullOutput";
+import { PlanBox, planBoxBasename } from "./planBox";
 import { Markdown } from "./markdown";
 
 export function formatElapsed(secs: number | undefined): string | null {
@@ -905,6 +906,41 @@ function FileToolDetails({ item, status, kind }: {
   );
 }
 
+function PlanDetailsOf(item: ToolItem): {
+  content: string;
+  path: string | null;
+  selectedLabel: string | null;
+} | null {
+  const details = objectArgument(item.result?.details);
+  if (!details) return null;
+  const content = stringField(details, "plan_content");
+  if (content === null || content.trim() === "") return null;
+  return {
+    content,
+    path: stringField(details, "plan_path"),
+    selectedLabel: stringField(details, "plan_selected_label"),
+  };
+}
+
+function PlanToolDetails({ item, status }: { item: ToolItem; status: string }) {
+  const plan = PlanDetailsOf(item);
+  if (plan === null) {
+    return <GenericToolDetails item={item} echo={commandEchoOf(item.arguments)} status={status} />;
+  }
+  return (
+    <>
+      <PlanBox title={`plan: ${planBoxBasename(plan.path)}`} markdown={plan.content} path={plan.path} />
+      {plan.selectedLabel ? (
+        <p className="tl-meta">
+          已选择：<span className="chip-button plan-selected-chip">{plan.selectedLabel}</span>
+        </p>
+      ) : null}
+      <ToolResultView item={item} includeSuccess={false} />
+      <ToolMeta item={item} status={status} />
+    </>
+  );
+}
+
 function TodoToolDetails({ item, status }: { item: ToolItem; status: string }) {
   const entries = todoEntriesFor(item);
   if (entries === null) {
@@ -977,6 +1013,8 @@ function Tool({ sessionId, item }: { sessionId: string; item: ToolItem }) {
           <FileToolDetails item={item} status={status} kind="edit" />
         ) : toolName === "write" ? (
           <FileToolDetails item={item} status={status} kind="write" />
+        ) : toolName === "exitplanmode" && PlanDetailsOf(item) !== null ? (
+          <PlanToolDetails item={item} status={status} />
         ) : isTodoList ? (
           <TodoToolDetails item={item} status={status} />
         ) : (
@@ -1197,7 +1235,14 @@ function ApprovalRow({ sessionId, item }: { sessionId: string; item: ApprovalIte
         <span className="ar-state">{stateText}</span>
       </div>
       {presentation.command ? <div className="cmd-echo">$ {presentation.command}</div> : null}
-      {typeof presentation.kind === "string" && presentation.kind !== "command" ? (
+      {presentation.kind === "plan" &&
+      typeof presentation.markdown === "string" &&
+      presentation.markdown.trim() !== "" ? (
+        <PlanBox
+          markdown={presentation.markdown}
+          path={typeof presentation.path === "string" ? presentation.path : null}
+        />
+      ) : typeof presentation.kind === "string" && presentation.kind !== "command" ? (
         <p className="ar-desc">{presentation.kind}</p>
       ) : null}
       {!resolved ? (

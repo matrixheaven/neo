@@ -92,6 +92,11 @@ export interface ApprovalPresentation {
   title?: string | null;
   command?: string | null;
   cwd?: string | null;
+  /** Plan presentations (kind === "plan"): the full plan markdown, its
+   * workspace-relative plan file path and a short summary line. */
+  markdown?: string | null;
+  path?: string | null;
+  summary?: string | null;
   [key: string]: unknown;
 }
 
