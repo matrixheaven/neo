@@ -149,6 +149,14 @@ export interface RetryItem {
   phase: "waiting" | "connecting" | "exhausted";
 }
 
+/** One queued input of the running turn (steer or follow-up), mirrored from
+ * the canonical queue events. Rendered only by the queue panel, never as a
+ * transcript line. */
+export interface QueuedInputItem {
+  id: string;
+  text: string;
+}
+
 export interface StatusLineItem {
   kind: "status";
   id: string;
@@ -200,6 +208,10 @@ export interface TranscriptProjection {
    * ApprovalResolved or the next snapshot). */
   pendingApprovalId: string | null;
   pendingQuestionIds: string[];
+  /** Queued inputs of the running turn, in arrival order (FIFO). Steers are
+   * injected at the next break point; follow-ups start later turns. */
+  pendingSteers: QueuedInputItem[];
+  pendingFollowUps: QueuedInputItem[];
   /** Latest TokenUsage payload on the stream (latest-wins). */
   latestUsage: AgentTokenUsage | null;
   /** Latest ContextWindowUpdated payload on the stream (latest-wins). */
@@ -223,6 +235,8 @@ export function emptyProjection(): TranscriptProjection {
     todos: [],
     pendingApprovalId: null,
     pendingQuestionIds: [],
+    pendingSteers: [],
+    pendingFollowUps: [],
     latestUsage: null,
     contextWindow: null,
     latestTurn: null,
@@ -349,9 +363,6 @@ const KNOWN_SILENT_TAGS = new Set([
   "RunStarted",
   "TurnStarted",
   "RunFinished",
-  "SteeringQueued",
-  "FollowUpQueued",
-  "QueueDrained",
   "CompactionStarted",
   "CompactionProgress",
   "CompactionApplied",
@@ -633,6 +644,35 @@ export function applyAgentEvent(
             ? null
             : projection.liveThinkingId,
       };
+    }
+
+    // -- Queued inputs of the running turn (steer / follow-up).
+    case "SteeringQueued":
+    case "FollowUpQueued": {
+      const message = (body as { message: AgentMessage }).message;
+      const [id, counter] = nextAppendedId(
+        projection,
+        tag === "SteeringQueued" ? "steer" : "follow_up",
+      );
+      const item: QueuedInputItem = { id, text: userDisplayText(message) };
+      return tag === "SteeringQueued"
+        ? {
+            ...projection,
+            appendedCounter: counter,
+            pendingSteers: [...projection.pendingSteers, item],
+          }
+        : {
+            ...projection,
+            appendedCounter: counter,
+            pendingFollowUps: [...projection.pendingFollowUps, item],
+          };
+    }
+    case "QueueDrained": {
+      const b = body as { kind: "Steering" | "FollowUp"; count: number };
+      if (b.count <= 0) return projection;
+      return b.kind === "Steering"
+        ? { ...projection, pendingSteers: projection.pendingSteers.slice(b.count) }
+        : { ...projection, pendingFollowUps: projection.pendingFollowUps.slice(b.count) };
     }
 
     // -- Tool lifecycle.
@@ -1085,6 +1125,12 @@ export function applyAgentEvent(
     case "MessageAppended": {
       const b = body as { message: AgentMessage };
       return applyMessageAppended(projection, b.message, projection.latestTurn);
+    }
+
+    // -- Run boundary: the runtime drains both queues before a run ends, so
+    // the panel mirror must never outlive it (also holds on JSONL replay).
+    case "RunFinished": {
+      return { ...projection, pendingSteers: [], pendingFollowUps: [] };
     }
 
     // -- Errors become visible status lines.

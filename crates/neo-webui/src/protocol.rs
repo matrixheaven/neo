@@ -74,6 +74,19 @@ pub enum WebUiInputDelivery {
     Steer,
 }
 
+/// Queue management on the active turn's input handle. The runtime mutates
+/// its queues and emits the canonical queue events; the browser mirrors
+/// state purely from those events.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WebUiQueueControl {
+    /// Promote the oldest queued follow-up to a steer (injected at the next
+    /// break point instead of starting a later turn).
+    PromoteFollowUpToSteer,
+    /// Remove the oldest queued follow-up so the composer can edit it again.
+    DequeueFollowUpForEdit,
+}
+
 /// Per-turn overrides scoped to one session; never written back to global
 /// configuration.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -462,6 +475,11 @@ pub enum WebUiCommand {
         message: String,
         attachments: Option<Vec<String>>,
     },
+    QueueControl {
+        session_id: String,
+        turn_id: String,
+        control: WebUiQueueControl,
+    },
     UploadAttachment {
         mime: String,
         base64: String,
@@ -745,6 +763,13 @@ pub struct WebUiInputBody {
     pub message: String,
     #[serde(default)]
     pub attachments: Option<Vec<String>>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct WebUiQueueControlBody {
+    pub turn_id: String,
+    pub control: WebUiQueueControl,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]

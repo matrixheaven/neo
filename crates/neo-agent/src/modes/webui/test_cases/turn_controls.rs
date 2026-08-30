@@ -1,5 +1,6 @@
-//! Turn control routing: cancel requires the current turn and follow-up
-//! input distinguishes idle, stale and turn-ending sessions.
+//! Turn control routing: cancel requires the current turn, follow-up input
+//! distinguishes idle, stale and turn-ending sessions, and queue controls
+//! ride the same handle routing.
 
 use super::state_fixtures::test_state;
 use super::*;
@@ -77,6 +78,60 @@ fn input_routing_distinguishes_idle_stale_and_finishing() {
             neo_webui::protocol::WebUiInputDelivery::FollowUp,
             "hi",
             Vec::new()
+        )
+        .expect_err("closed handle race")
+        .code,
+        WebUiErrorCode::TurnTransition
+    );
+}
+
+#[test]
+fn queue_control_routes_like_input_and_rejects_stale_turns() {
+    let relay = Relay::new("test_stream");
+    let running = test_state(&relay, "session_1", Some("turn_1"));
+    // Queue a follow-up, then promote it: the control lands on the same
+    // handle routing as text input (accepted, no degradations).
+    assert!(push_turn_input(
+        &running,
+        "turn_1",
+        neo_webui::protocol::WebUiInputDelivery::FollowUp,
+        "later",
+        Vec::new()
+    )
+    .expect("follow-up queued"));
+    assert!(push_queue_control(
+        &running,
+        "turn_1",
+        neo_webui::protocol::WebUiQueueControl::PromoteFollowUpToSteer
+    )
+    .expect("promote accepted"));
+    let idle = test_state(&relay, "session_1", None);
+    assert_eq!(
+        push_queue_control(
+            &idle,
+            "turn_1",
+            neo_webui::protocol::WebUiQueueControl::DequeueFollowUpForEdit
+        )
+        .expect_err("idle has no active turn")
+        .code,
+        WebUiErrorCode::NoActiveTurn
+    );
+    // A closed input handle is the turn-ending race: 409 turn_transition.
+    let closing = test_state(&relay, "session_2", Some("turn_1"));
+    {
+        let guard = closing.lock().expect("state lock");
+        let _ = guard
+            .active
+            .as_ref()
+            .expect("active turn")
+            .steer_input
+            .close_if_empty();
+    }
+    assert_eq!(
+        push_queue_control(
+            &closing,
+            "turn_1",
+            neo_webui::protocol::WebUiQueueControl::DequeueFollowUpForEdit
         )
         .expect_err("closed handle race")
         .code,

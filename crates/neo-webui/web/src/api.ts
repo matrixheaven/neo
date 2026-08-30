@@ -16,6 +16,7 @@ import type {
   WebUiInputAccepted,
   WebUiInputDelivery,
   WebUiCancelling,
+  WebUiQueueControl,
   WebUiQuestionAnswer,
   WebUiServerMessage,
   WebUiSessionMetadata,
@@ -214,6 +215,18 @@ export function sendInput(
       message,
       ...(attachments && attachments.length > 0 ? { attachments } : {}),
     },
+  );
+}
+
+export function queueControl(
+  sessionId: string,
+  turnId: string,
+  control: WebUiQueueControl,
+): Promise<void> {
+  return request<void>(
+    "POST",
+    `/api/sessions/${encodeURIComponent(sessionId)}/queue`,
+    { turn_id: turnId, control },
   );
 }
 

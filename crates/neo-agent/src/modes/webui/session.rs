@@ -1046,25 +1046,7 @@ pub(crate) fn push_turn_input(
     message: &str,
     media: Vec<neo_agent_core::Content>,
 ) -> Result<bool, WebUiError> {
-    let steer_input = {
-        let guard = state
-            .lock()
-            .map_err(|_| WebUiError::new(WebUiErrorCode::Internal))?;
-        let Some(current) = guard.turn_id.as_deref() else {
-            return Err(WebUiError::new(WebUiErrorCode::NoActiveTurn));
-        };
-        if current != turn_id {
-            return Err(WebUiError::new(WebUiErrorCode::StaleTurn));
-        }
-        if !matches!(guard.phase, WebUiPhase::Starting | WebUiPhase::Running) {
-            return Err(WebUiError::new(WebUiErrorCode::TurnTransition));
-        }
-        guard
-            .active
-            .as_ref()
-            .map(|active| active.steer_input.clone())
-            .ok_or_else(|| WebUiError::new(WebUiErrorCode::TurnTransition))?
-    };
+    let steer_input = active_steer_input(state, turn_id)?;
     let mut content = Vec::with_capacity(media.len() + 1);
     content.push(neo_agent_core::Content::text(message));
     content.extend(media);
@@ -1073,11 +1055,65 @@ pub(crate) fn push_turn_input(
         neo_webui::protocol::WebUiInputDelivery::FollowUp => ActiveTurnInput::FollowUp(message),
         neo_webui::protocol::WebUiInputDelivery::Steer => ActiveTurnInput::SteerNow(message),
     };
+    push_active_input(state, turn_id, steer_input, input)
+}
+
+/// Push a queue-management control into the active turn's input handle. The
+/// runtime performs the mutation and emits the canonical queue events.
+pub(crate) fn push_queue_control(
+    state: &Mutex<WebSessionState>,
+    turn_id: &str,
+    control: neo_webui::protocol::WebUiQueueControl,
+) -> Result<bool, WebUiError> {
+    let steer_input = active_steer_input(state, turn_id)?;
+    let input = match control {
+        neo_webui::protocol::WebUiQueueControl::PromoteFollowUpToSteer => {
+            ActiveTurnInput::PromoteFollowUpToSteer
+        }
+        neo_webui::protocol::WebUiQueueControl::DequeueFollowUpForEdit => {
+            ActiveTurnInput::DequeueFollowUpForEdit
+        }
+    };
+    push_active_input(state, turn_id, steer_input, input)
+}
+
+/// Snapshot the active turn's input handle under the session lock, rejecting
+/// stale, absent, or already-finishing turns.
+fn active_steer_input(
+    state: &Mutex<WebSessionState>,
+    turn_id: &str,
+) -> Result<neo_agent_core::SteerInputHandle, WebUiError> {
+    let guard = state
+        .lock()
+        .map_err(|_| WebUiError::new(WebUiErrorCode::Internal))?;
+    let Some(current) = guard.turn_id.as_deref() else {
+        return Err(WebUiError::new(WebUiErrorCode::NoActiveTurn));
+    };
+    if current != turn_id {
+        return Err(WebUiError::new(WebUiErrorCode::StaleTurn));
+    }
+    if !matches!(guard.phase, WebUiPhase::Starting | WebUiPhase::Running) {
+        return Err(WebUiError::new(WebUiErrorCode::TurnTransition));
+    }
+    guard
+        .active
+        .as_ref()
+        .map(|active| active.steer_input.clone())
+        .ok_or_else(|| WebUiError::new(WebUiErrorCode::TurnTransition))
+}
+
+/// Push one input and resolve the input-handle close race: re-check under
+/// the lock; an ending turn keeps the frontend draft (409 turn_transition)
+/// instead of dropping the input.
+fn push_active_input(
+    state: &Mutex<WebSessionState>,
+    turn_id: &str,
+    steer_input: neo_agent_core::SteerInputHandle,
+    input: ActiveTurnInput,
+) -> Result<bool, WebUiError> {
     if steer_input.try_push(input) {
         return Ok(true);
     }
-    // Input-handle close race: re-check under the lock; an ending turn keeps
-    // the frontend draft (409 turn_transition) instead of dropping the input.
     let guard = state
         .lock()
         .map_err(|_| WebUiError::new(WebUiErrorCode::Internal))?;

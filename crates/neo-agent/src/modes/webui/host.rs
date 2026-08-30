@@ -41,7 +41,7 @@ use crate::resources;
 
 use super::session::{
     ActiveTurnControl, PerSessionContainers, TurnReceivers, WebSessionState, cancel_turn,
-    drain_turn_loop, push_turn_input, resolve_approval, resolve_question,
+    drain_turn_loop, push_queue_control, push_turn_input, resolve_approval, resolve_question,
 };
 
 /// In-memory launch record for a `CreateSession` whose first legitimate
@@ -1238,6 +1238,18 @@ impl WebUiHost for WebSessionHost {
                 let media = self.attachment_parts(&attachments, &session_dir).await?;
                 match push_turn_input(&state, &turn_id, delivery, &message, media) {
                     Ok(true) => Ok(WebUiReply::InputAccepted { turn_id }),
+                    Ok(false) => Err(WebUiError::new(WebUiErrorCode::TurnTransition)),
+                    Err(error) => Err(error),
+                }
+            }
+            WebUiCommand::QueueControl {
+                session_id,
+                turn_id,
+                control,
+            } => {
+                let state = self.state_for(&session_id).await?;
+                match push_queue_control(&state, &turn_id, control) {
+                    Ok(true) => Ok(WebUiReply::Resolved),
                     Ok(false) => Err(WebUiError::new(WebUiErrorCode::TurnTransition)),
                     Err(error) => Err(error),
                 }

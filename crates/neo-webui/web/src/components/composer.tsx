@@ -39,6 +39,7 @@ import type {
 } from "../protocol";
 import { useAppActions, useAppState } from "../state/store";
 import { NeoMark } from "./neoMark";
+import { QueuePanel } from "./queuePanel";
 import { TaskList } from "./taskList";
 import { activeCompletionRange, replaceCompletion } from "./composerCompletion";
 
@@ -633,7 +634,12 @@ export function Composer({ centered }: { centered: boolean }) {
 
   return (
     <div className={`composer-dock ${centered ? "centered" : ""}`}>
-      {!centered && sessionId !== null ? <TaskList todos={todos} /> : null}
+      {!centered && sessionId !== null ? (
+        <>
+          <TaskList todos={todos} />
+          <QueuePanel sessionId={sessionId} />
+        </>
+      ) : null}
       {centered && selectedWorkspace ? (
         <div className="workspace-bar" aria-label="新会话项目">
           <Folder size={14} aria-hidden />

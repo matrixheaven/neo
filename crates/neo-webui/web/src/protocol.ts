@@ -100,6 +100,10 @@ export interface ApprovalPresentation {
   [key: string]: unknown;
 }
 
+/** Body of `POST /api/sessions/<id>/queue`: queue management on the active
+ * turn's input handle. The runtime emits the canonical queue events. */
+export type WebUiQueueControl = "promote_steer" | "dequeue_edit";
+
 export interface ApprovalRequest {
   turn: number;
   id: string;
@@ -430,7 +434,7 @@ export type AgentEvent =
   | { TodoUpdated: { turn: number; todos: TodoEventData[] } }
   | { SteeringQueued: { message: AgentMessage } }
   | { FollowUpQueued: { message: AgentMessage } }
-  | { QueueDrained: { kind: unknown; count: number } }
+  | { QueueDrained: { kind: "Steering" | "FollowUp"; count: number } }
   | { MessageAppended: { message: AgentMessage } }
   | { TurnFinished: { turn: number; stop_reason: StopReason } }
   | { RunFinished: { turn: number; stop_reason: StopReason } }

@@ -1469,3 +1469,51 @@ describe("buildFromHistory", () => {
     expect(tool.output?.id).toBe("opaque");
   });
 });
+
+describe("queued input projection", () => {
+  const userText = (text: string) => ({
+    User: { content: [{ Text: { text } }] },
+  });
+
+  it("appends queue events in arrival order and drains from the head", () => {
+    let projection = emptyProjection();
+    projection = applyAgentEvent(projection, {
+      SteeringQueued: { message: userText("立即约束") },
+    } as never);
+    projection = applyAgentEvent(projection, {
+      FollowUpQueued: { message: userText("第一条排队") },
+    } as never);
+    projection = applyAgentEvent(projection, {
+      FollowUpQueued: { message: userText("第二条排队") },
+    } as never);
+    expect(projection.pendingSteers.map((item) => item.text)).toEqual(["立即约束"]);
+    expect(projection.pendingFollowUps.map((item) => item.text)).toEqual([
+      "第一条排队",
+      "第二条排队",
+    ]);
+
+    projection = applyAgentEvent(projection, {
+      QueueDrained: { kind: "FollowUp", count: 1 },
+    } as never);
+    expect(projection.pendingFollowUps.map((item) => item.text)).toEqual(["第二条排队"]);
+    projection = applyAgentEvent(projection, {
+      QueueDrained: { kind: "FollowUp", count: 1 },
+    } as never);
+    expect(projection.pendingFollowUps).toEqual([]);
+    // Unknown queue kinds and zero counts never panic.
+    projection = applyAgentEvent(projection, {
+      QueueDrained: { kind: "Steering", count: 0 },
+    } as never);
+    expect(projection.pendingSteers).toHaveLength(1);
+  });
+
+  it("clears the queue mirror when the run finishes", () => {
+    let projection = emptyProjection();
+    projection = applyAgentEvent(projection, {
+      FollowUpQueued: { message: userText("排队消息") },
+    } as never);
+    projection = applyAgentEvent(projection, { RunFinished: { turn: 1, stop_reason: "EndTurn" } } as never);
+    expect(projection.pendingFollowUps).toEqual([]);
+    expect(projection.pendingSteers).toEqual([]);
+  });
+});

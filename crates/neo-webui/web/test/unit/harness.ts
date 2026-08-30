@@ -403,5 +403,8 @@ export function mockFetch(input: RequestInfo | URL, init?: RequestInit): Promise
       jsonResponse({ title: body?.title ?? null, pinned: body?.pinned ?? false, archived: body?.archived ?? false }),
     );
   }
+  if (path.endsWith("/queue") && method === "POST") {
+    return Promise.resolve(jsonResponse({}, 202));
+  }
   return Promise.resolve(jsonResponse({ code: "not_found" }, 404));
 }

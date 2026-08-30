@@ -30,8 +30,9 @@ use crate::protocol::{
     WebUiAddWorkspaceBody, WebUiApprovalBody, WebUiAttachmentBody, WebUiCancelBody,
     WebUiCancelling, WebUiClaimRequest, WebUiCommand, WebUiCreateSessionBody, WebUiError,
     WebUiErrorBody, WebUiErrorCode, WebUiHost, WebUiInputAccepted, WebUiInputBody,
-    WebUiMetadataBody, WebUiQuestionBody, WebUiReply, WebUiServerMessage, WebUiSessionScope,
-    WebUiSessionStarted, WebUiStartTurnBody, WebUiUpdateWorkspaceBody, WebUiWatchRequest,
+    WebUiMetadataBody, WebUiQueueControlBody, WebUiQuestionBody, WebUiReply, WebUiServerMessage,
+    WebUiSessionScope, WebUiSessionStarted, WebUiStartTurnBody, WebUiUpdateWorkspaceBody,
+    WebUiWatchRequest,
 };
 use crate::relay::{
     ATTACHMENT_BODY_LIMIT_BYTES, COMMAND_BODY_LIMIT_BYTES, FIRST_SUBSCRIBE_DEADLINE, ObserverQueue,
@@ -117,6 +118,7 @@ fn build_router(app: AppState) -> Router {
         )
         .route("/api/sessions/{session_id}/turns", post(start_turn))
         .route("/api/sessions/{session_id}/input", post(send_input))
+        .route("/api/sessions/{session_id}/queue", post(queue_control))
         .route("/api/sessions/{session_id}/cancel", post(cancel_turn))
         .route(
             "/api/sessions/{session_id}/approval",
@@ -701,6 +703,17 @@ path_body_handler!(
             delivery: body.delivery,
             message: body.message,
             attachments: body.attachments,
+        }
+    }
+);
+path_body_handler!(
+    queue_control,
+    WebUiQueueControlBody,
+    |session_id, body: WebUiQueueControlBody| {
+        WebUiCommand::QueueControl {
+            session_id,
+            turn_id: body.turn_id,
+            control: body.control,
         }
     }
 );

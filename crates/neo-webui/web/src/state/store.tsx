@@ -23,6 +23,7 @@ import {
   fetchBootstrap,
   fetchSnapshot,
   openEventsSocket,
+  queueControl,
   resolveApproval,
   resolveQuestion,
   sendInput,
@@ -87,6 +88,11 @@ export interface AppActions {
   setAtBottom(sessionId: string, atBottom: boolean): void;
   sendMessage(text: string, composer?: WebUiComposer, attachments?: string[], onSent?: () => void): void;
   steer(text: string): void;
+  /** Promote the oldest queued follow-up to a steer (head-of-queue action). */
+  promoteFollowUpToSteer(): void;
+  /** Remove the oldest queued follow-up and put its text back into the
+   * composer draft for editing (head-of-queue action). */
+  dequeueFollowUpForEdit(text: string): void;
   stop(): void;
   submitApproval(requestId: string, action: ApprovalAction, feedback?: string): void;
   submitQuestion(questionId: string, answer: WebUiQuestionAnswer): void;
@@ -400,6 +406,30 @@ export function AppProvider({ children }: { children: ReactNode }) {
           dispatch({ type: "send_finished", sessionId: selected });
           handleApiError(error, selected);
         });
+    },
+
+    promoteFollowUpToSteer() {
+      const current = stateRef.current;
+      const selected = current.selectedSessionId;
+      if (selected === null) return;
+      const view = current.sessions[selected];
+      if (!view || !view.currentTurnId) return;
+      queueControl(selected, view.currentTurnId, "promote_steer").catch((error: unknown) =>
+        handleApiError(error, selected),
+      );
+    },
+
+    dequeueFollowUpForEdit(text) {
+      const current = stateRef.current;
+      const selected = current.selectedSessionId;
+      if (selected === null) return;
+      const view = current.sessions[selected];
+      if (!view || !view.currentTurnId) return;
+      queueControl(selected, view.currentTurnId, "dequeue_edit")
+        .then(() => {
+          dispatch({ type: "draft_changed", sessionId: selected, text });
+        })
+        .catch((error: unknown) => handleApiError(error, selected));
     },
 
     stop() {

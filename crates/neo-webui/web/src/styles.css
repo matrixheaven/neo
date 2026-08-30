@@ -3841,6 +3841,68 @@ button.ft-file-head:focus-visible {
   color: var(--text-faint);
 }
 
+/* -- Queue panel: pending steers and follow-ups above the composer -------- */
+
+.queue-panel {
+  width: min(760px, calc(100% - 48px));
+  background: var(--surface-overlay);
+  backdrop-filter: blur(14px);
+  -webkit-backdrop-filter: blur(14px);
+  border: 1px solid var(--line);
+  border-radius: var(--radius-bubble);
+  box-shadow: var(--shadow-low);
+  overflow: hidden;
+}
+
+.queue-rows {
+  list-style: none;
+  margin: 0;
+  padding: 6px 14px;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  max-height: 160px;
+  overflow-y: auto;
+}
+
+.queue-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: var(--font-size-aux);
+}
+
+.queue-row-icon {
+  display: inline-flex;
+  flex: none;
+  color: var(--text-faint);
+}
+
+.queue-row-badge {
+  flex: none;
+  font-size: var(--font-size-micro);
+  color: var(--text-dim);
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  padding: 0 8px;
+  line-height: 18px;
+}
+
+.queue-row-text {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--text-dim);
+}
+
+.queue-row-actions {
+  display: inline-flex;
+  flex: none;
+  gap: 4px;
+}
+
 .task-item.status-in_progress {
   color: var(--text);
 }

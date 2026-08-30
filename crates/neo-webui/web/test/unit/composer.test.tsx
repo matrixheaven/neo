@@ -429,3 +429,142 @@ describe("composer R6", () => {
     expect(popup.className).toContain("above");
   });
 });
+
+describe("queue panel", () => {
+  beforeEach(() => {
+    resetHarness();
+    vi.stubGlobal("fetch", vi.fn(mockFetch));
+    vi.stubGlobal("WebSocket", FakeWebSocket);
+    window.history.replaceState(null, "", "/");
+  });
+
+  afterEach(() => {
+    cleanup();
+    vi.unstubAllGlobals();
+  });
+
+  function queueEvent(
+    sequence: number,
+    event: Record<string, unknown>,
+  ): Record<string, unknown> {
+    return {
+      type: "session_event",
+      stream_id: fixture.stream_id,
+      session_id: "session_0002",
+      sequence,
+      event,
+    };
+  }
+
+  async function openRunningSession() {
+    return renderReady();
+  }
+
+  it("mirrors queue events, promotes the head follow-up and dequeues it for edit", async () => {
+    const { socket } = await openRunningSession();
+    screen.getByText("并行格式化").click();
+    socket.emit({
+      type: "session_snapshot",
+      snapshot: {
+        stream_id: fixture.stream_id,
+        session_id: "session_0002",
+        watermark: 1,
+        session: {
+          phase: "running",
+          waiting_approval: false,
+          waiting_question: false,
+          current_turn_id: "turn_09",
+        },
+        metadata: {},
+        // One canonical user message switches the session view to the
+        // non-centered composer that hosts the queue panel.
+        history: [
+          {
+            sequence: 1,
+            event: {
+              MessageAppended: {
+                message: { User: { content: [{ Text: { text: "先前的任务" } }] } },
+              },
+            },
+          },
+        ],
+      },
+    } as never);
+
+    socket.emit(
+      queueEvent(2, {
+        FollowUpQueued: {
+          message: { User: { content: [{ Text: { text: "第一条排队消息" } }] } },
+        },
+      }) as never,
+    );
+    socket.emit(
+      queueEvent(3, {
+        FollowUpQueued: {
+          message: { User: { content: [{ Text: { text: "第二条排队消息" } }] } },
+        },
+      }) as never,
+    );
+    socket.emit(
+      queueEvent(4, {
+        SteeringQueued: {
+          message: { User: { content: [{ Text: { text: "立即补充约束" } }] } },
+        },
+      }) as never,
+    );
+
+    const panel = await screen.findByRole("region", { name: "待处理消息队列" });
+    expect(within(panel).getAllByText("排队")).toHaveLength(2);
+    expect(within(panel).getByText("引导")).toBeTruthy();
+    // Head-of-queue actions only: two icon buttons on the first follow-up.
+    expect(within(panel).getAllByRole("button", { name: /^编辑：/ })).toHaveLength(1);
+    expect(within(panel).getByRole("button", { name: /^立即引导：/ })).toBeTruthy();
+
+    // 立即引导 promotes the oldest follow-up via the queue control API.
+    fireEvent.click(within(panel).getByRole("button", { name: /^立即引导：/ }));
+    await waitFor(() =>
+      expect(
+        recordedRequests.filter(
+          (entry) => entry.url === "/api/sessions/session_0002/queue",
+        ),
+      ).toHaveLength(1),
+    );
+    expect(postedBodies("/api/sessions/session_0002/queue")[0]).toEqual({
+      turn_id: "turn_09",
+      control: "promote_steer",
+    });
+
+    // The runtime emits QueueDrained + SteeringQueued; the panel mirrors it.
+    socket.emit(queueEvent(5, { QueueDrained: { kind: "FollowUp", count: 1 } }) as never);
+    socket.emit(
+      queueEvent(6, {
+        SteeringQueued: {
+          message: { User: { content: [{ Text: { text: "第一条排队消息" } }] } },
+        },
+      }) as never,
+    );
+    await waitFor(() =>
+      expect(within(panel).getAllByText("引导")).toHaveLength(2),
+    );
+
+    // 编辑 dequeues the head follow-up and refills the composer draft.
+    fireEvent.click(within(panel).getByRole("button", { name: /^编辑：/ }));
+    await waitFor(() =>
+      expect(
+        recordedRequests.filter(
+          (entry) => entry.url === "/api/sessions/session_0002/queue",
+        ),
+      ).toHaveLength(2),
+    );
+    expect(postedBodies("/api/sessions/session_0002/queue")[1]).toEqual({
+      turn_id: "turn_09",
+      control: "dequeue_edit",
+    });
+    socket.emit(queueEvent(7, { QueueDrained: { kind: "FollowUp", count: 1 } }) as never);
+    await waitFor(() =>
+      expect((screen.getByLabelText("输入消息") as HTMLTextAreaElement).value).toBe(
+        "第二条排队消息",
+      ),
+    );
+  });
+});
