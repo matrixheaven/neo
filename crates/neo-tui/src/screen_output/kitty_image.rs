@@ -1,13 +1,20 @@
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::Write as _;
 
 const KITTY_SEQUENCE_PREFIX: &str = "\x1b_G";
 
-pub(super) fn collect_kitty_image_ids(lines: &[String]) -> BTreeSet<u32> {
-    lines
-        .iter()
-        .flat_map(|line| extract_kitty_image_ids(line))
-        .collect()
+/// Anchor row of every kitty image id in a frame, keyed by image id. The
+/// fullscreen diff renderer uses this to detect placements whose screen row
+/// changed between frames: kitty keeps drawing a placement until it is
+/// explicitly deleted, so a moved image must be deleted and re-emitted.
+pub(super) fn collect_kitty_image_rows(lines: &[String]) -> BTreeMap<u32, BTreeSet<usize>> {
+    let mut rows: BTreeMap<u32, BTreeSet<usize>> = BTreeMap::new();
+    for (row, line) in lines.iter().enumerate() {
+        for id in extract_kitty_image_ids(line) {
+            rows.entry(id).or_default().insert(row);
+        }
+    }
+    rows
 }
 
 fn extract_kitty_image_ids(line: &str) -> Vec<u32> {

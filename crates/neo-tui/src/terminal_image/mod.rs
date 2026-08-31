@@ -174,7 +174,7 @@ impl ImageRenderPolicy {
         };
         let lines = escape_sequence.as_ref().map_or_else(
             || vec![fallback],
-            |sequence| image_lines(sequence, protocol, cell_height),
+            |sequence| image_lines(sequence, cell_height),
         );
 
         RenderedInlineImage {
@@ -578,16 +578,12 @@ fn sanitize_metadata_value(value: &str, max_chars: usize) -> String {
         .collect()
 }
 
-fn image_lines(
-    escape_sequence: &str,
-    protocol: NegotiatedImageProtocol,
-    cell_height: u32,
-) -> Vec<String> {
-    let reserved_rows = if matches!(protocol, NegotiatedImageProtocol::Kitty) {
-        cell_height.max(1) as usize
-    } else {
-        1
-    };
+/// Rows a frame must reserve for one inline image. Both supported protocols
+/// place an image that is `cell_height` screen rows tall, and the fullscreen
+/// renderer positions every row absolutely — the terminal never advances the
+/// cursor past the image for us, so the layout must reserve the full block.
+fn image_lines(escape_sequence: &str, cell_height: u32) -> Vec<String> {
+    let reserved_rows = cell_height.max(1) as usize;
     let mut lines = Vec::with_capacity(reserved_rows);
     lines.push(escape_sequence.to_owned());
     lines.extend(std::iter::repeat_n(

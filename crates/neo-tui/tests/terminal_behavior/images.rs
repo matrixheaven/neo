@@ -214,10 +214,11 @@ fn terminal_image_thumbnail_uses_bounded_iterm2_cell_dimensions() {
     );
 
     assert_eq!(rendered.protocol, NegotiatedImageProtocol::Iterm2);
-    assert_eq!(rendered.lines.len(), 1);
+    assert_eq!(rendered.lines.len(), 12);
     assert!(rendered.lines[0].contains("\x1b]1337;File="));
     assert!(rendered.lines[0].contains("width=22"));
     assert!(rendered.lines[0].contains("height=12"));
+    assert!(rendered.lines.iter().skip(1).all(String::is_empty));
 }
 
 #[test]

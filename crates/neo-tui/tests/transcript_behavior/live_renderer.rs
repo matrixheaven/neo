@@ -203,6 +203,84 @@ fn replacing_live_kitty_image_deletes_only_its_image_id() {
 }
 
 #[test]
+fn scrolled_kitty_image_deletes_stale_placement_and_re_emits_at_new_anchor() {
+    let image = "\x1b_Ga=T,f=100,i=7,r=1;payload\x1b\\".to_owned();
+    let mut renderer = LiveRenderer::new(80, 6);
+    renderer
+        .render_to(
+            &mut Vec::new(),
+            0u16,
+            vec![
+                "l0".to_owned(),
+                "l1".to_owned(),
+                image.clone(),
+                "l3".to_owned(),
+            ],
+            None,
+        )
+        .expect("initial frame with image at row 2");
+
+    let mut output = Vec::new();
+    renderer
+        .render_to(
+            &mut output,
+            0u16,
+            vec!["l1".to_owned(), image, "l3".to_owned(), "l4".to_owned()],
+            None,
+        )
+        .expect("frame scrolled up by one row");
+    let output = String::from_utf8(output).expect("ANSI output is UTF-8");
+
+    // The stale placement at the old anchor row is deleted exactly once,
+    // before any row is repainted, so the image never stacks up on scroll.
+    assert!(
+        output.contains("\x1b_Ga=d,d=I,i=7,q=2\x1b\\"),
+        "output: {output:?}"
+    );
+    assert_eq!(
+        output.matches("\x1b_Ga=d").count(),
+        1,
+        "one delete per moved image: {output:?}"
+    );
+    // The image is re-emitted at its new anchor row (screen row 2, one-based).
+    assert!(
+        output.contains("\x1b[2;1H\x1b[2K\x1b_Ga=T,f=100,i=7"),
+        "output: {output:?}"
+    );
+    // The old anchor row is repainted with the text that replaced it.
+    assert!(output.contains("\x1b[3;1H\x1b[2Kl3"), "output: {output:?}");
+}
+
+#[test]
+fn unchanged_kitty_image_anchor_is_not_deleted_or_repainted() {
+    let image = "\x1b_Ga=T,f=100,i=41,r=1;payload\x1b\\".to_owned();
+    let mut renderer = LiveRenderer::new(80, 24);
+    renderer
+        .render_to(
+            &mut Vec::new(),
+            0u16,
+            vec![image.clone(), "before".to_owned()],
+            None,
+        )
+        .expect("first render");
+
+    let mut output = Vec::new();
+    renderer
+        .render_to(&mut output, 0u16, vec![image, "after".to_owned()], None)
+        .expect("second render with image row unchanged");
+    let output = String::from_utf8(output).expect("ANSI output is UTF-8");
+
+    // Same anchor row: the placement persists untouched — no delete, no
+    // payload re-transmission.
+    assert!(!output.contains("\x1b_Ga=d"), "output: {output:?}");
+    assert!(!output.contains("i=41"), "output: {output:?}");
+    assert!(
+        output.contains("\x1b[2;1H\x1b[2Kafter"),
+        "output: {output:?}"
+    );
+}
+
+#[test]
 fn invalid_live_dimensions_do_not_advance_renderer_state() {
     let mut renderer = LiveRenderer::new(5, 2);
     assert!(

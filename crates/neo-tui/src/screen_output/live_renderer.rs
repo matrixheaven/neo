@@ -1,10 +1,10 @@
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::Write as _;
 use std::io::Write;
 
 use crate::primitive::visible_width;
 
-use super::kitty_image::{collect_kitty_image_ids, delete_kitty_images};
+use super::kitty_image::{collect_kitty_image_rows, delete_kitty_images};
 use super::types::CursorPos;
 
 /// Bounded live-frame diff renderer.
@@ -17,7 +17,7 @@ pub struct LiveRenderer {
     height: u16,
     previous_lines: Vec<String>,
     previous_cursor: Option<CursorPos>,
-    previous_kitty_image_ids: BTreeSet<u32>,
+    previous_image_rows: BTreeMap<u32, BTreeSet<usize>>,
     full_redraw_pending: bool,
 }
 
@@ -29,7 +29,7 @@ impl LiveRenderer {
             height,
             previous_lines: Vec::new(),
             previous_cursor: None,
-            previous_kitty_image_ids: BTreeSet::new(),
+            previous_image_rows: BTreeMap::new(),
             full_redraw_pending: false,
         }
     }
@@ -84,11 +84,36 @@ impl LiveRenderer {
         } else {
             previous_lines.len().max(lines.len())
         };
-        let kitty_image_ids = collect_kitty_image_ids(&lines);
+        let image_rows = collect_kitty_image_rows(&lines);
+        // Kitty placements float above cell content and persist until they are
+        // explicitly deleted; clearing a row never removes an image anchored
+        // there. Delete every image whose anchor rows changed (including
+        // images that left the frame) before repainting, then force-repaint
+        // their old and new anchor rows so the replacement placement is
+        // emitted even when the row diff would skip it.
+        let moved_image_ids: BTreeSet<u32> = self
+            .previous_image_rows
+            .keys()
+            .chain(image_rows.keys())
+            .copied()
+            .filter(|id| self.previous_image_rows.get(id) != image_rows.get(id))
+            .collect();
+        let forced_rows: BTreeSet<usize> = moved_image_ids
+            .iter()
+            .flat_map(|id| {
+                self.previous_image_rows
+                    .get(id)
+                    .into_iter()
+                    .flatten()
+                    .chain(image_rows.get(id).into_iter().flatten())
+                    .copied()
+            })
+            .collect();
         let mut bytes = String::new();
 
         if self.full_redraw_pending {
-            bytes.push_str(&delete_kitty_images(&self.previous_kitty_image_ids));
+            let previous_ids: BTreeSet<u32> = self.previous_image_rows.keys().copied().collect();
+            bytes.push_str(&delete_kitty_images(&previous_ids));
             // Clear every previously live-owned row at the absolute origin.
             let clear_rows = previous_line_count.max(lines.len()).max(1);
             for row in 0..clear_rows {
@@ -100,23 +125,25 @@ impl LiveRenderer {
                 bytes.push_str("\x1b[2K");
             }
         } else {
-            bytes.push_str(&delete_kitty_images(
-                &self
-                    .previous_kitty_image_ids
-                    .difference(&kitty_image_ids)
-                    .copied()
-                    .collect(),
-            ));
+            bytes.push_str(&delete_kitty_images(&moved_image_ids));
         }
 
+        let mut repaint_rows: Vec<usize> = Vec::new();
         if first_changed < render_rows {
-            for row in first_changed..render_rows {
-                let screen_row = origin.saturating_add(row);
-                push_absolute_move(&mut bytes, screen_row, 0);
-                bytes.push_str("\x1b[2K");
-                if let Some(line) = lines.get(row) {
-                    bytes.push_str(line);
-                }
+            repaint_rows.extend(first_changed..render_rows);
+        }
+        repaint_rows.extend(&forced_rows);
+        repaint_rows.sort_unstable();
+        repaint_rows.dedup();
+        for row in repaint_rows {
+            let screen_row = origin.saturating_add(row);
+            if screen_row >= usize::from(self.height) {
+                break;
+            }
+            push_absolute_move(&mut bytes, screen_row, 0);
+            bytes.push_str("\x1b[2K");
+            if let Some(line) = lines.get(row) {
+                bytes.push_str(line);
             }
         }
 
@@ -135,7 +162,7 @@ impl LiveRenderer {
         output.flush()?;
         self.previous_lines = lines;
         self.previous_cursor = cursor;
-        self.previous_kitty_image_ids = kitty_image_ids;
+        self.previous_image_rows = image_rows;
         self.full_redraw_pending = false;
         Ok(())
     }
@@ -180,7 +207,8 @@ impl LiveRenderer {
     /// Emit absolute clears for the previously drawn live rows at `origin_row`.
     pub(crate) fn clear_at_origin(&mut self, origin_row: u16) -> String {
         let mut output = String::new();
-        output.push_str(&delete_kitty_images(&self.previous_kitty_image_ids));
+        let previous_ids: BTreeSet<u32> = self.previous_image_rows.keys().copied().collect();
+        output.push_str(&delete_kitty_images(&previous_ids));
         let origin = usize::from(origin_row);
         let clear_rows = self.previous_lines.len();
         for row in 0..clear_rows {
@@ -193,7 +221,7 @@ impl LiveRenderer {
         }
         self.previous_lines.clear();
         self.previous_cursor = None;
-        self.previous_kitty_image_ids.clear();
+        self.previous_image_rows.clear();
         self.full_redraw_pending = false;
         output
     }
@@ -204,10 +232,11 @@ impl LiveRenderer {
     /// transaction/transition buffer as other live output) before the next frame.
     #[must_use]
     pub(crate) fn reset(&mut self) -> String {
-        let deletes = delete_kitty_images(&self.previous_kitty_image_ids);
+        let previous_ids: BTreeSet<u32> = self.previous_image_rows.keys().copied().collect();
+        let deletes = delete_kitty_images(&previous_ids);
         self.previous_lines.clear();
         self.previous_cursor = None;
-        self.previous_kitty_image_ids.clear();
+        self.previous_image_rows.clear();
         self.full_redraw_pending = false;
         deletes
     }
