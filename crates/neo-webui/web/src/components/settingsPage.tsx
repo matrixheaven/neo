@@ -33,7 +33,7 @@ import type {
   WebUiSettingsSnapshot,
 } from "../protocol";
 import { useAppActions } from "../state/store";
-import { ModelReasoningSelector } from "./modelReasoningSelector";
+import { ModelPillMenu } from "./modelPill";
 
 type NavItem =
   | "general"
@@ -202,6 +202,7 @@ function GeneralSection({
   onNotice: (message: string) => void;
 }) {
   const [saving, setSaving] = useState(false);
+  const [modelMenuOpen, setModelMenuOpen] = useState(false);
 
   const saveModel = (alias: string, reasoning: ReasoningSelection) => {
     if (saving) return;
@@ -229,12 +230,22 @@ function GeneralSection({
       <h3>常规</h3>
       <div className="settings-field">
         <span className="settings-label">默认模型</span>
-        <ModelReasoningSelector
+        <ModelPillMenu
           models={snapshot.models}
+          defaultAlias={snapshot.default_model}
           alias={snapshot.default_model}
           reasoning={snapshot.default_reasoning}
-          disabled={saving}
-          onChange={saveModel}
+          configuredReasoning={snapshot.default_reasoning}
+          onChange={(nextAlias, nextReasoning) =>
+            saveModel(nextAlias, nextReasoning ?? { mode: "off" })
+          }
+          open={modelMenuOpen}
+          onOpenChange={setModelMenuOpen}
+          direction="down"
+          pillClassName="settings-model-pill"
+          pillAriaLabel="默认模型与推理强度"
+          pillTitle="选择默认模型与推理强度"
+          menuAriaLabel="选择默认模型与推理"
         />
         <p className="settings-hint">选择模型并配置推理强度；写入 ~/.neo/config.toml，重启后对新会话生效。</p>
       </div>

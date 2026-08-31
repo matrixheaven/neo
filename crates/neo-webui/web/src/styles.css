@@ -5099,8 +5099,9 @@ textarea.settings-input {
   font-size: 12px;
 }
 
+/* Settings pill keeps a comfortable width; the menu opens downward. */
 .settings-model-pill {
-  min-width: 200px;
+  min-width: 220px;
 }
 
 .model-settings-row {
@@ -5505,29 +5506,15 @@ textarea.settings-input {
   --code-bg: #16181d;
 }
 
-/* Model selector in settings opens DOWNWARD (the section sits near the top of
-   the scroll area, so an upward popover gets clipped) and aligns popovers to
-   the top. The back button stays visible (unlike the composer's desktop
-   hiding) and rotates the chevron to point left. */
-.model-selector-wrap {
-  position: relative;
-  width: fit-content;
-}
-
-.model-selector-shell {
+/* The model menu can open DOWNWARD (settings page: the section sits near the
+   top of the scroll area, so an upward popover gets clipped). The back button
+   stays visible outside the narrow-composer media query. */
+.model-menu-shell[data-direction="down"] {
   bottom: auto;
   top: calc(100% + 8px);
   align-items: flex-start;
 }
 
-.model-selector-shell .model-submenu-back {
+.model-menu-shell[data-direction="down"] .model-submenu-back {
   display: flex;
-}
-
-.model-submenu-back .flip {
-  transform: rotate(180deg);
-}
-
-.model-selector-wrap .pill-popover {
-  max-width: 320px;
 }
