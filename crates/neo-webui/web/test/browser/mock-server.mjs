@@ -368,6 +368,13 @@ function showcaseSnapshot() {
         },
       },
     },
+    // Turn 1's boundary. It is listed after turn 2's live events only because
+    // the projection accumulates finished-turn markers order-independently;
+    // keeping it here avoids renumbering the contiguous showcase sequence.
+    {
+      sequence: 22,
+      event: { TurnFinished: { turn: 1, stop_reason: "EndTurn" } },
+    },
   ];
   return {
     stream_id: fixture.stream_id,
@@ -526,7 +533,7 @@ function agentHistory(sessionId, agentId) {
   if (agentId !== SHOWCASE_AGENT_ID && !agentId.startsWith("agent_")) return null;
   return {
     agent_id: agentId,
-    watermark: 7,
+    watermark: 8,
     history: [
       {
         sequence: 1,
@@ -600,6 +607,10 @@ function agentHistory(sessionId, agentId) {
             },
           },
         },
+      },
+      {
+        sequence: 8,
+        event: { TurnFinished: { turn: 1, stop_reason: "EndTurn" } },
       },
     ],
   };

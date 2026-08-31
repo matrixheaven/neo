@@ -163,6 +163,7 @@ describe("transcript redesign rows", () => {
     emit({ MessageStarted: { turn: 2, id: "msg_2b" } });
     emit({ TextDelta: { turn: 2, text: "已修改 app.ts。" } });
     emit({ MessageFinished: { turn: 2, id: "msg_2b", stop_reason: "EndTurn" } });
+    emit({ TurnFinished: { turn: 2, stop_reason: "EndTurn" } });
   }
 
   it("clamps long user messages behind a gradient with an expand toggle", async () => {
@@ -377,6 +378,7 @@ describe("transcript redesign rows", () => {
     emit({ MessageStarted: { turn: 2, id: "thought_answer" } });
     emit({ TextDelta: { turn: 2, text: "思考后的回答" } });
     emit({ MessageFinished: { turn: 2, id: "thought_answer", stop_reason: "EndTurn" } });
+    emit({ TurnFinished: { turn: 2, stop_reason: "EndTurn" } });
 
     const answer = await screen.findByText("思考后的回答");
     const group = answer.closest(".a-msg") as HTMLElement;
@@ -636,6 +638,7 @@ describe("transcript redesign rows", () => {
     emit({ MessageStarted: { turn: 2, id: "special_answer" } });
     emit({ TextDelta: { turn: 2, text: "专用工具已完成。" } });
     emit({ MessageFinished: { turn: 2, id: "special_answer", stop_reason: "EndTurn" } });
+    emit({ TurnFinished: { turn: 2, stop_reason: "EndTurn" } });
 
     const answer = await screen.findByText("专用工具已完成。");
     const group = answer.closest(".a-msg") as HTMLElement;
@@ -697,29 +700,42 @@ describe("transcript redesign rows", () => {
     expect(within(setTodoButton).getByRole("progressbar", { name: "任务进度：1/1" })).toBeTruthy();
   });
 
-  it("folds one user prompt's full activity behind its final answer", async () => {
+  it("splits each process run behind its own fold and keeps intermediate prose visible", async () => {
     const user = userEvent.setup();
     const { socket } = await openSession1();
     emitFinishedEditTurn(socket);
-    const fold = await screen.findByRole("button", {
-      name: /展开工作过程（搜索 1 · 读取 1 · 编辑 1 · 命令 1 · 失败 1 · 5 个步骤）/,
+
+    // Intermediate assistant prose stays in the flow, never inside a fold.
+    const intermediate = await screen.findByText("先完成 app.ts 的初步修改。");
+    expect(intermediate.closest(".turn-fold")).toBeNull();
+
+    // The edit before that prose is its own fold; the later tool loop is another.
+    const editFoldButton = screen.getByRole("button", {
+      name: /展开工作过程（编辑 1 · 1 个步骤）/,
     });
-    expect(fold.getAttribute("aria-expanded")).toBe("false");
-    await user.click(fold);
-    const openFold = screen.getByRole("button", {
-      name: /收起工作过程（搜索 1 · 读取 1 · 编辑 1 · 命令 1 · 失败 1 · 5 个步骤）/,
+    expect(editFoldButton.getAttribute("aria-expanded")).toBe("false");
+    const toolFoldButton = screen.getByRole("button", {
+      name: /展开工作过程（搜索 1 · 读取 1 · 命令 1 · 失败 1 · 3 个步骤）/,
     });
-    expect(openFold.getAttribute("aria-expanded")).toBe("true");
-    const foldRoot = openFold.closest(".turn-fold") as HTMLElement;
-    expect(foldRoot.className).toContain("open");
-    expect(within(foldRoot).getByRole("button", { name: /编辑 src\/app.ts/ })).toBeTruthy();
-    expect(within(foldRoot).getByRole("button", { name: /搜索 app/ })).toBeTruthy();
-    const readBar = within(foldRoot).getByRole("button", { name: /读取 app.ts/ });
+    expect(toolFoldButton.getAttribute("aria-expanded")).toBe("false");
+
+    await user.click(editFoldButton);
+    const editFold = editFoldButton.closest(".turn-fold") as HTMLElement;
+    expect(editFold.className).toContain("open");
+    expect(within(editFold).getByRole("button", { name: /编辑 src\/app.ts/ })).toBeTruthy();
+
+    await user.click(toolFoldButton);
+    const toolFold = toolFoldButton.closest(".turn-fold") as HTMLElement;
+    expect(toolFold.className).toContain("open");
+    expect(within(toolFold).getByRole("button", { name: /搜索 app/ })).toBeTruthy();
+
+    const readBar = within(toolFold).getByRole("button", { name: /读取 app.ts/ });
     const readLine = readBar.closest(".tool-line") as HTMLElement;
     expect(readLine.querySelector('[data-tool-icon="file"]')).not.toBeNull();
     expect(readLine.querySelector(".tl-subtle")?.textContent).toBe("src/");
     expect(readLine.querySelector(".tl-subtle")?.nextElementSibling?.className).toContain("line-caret");
-    const failedCommand = within(foldRoot).getAllByRole("button", {
+
+    const failedCommand = within(toolFold).getAllByRole("button", {
       name: /运行 cargo test，状态：失败/,
     });
     expect(failedCommand).toHaveLength(1);
@@ -729,7 +745,6 @@ describe("transcript redesign rows", () => {
     expect(failedLine.querySelector(".line-tail")).toBeNull();
     await user.click(failedCommand[0]);
     expect(within(failedLine).getByText(/退出码 1/)).toBeTruthy();
-    expect(within(foldRoot).getByText("先完成 app.ts 的初步修改。")).toBeTruthy();
 
     expect(screen.getAllByRole("button", { name: "复制回答" })).toHaveLength(1);
     const finalAnswer = screen.getByText("已修改 app.ts。");

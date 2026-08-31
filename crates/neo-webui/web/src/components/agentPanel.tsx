@@ -23,7 +23,12 @@ import { ReviewPanel, type ReviewSourceState } from "./reviewPanel";
 type PanelResult =
   | { status: "idle" }
   | { status: "loading" }
-  | { status: "ok"; agentId: string; items: TranscriptItem[] }
+  | {
+      status: "ok";
+      agentId: string;
+      items: TranscriptItem[];
+      finishedTurns: Set<number>;
+    }
   | { status: "error"; agentId: string; notFound: boolean };
 
 const TERMINAL_AGENT_STATES = new Set([
@@ -240,7 +245,12 @@ function AgentDetail({
         ) : result.items.length === 0 ? (
           <p className="information-empty">该子代理暂无已落盘的历史内容。</p>
         ) : (
-          <TranscriptDocument sessionId={sessionId} items={result.items} agentId={agent.id} />
+          <TranscriptDocument
+            sessionId={sessionId}
+            items={result.items}
+            agentId={agent.id}
+            finishedTurns={result.finishedTurns}
+          />
         )}
       </div>
     </div>
@@ -476,6 +486,7 @@ export function InformationPanel() {
           status: "ok",
           agentId: historyAgentId,
           items: readonlyItems(projection.items, historyAgentId),
+          finishedTurns: projection.finishedTurns,
         });
       })
       .catch((error: unknown) => {

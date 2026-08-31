@@ -1,7 +1,8 @@
 /**
  * Transcript scroll pane (redesign §4). Items between one user bubble and the
- * next form one turn. Earlier assistant messages and process rows collapse
- * into a TurnFold; only the final assistant message gets the answer footer.
+ * next form one turn. Each process run (thinking/tools/shells/…) collapses
+ * into its own summary fold; intermediate assistant messages stay visible as
+ * prose; only the final assistant message gets the answer footer.
  *
  * Leaving the bottom disables follow; new events never steal the scroll
  * position. A floating jump-to-latest action appears above the composer
@@ -294,12 +295,17 @@ function ProcessRows({
   });
 }
 
-type TurnActivitySegment =
+type TurnSegment =
   | { kind: "process"; items: TranscriptItem[] }
+  | { kind: "message"; item: AssistantMessageItem }
   | { kind: "inline"; item: TranscriptItem };
 
-function turnActivitySegments(activity: TranscriptItem[]): TurnActivitySegment[] {
-  const segments: TurnActivitySegment[] = [];
+/** Split one turn's pre-answer activity into ordered segments: process runs
+ * (thinking/tools/shells/…) collapse behind their own summary, intermediate
+ * assistant messages render as visible prose, and pending interactions stay
+ * inline in the flow. */
+function turnSegments(activity: TranscriptItem[]): TurnSegment[] {
+  const segments: TurnSegment[] = [];
   let process: TranscriptItem[] = [];
   const flushProcess = () => {
     if (process.length === 0) return;
@@ -307,7 +313,10 @@ function turnActivitySegments(activity: TranscriptItem[]): TurnActivitySegment[]
     process = [];
   };
   for (const item of activity) {
-    if (isPendingInteraction(item)) {
+    if (item.kind === "assistant_message") {
+      flushProcess();
+      segments.push({ kind: "message", item });
+    } else if (isPendingInteraction(item)) {
       flushProcess();
       segments.push({ kind: "inline", item });
     } else {
@@ -514,50 +523,34 @@ function deriveFileChanges(process: TranscriptItem[]): ReviewFileChange[] {
   return [...byPath.values()];
 }
 
-/** Best available wall-clock hint for a fold: the slowest delegate/swarm
- * elapsed time, when one was reported on the wire. */
-function foldElapsedSecs(process: TranscriptItem[]): number | null {
-  let secs = 0;
-  for (const item of process) {
-    if (item.kind === "delegate") {
-      secs = Math.max(secs, item.agent.elapsed?.secs ?? 0);
-    }
-    if (item.kind === "swarm") {
-      for (const child of item.swarm.children) {
-        secs = Math.max(secs, child.agent.elapsed?.secs ?? 0);
-      }
-    }
-  }
-  return secs > 0 ? secs : null;
-}
-
 // ---------------------------------------------------------------------------
-// TurnFold + answer footer
+// ProcessFold + answer footer
 // ---------------------------------------------------------------------------
 
-function TurnFold({
+/** One run of process rows (thinking/tools/shells/…) collapsed behind a
+ * single summary line. A live turn keeps its runs open and locked; the
+ * finished turn collapses them once. The fold id changes with liveness so a
+ * user's live-turn override never leaks into the finished view. */
+function ProcessFold({
   sessionId,
-  msg,
-  activity,
+  items,
   allItems,
+  live,
 }: {
   sessionId: string;
-  msg: AssistantMessageItem;
-  activity: TranscriptItem[];
+  items: TranscriptItem[];
   allItems: TranscriptItem[];
+  live: boolean;
 }) {
-  // Completed process rows stay behind their summary while pending controls
-  // remain visible. In-progress turns stay open; an explicit choice wins later.
+  const baseId = items[0]?.id ?? "process";
   const [open, toggle] = useLineExpanded(
     sessionId,
-    `fold:${msg.id}`,
-    !msg.finished,
+    `${live ? "live-fold" : "fold"}:${baseId}`,
+    live,
   );
-  const secs = foldElapsedSecs(activity);
-  const detail = processSummary(activity);
-  const summary = msg.finished
-    ? (secs !== null ? "工作了 " + secs + "s · " : "") + detail
-    : "工作中 · " + detail;
+  const summary = live
+    ? "工作中 · " + processSummary(items)
+    : processSummary(items);
   return (
     <div className={`turn-fold ${open ? "open" : ""}`}>
       <button
@@ -565,7 +558,7 @@ function TurnFold({
         className="tf-head"
         aria-expanded={open}
         aria-label={`${open ? "收起" : "展开"}工作过程（${summary}）`}
-        disabled={!msg.finished}
+        disabled={live}
         onClick={toggle}
       >
         <span className="tf-caret" aria-hidden>
@@ -573,15 +566,11 @@ function TurnFold({
         </span>
         <span className="tf-sum">{summary}</span>
       </button>
-      {turnActivitySegments(activity).map((segment) => segment.kind === "inline" ? (
-        <TranscriptItemView key={`inline:${segment.item.id}`} sessionId={sessionId} item={segment.item} />
-      ) : (
-        <div className="tf-body" key={`process:${segment.items[0].id}`}>
-          <div className="tf-body-inner">
-            <ProcessRows sessionId={sessionId} items={segment.items} allItems={allItems} />
-          </div>
+      <div className="tf-body">
+        <div className="tf-body-inner">
+          <ProcessRows sessionId={sessionId} items={items} allItems={allItems} />
         </div>
-      ))}
+      </div>
     </div>
   );
 }
@@ -854,21 +843,42 @@ function AssistGroup({
   group,
   allItems,
   agentId,
+  finishedTurns,
 }: {
   sessionId: string;
   group: { process: TranscriptItem[]; activity: TranscriptItem[]; msg: AssistantMessageItem };
   allItems: TranscriptItem[];
   agentId: string | null;
+  finishedTurns: Set<number>;
 }) {
-  const { process, activity, msg } = group;
+  const { activity, msg } = group;
   const changes = msg.finished ? deriveFileChanges(activity) : [];
+  const live = typeof msg.turn === "number" && !finishedTurns.has(msg.turn);
   return (
     <div className="a-msg t-item">
-      {process.length > 0 ? (
-        <TurnFold sessionId={sessionId} msg={msg} activity={activity} allItems={allItems} />
-      ) : activity.length > 0 ? (
-        <ProcessRows sessionId={sessionId} items={activity} allItems={allItems} />
-      ) : null}
+      {turnSegments(activity).map((segment) => {
+        if (segment.kind === "inline") {
+          return (
+            <TranscriptItemView
+              key={`inline:${segment.item.id}`}
+              sessionId={sessionId}
+              item={segment.item}
+            />
+          );
+        }
+        if (segment.kind === "message") {
+          return <AssistantBody key={segment.item.id} item={segment.item} />;
+        }
+        return (
+          <ProcessFold
+            key={`process:${segment.items[0].id}`}
+            sessionId={sessionId}
+            items={segment.items}
+            allItems={allItems}
+            live={live}
+          />
+        );
+      })}
       <AssistantBody item={msg} />
       {msg.finished ? (
         <AnswerFooter
@@ -896,10 +906,12 @@ export function TranscriptDocument({
   sessionId,
   items,
   agentId = null,
+  finishedTurns = new Set<number>(),
 }: {
   sessionId: string;
   items: TranscriptItem[];
   agentId?: string | null;
+  finishedTurns?: Set<number>;
 }) {
   const groups = groupTurns(items);
   return (
@@ -918,6 +930,7 @@ export function TranscriptDocument({
                 group={group}
                 allItems={items}
                 agentId={agentId}
+                finishedTurns={finishedTurns}
               />
             );
           case "process":
@@ -990,7 +1003,11 @@ export function TranscriptPane({ sessionId }: { sessionId: string }) {
         onScroll={onScroll}
         aria-label="会话转录"
       >
-        <TranscriptDocument sessionId={sessionId} items={items} />
+        <TranscriptDocument
+          sessionId={sessionId}
+          items={items}
+          finishedTurns={view?.projection.finishedTurns ?? new Set<number>()}
+        />
       </div>
       {!isAtBottom ? (
         <button

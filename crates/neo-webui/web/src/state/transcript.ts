@@ -219,6 +219,10 @@ export interface TranscriptProjection {
   // Internal, never rendered directly:
   /** Last explicit event turn, used because MessageAppended has no turn field. */
   latestTurn: number | null;
+  /** Turn numbers whose TurnFinished boundary has been observed. A turn is
+   * live until this boundary; intermediate MessageFinished events (one per
+   * model attempt) must not collapse a live turn's process. */
+  finishedTurns: Set<number>;
   liveMessageId: string | null;
   liveThinkingId: string | null;
   /** Per-(turn, provider id) occurrence counts keep separate thinking
@@ -240,6 +244,7 @@ export function emptyProjection(): TranscriptProjection {
     latestUsage: null,
     contextWindow: null,
     latestTurn: null,
+    finishedTurns: new Set<number>(),
     liveMessageId: null,
     liveThinkingId: null,
     thinkingOccurrenceByKey: {},
@@ -637,6 +642,7 @@ export function applyAgentEvent(
       return {
         ...projection,
         items,
+        finishedTurns: new Set([...projection.finishedTurns, b.turn]),
         liveThinkingId:
           live === null ||
           live === undefined ||

@@ -176,7 +176,7 @@ export function bootstrapBody(): Record<string, unknown> {
 export function agentHistoryBody(agentId: string): Record<string, unknown> {
   return {
     agent_id: agentId,
-    watermark: 7,
+    watermark: 8,
     history: [
       {
         sequence: 1,
@@ -255,6 +255,10 @@ export function agentHistoryBody(agentId: string): Record<string, unknown> {
             },
           },
         },
+      },
+      {
+        sequence: 8,
+        event: { TurnFinished: { turn: 1, stop_reason: "EndTurn" } },
       },
     ],
   };
