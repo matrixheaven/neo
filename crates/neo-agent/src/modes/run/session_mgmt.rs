@@ -1,7 +1,6 @@
 use std::path::{Path, PathBuf};
 
 use anyhow::Context;
-use futures::StreamExt;
 use neo_agent_core::session::{SessionMetadataStore, main_agent_wire_path};
 use neo_ai::{ChatMessage, ContentPart};
 
