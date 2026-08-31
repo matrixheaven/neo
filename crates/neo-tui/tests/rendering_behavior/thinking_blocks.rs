@@ -18,6 +18,13 @@ fn plain_frame(runtime: &mut TranscriptPane, width: usize, height: usize) -> Vec
         .collect()
 }
 
+/// True when a row carries no visible glyph. A reserved tail row may hold only
+/// a zero-width space; that is blank to the eye but must not be treated as
+/// content-holding on the other rows.
+fn is_visually_blank(row: &str) -> bool {
+    !row.chars().any(|c| !c.is_whitespace() && c != '\u{200b}')
+}
+
 #[test]
 fn live_thinking_shows_spinner_and_tail_window() {
     let mut runtime = TranscriptPane::new(40, 12);
@@ -100,10 +107,9 @@ fn live_thinking_window_keeps_reserved_height_while_text_arrives() {
                     );
                     caret_seen = true;
                 }
-                None => assert_eq!(
-                    rows[1 + offset].trim(),
-                    "·",
-                    "{name}: receding slot shows a faint dot: {rows:?}"
+                None => assert!(
+                    is_visually_blank(&rows[1 + offset]),
+                    "{name}: receding slot is blank: {rows:?}"
                 ),
             }
         }
@@ -130,10 +136,9 @@ fn summary_thinking_reserves_window_height_while_live() {
         "spinner title row first: {rows:?}"
     );
     assert_eq!(rows[1].trim(), "▍", "next line shows a caret: {rows:?}");
-    assert_eq!(
-        rows[2].trim(),
-        "·",
-        "receding slot shows a faint dot: {rows:?}"
+    assert!(
+        is_visually_blank(&rows[2]),
+        "receding slot is blank: {rows:?}"
     );
 }
 

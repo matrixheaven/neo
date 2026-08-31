@@ -18,9 +18,9 @@ const THINKING_WINDOW_ROWS: usize = 1 + THINKING_PREVIEW_LINES;
 /// - **Streaming Full/Unknown**: a height-reserved window: a braille-spinner
 ///   header followed by the *last* [`THINKING_PREVIEW_LINES`] wrapped rows as a
 ///   scrolling tail. Unfilled slots show a blinking block caret on the next
-///   line plus a fainter receding dot, so the block keeps a constant height
-///   from the moment it goes live instead of growing line by line and shifting
-///   the transcript.
+///   line and a blank row below it, so the block keeps a constant height from
+///   the moment it goes live instead of growing line by line and shifting the
+///   transcript.
 /// - **Complete**: the *first* [`THINKING_PREVIEW_LINES`] rows prefixed with a
 ///   `●` bullet, followed by a `… N more lines (ctrl+o to expand)` hint when
 ///   the full text was longer. This keeps completed thinking compact instead
@@ -127,12 +127,11 @@ fn render_thinking_parts(
     rows
 }
 
-/// Pad a live streaming window with faint placeholder rows up to the reserved
-/// height. The first empty slot gets a blinking block caret — the line where
-/// streamed text will land next — and any further empty slot a fainter receding
-/// dot. Placeholders must carry a visible character: the pane trims blank
-/// trailing rows from every entry block, so blank padding would collapse the
-/// reservation and reintroduce height jitter.
+/// Pad a live streaming window up to the reserved height. The first empty slot
+/// gets a blinking block caret — the line where streamed text will land next.
+/// Any further empty slot is a visually blank row that still survives the
+/// pane's blank-row trimming, so the reservation never collapses and the
+/// window keeps a constant height while text streams in.
 fn reserve_streaming_rows(rows: &mut Vec<Line>, theme: &TuiTheme, activity_frame: usize) {
     // Half the caret's blink period in animation frames. The spinner advances
     // through ten braille frames per cycle, so a half-period of ten makes the
@@ -147,14 +146,18 @@ fn reserve_streaming_rows(rows: &mut Vec<Line>, theme: &TuiTheme, activity_frame
     } else {
         caret_off
     };
-    let receding = Style::default().fg(theme.surface_border).italic();
+
+    // A zero-width space renders blank but is not whitespace, so a blank row
+    // holding it is not dropped by `trim_ansi_transcript_block`: a genuinely
+    // empty row would be trimmed and the reserved window would collapse.
+    let blank = "\u{200b}";
 
     let caret_row = rows.len();
     while rows.len() < THINKING_WINDOW_ROWS {
         if rows.len() == caret_row {
             rows.push(Line::styled("  ▍", caret));
         } else {
-            rows.push(Line::styled("  ·", receding));
+            rows.push(Line::styled(blank, Style::default()));
         }
     }
 }
