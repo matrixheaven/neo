@@ -17,9 +17,10 @@ const THINKING_WINDOW_ROWS: usize = 1 + THINKING_PREVIEW_LINES;
 ///   part is live.
 /// - **Streaming Full/Unknown**: a height-reserved window: a braille-spinner
 ///   header followed by the *last* [`THINKING_PREVIEW_LINES`] wrapped rows as a
-///   scrolling tail. Rows not yet filled by streamed text stay as placeholders,
-///   so the block keeps a constant height from the moment it goes live instead
-///   of growing line by line and shifting the transcript.
+///   scrolling tail. Unfilled slots show a blinking block caret on the next
+///   line plus a fainter receding dot, so the block keeps a constant height
+///   from the moment it goes live instead of growing line by line and shifting
+///   the transcript.
 /// - **Complete**: the *first* [`THINKING_PREVIEW_LINES`] rows prefixed with a
 ///   `●` bullet, followed by a `… N more lines (ctrl+o to expand)` hint when
 ///   the full text was longer. This keeps completed thinking compact instead
@@ -47,7 +48,7 @@ fn render_thinking_parts(
                 format!("{} {label}", thinking_spinner(activity_frame)),
                 style,
             )];
-            reserve_streaming_rows(&mut rows, style);
+            reserve_streaming_rows(&mut rows, theme, activity_frame);
             return rows;
         }
 
@@ -92,7 +93,7 @@ fn render_thinking_parts(
         for line in wrapped.iter().skip(start) {
             rows.push(Line::styled(format!("  {line}"), style));
         }
-        reserve_streaming_rows(&mut rows, style);
+        reserve_streaming_rows(&mut rows, theme, activity_frame);
         return rows;
     }
 
@@ -127,12 +128,34 @@ fn render_thinking_parts(
 }
 
 /// Pad a live streaming window with faint placeholder rows up to the reserved
-/// height. Placeholders must carry a visible character: the pane trims blank
+/// height. The first empty slot gets a blinking block caret — the line where
+/// streamed text will land next — and any further empty slot a fainter receding
+/// dot. Placeholders must carry a visible character: the pane trims blank
 /// trailing rows from every entry block, so blank padding would collapse the
 /// reservation and reintroduce height jitter.
-fn reserve_streaming_rows(rows: &mut Vec<Line>, style: Style) {
+fn reserve_streaming_rows(rows: &mut Vec<Line>, theme: &TuiTheme, activity_frame: usize) {
+    // Half the caret's blink period in animation frames. The spinner advances
+    // through ten braille frames per cycle, so a half-period of ten makes the
+    // caret pulse once per full spinner cycle — a calm typing cursor, not a
+    // second spinner.
+    const CARET_BLINK_HALF_PERIOD: usize = 10;
+
+    let caret_on = thinking_style(theme);
+    let caret_off = Style::default().fg(theme.surface_border).italic();
+    let caret = if (activity_frame / CARET_BLINK_HALF_PERIOD).is_multiple_of(2) {
+        caret_on
+    } else {
+        caret_off
+    };
+    let receding = Style::default().fg(theme.surface_border).italic();
+
+    let caret_row = rows.len();
     while rows.len() < THINKING_WINDOW_ROWS {
-        rows.push(Line::styled("  ·", style));
+        if rows.len() == caret_row {
+            rows.push(Line::styled("  ▍", caret));
+        } else {
+            rows.push(Line::styled("  ·", receding));
+        }
     }
 }
 

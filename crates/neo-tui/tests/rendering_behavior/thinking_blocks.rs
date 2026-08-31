@@ -85,16 +85,25 @@ fn live_thinking_window_keeps_reserved_height_while_text_arrives() {
             rows[0].contains("thinking..."),
             "{name}: spinner header first: {rows:?}"
         );
+        let mut caret_seen = false;
         for (offset, expected) in tail.iter().enumerate() {
             match expected {
                 Some(line) => assert!(
                     rows[1 + offset].contains(line),
                     "{name}: tail row {offset} shows {line}: {rows:?}"
                 ),
+                None if !caret_seen => {
+                    assert_eq!(
+                        rows[1 + offset].trim(),
+                        "▍",
+                        "{name}: next line shows a caret: {rows:?}"
+                    );
+                    caret_seen = true;
+                }
                 None => assert_eq!(
                     rows[1 + offset].trim(),
                     "·",
-                    "{name}: unfilled tail row {offset} stays placeholder: {rows:?}"
+                    "{name}: receding slot shows a faint dot: {rows:?}"
                 ),
             }
         }
@@ -120,8 +129,12 @@ fn summary_thinking_reserves_window_height_while_live() {
         rows[0].contains("thinking"),
         "spinner title row first: {rows:?}"
     );
-    assert_eq!(rows[1].trim(), "·", "placeholder tail row: {rows:?}");
-    assert_eq!(rows[2].trim(), "·", "placeholder tail row: {rows:?}");
+    assert_eq!(rows[1].trim(), "▍", "next line shows a caret: {rows:?}");
+    assert_eq!(
+        rows[2].trim(),
+        "·",
+        "receding slot shows a faint dot: {rows:?}"
+    );
 }
 
 #[test]
