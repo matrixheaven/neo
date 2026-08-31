@@ -28,11 +28,11 @@ use crate::auth::{
 };
 use crate::protocol::{
     WebUiAddWorkspaceBody, WebUiApprovalBody, WebUiAttachmentBody, WebUiCancelBody,
-    WebUiCancelling, WebUiClaimRequest, WebUiCommand, WebUiCreateSessionBody, WebUiError,
-    WebUiErrorBody, WebUiErrorCode, WebUiHost, WebUiInputAccepted, WebUiInputBody,
-    WebUiMetadataBody, WebUiQueueControlBody, WebUiQuestionBody, WebUiReply, WebUiServerMessage,
-    WebUiSessionScope, WebUiSessionStarted, WebUiStartTurnBody, WebUiUpdateWorkspaceBody,
-    WebUiCheckoutBody, WebUiWatchRequest,
+    WebUiCancelling, WebUiCheckoutBody, WebUiClaimRequest, WebUiCommand, WebUiCreateSessionBody,
+    WebUiError, WebUiErrorBody, WebUiErrorCode, WebUiHost, WebUiInputAccepted, WebUiInputBody,
+    WebUiMcpServerEdit, WebUiMetadataBody, WebUiQuestionBody, WebUiQueueControlBody, WebUiReply,
+    WebUiServerMessage, WebUiSessionScope, WebUiSessionStarted, WebUiSetDefaultModelBody,
+    WebUiSetMcpEnabledBody, WebUiStartTurnBody, WebUiUpdateWorkspaceBody, WebUiWatchRequest,
 };
 use crate::relay::{
     ATTACHMENT_BODY_LIMIT_BYTES, COMMAND_BODY_LIMIT_BYTES, FIRST_SUBSCRIBE_DEADLINE, ObserverQueue,
@@ -103,11 +103,18 @@ fn build_router(app: AppState) -> Router {
         .route("/api/auth/claim", post(claim))
         .route("/api/bootstrap", get(bootstrap))
         .route("/api/completions", get(completions))
+        .route("/api/fs/list", get(fs_list))
         .route("/api/attachments", post(upload_attachment))
         .route("/api/sessions", get(list_sessions).post(create_session))
         .route("/api/workspaces", post(add_workspace))
-        .route("/api/workspaces/{workspace_id}/branches", get(list_branches))
-        .route("/api/workspaces/{workspace_id}/checkout", post(checkout_branch))
+        .route(
+            "/api/workspaces/{workspace_id}/branches",
+            get(list_branches),
+        )
+        .route(
+            "/api/workspaces/{workspace_id}/checkout",
+            post(checkout_branch),
+        )
         .route(
             "/api/workspaces/{workspace_id}/reveal",
             post(reveal_workspace),
@@ -139,6 +146,13 @@ fn build_router(app: AppState) -> Router {
         .route(
             "/api/workspace/changes/{change_id}",
             get(workspace_change_detail),
+        )
+        .route("/api/settings", get(settings))
+        .route("/api/settings/default-model", patch(set_default_model))
+        .route("/api/settings/mcp", post(upsert_mcp_server))
+        .route(
+            "/api/settings/mcp/{server_id}",
+            patch(set_mcp_server_enabled).delete(remove_mcp_server),
         )
         .route("/api/events", get(events_ws))
         .fallback(fallback)
@@ -214,6 +228,9 @@ const SESSION_LIST_QUERY_KEYS: &[&str] = &["scope", "query", "cursor", "limit"];
 /// Whitelisted query keys for `GET /api/completions`.
 const COMPLETION_QUERY_KEYS: &[&str] = &["query"];
 const COMPLETION_QUERY_MAX_CHARS: usize = 256;
+/// Whitelisted query keys for `GET /api/fs/list`.
+const FS_LIST_QUERY_KEYS: &[&str] = &["path"];
+const FS_LIST_QUERY_MAX_CHARS: usize = 4096;
 /// Whitelisted query keys for `GET .../tool-output/...`.
 const TOOL_OUTPUT_QUERY_KEYS: &[&str] = &["start_line", "max_lines"];
 
@@ -310,6 +327,8 @@ fn reply_response(app: &AppState, reply: WebUiReply) -> Response {
         WebUiReply::Branches(value) => json(StatusCode::OK, &value),
         WebUiReply::AttachmentUploaded(value) => json(StatusCode::CREATED, &value),
         WebUiReply::AgentHistory(value) => json(StatusCode::OK, &value),
+        WebUiReply::FsList(value) => json(StatusCode::OK, &value),
+        WebUiReply::Settings(value) => json(StatusCode::OK, &value),
     }
 }
 
@@ -395,6 +414,103 @@ async fn completions(
         .execute(WebUiCommand::CompleteInput {
             query: query.clone(),
         })
+        .await
+    {
+        Ok(reply) => reply_response(&app, reply),
+        Err(error) => host_error_response(error),
+    }
+}
+
+async fn fs_list(
+    State(app): State<AppState>,
+    params: Result<Query<HashMap<String, String>>, axum::extract::rejection::QueryRejection>,
+) -> Response {
+    let params = match params {
+        Ok(Query(params)) => params,
+        Err(_) => return invalid_request(),
+    };
+    if params
+        .keys()
+        .any(|key| !FS_LIST_QUERY_KEYS.contains(&key.as_str()))
+    {
+        return invalid_request();
+    }
+    let path = match params.get("path") {
+        Some(path) if path.chars().count() <= FS_LIST_QUERY_MAX_CHARS => Some(path.clone()),
+        Some(_) => return invalid_request(),
+        None => None,
+    };
+    match app.host.execute(WebUiCommand::FsList { path }).await {
+        Ok(reply) => reply_response(&app, reply),
+        Err(error) => host_error_response(error),
+    }
+}
+
+async fn settings(State(app): State<AppState>) -> Response {
+    match app.host.execute(WebUiCommand::SettingsSnapshot).await {
+        Ok(reply) => reply_response(&app, reply),
+        Err(error) => host_error_response(error),
+    }
+}
+
+async fn set_default_model(State(app): State<AppState>, body: Body) -> Response {
+    let parsed: WebUiSetDefaultModelBody = match parse_body(body).await {
+        Ok(parsed) => parsed,
+        Err(response) => return response,
+    };
+    match app
+        .host
+        .execute(WebUiCommand::SetDefaultModel {
+            alias: parsed.alias,
+        })
+        .await
+    {
+        Ok(reply) => reply_response(&app, reply),
+        Err(error) => host_error_response(error),
+    }
+}
+
+async fn set_mcp_server_enabled(
+    State(app): State<AppState>,
+    Path(server_id): Path<String>,
+    body: Body,
+) -> Response {
+    let parsed: WebUiSetMcpEnabledBody = match parse_body(body).await {
+        Ok(parsed) => parsed,
+        Err(response) => return response,
+    };
+    match app
+        .host
+        .execute(WebUiCommand::SetMcpServerEnabled {
+            server_id,
+            enabled: parsed.enabled,
+        })
+        .await
+    {
+        Ok(reply) => reply_response(&app, reply),
+        Err(error) => host_error_response(error),
+    }
+}
+
+async fn remove_mcp_server(State(app): State<AppState>, Path(server_id): Path<String>) -> Response {
+    match app
+        .host
+        .execute(WebUiCommand::RemoveMcpServer { server_id })
+        .await
+    {
+        Ok(reply) => reply_response(&app, reply),
+        Err(error) => host_error_response(error),
+    }
+}
+
+async fn upsert_mcp_server(State(app): State<AppState>, body: Body) -> Response {
+    let parsed: WebUiMcpServerEdit = match parse_body(body).await {
+        Ok(parsed) => parsed,
+        Err(response) => return response,
+    };
+    match app
+        .host
+        .execute(WebUiCommand::UpsertMcpServer { server: parsed })
         .await
     {
         Ok(reply) => reply_response(&app, reply),
@@ -665,10 +781,7 @@ async fn update_workspace(
     }
 }
 
-async fn list_branches(
-    State(app): State<AppState>,
-    Path(workspace_id): Path<String>,
-) -> Response {
+async fn list_branches(State(app): State<AppState>, Path(workspace_id): Path<String>) -> Response {
     match app
         .host
         .execute(WebUiCommand::ListBranches { workspace_id })

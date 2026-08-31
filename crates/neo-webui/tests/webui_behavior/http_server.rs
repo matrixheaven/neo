@@ -532,6 +532,41 @@ impl WebUiHost for FakeHost {
                     },
                 ))
             }
+            WebUiCommand::FsList { path } => {
+                Ok(WebUiReply::FsList(neo_webui::protocol::WebUiFsListing {
+                    path: path.unwrap_or_else(|| "/fake/root".to_string()),
+                    parent: Some("/fake".to_string()),
+                    entries: vec![neo_webui::protocol::WebUiFsEntry {
+                        name: "project".to_string(),
+                        is_dir: true,
+                    }],
+                }))
+            }
+            WebUiCommand::SettingsSnapshot => Ok(WebUiReply::Settings(
+                neo_webui::protocol::WebUiSettingsSnapshot {
+                    default_model: "fake/model".to_string(),
+                    default_provider: Some("fake-provider".to_string()),
+                    permission_mode: "ask".to_string(),
+                    providers: Vec::new(),
+                    models: Vec::new(),
+                    mcp_servers: Vec::new(),
+                    skills: Vec::new(),
+                },
+            )),
+            WebUiCommand::SetDefaultModel { .. }
+            | WebUiCommand::SetMcpServerEnabled { .. }
+            | WebUiCommand::RemoveMcpServer { .. }
+            | WebUiCommand::UpsertMcpServer { .. } => Ok(WebUiReply::Settings(
+                neo_webui::protocol::WebUiSettingsSnapshot {
+                    default_model: "fake/model".to_string(),
+                    default_provider: Some("fake-provider".to_string()),
+                    permission_mode: "ask".to_string(),
+                    providers: Vec::new(),
+                    models: Vec::new(),
+                    mcp_servers: Vec::new(),
+                    skills: Vec::new(),
+                },
+            )),
         }
     }
 

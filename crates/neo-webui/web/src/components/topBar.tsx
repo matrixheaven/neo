@@ -5,7 +5,7 @@
  * permission modes or development modes.
  */
 
-import { ListFilter, Moon, PanelLeft, Sun } from "lucide-react";
+import { ListFilter, Moon, PanelLeft, Settings, Sun } from "lucide-react";
 import { useEffect, useState } from "react";
 import { useAppActions, useAppState } from "../state/store";
 import type { WebUiPhase } from "../protocol";
@@ -52,7 +52,7 @@ function phaseText(phase: WebUiPhase | null): string {
   }
 }
 
-export function TopBar() {
+export function TopBar({ onOpenSettings }: { onOpenSettings: () => void }) {
   const state = useAppState();
   const actions = useAppActions();
   const sessionId = state.selectedSessionId;
@@ -119,6 +119,15 @@ export function TopBar() {
         </>
       ) : null}
       <span className="topbar-spacer" />
+      <button
+        type="button"
+        className="icon-button settings-toggle"
+        aria-label="设置"
+        title="设置"
+        onClick={onOpenSettings}
+      >
+        <Settings size={16} aria-hidden />
+      </button>
       <button
         type="button"
         className="icon-button information-toggle fixed-summary-toggle"

@@ -490,7 +490,9 @@ struct ParseState {
 #[derive(Default)]
 struct StreamLifecycle {
     started: bool,
-    reasoning_started: bool,
+    /// A thinking block is currently open: from the first `reasoning_content`
+    /// delta until the stream transitions to content, tool calls, or the end.
+    reasoning_active: bool,
     finished: bool,
 }
 
@@ -626,12 +628,12 @@ impl ParseState {
         if let Some(reasoning) = reasoning_delta(delta)
             && !reasoning.is_empty()
         {
-            if !self.lifecycle.reasoning_started {
+            if !self.lifecycle.reasoning_active {
                 self.events.push(AiStreamEvent::ThinkingStart {
                     id: "reasoning".to_owned(),
                     kind: crate::ThinkingKind::Unknown,
                 });
-                self.lifecycle.reasoning_started = true;
+                self.lifecycle.reasoning_active = true;
             }
             self.events.push(AiStreamEvent::ThinkingDelta {
                 text: reasoning.to_owned(),
@@ -641,6 +643,10 @@ impl ParseState {
         if let Some(text) = delta.get("content").and_then(Value::as_str)
             && !text.is_empty()
         {
+            // Reasoning ends the moment regular content begins; delaying
+            // `ThinkingEnd` until the stream finishes leaves the transcript
+            // spinner running through the whole answer.
+            self.end_reasoning_if_active();
             self.events.push(AiStreamEvent::TextDelta {
                 text: text.to_owned(),
             });
@@ -649,11 +655,24 @@ impl ParseState {
         let Some(tool_calls) = delta.get("tool_calls").and_then(Value::as_array) else {
             return Ok(());
         };
+        if !tool_calls.is_empty() {
+            self.end_reasoning_if_active();
+        }
 
         for tool_call in tool_calls {
             self.ingest_tool_call(tool_call)?;
         }
         Ok(())
+    }
+
+    fn end_reasoning_if_active(&mut self) {
+        if self.lifecycle.reasoning_active {
+            self.events.push(AiStreamEvent::ThinkingEnd {
+                signature: None,
+                redacted: false,
+            });
+            self.lifecycle.reasoning_active = false;
+        }
     }
 
     fn ingest_tool_call(&mut self, tool_call: &Value) -> Result<(), ProviderError> {
@@ -716,7 +735,8 @@ impl ParseState {
             }
             self.last_stop_reason = StopReason::ToolUse;
         }
-        if self.lifecycle.reasoning_started {
+        if self.lifecycle.reasoning_active {
+            self.lifecycle.reasoning_active = false;
             self.events.push(AiStreamEvent::ThinkingEnd {
                 signature: None,
                 redacted: false,

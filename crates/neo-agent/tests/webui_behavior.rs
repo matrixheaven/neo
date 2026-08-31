@@ -24,6 +24,10 @@ mod webui_behavior {
     pub mod session_reconnect;
     #[path = "session_turns.rs"]
     pub mod session_turns;
+    #[path = "settings_page.rs"]
+    pub mod settings_page;
+    #[path = "unread_markers.rs"]
+    pub mod unread_markers;
     #[path = "workspace_changes.rs"]
     pub mod workspace_changes;
     #[path = "ws.rs"]

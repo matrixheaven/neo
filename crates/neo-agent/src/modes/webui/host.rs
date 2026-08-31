@@ -8,7 +8,8 @@
 //! tokens and one-time response senders are invoked outside the lock. Web
 //! connections and HTTP requests never own turn lifecycle state.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
+use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
@@ -20,10 +21,11 @@ use neo_agent_core::{AgentEvent, Content, MediaRef, PendingQuestion};
 use neo_webui::protocol::{
     WebUiAgentHistory, WebUiAttachmentAck, WebUiBootstrap, WebUiBranchList, WebUiChangeStatus,
     WebUiCommand, WebUiCompletionItem, WebUiCompletions, WebUiComposer, WebUiDevelopmentMode,
-    WebUiError, WebUiErrorCode, WebUiHost, WebUiModelInfo, WebUiReply, WebUiSessionMetadata,
-    WebUiSessionPage, WebUiSessionScope, WebUiSessionSummary, WebUiSnapshot, WebUiSummaryState,
-    WebUiWorkspaceChange, WebUiWorkspaceChangeDetail, WebUiWorkspaceChanges, WebUiWorkspaceGroup,
-    WebUiWorkspaceSnapshot,
+    WebUiError, WebUiErrorCode, WebUiFsEntry, WebUiFsListing, WebUiHost, WebUiMcpServerEdit,
+    WebUiMcpServerInfo, WebUiModelInfo, WebUiProviderInfo, WebUiReply, WebUiSessionMetadata,
+    WebUiSessionPage, WebUiSessionScope, WebUiSessionSummary, WebUiSettingsSnapshot,
+    WebUiSkillInfo, WebUiSnapshot, WebUiSummaryState, WebUiWorkspaceChange,
+    WebUiWorkspaceChangeDetail, WebUiWorkspaceChanges, WebUiWorkspaceGroup, WebUiWorkspaceSnapshot,
 };
 use neo_webui::relay::{
     ATTACHMENT_MAX_BYTES, ATTACHMENTS_PER_MESSAGE_MAX, Relay, SESSION_PAGE_LIMIT,
@@ -73,6 +75,10 @@ struct WebUiProjectPreference {
 }
 
 type WebUiProjectPreferences = HashMap<String, WebUiProjectPreference>;
+
+/// Hard cap on directory entries returned per folder-picker listing. Large
+/// directories truncate; navigation by path or search stays available.
+const FS_LIST_MAX_ENTRIES: usize = 500;
 
 pub(crate) struct WebSessionHost {
     config: AppConfig,
@@ -1104,6 +1110,23 @@ fn workspace_id_for(workdir: &Path) -> String {
     )
 }
 
+/// Display form of a canonicalized path for the folder picker. On Windows the
+/// canonical form carries the `\\?\` verbatim prefix; strip it so breadcrumbs
+/// and the submitted path read like a normal directory.
+fn fs_display_path(path: &Path) -> String {
+    let text = path.to_string_lossy();
+    #[cfg(windows)]
+    {
+        text.strip_prefix(r"\\?\")
+            .map(str::to_owned)
+            .unwrap_or_else(|| text.into_owned())
+    }
+    #[cfg(not(windows))]
+    {
+        text.into_owned()
+    }
+}
+
 fn short_sha256_hex(bytes: &[u8]) -> String {
     use sha2::Digest as _;
     let digest = sha2::Sha256::digest(bytes);
@@ -1348,6 +1371,14 @@ impl WebUiHost for WebSessionHost {
                 self.workspace_change_detail(&change_id).await
             }
             WebUiCommand::AddWorkspace { path } => self.add_workspace(path),
+            WebUiCommand::FsList { path } => self.fs_list(path.as_deref()),
+            WebUiCommand::SettingsSnapshot => self.settings_snapshot(),
+            WebUiCommand::SetDefaultModel { alias } => self.set_default_model(&alias),
+            WebUiCommand::SetMcpServerEnabled { server_id, enabled } => {
+                self.set_mcp_server_enabled(&server_id, enabled)
+            }
+            WebUiCommand::RemoveMcpServer { server_id } => self.remove_mcp_server(&server_id),
+            WebUiCommand::UpsertMcpServer { server } => self.upsert_mcp_server(server),
             WebUiCommand::ListBranches { workspace_id } => self.list_branches(&workspace_id).await,
             WebUiCommand::CheckoutBranch {
                 workspace_id,
@@ -1427,20 +1458,20 @@ impl WebSessionHost {
                 .unwrap_or_default()
         });
         let read_session = read_session_id.and_then(|session_id| {
-            self.aggregated_workspaces()
+            // Resolve the marker timestamp from the session's own bucket
+            // metadata instead of the aggregated view: aggregation can lag or
+            // omit a session (index/bucket mismatch), which previously made
+            // the PATCH silently write nothing while the frontend locally
+            // hid the unread dot.
+            let record = self
+                .metadata_store_for(session_id)
+                .list()
+                .ok()?
                 .into_iter()
-                .find(|group| group.id == workspace_id)
-                .and_then(|group| {
-                    group
-                        .sessions
-                        .into_iter()
-                        .find(|session| session.session_id == session_id)
-                })
-                .and_then(|session| {
-                    session
-                        .updated_at
-                        .map(|updated_at| (session.session_id, updated_at))
-                })
+                .find(|record| record.id == session_id)?;
+            record
+                .updated_at
+                .map(|updated_at| (session_id.to_owned(), updated_at))
         });
         let home = neo_home().ok_or_else(Self::internal)?;
         crate::json_store::update(
@@ -1478,6 +1509,239 @@ impl WebSessionHost {
             .ok_or_else(|| WebUiError::new(WebUiErrorCode::NotFound))?;
         reveal_in_file_manager(&workspace).map_err(|_| Self::internal())?;
         Ok(WebUiReply::Resolved)
+    }
+
+    fn fs_list(&self, path: Option<&str>) -> Result<WebUiReply, WebUiError> {
+        let directory = match path.map(str::trim).filter(|value| !value.is_empty()) {
+            Some(raw) => crate::config::expand_user_path(PathBuf::from(raw))
+                .canonicalize()
+                .map_err(|_| WebUiError::new(WebUiErrorCode::InvalidRequest))?,
+            None => crate::config::user_home()
+                .or_else(neo_home)
+                .unwrap_or_else(|| self.config.project_dir.clone()),
+        };
+        if !directory.is_dir() {
+            return Err(WebUiError::new(WebUiErrorCode::NotFound));
+        }
+        let mut entries = Vec::new();
+        let read =
+            fs::read_dir(&directory).map_err(|_| WebUiError::new(WebUiErrorCode::NotFound))?;
+        for entry in read.flatten() {
+            let is_dir = entry.file_type().map(|kind| kind.is_dir()).unwrap_or(false);
+            let Some(name) = entry.file_name().to_str().map(str::to_owned) else {
+                continue;
+            };
+            entries.push(WebUiFsEntry { name, is_dir });
+            if entries.len() >= FS_LIST_MAX_ENTRIES {
+                break;
+            }
+        }
+        // Folders first, then case-insensitive name order for stable browsing.
+        entries.sort_by(|left, right| {
+            right
+                .is_dir
+                .cmp(&left.is_dir)
+                .then_with(|| left.name.to_lowercase().cmp(&right.name.to_lowercase()))
+                .then_with(|| left.name.cmp(&right.name))
+        });
+        let parent = directory.parent().map(|parent| fs_display_path(parent));
+        Ok(WebUiReply::FsList(WebUiFsListing {
+            path: fs_display_path(&directory),
+            parent,
+            entries,
+        }))
+    }
+
+    fn settings_snapshot(&self) -> Result<WebUiReply, WebUiError> {
+        // Default model and MCP servers are persisted in config.toml; read
+        // the file so a mutation made through this same service is reflected
+        // immediately (the in-memory AppConfig is a startup snapshot).
+        let persisted = crate::config::default_config_path()
+            .and_then(|path| std::fs::read_to_string(path).ok())
+            .and_then(|text| toml::from_str::<crate::config::FileConfig>(&text).ok());
+        let default_model = persisted
+            .as_ref()
+            .and_then(|file| file.default_model.clone())
+            .unwrap_or_else(|| self.config.default_model.clone());
+        let default_provider = persisted
+            .as_ref()
+            .and_then(|file| file.default_provider.clone())
+            .unwrap_or_else(|| self.config.default_provider.clone());
+        let mcp_servers: Vec<WebUiMcpServerInfo> = persisted
+            .as_ref()
+            .and_then(|file| file.mcp.as_ref())
+            .map(|mcp| mcp.servers.as_slice())
+            .unwrap_or(&self.config.mcp.servers)
+            .iter()
+            .map(|server| WebUiMcpServerInfo {
+                id: server.id.clone(),
+                enabled: server.enabled,
+                transport: server.transport.as_str().to_owned(),
+                command: server.command.clone(),
+                url: server.url.clone(),
+                tool_count: server.enabled_tools.len(),
+            })
+            .collect();
+
+        let mut models: Vec<WebUiModelInfo> = self
+            .config
+            .models
+            .iter()
+            .map(|(alias, model)| WebUiModelInfo {
+                alias: alias.clone(),
+                provider: model.provider.clone(),
+                display_name: model.display_name.clone(),
+                context_window: model.max_context_tokens,
+                capabilities: model.capabilities.clone(),
+                reasoning: model.reasoning.clone(),
+            })
+            .collect();
+        // The model pill catalog only covers inline `[models.*]`; the default
+        // alias can also be a catalog/module model (`provider/model`) not in
+        // the file. Include it and the registry models of configured
+        // providers so the settings select can reach every resolvable alias.
+        let mut known_aliases: HashSet<String> =
+            models.iter().map(|model| model.alias.clone()).collect();
+        let default_alias = default_model.clone();
+        if !known_aliases.contains(&default_alias) {
+            let (provider, model) = default_alias
+                .split_once('/')
+                .map(|(provider, model)| (provider.to_owned(), model.to_owned()))
+                .unwrap_or_else(|| (default_provider.clone(), default_alias.clone()));
+            models.push(WebUiModelInfo {
+                alias: default_alias.clone(),
+                provider,
+                display_name: (!model.is_empty()).then_some(model),
+                context_window: None,
+                capabilities: Vec::new(),
+                reasoning: neo_ai::ReasoningCapability::None,
+            });
+            known_aliases.insert(default_alias.clone());
+        }
+        let registry = neo_ai::registry::ModelRegistry::seeded();
+        for provider_id in self.config.providers.keys() {
+            for spec in registry.list() {
+                if spec.provider.0 != *provider_id {
+                    continue;
+                }
+                let alias = format!("{provider_id}/{}", spec.model);
+                if known_aliases.insert(alias.clone()) {
+                    models.push(WebUiModelInfo {
+                        alias,
+                        provider: provider_id.clone(),
+                        display_name: Some(spec.model.clone()),
+                        context_window: None,
+                        capabilities: Vec::new(),
+                        reasoning: neo_ai::ReasoningCapability::None,
+                    });
+                }
+            }
+        }
+        models.sort_by(|left, right| left.alias.cmp(&right.alias));
+        let providers: Vec<WebUiProviderInfo> = self
+            .config
+            .providers
+            .iter()
+            .map(|(id, provider)| WebUiProviderInfo {
+                id: id.clone(),
+                display_name: provider.display_name.clone(),
+                provider_type: provider
+                    .provider_type
+                    .as_ref()
+                    .map(|provider_type| provider_type.as_config_str().to_owned()),
+                base_url: provider.base_url.clone(),
+                has_api_key: provider.api_key.is_some() || provider.api_key_env.is_some(),
+            })
+            .collect();
+        let skills = resources::load_skill_store(
+            neo_home().as_deref(),
+            &self.config.extra_skill_dirs,
+            &self.config.skill_path,
+        )
+        .map(|store| {
+            store
+                .iter()
+                .map(|skill| WebUiSkillInfo {
+                    name: skill.name.clone(),
+                    display_name: Some(skill.display_name().to_owned()),
+                    description: skill
+                        .short_description()
+                        .map(str::to_owned)
+                        .or_else(|| Some(skill.manifest.description.clone())),
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+        Ok(WebUiReply::Settings(WebUiSettingsSnapshot {
+            default_model,
+            default_provider: Some(default_provider),
+            permission_mode: self.config.permission_mode.label().to_owned(),
+            providers,
+            models,
+            mcp_servers,
+            skills,
+        }))
+    }
+
+    fn set_default_model(&self, alias: &str) -> Result<WebUiReply, WebUiError> {
+        let known = alias == self.config.default_model
+            || self.config.models.contains_key(alias)
+            || alias
+                .split_once('/')
+                .is_some_and(|(provider, _)| self.config.providers.contains_key(provider));
+        if !known {
+            return Err(WebUiError::new(WebUiErrorCode::InvalidRequest));
+        }
+        let config_path = crate::config::default_config_path().ok_or_else(Self::internal)?;
+        crate::config::mutations::set_default_model(&config_path, alias)
+            .map_err(|_| Self::internal())?;
+        self.settings_snapshot()
+    }
+
+    fn set_mcp_server_enabled(
+        &self,
+        server_id: &str,
+        enabled: bool,
+    ) -> Result<WebUiReply, WebUiError> {
+        let config_path = crate::config::default_config_path().ok_or_else(Self::internal)?;
+        crate::config::mutations::set_mcp_server_enabled(server_id, enabled, &config_path)
+            .map_err(|_| Self::internal())?;
+        self.settings_snapshot()
+    }
+
+    fn remove_mcp_server(&self, server_id: &str) -> Result<WebUiReply, WebUiError> {
+        let config_path = crate::config::default_config_path().ok_or_else(Self::internal)?;
+        crate::config::mutations::remove_mcp_server(server_id, &config_path)
+            .map_err(|_| Self::internal())?;
+        self.settings_snapshot()
+    }
+
+    fn upsert_mcp_server(&self, edit: WebUiMcpServerEdit) -> Result<WebUiReply, WebUiError> {
+        let transport = match edit.transport.as_str() {
+            "stdio" => crate::config::McpTransport::Stdio,
+            "http" => crate::config::McpTransport::Http,
+            "sse" => crate::config::McpTransport::Sse,
+            _ => return Err(WebUiError::new(WebUiErrorCode::InvalidRequest)),
+        };
+        let server = crate::config::McpServerConfig {
+            id: edit.id,
+            enabled: edit.enabled,
+            transport,
+            command: edit.command,
+            url: edit.url,
+            args: edit.args,
+            env: Default::default(),
+            headers: Default::default(),
+            cwd: None,
+            enabled_tools: Vec::new(),
+            disabled_tools: Vec::new(),
+            startup_timeout_ms: None,
+            tool_timeout_ms: None,
+        };
+        let config_path = crate::config::default_config_path().ok_or_else(Self::internal)?;
+        crate::config::mutations::upsert_mcp_server(&server, &config_path)
+            .map_err(|_| Self::internal())?;
+        self.settings_snapshot()
     }
 
     fn add_workspace(&self, path: String) -> Result<WebUiReply, WebUiError> {
@@ -1521,16 +1785,13 @@ impl WebSessionHost {
     /// empty list, never an error.
     async fn list_branches(&self, workspace_id: &str) -> Result<WebUiReply, WebUiError> {
         let workspace = self.workspace_for_id(Some(workspace_id))?;
-        let list = tokio::task::spawn_blocking(move || {
-            crate::git_status::list_branches(&workspace)
-        })
-        .await
-        .map_err(|_| Self::internal())?;
+        let list =
+            tokio::task::spawn_blocking(move || crate::git_status::list_branches(&workspace))
+                .await
+                .map_err(|_| Self::internal())?;
         Ok(WebUiReply::Branches(WebUiBranchList {
             current: list.as_ref().and_then(|branches| branches.current.clone()),
-            branches: list
-                .map(|branches| branches.branches)
-                .unwrap_or_default(),
+            branches: list.map(|branches| branches.branches).unwrap_or_default(),
         }))
     }
 

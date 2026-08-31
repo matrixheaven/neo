@@ -17,6 +17,7 @@ import type {
   WebUiInputAccepted,
   WebUiInputDelivery,
   WebUiCancelling,
+  WebUiMcpServerEdit,
   WebUiQueueControl,
   WebUiQuestionAnswer,
   WebUiServerMessage,
@@ -25,6 +26,8 @@ import type {
   WebUiSessionStarted,
   WebUiComposer,
   WebUiCompletions,
+  WebUiFsListing,
+  WebUiSettingsSnapshot,
   WebUiSnapshot,
   WebUiWatchRequest,
 } from "./protocol";
@@ -125,6 +128,41 @@ export function fetchCompletions(query: string, signal?: AbortSignal): Promise<W
     undefined,
     signal,
   );
+}
+
+export function listDirectory(path?: string): Promise<WebUiFsListing> {
+  const search = path ? `?path=${encodeURIComponent(path)}` : "";
+  return request<WebUiFsListing>("GET", `/api/fs/list${search}`);
+}
+
+export function fetchSettings(): Promise<WebUiSettingsSnapshot> {
+  return request<WebUiSettingsSnapshot>("GET", "/api/settings");
+}
+
+export function setDefaultModel(alias: string): Promise<WebUiSettingsSnapshot> {
+  return request<WebUiSettingsSnapshot>("PATCH", "/api/settings/default-model", { alias });
+}
+
+export function setMcpServerEnabled(
+  serverId: string,
+  enabled: boolean,
+): Promise<WebUiSettingsSnapshot> {
+  return request<WebUiSettingsSnapshot>(
+    "PATCH",
+    `/api/settings/mcp/${encodeURIComponent(serverId)}`,
+    { enabled },
+  );
+}
+
+export function removeMcpServer(serverId: string): Promise<WebUiSettingsSnapshot> {
+  return request<WebUiSettingsSnapshot>(
+    "DELETE",
+    `/api/settings/mcp/${encodeURIComponent(serverId)}`,
+  );
+}
+
+export function upsertMcpServer(server: WebUiMcpServerEdit): Promise<WebUiSettingsSnapshot> {
+  return request<WebUiSettingsSnapshot>("POST", "/api/settings/mcp", server);
 }
 
 export function listSessions(params: {

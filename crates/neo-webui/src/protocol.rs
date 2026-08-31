@@ -564,6 +564,23 @@ pub enum WebUiCommand {
         mark_read: bool,
         read_session_id: Option<String>,
     },
+    FsList {
+        path: Option<String>,
+    },
+    SettingsSnapshot,
+    SetDefaultModel {
+        alias: String,
+    },
+    SetMcpServerEnabled {
+        server_id: String,
+        enabled: bool,
+    },
+    RemoveMcpServer {
+        server_id: String,
+    },
+    UpsertMcpServer {
+        server: WebUiMcpServerEdit,
+    },
 }
 
 /// Answer to a pending question.
@@ -606,6 +623,114 @@ pub struct WebUiCompletionItem {
 pub struct WebUiCompletions {
     #[serde(default)]
     pub items: Vec<WebUiCompletionItem>,
+}
+
+/// One entry of a directory listing served to the folder picker. Display
+/// fields only; no file sizes, no timestamps, no symlink targets.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WebUiFsEntry {
+    pub name: String,
+    pub is_dir: bool,
+}
+
+/// Bounded listing of one directory for the folder picker. `path` is the
+/// canonical directory shown (and the value submitted back); `parent` is the
+/// canonical parent for the up button, `None` at a filesystem root.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WebUiFsListing {
+    pub path: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub parent: Option<String>,
+    #[serde(default)]
+    pub entries: Vec<WebUiFsEntry>,
+}
+
+/// Read-only provider row for the settings page. Never carries a credential:
+/// only whether a key is configured (inline or via env ref).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WebUiProviderInfo {
+    pub id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub display_name: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provider_type: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub base_url: Option<String>,
+    pub has_api_key: bool,
+}
+
+/// Read-only MCP server row for the settings page. The wire never carries
+/// server env/headers/credentials.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WebUiMcpServerInfo {
+    pub id: String,
+    pub enabled: bool,
+    pub transport: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub command: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub url: Option<String>,
+    #[serde(default)]
+    pub tool_count: usize,
+}
+
+/// One skill discovered from the skill store (project/user/extra/built-in).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WebUiSkillInfo {
+    pub name: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub display_name: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+}
+
+/// Settings page payload: read-only overview of the persisted config plus the
+/// live model catalog. Secrets never cross the web boundary.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WebUiSettingsSnapshot {
+    pub default_model: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub default_provider: Option<String>,
+    pub permission_mode: String,
+    #[serde(default)]
+    pub providers: Vec<WebUiProviderInfo>,
+    #[serde(default)]
+    pub models: Vec<WebUiModelInfo>,
+    #[serde(default)]
+    pub mcp_servers: Vec<WebUiMcpServerInfo>,
+    #[serde(default)]
+    pub skills: Vec<WebUiSkillInfo>,
+}
+
+/// Add-or-update MCP server body. Only the fields a settings page may edit:
+/// no env/headers/credentials.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct WebUiMcpServerEdit {
+    pub id: String,
+    pub transport: String,
+    #[serde(default)]
+    pub enabled: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub command: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub url: Option<String>,
+    #[serde(default)]
+    pub args: Vec<String>,
+}
+
+/// Body of `PATCH /api/settings/default-model`.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct WebUiSetDefaultModelBody {
+    pub alias: String,
+}
+
+/// Body of `PATCH /api/settings/mcp/{server_id}`.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct WebUiSetMcpEnabledBody {
+    pub enabled: bool,
 }
 
 /// Initial page payload.
@@ -682,6 +807,8 @@ pub enum WebUiReply {
     Branches(WebUiBranchList),
     AttachmentUploaded(WebUiAttachmentAck),
     AgentHistory(WebUiAgentHistory),
+    FsList(WebUiFsListing),
+    Settings(WebUiSettingsSnapshot),
 }
 
 /// Stable short error codes returned by every web API surface. Error

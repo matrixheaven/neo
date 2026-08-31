@@ -89,7 +89,6 @@ interface ProjectPreference {
   label?: string;
   pinned?: boolean;
   removed?: boolean;
-  readAtBySession?: Record<string, string>;
 }
 
 const PROJECT_PREFERENCES_KEY = "neo-webui.project-preferences";
@@ -451,6 +450,9 @@ export function Sidebar() {
   const [selectionClosingDrawer, setSelectionClosingDrawer] = useState(false);
   const [addingWorkspace, setAddingWorkspace] = useState(false);
   const [projectPreferences, setProjectPreferences] = useState(loadProjectPreferences);
+  /** Session ids the backend confirmed as read in this launch (optimistic
+   * overlay only; the persistent source of truth is server-side). */
+  const [readLocally, setReadLocally] = useState<Set<string>>(new Set());
   const [projectMenu, setProjectMenu] = useState<{
     workspaceId: string;
     x: number;
@@ -538,13 +540,14 @@ export function Sidebar() {
           (group) => group.sessions.some((entry) => entry.session_id === summary.session_id),
         );
         if (workspace && summary.updated_at) {
-          updateWorkspace(workspace.id, { read_session_id: summary.session_id }).catch(() => {});
-          updateProjectPreference(workspace.id, {
-            readAtBySession: {
-              ...projectPreferences[workspace.id]?.readAtBySession,
-              [summary.session_id]: summary.updated_at,
-            },
-          });
+          // The backend persists the read marker server-side (single source
+          // of truth; the browser origin changes every launch because the
+          // service binds a random port, so localStorage cannot survive).
+          updateWorkspace(workspace.id, { read_session_id: summary.session_id })
+            .then(() => {
+              setReadLocally((previous) => new Set(previous).add(summary.session_id));
+            })
+            .catch(() => {});
         }
         setSelectionClosingDrawer(true);
         actions.setDrawerOpen(false);
@@ -558,16 +561,7 @@ export function Sidebar() {
         setRenamingId(null);
       }}
       onRenameCancel={() => setRenamingId(null)}
-      unread={(() => {
-        const workspace = state.workspaces.find(
-          (group) => group.sessions.some((entry) => entry.session_id === summary.session_id),
-        );
-        const reads = workspace
-          ? projectPreferences[workspace.id]?.readAtBySession
-          : undefined;
-        if (!reads || !summary.updated_at) return Boolean(summary.unread);
-        return reads[summary.session_id] === undefined || summary.updated_at > reads[summary.session_id];
-      })()}
+      unread={Boolean(summary.unread) && !readLocally.has(summary.session_id)}
     />
   );
 
@@ -871,14 +865,15 @@ export function Sidebar() {
               setProjectMenu(null);
             }}
             onMarkRead={() => {
-              updateProjectPreference(group.id, {
-                readAtBySession: Object.fromEntries(
-                  group.sessions.flatMap((session) =>
-                    session.updated_at ? [[session.session_id, session.updated_at]] : [],
-                  ),
-                ),
-              });
-              updateWorkspace(group.id, { mark_read: true }).catch(() => {});
+              updateWorkspace(group.id, { mark_read: true })
+                .then(() => {
+                  setReadLocally((previous) => {
+                    const next = new Set(previous);
+                    for (const session of group.sessions) next.add(session.session_id);
+                    return next;
+                  });
+                })
+                .catch(() => {});
             }}
             onArchive={() => {
               setArchivingProject(group);

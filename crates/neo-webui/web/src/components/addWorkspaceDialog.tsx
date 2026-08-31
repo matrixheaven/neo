@@ -8,6 +8,7 @@
 import { useState } from "react";
 import type { WebUiWorkspaceGroup } from "../protocol";
 import { useAppActions } from "../state/store";
+import { FolderBrowser } from "./folderBrowser";
 
 export function AddWorkspaceDialog({
   onClose,
@@ -19,8 +20,19 @@ export function AddWorkspaceDialog({
   const actions = useAppActions();
   const [path, setPath] = useState("");
   const [saving, setSaving] = useState(false);
+  const [browsing, setBrowsing] = useState(false);
+
   return (
     <div className="dialog-backdrop" role="presentation">
+      {browsing ? (
+        <FolderBrowser
+          onClose={() => setBrowsing(false)}
+          onSelect={(selected) => {
+            setPath(selected);
+            setBrowsing(false);
+          }}
+        />
+      ) : null}
       <form
         className="workspace-dialog"
         role="dialog"
@@ -43,13 +55,18 @@ export function AddWorkspaceDialog({
       >
         <h2 id="workspace-dialog-title">添加项目</h2>
         <label htmlFor="workspace-path">项目文件夹</label>
-        <input
-          id="workspace-path"
-          autoFocus
-          value={path}
-          placeholder="/Users/name/Workspace/project"
-          onChange={(event) => setPath(event.target.value)}
-        />
+        <div className="workspace-path-row">
+          <input
+            id="workspace-path"
+            autoFocus
+            value={path}
+            placeholder="/Users/name/Workspace/project"
+            onChange={(event) => setPath(event.target.value)}
+          />
+          <button type="button" onClick={() => setBrowsing(true)}>
+            浏览…
+          </button>
+        </div>
         <div className="workspace-dialog-actions">
           <button type="button" onClick={onClose}>
             取消

@@ -694,6 +694,66 @@ export interface WebUiCompletions {
   items: WebUiCompletionItem[];
 }
 
+/** One directory entry served to the folder picker. */
+export interface WebUiFsEntry {
+  name: string;
+  is_dir: boolean;
+}
+
+/** Bounded directory listing served to the folder picker. */
+export interface WebUiFsListing {
+  path: string;
+  parent?: string | null;
+  entries: WebUiFsEntry[];
+}
+
+/** Read-only provider row for the settings page (no credentials on the wire). */
+export interface WebUiProviderInfo {
+  id: string;
+  display_name?: string | null;
+  provider_type?: string | null;
+  base_url?: string | null;
+  has_api_key: boolean;
+}
+
+/** Read-only MCP server row for the settings page. */
+export interface WebUiMcpServerInfo {
+  id: string;
+  enabled: boolean;
+  transport: string;
+  command?: string | null;
+  url?: string | null;
+  tool_count: number;
+}
+
+/** One skill discovered from the skill store. */
+export interface WebUiSkillInfo {
+  name: string;
+  display_name?: string | null;
+  description?: string | null;
+}
+
+/** Settings page payload. */
+export interface WebUiSettingsSnapshot {
+  default_model: string;
+  default_provider?: string | null;
+  permission_mode: string;
+  providers: WebUiProviderInfo[];
+  models: WebUiModelInfo[];
+  mcp_servers: WebUiMcpServerInfo[];
+  skills: WebUiSkillInfo[];
+}
+
+/** Add-or-update MCP server body. */
+export interface WebUiMcpServerEdit {
+  id: string;
+  transport: string;
+  enabled: boolean;
+  command?: string | null;
+  url?: string | null;
+  args: string[];
+}
+
 /** Body of `POST /api/attachments`: one base64 media payload. */
 export interface WebUiAttachmentBody {
   mime: string;

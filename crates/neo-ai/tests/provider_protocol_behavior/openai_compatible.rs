@@ -349,6 +349,20 @@ async fn openai_streams_reasoning_content_as_thinking_events() {
     assert!(events.contains(&AiStreamEvent::TextDelta {
         text: "done".to_owned(),
     }));
+    // The spinner regression: `ThinkingEnd` must arrive when reasoning
+    // transitions to answer text, not only at the very end of the stream.
+    let thinking_end = events
+        .iter()
+        .position(|event| matches!(event, AiStreamEvent::ThinkingEnd { .. }))
+        .expect("thinking end event");
+    let answer_text = events
+        .iter()
+        .position(|event| matches!(event, AiStreamEvent::TextDelta { .. }))
+        .expect("answer text event");
+    assert!(
+        thinking_end < answer_text,
+        "ThinkingEnd ({thinking_end}) must precede the answer text ({answer_text})"
+    );
 }
 
 #[tokio::test]

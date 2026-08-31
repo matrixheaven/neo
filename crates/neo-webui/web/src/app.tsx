@@ -7,11 +7,13 @@
 import { NeoMark } from "./components/neoMark";
 import { FixedSummary, InformationPanel } from "./components/agentPanel";
 import { Composer } from "./components/composer";
+import { SettingsDialog } from "./components/settingsDialog";
 import { Sidebar } from "./components/sidebar";
 import { SidebarResizer } from "./components/sidebarResizer";
 import { TopBar } from "./components/topBar";
 import { TranscriptPane } from "./components/transcript";
 import { useAppActions, useAppState } from "./state/store";
+import { useState } from "react";
 
 function AccessFailed() {
   return (
@@ -61,6 +63,7 @@ function SessionView({ sessionId }: { sessionId: string }) {
 export function App() {
   const state = useAppState();
   const actions = useAppActions();
+  const [settingsOpen, setSettingsOpen] = useState(false);
 
   if (state.auth === "pending") {
     return <Loading />;
@@ -81,7 +84,8 @@ export function App() {
 
   return (
     <div className="app-shell">
-      <TopBar />
+      <TopBar onOpenSettings={() => setSettingsOpen(true)} />
+      {settingsOpen ? <SettingsDialog onClose={() => setSettingsOpen(false)} /> : null}
       <div className={`app-body ${state.sidebarCollapsed ? "sidebar-collapsed" : ""}`}>
         <Sidebar />
         <SidebarResizer />
