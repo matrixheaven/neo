@@ -190,6 +190,10 @@ pub(crate) struct FileRuntimeConfig {
     pub(crate) max_tokens: Option<u32>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) reasoning: Option<neo_ai::ReasoningSelection>,
+    /// Auxiliary-call reasoning intensity (`"auto"`, `"off"`, or a pinned
+    /// effort value); `None` behaves as `auto`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) aux_reasoning: Option<neo_ai::AuxReasoning>,
     // Legacy config migration input only; runtime uses `reasoning`.
     #[serde(default, skip_serializing)]
     pub(crate) reasoning_effort: Option<ReasoningEffort>,

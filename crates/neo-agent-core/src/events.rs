@@ -413,6 +413,13 @@ pub enum AgentEvent {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         retry_after: Option<u64>,
     },
+    /// Non-fatal runtime notice surfaced in the transcript (for example a
+    /// reasoning-effort name mapped to the model's nearest declared level).
+    /// Append-only context: notices never replace or rewrite existing events.
+    Notice {
+        turn: u32,
+        message: String,
+    },
     /// Plan mode was entered — read-only exploration plus plan file writes.
     PlanModeEntered {
         turn: u32,

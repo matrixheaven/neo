@@ -183,6 +183,9 @@ pub struct RuntimeConfig {
     pub temperature: Option<f64>,
     pub max_tokens: Option<u32>,
     pub reasoning: neo_ai::ReasoningSelection,
+    /// Auxiliary-call reasoning intensity (`"auto"`, `"off"`, or a pinned
+    /// effort value); `None` behaves as `auto`.
+    pub aux_reasoning: Option<neo_ai::AuxReasoning>,
     pub replay_reasoning: bool,
     pub steering_queue_mode: QueueMode,
     pub follow_up_queue_mode: QueueMode,
@@ -201,6 +204,7 @@ impl Default for RuntimeConfig {
             temperature: None,
             max_tokens: None,
             reasoning: neo_ai::ReasoningSelection::Off,
+            aux_reasoning: None,
             replay_reasoning: true,
             steering_queue_mode: QueueMode::All,
             follow_up_queue_mode: QueueMode::All,

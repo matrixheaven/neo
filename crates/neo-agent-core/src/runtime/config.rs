@@ -69,6 +69,11 @@ pub struct AgentConfig {
     pub first_event_timeout_secs: u64,
     pub stream_idle_timeout_secs: u64,
     pub reasoning: ReasoningSelection,
+    /// Reasoning intensity policy for auxiliary calls (session titles,
+    /// compaction summaries). Resolved per request against the model
+    /// capability; defaults to the cheapest controllable level.
+    #[serde(default)]
+    pub aux_reasoning: neo_ai::AuxReasoning,
     pub replay_reasoning: bool,
     pub tools: Vec<ToolSpec>,
     pub steering_queue_mode: QueueMode,
@@ -266,6 +271,7 @@ impl AgentConfig {
             first_event_timeout_secs: DEFAULT_FIRST_EVENT_TIMEOUT_SECS,
             stream_idle_timeout_secs: DEFAULT_STREAM_IDLE_TIMEOUT_SECS,
             reasoning: ReasoningSelection::Off,
+            aux_reasoning: neo_ai::AuxReasoning::Auto,
             replay_reasoning: true,
             tools: Vec::new(),
             steering_queue_mode: QueueMode::All,

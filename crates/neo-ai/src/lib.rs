@@ -23,7 +23,10 @@ pub use options::{
     CacheRetention, ReasoningBudget, ReasoningCapability, ReasoningEffort, ReasoningSelection,
     RequestMetadata, RequestOptions, ResponseFormat,
 };
-pub use reasoning::{ReasoningPolicy, automatic_reasoning_selection};
+pub use reasoning::{
+    AuxReasoning, AuxReasoningPlan, EffortResolution, automatic_reasoning_selection,
+    aux_reasoning_selection, resolve_requested_effort,
+};
 pub use registry::{ModelRegistry, ProviderRegistry, ProviderResolver, ProviderSpec};
 pub use stream::collect_tool_arguments;
 pub use tool_schema::schema_for;

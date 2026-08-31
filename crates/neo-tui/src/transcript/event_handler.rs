@@ -631,6 +631,10 @@ impl TranscriptPane {
                 self.push_status_with_severity(text, severity);
                 true
             }
+            AgentEvent::Notice { message, .. } => {
+                self.push_status_with_severity(format!("⚠ {message}"), StatusSeverity::Warning);
+                true
+            }
             AgentEvent::RunFinished { turn, stop_reason } => {
                 if let Some(notice) = run_finished_notice(*turn, *stop_reason) {
                     self.push_status(notice);

@@ -3,15 +3,18 @@ use super::context::reconcile_defer_epoch;
 use super::fake_harness::DelayedHarness;
 use super::fake_harness::DelayedStep;
 use super::fake_harness::collect_turn_events;
+use super::fake_harness::model_with_capabilities;
 use super::fake_harness::text_turn_events;
 use futures::StreamExt;
 use neo_agent_core::{
     AgentConfig, AgentContext, AgentEvent, AgentMessage, AgentRuntime, AgentToolCall,
     CompactionSettings, Content, InstructionContextBridge, StopReason, Tool, ToolContext,
-    ToolExecutionMode, ToolFuture, ToolRegistry, ToolResult, harness::FakeHarness,
-    instructions::InstructionEpochOutcome,
+    ToolExecutionMode, ToolFuture, ToolRegistry, ToolResult, generate_compaction_summary,
+    harness::FakeHarness, instructions::InstructionEpochOutcome,
 };
-use neo_ai::{AiError, AiStreamEvent, MessagePhase};
+use neo_ai::{
+    AiError, AiStreamEvent, MessagePhase, ModelCapabilities, ReasoningCapability, ReasoningEffort,
+};
 use serde_json::json;
 use std::time::Duration;
 use tokio::time::timeout;
@@ -832,5 +835,93 @@ async fn compacted_current_nested_scope_removal_emits_removed_epoch() {
             .visited_revisions
             .contains_key(&nested),
         "{removed:?}"
+    );
+}
+
+#[tokio::test]
+async fn compaction_summary_request_carries_auto_aux_reasoning_plan() {
+    let harness = FakeHarness::from_events([
+        AiStreamEvent::TextDelta {
+            text: "summary text".to_owned(),
+        },
+        AiStreamEvent::MessageEnd {
+            phase: MessagePhase::Unknown,
+            stop_reason: neo_ai::StopReason::EndTurn,
+            usage: None,
+        },
+    ]);
+    let mut config = AgentConfig::for_model(model_with_capabilities(ModelCapabilities {
+        reasoning: ReasoningCapability::Effort {
+            values: vec![
+                ReasoningEffort::try_from("low").expect("effort"),
+                ReasoningEffort::try_from("high").expect("effort"),
+            ],
+            disable_supported: false,
+        },
+        ..ModelCapabilities::tool_chat()
+    }));
+    config.aux_reasoning = neo_ai::AuxReasoning::Auto;
+
+    let summary = generate_compaction_summary(
+        &harness.client(),
+        &config,
+        &[AgentMessage::user_text("long history to compact")],
+        None,
+        &tokio_util::sync::CancellationToken::new(),
+        |_| {},
+    )
+    .await
+    .expect("summary succeeds");
+
+    assert_eq!(summary, "summary text");
+    assert_eq!(
+        harness.requests()[0].options.reasoning,
+        neo_ai::ReasoningSelection::Effort {
+            effort: ReasoningEffort::low()
+        },
+        "auto policy sends the cheapest declared effort for always-thinking models"
+    );
+    assert!(!harness.requests()[0].options.disable_reasoning);
+}
+
+#[tokio::test]
+async fn compaction_summary_request_honors_off_aux_reasoning_policy() {
+    let harness = FakeHarness::from_events([
+        AiStreamEvent::TextDelta {
+            text: "compacted".to_owned(),
+        },
+        AiStreamEvent::MessageEnd {
+            phase: MessagePhase::Unknown,
+            stop_reason: neo_ai::StopReason::EndTurn,
+            usage: None,
+        },
+    ]);
+    let mut config = AgentConfig::for_model(model_with_capabilities(ModelCapabilities {
+        reasoning: ReasoningCapability::Effort {
+            values: vec![ReasoningEffort::low()],
+            disable_supported: true,
+        },
+        ..ModelCapabilities::tool_chat()
+    }));
+    config.aux_reasoning = neo_ai::AuxReasoning::Off;
+
+    generate_compaction_summary(
+        &harness.client(),
+        &config,
+        &[AgentMessage::user_text("history")],
+        None,
+        &tokio_util::sync::CancellationToken::new(),
+        |_| {},
+    )
+    .await
+    .expect("summary call completes");
+
+    assert_eq!(
+        harness.requests()[0].options.reasoning,
+        neo_ai::ReasoningSelection::Off
+    );
+    assert!(
+        harness.requests()[0].options.disable_reasoning,
+        "off policy always sends the explicit disable"
     );
 }

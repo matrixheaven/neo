@@ -249,8 +249,10 @@ async fn run_next_model_turn(
         .update_event_route_turn(config.session_directory.as_deref(), turn)
         .map_err(std::io::Error::other)?;
     prepare_model_request(model, config, emitter, cancel_token, pending_debt).await?;
-    let request = chat_request(config, &emitter.context, model.media_transport()).await?;
-    validate_model_capabilities(&request)?;
+    let mut request = chat_request(config, &emitter.context, model.media_transport()).await?;
+    if let Some(message) = validate_model_capabilities(&mut request)? {
+        emitter.emit(AgentEvent::Notice { turn, message });
+    }
     match run_model_turn_with_recovery(model, config, request, turn, emitter, cancel_token).await {
         Ok(message) => Ok(ModelTurnOutcome::Assistant { turn, message }),
         Err(AgentRuntimeError::Model(AiError::Cancelled)) => {

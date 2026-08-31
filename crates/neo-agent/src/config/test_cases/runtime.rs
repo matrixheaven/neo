@@ -156,6 +156,61 @@ fn runtime_reasoning_uses_structured_config_and_migrates_legacy_effort() {
 }
 
 #[test]
+fn runtime_aux_reasoning_defaults_to_auto_and_parses_pinned_values() {
+    use crate::config::types::FileConfig;
+
+    let default = super::super::loader::runtime_from_file_for_tests(None);
+    assert_eq!(
+        default.aux_reasoning, None,
+        "missing key behaves as auto at the call site"
+    );
+
+    let parsed: FileConfig = toml::from_str(
+        r#"
+            [runtime]
+            aux_reasoning = "5k"
+            "#,
+    )
+    .expect("parse pinned effort value");
+    let runtime = super::super::loader::runtime_from_file_for_tests(parsed.runtime);
+    assert_eq!(
+        runtime.aux_reasoning,
+        Some(neo_ai::AuxReasoning::Effort("5k".to_owned()))
+    );
+
+    let parsed: FileConfig = toml::from_str(
+        r#"
+            [runtime]
+            aux_reasoning = "off"
+            "#,
+    )
+    .expect("parse off policy");
+    let runtime = super::super::loader::runtime_from_file_for_tests(parsed.runtime);
+    assert_eq!(runtime.aux_reasoning, Some(neo_ai::AuxReasoning::Off));
+
+    let parsed: FileConfig = toml::from_str(
+        r#"
+            [runtime]
+            aux_reasoning = "auto"
+            "#,
+    )
+    .expect("parse auto policy");
+    let runtime = super::super::loader::runtime_from_file_for_tests(parsed.runtime);
+    assert_eq!(runtime.aux_reasoning, Some(neo_ai::AuxReasoning::Auto));
+
+    assert!(
+        toml::from_str::<FileConfig>(
+            r#"
+            [runtime]
+            aux_reasoning = ""
+            "#,
+        )
+        .is_err(),
+        "empty aux_reasoning is a configuration error"
+    );
+}
+
+#[test]
 fn runtime_retry_defaults_and_loads_explicit_values() {
     let config = super::super::loader::runtime_from_file_for_tests(Some(
         crate::config::types::FileRuntimeConfig {

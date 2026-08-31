@@ -17,10 +17,10 @@ pub mod summary;
 
 use std::sync::Arc;
 
-use futures::StreamExt;
-use neo_ai::{AiStreamEvent, ChatMessage, ChatRequest, ModelClient, RequestOptions};
+use neo_ai::{AiError, ChatMessage, ModelClient, RequestOptions};
 use tokio_util::sync::CancellationToken;
 
+use crate::aux_model::aux_stream_text;
 use crate::runtime::estimate_message_tokens;
 use crate::{AgentConfig, AgentMessage, Content};
 
@@ -502,44 +502,39 @@ where
         content: vec![neo_ai::ContentPart::Text { text: user_prompt }],
     });
 
-    let request = ChatRequest {
-        model: config.model.clone(),
-        messages: chat_messages,
-        tools: Vec::new(), // no tools — summariser must not call tools
-        options: RequestOptions {
+    let mut last_progress_chars = 0_usize;
+    let mut progress = |count: usize| {
+        // Throttle progress callbacks to roughly every 200 characters
+        // so we do not flood the event channel.
+        if count.saturating_sub(last_progress_chars) >= 200 {
+            on_progress(count);
+            last_progress_chars = count;
+        }
+    };
+
+    let summary = aux_stream_text(
+        model.as_ref(),
+        &config.model,
+        chat_messages,
+        RequestOptions {
             temperature: Some(0.0), // deterministic summary
             ..RequestOptions::default()
         },
+        &config.aux_reasoning,
+        Some(cancel_token),
+        Some(&mut progress),
+    )
+    .await;
+
+    let summary = match summary {
+        Ok(text) => text,
+        Err(AiError::Cancelled) => return Err(CompactionError::Cancelled),
+        Err(err) => return Err(CompactionError::Llm(err.to_string())),
     };
-
-    let mut stream = model.stream_chat(request);
-    let mut summary = String::new();
-    let mut last_progress_chars = 0_usize;
-
-    while let Some(event) = stream.next().await {
-        if cancel_token.is_cancelled() {
-            return Err(CompactionError::Cancelled);
-        }
-        match event {
-            Ok(AiStreamEvent::TextDelta { text }) => {
-                summary.push_str(&text);
-                // Throttle progress callbacks to roughly every 200 characters
-                // so we do not flood the event channel.
-                if summary.len().saturating_sub(last_progress_chars) >= 200 {
-                    on_progress(summary.len());
-                    last_progress_chars = summary.len();
-                }
-            }
-            Ok(_) => {}
-            Err(err) => return Err(CompactionError::Llm(err.to_string())),
-        }
-    }
 
     // Final progress update so the bar reaches the estimated cap before the
     // caller switches to the Applying phase.
-    if summary.len() > last_progress_chars {
-        on_progress(summary.len());
-    }
+    on_progress(summary.len());
 
     if summary.trim().is_empty() {
         return Err(CompactionError::Empty);

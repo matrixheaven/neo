@@ -145,7 +145,7 @@ Per behavior keep at most: one cheapest unit parameter matrix (local branches), 
 1. Config: CLI → env → `~/.neo/config.toml` (`$NEO_HOME`) → defaults. No project-local config.
 2. Sessions: JSONL under `~/.neo/sessions/wd_<slug>_<hash12>/` (workspace-scoped buckets). Global `session_index.jsonl` for cross-workspace resume.
 3. Model resolution: `ModelRegistry` (catalog + inline TOML) → `ProviderRegistry` → `ProviderResolver` selects wire client by provider `type`.
-4. Streams normalized to `AiStreamEvent` (`TextDelta`, `Thinking*`, `ToolCall*`, `MessageEnd`, `Error`). Reasoning preserved as `ContentPart::Thinking`.
+4. Streams normalized to `AiStreamEvent` (`TextDelta`, `Thinking*`, `ToolCall*`, `MessageEnd`, `Error`, `Notice`). Reasoning preserved as `ContentPart::Thinking`. Reasoning effort `values` list order is the intensity contract: cheapest first (`first()` = lowest). Auxiliary calls (session titles, compaction) resolve intensity via `[runtime] aux_reasoning` (`auto` = disable when supported, else cheapest effort; `off`; or a pinned value — canonical names map to the nearest declared level); a disable rejected by the provider retries once with the cheapest declared effort.
 5. Errors typed (`AiError` 8 variants) with exponential backoff retry (300ms–5s, jitter); context-overflow triggers forced multi-round compaction + retry; `Retry-After` honored.
 6. Tools authorized against `PermissionMode`, executed by `ToolRegistry`.
 7. Skills: project/user/extra/built-in tiers; `<available_skills>` injected into system prompt; activation injects skill body before user message.
@@ -174,7 +174,7 @@ Per behavior keep at most: one cheapest unit parameter matrix (local branches), 
 
 ### Config sections
 
-`providers.<id>`, `models.<alias>`, `permission_mode`, `runtime` (temp, max_tokens, structured reasoning, queue/execution modes, compaction, extra_skill_dirs), `tui` (image_protocol, keybindings, completion_notification, question_notification), `mcp.servers`. System prompt: `~/.neo/SYSTEM.md`, `~/.neo/APPEND_SYSTEM.md`. Trust: `~/.neo/trust.json` gates project instruction loading (`AGENTS.md` only).
+`providers.<id>`, `models.<alias>`, `permission_mode`, `runtime` (temp, max_tokens, structured reasoning, aux reasoning, queue/execution modes, compaction, extra_skill_dirs), `tui` (image_protocol, keybindings, completion_notification, question_notification), `mcp.servers`. System prompt: `~/.neo/SYSTEM.md`, `~/.neo/APPEND_SYSTEM.md`. Trust: `~/.neo/trust.json` gates project instruction loading (`AGENTS.md` only).
 
 ## Security
 

@@ -1,4 +1,5 @@
 pub mod approval;
+pub mod aux_model;
 pub mod compaction;
 pub mod events;
 pub mod goal;

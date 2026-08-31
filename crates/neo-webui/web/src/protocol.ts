@@ -446,6 +446,7 @@ export type AgentEvent =
         retry_after?: number | null;
       };
     }
+  | { Notice: { turn: number; message: string } }
   // Unknown future event tags are preserved verbatim as collapsible records.
   | Record<string, unknown>;
 

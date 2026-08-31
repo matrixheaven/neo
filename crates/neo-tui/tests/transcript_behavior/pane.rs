@@ -118,6 +118,35 @@ fn canonical_provider_error_codes_use_expected_severity() {
 }
 
 #[test]
+fn notice_events_render_warning_status_line() {
+    let mut pane = TranscriptPane::new(80, 12);
+    pane.apply_agent_event(neo_agent_core::AgentEvent::Notice {
+        turn: 1,
+        message: "reasoning effort \"low\" is not declared; using \"5k\"".to_owned(),
+    });
+
+    let severities = pane
+        .transcript()
+        .entries()
+        .iter()
+        .filter_map(|entry| match entry {
+            TranscriptEntry::Status {
+                severity: Some(severity),
+                ..
+            } => Some(*severity),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(severities, vec![StatusSeverity::Warning]);
+
+    let rendered = pane.render_visible_slice(80, 12).join("\n");
+    assert!(
+        strip_ansi(&rendered).contains("reasoning effort \"low\" is not declared; using \"5k\""),
+        "notice text must be visible: {rendered}"
+    );
+}
+
+#[test]
 fn failed_skill_tool_renders_semantic_failure_card() {
     let mut pane = TranscriptPane::new(80, 20);
     pane.apply_agent_event(neo_agent_core::AgentEvent::ToolCallStarted {

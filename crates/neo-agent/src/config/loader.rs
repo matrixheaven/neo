@@ -247,6 +247,7 @@ fn runtime_from_file(runtime: Option<FileRuntimeConfig>) -> RuntimeConfig {
                     neo_ai::ReasoningSelection::Effort { effort }
                 })
         }),
+        aux_reasoning: runtime.aux_reasoning,
         replay_reasoning: runtime.replay_reasoning.unwrap_or(true),
         steering_queue_mode: runtime.steering_queue_mode.unwrap_or(QueueMode::All),
         follow_up_queue_mode: runtime.follow_up_queue_mode.unwrap_or(QueueMode::All),

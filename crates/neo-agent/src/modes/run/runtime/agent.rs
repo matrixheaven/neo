@@ -59,6 +59,7 @@ pub(crate) fn agent_config_for_app(
         .max_tokens
         .or(agent_config.model.capabilities.max_output_tokens);
     agent_config.reasoning = config.runtime.reasoning.clone();
+    agent_config.aux_reasoning = config.runtime.aux_reasoning.clone().unwrap_or_default();
     agent_config.replay_reasoning = config.runtime.replay_reasoning;
     agent_config.max_retries = config.runtime.retry.max_retries;
     agent_config.first_event_timeout_secs = config.runtime.retry.first_event_timeout_secs;

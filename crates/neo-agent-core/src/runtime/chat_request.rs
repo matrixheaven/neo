@@ -1,7 +1,8 @@
 use neo_ai::{
-    AiError, ApiKind, ChatMessage, ChatRequest, EffectiveMediaCapability, MediaKind, MediaPosition,
-    MediaTransportCapabilities, MediaTransportMode, ModelCapabilities, RequestOptions,
-    effective_media_capability,
+    AiError, ApiKind, ChatMessage, ChatRequest, EffectiveMediaCapability, EffortResolution,
+    MediaKind, MediaPosition, MediaTransportCapabilities, MediaTransportMode, ModelCapabilities,
+    ReasoningCapability, ReasoningEffort, ReasoningSelection, RequestOptions,
+    effective_media_capability, resolve_requested_effort,
 };
 
 use super::config::AgentConfig;
@@ -625,7 +626,9 @@ fn filter_reasoning(content: Vec<neo_ai::ContentPart>) -> Vec<neo_ai::ContentPar
         .collect()
 }
 
-pub(super) fn validate_model_capabilities(request: &ChatRequest) -> Result<(), AiError> {
+pub(super) fn validate_model_capabilities(
+    request: &mut ChatRequest,
+) -> Result<Option<String>, AiError> {
     let capabilities = &request.model.capabilities;
     if !request.tools.is_empty() && !capabilities.tools {
         return Err(AiError::Configuration {
@@ -635,18 +638,44 @@ pub(super) fn validate_model_capabilities(request: &ChatRequest) -> Result<(), A
             ),
         });
     }
-    if !capabilities.reasoning.supports(&request.options.reasoning) {
-        return Err(AiError::Configuration {
-            message: format!(
-                "model {}/{} does not support reasoning selection {:?}; capability is {:?}",
-                request.model.provider.0,
-                request.model.model,
-                request.options.reasoning,
-                capabilities.reasoning
-            ),
-        });
+    if capabilities.reasoning.supports(&request.options.reasoning) {
+        return Ok(None);
     }
-    Ok(())
+    // Name-level mismatch only: a requested effort the model does not declare
+    // maps to the nearest declared value instead of failing the turn.
+    // Structurally unsupported selections still fail closed below.
+    if let ReasoningSelection::Effort { effort } = &request.options.reasoning {
+        let values: &[ReasoningEffort] = match &capabilities.reasoning {
+            ReasoningCapability::Effort { values, .. }
+            | ReasoningCapability::Combined { effort: values, .. } => values,
+            ReasoningCapability::None
+            | ReasoningCapability::Toggle { .. }
+            | ReasoningCapability::BudgetTokens { .. } => &[],
+        };
+        if !values.is_empty()
+            && let EffortResolution::Nearest(resolved) =
+                resolve_requested_effort(values, effort.as_str())
+        {
+            let requested = effort.clone();
+            request.options.reasoning = ReasoningSelection::Effort {
+                effort: resolved.clone(),
+            };
+            return Ok(Some(format!(
+                "reasoning effort \"{requested}\" is not declared by model {}/{}; \
+                 using the nearest level \"{resolved}\"",
+                request.model.provider.0, request.model.model
+            )));
+        }
+    }
+    Err(AiError::Configuration {
+        message: format!(
+            "model {}/{} does not support reasoning selection {:?}; capability is {:?}",
+            request.model.provider.0,
+            request.model.model,
+            request.options.reasoning,
+            capabilities.reasoning
+        ),
+    })
 }
 
 #[cfg(test)]

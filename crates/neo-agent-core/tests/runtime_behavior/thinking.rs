@@ -33,6 +33,56 @@ async fn runtime_rejects_reasoning_selection_when_model_lacks_reasoning_before_r
 }
 
 #[tokio::test]
+async fn runtime_coerces_unsupported_effort_name_to_nearest_and_emits_notice() {
+    let harness = FakeHarness::from_events([AiStreamEvent::MessageEnd {
+        phase: MessagePhase::Unknown,
+        stop_reason: neo_ai::StopReason::EndTurn,
+        usage: None,
+    }]);
+    let mut config = AgentConfig::for_model(model_with_capabilities(ModelCapabilities {
+        reasoning: ReasoningCapability::Effort {
+            values: vec![
+                ReasoningEffort::try_from("5k").expect("numeric effort"),
+                ReasoningEffort::try_from("10k").expect("numeric effort"),
+                ReasoningEffort::try_from("20k").expect("numeric effort"),
+            ],
+            disable_supported: false,
+        },
+        ..ModelCapabilities::tool_chat()
+    }));
+    config.reasoning = ReasoningSelection::Effort {
+        effort: ReasoningEffort::low(),
+    };
+    let runtime = AgentRuntime::new(config, harness.client());
+    let mut context = AgentContext::new();
+
+    let events = runtime
+        .run_turn(&mut context, AgentMessage::user_text("think lightly"))
+        .collect::<Vec<_>>()
+        .await
+        .into_iter()
+        .collect::<Result<Vec<_>, _>>()
+        .expect("nearest-effort coercion should keep the turn alive");
+
+    assert!(
+        events.contains(&AgentEvent::Notice {
+            turn: 1,
+            message: "reasoning effort \"low\" is not declared by model \
+                      capability-test/capability-test-model; using the nearest level \"5k\""
+                .to_owned(),
+        }),
+        "coercion must be visible in the transcript: {events:?}"
+    );
+    assert_eq!(
+        harness.requests()[0].options.reasoning,
+        ReasoningSelection::Effort {
+            effort: ReasoningEffort::try_from("5k").expect("numeric effort")
+        },
+        "request carries the nearest declared effort"
+    );
+}
+
+#[tokio::test]
 async fn runtime_rejects_unsupported_reasoning_selection_before_request() {
     let harness = FakeHarness::from_events([AiStreamEvent::MessageEnd {
         phase: MessagePhase::Unknown,
