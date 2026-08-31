@@ -5103,15 +5103,6 @@ textarea.settings-input {
   min-width: 200px;
 }
 
-.model-selector-wrap {
-  position: relative;
-  width: fit-content;
-}
-
-.model-selector-popover {
-  left: 0;
-}
-
 .model-settings-row {
   cursor: pointer;
 }
@@ -5390,10 +5381,20 @@ textarea.settings-input {
   padding: 0 12px;
 }
 
-/* GitHub Light palette */
+/* GitHub Light palette — the card owns its text tokens so the header stays
+   readable regardless of the surrounding interface theme. */
 .code-preview-card[data-code-theme="light"] {
   background: #f6f8fa;
   color: #1f2328;
+  --text: #1f2328;
+  --text-dim: #57606a;
+  --text-faint: #8c959f;
+  --line: #d8dee4;
+  --line-strong: #c6cdd5;
+  --accent: #0969da;
+  --accent-dim: #0a5cc2;
+  --accent-soft: rgba(9, 105, 218, 0.12);
+  --accent-soft-strong: rgba(9, 105, 218, 0.2);
 }
 .code-preview-card[data-code-theme="light"] .code-preview-card-head {
   background: #eef1f4;
@@ -5433,10 +5434,19 @@ textarea.settings-input {
   color: #6e7781;
 }
 
-/* GitHub Dark palette */
+/* GitHub Dark palette — same token scoping as the light card. */
 .code-preview-card[data-code-theme="dark"] {
   background: #0d1117;
   color: #e6edf3;
+  --text: #e6edf3;
+  --text-dim: #9198a1;
+  --text-faint: #7d8590;
+  --line: #30363d;
+  --line-strong: #3d444d;
+  --accent: #4493f8;
+  --accent-dim: #3a7fd5;
+  --accent-soft: rgba(68, 147, 248, 0.16);
+  --accent-soft-strong: rgba(68, 147, 248, 0.26);
 }
 .code-preview-card[data-code-theme="dark"] .code-preview-card-head {
   background: #161b22;
@@ -5495,9 +5505,22 @@ textarea.settings-input {
   --code-bg: #16181d;
 }
 
-/* Model selector in settings always shows its back button (unlike the
-   composer's desktop hiding) and rotates the chevron to point left. */
-.model-selector-popover .model-submenu-back {
+/* Model selector in settings opens DOWNWARD (the section sits near the top of
+   the scroll area, so an upward popover gets clipped) and aligns popovers to
+   the top. The back button stays visible (unlike the composer's desktop
+   hiding) and rotates the chevron to point left. */
+.model-selector-wrap {
+  position: relative;
+  width: fit-content;
+}
+
+.model-selector-shell {
+  bottom: auto;
+  top: calc(100% + 8px);
+  align-items: flex-start;
+}
+
+.model-selector-shell .model-submenu-back {
   display: flex;
 }
 
@@ -5506,5 +5529,5 @@ textarea.settings-input {
 }
 
 .model-selector-wrap .pill-popover {
-  max-width: 300px;
+  max-width: 320px;
 }

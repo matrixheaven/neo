@@ -69,6 +69,11 @@ export function App() {
   if (state.auth === "failed") {
     return <AccessFailed />;
   }
+  // Settings is a full-page surface: it owns the whole window (its own header
+  // and nav) and never renders inside the chat shell (no sidebar / top bar).
+  if (state.view === "settings") {
+    return <SettingsPage />;
+  }
 
   const sessionId = state.selectedSessionId;
   const selectedSession = sessionId === null ? undefined : state.sessions[sessionId];
@@ -81,9 +86,7 @@ export function App() {
   }
 
   const mainContent =
-    state.view === "settings" ? (
-      <SettingsPage />
-    ) : connectionBannerState === "reconnecting" ? (
+    connectionBannerState === "reconnecting" ? (
       <div className="connection-banner" role="status">
         连接已断开，正在重连…
       </div>
@@ -121,7 +124,7 @@ export function App() {
           />
         ) : null}
         <main className="main-area">{mainContent}</main>
-        {state.view === "chat" ? <InformationPanel /> : null}
+        <InformationPanel />
       </div>
     </div>
   );

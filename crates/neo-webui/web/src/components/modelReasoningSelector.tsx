@@ -229,8 +229,8 @@ export function ModelReasoningSelector({
       </button>
 
       {open ? (
-        <div className="pill-popover model-settings-popover model-selector-popover">
-          {pane === "root" ? (
+        <div className="model-menu-shell model-selector-shell" data-pane={pane}>
+          <div className="pill-popover model-settings-popover">
             <div className="pill-popover-list model-settings-list">
               <button
                 type="button"
@@ -255,7 +255,7 @@ export function ModelReasoningSelector({
                 <ChevronRight size={14} className="model-settings-caret" aria-hidden />
               </button>
             </div>
-          ) : null}
+          </div>
 
           {pane === "models" ? (
             <div className="pill-popover model-submenu" aria-label="选择模型">

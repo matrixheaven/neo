@@ -665,7 +665,68 @@ const server = createServer(async (req, res) => {
       ],
       permission_modes: ["ask", "auto", "yolo"],
       development_modes: ["normal", "plan", "goal"],
+      appearance: {
+        theme: "dark",
+        ui_font_size: 14,
+        code_font_size: 12,
+        code_theme: "auto",
+        show_line_numbers: true,
+        word_wrap: true,
+      },
       sessions: allSummaries().filter((entry) => entry.workspace_label === "neo"),
+    });
+    return;
+  }
+  if (path === "/api/settings" && method === "GET") {
+    json(res, {
+      default_model: "gpt-5-codex",
+      default_provider: "openai",
+      permission_mode: "ask",
+      default_reasoning: { mode: "effort", effort: "high" },
+      appearance: {
+        theme: "dark",
+        ui_font_size: 14,
+        code_font_size: 12,
+        code_theme: "auto",
+        show_line_numbers: true,
+        word_wrap: true,
+      },
+      providers: [
+        {
+          id: "openai",
+          display_name: "OpenAI",
+          provider_type: "openai",
+          base_url: "https://api.openai.com/v1",
+          has_api_key: true,
+        },
+      ],
+      models: [
+        {
+          alias: "gpt-5-codex",
+          provider: "openai",
+          display_name: "GPT-5 Codex",
+          context_window: 272000,
+          capabilities: ["reasoning"],
+          reasoning: { type: "effort", values: ["low", "medium", "high", "xhigh"], disable_supported: true },
+        },
+        {
+          alias: "claude-sonnet-4.5",
+          provider: "openai",
+          display_name: "Claude Sonnet 4.5",
+          context_window: 200000,
+          capabilities: [],
+          reasoning: { type: "none" },
+        },
+      ],
+      mcp_servers: [],
+      skills: [
+        {
+          name: "writing-plans",
+          display_name: "writing-plans",
+          description:
+            "Use when you have a spec or requirements for a multi-step task, before touching code.",
+        },
+      ],
     });
     return;
   }
