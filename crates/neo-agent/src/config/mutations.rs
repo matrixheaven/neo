@@ -12,7 +12,7 @@ use serde_json::json;
 
 use super::{
     AppConfig, FileConfig, McpConfig, McpServerConfig, ModelConfig, ProviderConfig,
-    update_file_config,
+    WebUiAppearance, update_file_config,
 };
 
 /// Add or replace a provider in config.toml.
@@ -99,6 +99,41 @@ pub fn set_startup_theme(config_path: &Path, theme_id: &str) -> anyhow::Result<(
     update_file_config(config_path, |file_config| {
         let tui = file_config.tui.get_or_insert_default();
         tui.theme = Some(theme_id.to_owned());
+        Ok(())
+    })
+}
+
+/// Persist the default permission mode used by new sessions.
+pub fn set_permission_mode(
+    config_path: &Path,
+    mode: neo_agent_core::PermissionMode,
+) -> anyhow::Result<()> {
+    update_file_config(config_path, |file_config| {
+        file_config.permission_mode = Some(mode);
+        Ok(())
+    })
+}
+
+/// Persist the WebUI appearance block (`[webui]`). Validates enum-ish string
+/// fields at the logical boundary so a bad value never reaches config.toml.
+pub fn set_appearance(config_path: &Path, appearance: &WebUiAppearance) -> anyhow::Result<()> {
+    let theme = appearance.theme.as_str();
+    if !matches!(theme, "system" | "light" | "dark") {
+        anyhow::bail!("invalid webui theme {theme:?}: expected system, light, or dark");
+    }
+    let code_theme = appearance.code_theme.as_str();
+    if !matches!(code_theme, "auto" | "light" | "dark") {
+        anyhow::bail!("invalid webui code theme {code_theme:?}: expected auto, light, or dark");
+    }
+    update_file_config(config_path, |file_config| {
+        file_config.webui = Some(super::FileWebUiConfig {
+            theme: Some(appearance.theme.clone()),
+            ui_font_size: Some(appearance.ui_font_size),
+            code_font_size: Some(appearance.code_font_size),
+            code_theme: Some(appearance.code_theme.clone()),
+            show_line_numbers: Some(appearance.show_line_numbers),
+            word_wrap: Some(appearance.word_wrap),
+        });
         Ok(())
     })
 }

@@ -15,7 +15,7 @@ use axum::extract::{Path, Query, Request, State};
 use axum::http::{Method, StatusCode, Uri, header};
 use axum::middleware::{self, Next};
 use axum::response::{IntoResponse, Response};
-use axum::routing::{get, patch, post};
+use axum::routing::{delete, get, patch, post};
 use axum::{Json, Router};
 use http::HeaderMap;
 use serde::Serialize;
@@ -30,9 +30,11 @@ use crate::protocol::{
     WebUiAddWorkspaceBody, WebUiApprovalBody, WebUiAttachmentBody, WebUiCancelBody,
     WebUiCancelling, WebUiCheckoutBody, WebUiClaimRequest, WebUiCommand, WebUiCreateSessionBody,
     WebUiError, WebUiErrorBody, WebUiErrorCode, WebUiHost, WebUiInputAccepted, WebUiInputBody,
-    WebUiMcpServerEdit, WebUiMetadataBody, WebUiQuestionBody, WebUiQueueControlBody, WebUiReply,
-    WebUiServerMessage, WebUiSessionScope, WebUiSessionStarted, WebUiSetDefaultModelBody,
-    WebUiSetMcpEnabledBody, WebUiStartTurnBody, WebUiUpdateWorkspaceBody, WebUiWatchRequest,
+    WebUiMcpServerEdit, WebUiMetadataBody, WebUiModelEdit, WebUiProviderEdit, WebUiQuestionBody,
+    WebUiQueueControlBody, WebUiReply, WebUiServerMessage, WebUiSessionScope, WebUiSessionStarted,
+    WebUiSetAppearanceBody, WebUiSetDefaultModelBody, WebUiSetDefaultModelSelectionBody,
+    WebUiSetMcpEnabledBody, WebUiSetPermissionModeBody, WebUiStartTurnBody,
+    WebUiUpdateWorkspaceBody, WebUiWatchRequest,
 };
 use crate::relay::{
     ATTACHMENT_BODY_LIMIT_BYTES, COMMAND_BODY_LIMIT_BYTES, FIRST_SUBSCRIBE_DEADLINE, ObserverQueue,
@@ -149,6 +151,22 @@ fn build_router(app: AppState) -> Router {
         )
         .route("/api/settings", get(settings))
         .route("/api/settings/default-model", patch(set_default_model))
+        .route(
+            "/api/settings/default-model-selection",
+            patch(set_default_model_selection),
+        )
+        .route(
+            "/api/settings/permission-mode",
+            patch(set_permission_mode_handler),
+        )
+        .route("/api/settings/appearance", patch(set_appearance_handler))
+        .route("/api/settings/providers", post(add_provider))
+        .route(
+            "/api/settings/providers/{provider_id}",
+            delete(remove_provider),
+        )
+        .route("/api/settings/models", post(add_model))
+        .route("/api/settings/models/{alias}", delete(remove_model))
         .route("/api/settings/mcp", post(upsert_mcp_server))
         .route(
             "/api/settings/mcp/{server_id}",
@@ -465,6 +483,104 @@ async fn set_default_model(State(app): State<AppState>, body: Body) -> Response 
         })
         .await
     {
+        Ok(reply) => reply_response(&app, reply),
+        Err(error) => host_error_response(error),
+    }
+}
+
+async fn set_default_model_selection(State(app): State<AppState>, body: Body) -> Response {
+    let parsed: WebUiSetDefaultModelSelectionBody = match parse_body(body).await {
+        Ok(parsed) => parsed,
+        Err(response) => return response,
+    };
+    match app
+        .host
+        .execute(WebUiCommand::SetDefaultModelSelection {
+            alias: parsed.alias,
+            reasoning: parsed.reasoning,
+        })
+        .await
+    {
+        Ok(reply) => reply_response(&app, reply),
+        Err(error) => host_error_response(error),
+    }
+}
+
+async fn set_permission_mode_handler(State(app): State<AppState>, body: Body) -> Response {
+    let parsed: WebUiSetPermissionModeBody = match parse_body(body).await {
+        Ok(parsed) => parsed,
+        Err(response) => return response,
+    };
+    match app
+        .host
+        .execute(WebUiCommand::SetPermissionMode { mode: parsed.mode })
+        .await
+    {
+        Ok(reply) => reply_response(&app, reply),
+        Err(error) => host_error_response(error),
+    }
+}
+
+async fn set_appearance_handler(State(app): State<AppState>, body: Body) -> Response {
+    let parsed: WebUiSetAppearanceBody = match parse_body(body).await {
+        Ok(parsed) => parsed,
+        Err(response) => return response,
+    };
+    match app
+        .host
+        .execute(WebUiCommand::SetAppearance {
+            appearance: parsed.appearance,
+        })
+        .await
+    {
+        Ok(reply) => reply_response(&app, reply),
+        Err(error) => host_error_response(error),
+    }
+}
+
+async fn add_provider(State(app): State<AppState>, body: Body) -> Response {
+    let parsed: WebUiProviderEdit = match parse_body(body).await {
+        Ok(parsed) => parsed,
+        Err(response) => return response,
+    };
+    match app
+        .host
+        .execute(WebUiCommand::AddProvider { provider: parsed })
+        .await
+    {
+        Ok(reply) => reply_response(&app, reply),
+        Err(error) => host_error_response(error),
+    }
+}
+
+async fn remove_provider(State(app): State<AppState>, Path(provider_id): Path<String>) -> Response {
+    match app
+        .host
+        .execute(WebUiCommand::RemoveProvider { provider_id })
+        .await
+    {
+        Ok(reply) => reply_response(&app, reply),
+        Err(error) => host_error_response(error),
+    }
+}
+
+async fn add_model(State(app): State<AppState>, body: Body) -> Response {
+    let parsed: WebUiModelEdit = match parse_body(body).await {
+        Ok(parsed) => parsed,
+        Err(response) => return response,
+    };
+    match app
+        .host
+        .execute(WebUiCommand::AddModel { model: parsed })
+        .await
+    {
+        Ok(reply) => reply_response(&app, reply),
+        Err(error) => host_error_response(error),
+    }
+}
+
+async fn remove_model(State(app): State<AppState>, Path(alias): Path<String>) -> Response {
+    match app.host.execute(WebUiCommand::RemoveModel { alias }).await {
         Ok(reply) => reply_response(&app, reply),
         Err(error) => host_error_response(error),
     }

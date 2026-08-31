@@ -8,6 +8,7 @@
 import type {
   ToolOutputRange,
   WebUiAgentHistory,
+  WebUiAppearance,
   WebUiAttachmentAck,
   WebUiBootstrap,
   WebUiBranchList,
@@ -18,6 +19,8 @@ import type {
   WebUiInputDelivery,
   WebUiCancelling,
   WebUiMcpServerEdit,
+  WebUiModelEdit,
+  WebUiProviderEdit,
   WebUiQueueControl,
   WebUiQuestionAnswer,
   WebUiServerMessage,
@@ -141,6 +144,46 @@ export function fetchSettings(): Promise<WebUiSettingsSnapshot> {
 
 export function setDefaultModel(alias: string): Promise<WebUiSettingsSnapshot> {
   return request<WebUiSettingsSnapshot>("PATCH", "/api/settings/default-model", { alias });
+}
+
+export function setDefaultModelSelection(
+  alias: string,
+  reasoning: import("./protocol").ReasoningSelection,
+): Promise<WebUiSettingsSnapshot> {
+  return request<WebUiSettingsSnapshot>("PATCH", "/api/settings/default-model-selection", {
+    alias,
+    reasoning,
+  });
+}
+
+export function setPermissionMode(mode: string): Promise<WebUiSettingsSnapshot> {
+  return request<WebUiSettingsSnapshot>("PATCH", "/api/settings/permission-mode", { mode });
+}
+
+export function setAppearance(appearance: WebUiAppearance): Promise<WebUiSettingsSnapshot> {
+  return request<WebUiSettingsSnapshot>("PATCH", "/api/settings/appearance", { appearance });
+}
+
+export function addProvider(provider: WebUiProviderEdit): Promise<WebUiSettingsSnapshot> {
+  return request<WebUiSettingsSnapshot>("POST", "/api/settings/providers", provider);
+}
+
+export function removeProvider(providerId: string): Promise<WebUiSettingsSnapshot> {
+  return request<WebUiSettingsSnapshot>(
+    "DELETE",
+    `/api/settings/providers/${encodeURIComponent(providerId)}`,
+  );
+}
+
+export function addModel(model: WebUiModelEdit): Promise<WebUiSettingsSnapshot> {
+  return request<WebUiSettingsSnapshot>("POST", "/api/settings/models", model);
+}
+
+export function removeModel(alias: string): Promise<WebUiSettingsSnapshot> {
+  return request<WebUiSettingsSnapshot>(
+    "DELETE",
+    `/api/settings/models/${encodeURIComponent(alias)}`,
+  );
 }
 
 export function setMcpServerEnabled(

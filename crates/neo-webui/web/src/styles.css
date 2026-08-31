@@ -4814,3 +4814,627 @@ button.ft-file-head:focus-visible {
     transform: none;
   }
 }
+
+/* ------------------------------------------------------------------ */
+/* Persistent WebUI appearance (config-backed [webui])                 */
+/* ------------------------------------------------------------------ */
+
+:root {
+  --font-size-code: 12px;
+  /* Code token palette defaults follow the interface theme. */
+  --code-text: var(--text);
+  --code-dim: var(--text-dim);
+  --code-faint: var(--text-faint);
+  --code-accent: var(--accent);
+  --code-ok: var(--ok);
+  --code-danger: var(--danger);
+  --code-bg: var(--surface-raised);
+  --code-inline-bg: var(--inline-code-bg);
+}
+
+/* Forced light code palette (independent of interface theme). */
+html[data-code-theme="light"] {
+  --code-text: rgba(0, 0, 0, 0.9);
+  --code-dim: rgba(0, 0, 0, 0.55);
+  --code-faint: rgba(0, 0, 0, 0.4);
+  --code-accent: #0969da;
+  --code-ok: #1a7f37;
+  --code-danger: #cf222e;
+  --code-bg: #f6f8fa;
+  --code-inline-bg: rgba(0, 0, 0, 0.04);
+}
+
+/* Forced dark code palette. */
+html[data-code-theme="dark"] {
+  --code-text: #e4e6eb;
+  --code-dim: #9aa0ab;
+  --code-faint: #6c7280;
+  --code-accent: #7aa2f7;
+  --code-ok: #7ec699;
+  --code-danger: #e06c75;
+  --code-bg: #16181d;
+  --code-inline-bg: rgba(255, 255, 255, 0.06);
+}
+
+.code-block pre {
+  font-size: var(--font-size-code);
+  background: var(--code-bg);
+}
+
+.code-block-pre {
+  margin: 0;
+  overflow: auto;
+}
+
+.code-block-lines {
+  overflow: auto;
+}
+
+.code-line-table {
+  display: table;
+  width: 100%;
+  border-collapse: collapse;
+}
+
+.code-line {
+  display: table-row;
+}
+
+.code-line-no {
+  display: table-cell;
+  width: 1%; /* shrink to content */
+  min-width: 2.5em;
+  padding-right: 10px;
+  text-align: right;
+  color: var(--text-faint);
+  user-select: none;
+  border-right: 1px solid var(--line);
+  white-space: nowrap;
+}
+
+.code-line code {
+  display: table-cell;
+  padding-left: 12px;
+}
+
+/* Long-line wrapping honored from the appearance toggle. */
+html[data-word-wrap="on"] .code-block pre,
+html[data-word-wrap="on"] .code-preview-pre {
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+/* ------------------------------------------------------------------ */
+/* Settings page (sidebar form, replaces the modal)                    */
+/* ------------------------------------------------------------------ */
+
+.settings-page {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  min-height: 0;
+  background: var(--surface);
+}
+
+.settings-page-header {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  padding: 14px 20px;
+  border-bottom: 1px solid var(--line);
+}
+
+.settings-page-header h2 {
+  margin: 0;
+  font-size: 18px;
+}
+
+.settings-back {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 5px 10px;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  background: transparent;
+  color: var(--text-dim);
+  font-size: 12px;
+  cursor: pointer;
+}
+
+.settings-back:hover {
+  color: var(--text);
+  background: var(--hover);
+}
+
+.settings-page-body {
+  display: flex;
+  flex: 1;
+  min-height: 0;
+}
+
+.settings-nav {
+  width: 220px;
+  flex: 0 0 220px;
+  padding: 14px 10px;
+  border-right: 1px solid var(--line);
+  overflow: auto;
+}
+
+.settings-nav-group {
+  margin-bottom: 18px;
+}
+
+.settings-nav-label {
+  padding: 0 10px 6px;
+  color: var(--text-faint);
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+}
+
+.settings-nav-item {
+  display: block;
+  width: 100%;
+  padding: 7px 10px;
+  border: none;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--text-dim);
+  text-align: left;
+  font-size: 13px;
+  cursor: pointer;
+}
+
+.settings-nav-item.active {
+  background: var(--accent-soft);
+  color: var(--accent);
+}
+
+.settings-nav-item:hover {
+  color: var(--text);
+  background: var(--hover);
+}
+
+.settings-content {
+  flex: 1;
+  min-width: 0;
+  padding: 18px 24px;
+  overflow: auto;
+}
+
+.settings-loading {
+  padding: 20px;
+  color: var(--text-faint);
+}
+
+.settings-label {
+  color: var(--text-dim);
+  font-size: 12px;
+}
+
+.settings-input {
+  width: 100%;
+  padding: 8px 10px;
+  border: 1px solid var(--line-strong);
+  border-radius: 6px;
+  background: var(--surface);
+  color: var(--text);
+  font: inherit;
+  font-size: 13px;
+}
+
+.settings-input:focus {
+  outline: none;
+  border-color: var(--focus-ring);
+}
+
+.settings-input-number {
+  width: 120px;
+}
+
+.settings-input textarea,
+textarea.settings-input {
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 12px;
+  resize: vertical;
+  min-height: 54px;
+}
+
+.settings-field-row {
+  display: flex;
+  gap: 18px;
+  align-items: flex-end;
+  flex-wrap: wrap;
+}
+
+.settings-field-inline {
+  flex-direction: row;
+  align-items: center;
+  gap: 10px;
+}
+
+.settings-card {
+  padding: 14px 16px;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: var(--surface-raised);
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.settings-card-title {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--text);
+}
+
+.settings-dl {
+  display: grid;
+  grid-template-columns: 90px 1fr;
+  gap: 6px 12px;
+  margin: 0;
+  font-size: 13px;
+}
+
+.settings-dl dt {
+  color: var(--text-faint);
+}
+
+.settings-dl dd {
+  margin: 0;
+  color: var(--text);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.settings-dl .mono {
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 12px;
+}
+
+.settings-model-pill {
+  min-width: 200px;
+}
+
+.model-selector-wrap {
+  position: relative;
+  width: fit-content;
+}
+
+.model-selector-popover {
+  left: 0;
+}
+
+.model-settings-row {
+  cursor: pointer;
+}
+
+.model-settings-label {
+  color: var(--text-dim);
+  font-size: 12px;
+}
+
+.model-settings-value {
+  color: var(--text);
+  font-size: 13px;
+}
+
+.model-pill-caret {
+  color: var(--text-faint);
+  margin-left: 6px;
+}
+
+.model-settings-caret {
+  color: var(--text-faint);
+  margin-left: auto;
+}
+
+.model-settings-row.disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+
+.model-catalog-empty {
+  padding: 12px;
+  color: var(--text-faint);
+  font-size: 13px;
+  text-align: center;
+}
+
+/* ------------------------------------------------------------------ */
+/* Provider / model management                                          */
+/* ------------------------------------------------------------------ */
+
+.provider-layout {
+  display: grid;
+  grid-template-columns: 200px 1fr;
+  gap: 16px;
+  align-items: stretch;
+}
+
+.provider-list {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  border-right: 1px solid var(--line);
+  padding-right: 12px;
+}
+
+.provider-item {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 8px 10px;
+  border: none;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--text-dim);
+  text-align: left;
+  font-size: 13px;
+  cursor: pointer;
+}
+
+.provider-item.active {
+  background: var(--accent-soft);
+  color: var(--accent);
+}
+
+.provider-item:hover {
+  color: var(--text);
+  background: var(--hover);
+}
+
+.provider-item-name {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.provider-item-key {
+  color: var(--text-faint);
+  font-size: 11px;
+  flex: none;
+}
+
+.provider-item.provider-add {
+  color: var(--accent);
+  border: 1px dashed var(--line-strong);
+  justify-content: flex-start;
+  margin-top: 6px;
+}
+
+.provider-detail {
+  min-width: 0;
+}
+
+/* Model editor modal */
+.settings-modal {
+  width: min(440px, 100%);
+  max-height: min(88vh, 800px);
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  padding: 18px;
+  border: 1px solid var(--line-strong);
+  border-radius: 10px;
+  background: var(--surface-raised);
+  box-shadow: var(--shadow-lg);
+  overflow: auto;
+}
+
+.settings-modal-head h3 {
+  margin: 0;
+  font-size: 16px;
+}
+
+.settings-check-group {
+  display: flex;
+  gap: 14px;
+  flex-wrap: wrap;
+  padding: 4px 0;
+}
+
+.settings-check {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  color: var(--text-dim);
+  font-size: 13px;
+}
+
+/* ------------------------------------------------------------------ */
+/* Skills (fix: description takes the rest of the width)                */
+/* ------------------------------------------------------------------ */
+
+.skills-table {
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  overflow: hidden;
+}
+
+.skills-row {
+  display: grid;
+  grid-template-columns: minmax(180px, 220px) 1fr;
+  gap: 16px;
+  padding: 10px 12px;
+  border-top: 1px solid var(--line);
+}
+
+.skills-row:first-child {
+  border-top: none;
+}
+
+.skills-name {
+  font-weight: 500;
+  color: var(--text);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.skills-desc {
+  color: var(--text-dim);
+  font-size: 13px;
+  line-height: 1.5;
+  white-space: normal;
+}
+
+.settings-keys {
+  color: var(--text-faint);
+}
+
+/* ------------------------------------------------------------------ */
+/* Code preview (appearance)                                            */
+/* ------------------------------------------------------------------ */
+
+.code-preview-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 12px;
+}
+
+.code-preview-card {
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  overflow: hidden;
+  background: var(--surface);
+}
+
+.code-preview-card.active {
+  border-color: var(--accent-dim);
+}
+
+.code-preview-card-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 6px 10px;
+  border-bottom: 1px solid var(--line);
+}
+
+.code-preview-title {
+  font-size: 12px;
+  color: var(--text-dim);
+}
+
+.code-preview-status {
+  font-size: 11px;
+  color: var(--text-faint);
+}
+
+.code-preview-card.active .code-preview-status {
+  color: var(--accent);
+}
+
+.code-preview-pre {
+  margin: 0;
+  padding: 12px;
+  overflow: auto;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+/* Preview palettes: the card's own data-code-theme overrides the global. */
+.code-preview-card[data-code-theme="light"] {
+  color: rgba(0, 0, 0, 0.9);
+  --code-text: rgba(0, 0, 0, 0.9);
+  --code-dim: rgba(0, 0, 0, 0.55);
+  --code-faint: rgba(0, 0, 0, 0.4);
+  --code-accent: #0969da;
+  --code-ok: #1a7f37;
+  --code-danger: #cf222e;
+  --code-bg: #f6f8fa;
+}
+
+.code-preview-card[data-code-theme="dark"] {
+  color: #e4e6eb;
+  --code-text: #e4e6eb;
+  --code-dim: #9aa0ab;
+  --code-faint: #6c7280;
+  --code-accent: #7aa2f7;
+  --code-ok: #7ec699;
+  --code-danger: #e06c75;
+  --code-bg: #16181d;
+}
+
+.code-preview-pre code {
+  color: var(--code-text);
+}
+
+.code-preview-pre .token {
+  color: var(--code-dim);
+}
+
+.code-preview-pre .token.keyword,
+.code-preview-pre .token.function,
+.code-preview-pre .token.boolean,
+.code-preview-pre .token.number,
+.code-preview-pre .token.class-name,
+.code-preview-pre .token.builtin {
+  color: var(--code-accent);
+}
+
+.code-preview-pre .token.string,
+.code-preview-pre .token.property,
+.code-preview-pre .token.attr-value,
+.code-preview-pre .token.attr-name,
+.code-preview-pre .token.selector {
+  color: var(--code-ok);
+}
+
+.code-preview-pre .token.comment {
+  color: var(--code-faint);
+}
+
+.code-preview-pre .token.deleted,
+.code-preview-pre .token.regex,
+.code-preview-pre .token.tag,
+.code-preview-pre .token.important {
+  color: var(--code-danger);
+}
+
+.code-preview-pre .token.operator,
+.code-preview-pre .token.punctuation {
+  color: var(--code-dim);
+}
+
+/* Forced code theme scoped to a code block (independent of interface theme). */
+.code-block[data-code-theme="light"] {
+  --accent: #0969da;
+  --ok: #1a7f37;
+  --danger: #cf222e;
+  --text-dim: rgba(0, 0, 0, 0.55);
+  --text-faint: rgba(0, 0, 0, 0.4);
+  --code-bg: #f6f8fa;
+}
+
+.code-block[data-code-theme="dark"] {
+  --accent: #7aa2f7;
+  --ok: #7ec699;
+  --danger: #e06c75;
+  --text-dim: #9aa0ab;
+  --text-faint: #6c7280;
+  --code-bg: #16181d;
+}
+
+/* Model selector in settings always shows its back button (unlike the
+   composer's desktop hiding) and rotates the chevron to point left. */
+.model-selector-popover .model-submenu-back {
+  display: flex;
+}
+
+.model-submenu-back .flip {
+  transform: rotate(180deg);
+}
+
+.model-selector-wrap .pill-popover {
+  max-width: 300px;
+}

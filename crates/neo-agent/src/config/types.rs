@@ -174,6 +174,7 @@ pub(crate) struct FileConfig {
     pub(crate) defaults: Option<FileDefaults>,
     pub(crate) runtime: Option<FileRuntimeConfig>,
     pub(crate) tui: Option<FileTuiConfig>,
+    pub(crate) webui: Option<FileWebUiConfig>,
     pub(crate) mcp: Option<McpConfig>,
 }
 
@@ -337,4 +338,75 @@ pub(crate) struct FileTuiConfig {
     /// `$NEO_HOME/themes/`), never an absolute path.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) theme: Option<String>,
+}
+
+/// WebUI display preferences persisted under the `[webui]` table. All fields
+/// optional so an unset section falls back to WebUI defaults. WebUI is a
+/// browser-rendered surface; these values drive its CSS variables and code
+/// rendering (separate from the TUI `[tui].theme` file id).
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct FileWebUiConfig {
+    /// Interface theme: `"system"` (follow OS), `"light"`, or `"dark"`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) theme: Option<String>,
+    /// Base UI font size in px.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) ui_font_size: Option<u32>,
+    /// Code block font size in px.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) code_font_size: Option<u32>,
+    /// Code token palette: `"auto"` (follow interface theme), `"light"`, or `"dark"`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) code_theme: Option<String>,
+    /// Show line numbers in code blocks.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) show_line_numbers: Option<bool>,
+    /// Wrap long lines in code blocks.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) word_wrap: Option<bool>,
+}
+
+/// Resolved WebUI appearance with defaults applied. Used as the settings
+/// write model and mirrored to the web protocol snapshot/`bootstrap`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WebUiAppearance {
+    pub theme: String,
+    pub ui_font_size: u32,
+    pub code_font_size: u32,
+    pub code_theme: String,
+    pub show_line_numbers: bool,
+    pub word_wrap: bool,
+}
+
+impl Default for WebUiAppearance {
+    fn default() -> Self {
+        Self {
+            theme: "system".to_owned(),
+            ui_font_size: 14,
+            code_font_size: 12,
+            code_theme: "auto".to_owned(),
+            show_line_numbers: true,
+            word_wrap: true,
+        }
+    }
+}
+
+impl WebUiAppearance {
+    /// Merge a partial `[webui]` table over the defaults.
+    #[must_use]
+    pub fn from_file(file: Option<&FileWebUiConfig>) -> Self {
+        let defaults = Self::default();
+        let Some(file) = file else {
+            return defaults;
+        };
+        Self {
+            theme: file.theme.clone().unwrap_or(defaults.theme),
+            ui_font_size: file.ui_font_size.unwrap_or(defaults.ui_font_size),
+            code_font_size: file.code_font_size.unwrap_or(defaults.code_font_size),
+            code_theme: file.code_theme.clone().unwrap_or(defaults.code_theme),
+            show_line_numbers: file.show_line_numbers.unwrap_or(defaults.show_line_numbers),
+            word_wrap: file.word_wrap.unwrap_or(defaults.word_wrap),
+        }
+    }
 }

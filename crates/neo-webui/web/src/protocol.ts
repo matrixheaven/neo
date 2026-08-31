@@ -674,6 +674,15 @@ export interface WebUiModelInfo {
   reasoning: ReasoningCapability;
 }
 
+export interface WebUiAppearance {
+  theme: string;
+  ui_font_size: number;
+  code_font_size: number;
+  code_theme: string;
+  show_line_numbers: boolean;
+  word_wrap: boolean;
+}
+
 export interface WebUiBootstrap {
   workspace_label?: string | null;
   default_model: string;
@@ -681,6 +690,7 @@ export interface WebUiBootstrap {
   models?: WebUiModelInfo[];
   permission_modes?: PermissionMode[];
   development_modes?: WebUiDevelopmentMode[];
+  appearance: WebUiAppearance;
   sessions?: WebUiSessionSummary[];
 }
 
@@ -716,7 +726,7 @@ export interface WebUiProviderInfo {
   has_api_key: boolean;
 }
 
-/** Read-only MCP server row for the settings page. */
+/** Read-only MCP server row for the settings page (env/header KEYS only). */
 export interface WebUiMcpServerInfo {
   id: string;
   enabled: boolean;
@@ -724,6 +734,8 @@ export interface WebUiMcpServerInfo {
   command?: string | null;
   url?: string | null;
   tool_count: number;
+  env_keys?: string[];
+  header_keys?: string[];
 }
 
 /** One skill discovered from the skill store. */
@@ -738,13 +750,15 @@ export interface WebUiSettingsSnapshot {
   default_model: string;
   default_provider?: string | null;
   permission_mode: string;
+  default_reasoning: ReasoningSelection;
+  appearance: WebUiAppearance;
   providers: WebUiProviderInfo[];
   models: WebUiModelInfo[];
   mcp_servers: WebUiMcpServerInfo[];
   skills: WebUiSkillInfo[];
 }
 
-/** Add-or-update MCP server body. */
+/** Add-or-update MCP server body (transport-specific field sets). */
 export interface WebUiMcpServerEdit {
   id: string;
   transport: string;
@@ -752,6 +766,36 @@ export interface WebUiMcpServerEdit {
   command?: string | null;
   url?: string | null;
   args: string[];
+  env?: Record<string, string>;
+  headers?: Record<string, string>;
+}
+
+export interface WebUiProviderEdit {
+  id: string;
+  display_name?: string | null;
+  provider_type?: string | null;
+  base_url?: string | null;
+  api_key?: string | null;
+  api_key_env?: string | null;
+}
+
+export interface WebUiModelEdit {
+  alias: string;
+  provider: string;
+  model: string;
+  display_name?: string | null;
+  max_context_tokens?: number | null;
+  max_output_tokens?: number | null;
+  capabilities: string[];
+  reasoning: ReasoningCapability;
+}
+
+export interface WebUiSetPermissionModeBody {
+  mode: string;
+}
+
+export interface WebUiSetAppearanceBody {
+  appearance: WebUiAppearance;
 }
 
 /** Body of `POST /api/attachments`: one base64 media payload. */

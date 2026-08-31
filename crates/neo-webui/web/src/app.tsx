@@ -7,13 +7,12 @@
 import { NeoMark } from "./components/neoMark";
 import { FixedSummary, InformationPanel } from "./components/agentPanel";
 import { Composer } from "./components/composer";
-import { SettingsDialog } from "./components/settingsDialog";
+import { SettingsPage } from "./components/settingsPage";
 import { Sidebar } from "./components/sidebar";
 import { SidebarResizer } from "./components/sidebarResizer";
 import { TopBar } from "./components/topBar";
 import { TranscriptPane } from "./components/transcript";
 import { useAppActions, useAppState } from "./state/store";
-import { useState } from "react";
 
 function AccessFailed() {
   return (
@@ -63,7 +62,6 @@ function SessionView({ sessionId }: { sessionId: string }) {
 export function App() {
   const state = useAppState();
   const actions = useAppActions();
-  const [settingsOpen, setSettingsOpen] = useState(false);
 
   if (state.auth === "pending") {
     return <Loading />;
@@ -82,10 +80,36 @@ export function App() {
     return <Loading />;
   }
 
+  const mainContent =
+    state.view === "settings" ? (
+      <SettingsPage />
+    ) : connectionBannerState === "reconnecting" ? (
+      <div className="connection-banner" role="status">
+        连接已断开，正在重连…
+      </div>
+    ) : (
+      <>
+        {state.notice !== null ? (
+          <div className="notice" role="status">
+            <span>{state.notice}</span>
+            <button type="button" className="notice-dismiss" onClick={() => actions.dismissNotice()}>
+              知道了
+            </button>
+          </div>
+        ) : null}
+        {connectionBannerState === "connecting" ? (
+          <Loading />
+        ) : sessionId === null ? (
+          <NewSessionView />
+        ) : (
+          <SessionView sessionId={sessionId} />
+        )}
+      </>
+    );
+
   return (
     <div className="app-shell">
-      <TopBar onOpenSettings={() => setSettingsOpen(true)} />
-      {settingsOpen ? <SettingsDialog onClose={() => setSettingsOpen(false)} /> : null}
+      <TopBar onOpenSettings={() => actions.setView("settings")} />
       <div className={`app-body ${state.sidebarCollapsed ? "sidebar-collapsed" : ""}`}>
         <Sidebar />
         <SidebarResizer />
@@ -96,29 +120,8 @@ export function App() {
             onClick={() => actions.setDrawerOpen(false)}
           />
         ) : null}
-        <main className="main-area">
-          {connectionBannerState === "reconnecting" ? (
-            <div className="connection-banner" role="status">
-              连接已断开，正在重连…
-            </div>
-          ) : null}
-          {state.notice !== null ? (
-            <div className="notice" role="status">
-              <span>{state.notice}</span>
-              <button type="button" className="notice-dismiss" onClick={() => actions.dismissNotice()}>
-                知道了
-              </button>
-            </div>
-          ) : null}
-          {connectionBannerState === "connecting" ? (
-            <Loading />
-          ) : sessionId === null ? (
-            <NewSessionView />
-          ) : (
-            <SessionView sessionId={sessionId} />
-          )}
-        </main>
-        <InformationPanel />
+        <main className="main-area">{mainContent}</main>
+        {state.view === "chat" ? <InformationPanel /> : null}
       </div>
     </div>
   );

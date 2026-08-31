@@ -21,6 +21,13 @@ import "prismjs/components/prism-tsx";
 import "prismjs/components/prism-yaml";
 import { useEffect, useRef, useState, type CSSProperties, type ReactNode } from "react";
 
+function documentCodeTheme(): string | null {
+  return document.documentElement.dataset.codeTheme ?? null;
+}
+function documentLineNumbers(): boolean {
+  return document.documentElement.dataset.lineNumbers === "on";
+}
+
 const languageAliases: Readonly<Record<string, string>> = {
   "参数": "json",
   bash: "bash",
@@ -172,19 +179,45 @@ export function CodeBlock({
   language?: string;
 }) {
   const highlighted = highlightedCode(code, language);
+  const lineNumbers = documentLineNumbers();
+  const codeTheme = documentCodeTheme();
+  const lines = code.split("\n");
   return (
-    <div className="code-block">
+    <div
+      className="code-block"
+      data-code-theme={codeTheme === "light" || codeTheme === "dark" ? codeTheme : undefined}
+    >
       <div className="code-block-bar">
         <span className="code-block-lang">{language ?? "text"}</span>
         <CopyButton text={code} label="复制代码" />
       </div>
-      <pre>
-        <code className={highlighted.language ? `language-${highlighted.language}` : undefined}>
-          {highlighted.content}
-        </code>
+      <pre className={lineNumbers ? "code-block-pre code-block-lines" : "code-block-pre"}>
+        {lineNumbers ? (
+          <div className="code-line-table">
+            {lines.map((line, index) => (
+              <div className="code-line" key={index}>
+                <span className="code-line-no">{index + 1}</span>
+                <code className={highlighted.language ? `language-${highlighted.language}` : undefined}>
+                  {renderLine(line, highlighted.language)}
+                </code>
+              </div>
+            ))}
+          </div>
+        ) : (
+          <code className={highlighted.language ? `language-${highlighted.language}` : undefined}>
+            {highlighted.content}
+          </code>
+        )}
       </pre>
     </div>
   );
+}
+
+function renderLine(line: string, syntax: string | null): ReactNode {
+  if (!syntax) return line;
+  const grammar = Prism.languages[syntax as keyof typeof Prism.languages];
+  if (!grammar) return line;
+  return renderTokenStream(Prism.tokenize(line, grammar), "line");
 }
 
 export function OutputBlock({ text, children }: { text: string; children?: ReactNode }) {

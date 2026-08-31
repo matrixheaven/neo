@@ -320,3 +320,84 @@ fn failed_startup_theme_write_leaves_previous_config_unchanged() {
         "failed write must leave the previous config unchanged"
     );
 }
+
+#[test]
+fn set_permission_mode_persists_and_preserves_other_fields() {
+    let temp = TempDir::new().expect("temp dir");
+    let config_path = temp.path().join("config.toml");
+    fs::write(&config_path, "default_model = \"keep\"\n").unwrap();
+
+    super::super::set_permission_mode(&config_path, neo_agent_core::PermissionMode::Auto).unwrap();
+
+    let config = read_file_config(&config_path).unwrap();
+    assert_eq!(
+        config.permission_mode,
+        Some(neo_agent_core::PermissionMode::Auto)
+    );
+    assert_eq!(
+        config.default_model.as_deref(),
+        Some("keep"),
+        "unrelated settings preserved"
+    );
+}
+
+#[test]
+fn set_appearance_persists_webui_block() {
+    let temp = TempDir::new().expect("temp dir");
+    let config_path = temp.path().join("config.toml");
+    fs::write(&config_path, "default_model = \"keep\"\n").unwrap();
+
+    let appearance = crate::config::WebUiAppearance {
+        theme: "dark".to_owned(),
+        ui_font_size: 15,
+        code_font_size: 13,
+        code_theme: "auto".to_owned(),
+        show_line_numbers: false,
+        word_wrap: true,
+    };
+    super::super::set_appearance(&config_path, &appearance).unwrap();
+
+    let config = read_file_config(&config_path).unwrap();
+    let webui = config.webui.expect("[webui] table persisted");
+    assert_eq!(webui.theme.as_deref(), Some("dark"));
+    assert_eq!(webui.ui_font_size, Some(15));
+    assert_eq!(webui.code_font_size, Some(13));
+    assert_eq!(webui.code_theme.as_deref(), Some("auto"));
+    assert_eq!(webui.show_line_numbers, Some(false));
+    assert_eq!(webui.word_wrap, Some(true));
+    assert_eq!(config.default_model.as_deref(), Some("keep"));
+}
+
+#[test]
+fn set_appearance_rejects_invalid_enum_without_writing() {
+    let temp = TempDir::new().expect("temp dir");
+    let config_path = temp.path().join("config.toml");
+    fs::write(&config_path, "default_model = \"keep\"\n").unwrap();
+
+    let invalid_theme = crate::config::WebUiAppearance {
+        theme: "neon".to_owned(),
+        ui_font_size: 14,
+        code_font_size: 12,
+        code_theme: "auto".to_owned(),
+        show_line_numbers: true,
+        word_wrap: true,
+    };
+    assert!(super::super::set_appearance(&config_path, &invalid_theme).is_err());
+
+    let invalid_code = crate::config::WebUiAppearance {
+        theme: "system".to_owned(),
+        ui_font_size: 14,
+        code_font_size: 12,
+        code_theme: "purple".to_owned(),
+        show_line_numbers: true,
+        word_wrap: true,
+    };
+    assert!(super::super::set_appearance(&config_path, &invalid_code).is_err());
+
+    let config = read_file_config(&config_path).unwrap();
+    assert!(
+        config.webui.is_none(),
+        "failed validation must not write config"
+    );
+    assert_eq!(config.default_model.as_deref(), Some("keep"));
+}

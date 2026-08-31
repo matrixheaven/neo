@@ -16,6 +16,7 @@ use neo_agent_core::{
 };
 use neo_ai::{ReasoningCapability, ReasoningSelection};
 use serde::{Deserialize, Serialize};
+use std::collections::BTreeMap;
 
 /// Body of `POST /api/auth/claim`. The token is sensitive: it must never be
 /// logged, echoed, or persisted.
@@ -571,6 +572,16 @@ pub enum WebUiCommand {
     SetDefaultModel {
         alias: String,
     },
+    SetDefaultModelSelection {
+        alias: String,
+        reasoning: ReasoningSelection,
+    },
+    SetPermissionMode {
+        mode: String,
+    },
+    SetAppearance {
+        appearance: WebUiAppearance,
+    },
     SetMcpServerEnabled {
         server_id: String,
         enabled: bool,
@@ -580,6 +591,18 @@ pub enum WebUiCommand {
     },
     UpsertMcpServer {
         server: WebUiMcpServerEdit,
+    },
+    AddProvider {
+        provider: WebUiProviderEdit,
+    },
+    RemoveProvider {
+        provider_id: String,
+    },
+    AddModel {
+        model: WebUiModelEdit,
+    },
+    RemoveModel {
+        alias: String,
     },
 }
 
@@ -660,7 +683,7 @@ pub struct WebUiProviderInfo {
 }
 
 /// Read-only MCP server row for the settings page. The wire never carries
-/// server env/headers/credentials.
+/// server env/headers/credentials — only their keys.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct WebUiMcpServerInfo {
     pub id: String,
@@ -672,6 +695,12 @@ pub struct WebUiMcpServerInfo {
     pub url: Option<String>,
     #[serde(default)]
     pub tool_count: usize,
+    /// Environment-variable keys for stdio servers (names only, never values).
+    #[serde(default)]
+    pub env_keys: Vec<String>,
+    /// Header keys for http/sse servers (names only, never values).
+    #[serde(default)]
+    pub header_keys: Vec<String>,
 }
 
 /// One skill discovered from the skill store (project/user/extra/built-in).
@@ -692,6 +721,13 @@ pub struct WebUiSettingsSnapshot {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub default_provider: Option<String>,
     pub permission_mode: String,
+    /// The default reasoning selection attached to `default_model`, used to
+    /// prefill the settings model selector.
+    #[serde(default)]
+    pub default_reasoning: ReasoningSelection,
+    /// Persistent `WebUI` appearance (from `[webui]`), not the TUI theme id.
+    #[serde(default)]
+    pub appearance: WebUiAppearance,
     #[serde(default)]
     pub providers: Vec<WebUiProviderInfo>,
     #[serde(default)]
@@ -702,8 +738,10 @@ pub struct WebUiSettingsSnapshot {
     pub skills: Vec<WebUiSkillInfo>,
 }
 
-/// Add-or-update MCP server body. Only the fields a settings page may edit:
-/// no env/headers/credentials.
+/// Add-or-update MCP server body. Only the fields a settings page may edit;
+/// transport-specific: stdio uses `command`/`args`/`env`, http/sse use
+/// `url`/`headers`. Credentials (header values, bearer tokens) ride the POST
+/// body but are never echoed back by the snapshot.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct WebUiMcpServerEdit {
@@ -717,6 +755,98 @@ pub struct WebUiMcpServerEdit {
     pub url: Option<String>,
     #[serde(default)]
     pub args: Vec<String>,
+    #[serde(default)]
+    pub env: BTreeMap<String, String>,
+    #[serde(default)]
+    pub headers: BTreeMap<String, String>,
+}
+
+/// `WebUI` display appearance across a full settings save. Persisted under the
+/// `[webui]` config table (never the TUI `[tui].theme` file id).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct WebUiAppearance {
+    /// Interface theme: `"system"`, `"light"`, or `"dark"`.
+    pub theme: String,
+    pub ui_font_size: u32,
+    pub code_font_size: u32,
+    /// Code token palette: `"auto"`, `"light"`, or `"dark"`.
+    pub code_theme: String,
+    pub show_line_numbers: bool,
+    pub word_wrap: bool,
+}
+
+impl Default for WebUiAppearance {
+    fn default() -> Self {
+        Self {
+            theme: "system".to_owned(),
+            ui_font_size: 14,
+            code_font_size: 12,
+            code_theme: "auto".to_owned(),
+            show_line_numbers: true,
+            word_wrap: true,
+        }
+    }
+}
+
+/// Add-or-replace provider body. The API key is accepted inline or as an env
+/// reference; only `has_api_key` crosses back in the snapshot.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct WebUiProviderEdit {
+    pub id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub display_name: Option<String>,
+    /// Provider wire type (`openai`/`openai_response`/`anthropic`/`google`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provider_type: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub base_url: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub api_key: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub api_key_env: Option<String>,
+}
+
+/// Add-or-replace model body (one entry of `[models.<alias>]`).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct WebUiModelEdit {
+    pub alias: String,
+    pub provider: String,
+    pub model: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub display_name: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_context_tokens: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_output_tokens: Option<u32>,
+    #[serde(default)]
+    pub capabilities: Vec<String>,
+    #[serde(default)]
+    pub reasoning: ReasoningCapability,
+}
+
+/// Body of `PATCH /api/settings/default-model-selection`.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct WebUiSetDefaultModelSelectionBody {
+    pub alias: String,
+    pub reasoning: ReasoningSelection,
+}
+
+/// Body of `PATCH /api/settings/permission-mode`.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct WebUiSetPermissionModeBody {
+    pub mode: String,
+}
+
+/// Body of `PATCH /api/settings/appearance`.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct WebUiSetAppearanceBody {
+    pub appearance: WebUiAppearance,
 }
 
 /// Body of `PATCH /api/settings/default-model`.
@@ -746,6 +876,9 @@ pub struct WebUiBootstrap {
     pub permission_modes: Vec<PermissionMode>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub development_modes: Vec<WebUiDevelopmentMode>,
+    /// Persistent `WebUI` appearance applied on first load.
+    #[serde(default)]
+    pub appearance: WebUiAppearance,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub sessions: Vec<WebUiSessionSummary>,
 }

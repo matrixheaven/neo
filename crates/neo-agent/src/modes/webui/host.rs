@@ -19,13 +19,14 @@ use neo_agent_core::session::{
 };
 use neo_agent_core::{AgentEvent, Content, MediaRef, PendingQuestion};
 use neo_webui::protocol::{
-    WebUiAgentHistory, WebUiAttachmentAck, WebUiBootstrap, WebUiBranchList, WebUiChangeStatus,
-    WebUiCommand, WebUiCompletionItem, WebUiCompletions, WebUiComposer, WebUiDevelopmentMode,
-    WebUiError, WebUiErrorCode, WebUiFsEntry, WebUiFsListing, WebUiHost, WebUiMcpServerEdit,
-    WebUiMcpServerInfo, WebUiModelInfo, WebUiProviderInfo, WebUiReply, WebUiSessionMetadata,
-    WebUiSessionPage, WebUiSessionScope, WebUiSessionSummary, WebUiSettingsSnapshot,
-    WebUiSkillInfo, WebUiSnapshot, WebUiSummaryState, WebUiWorkspaceChange,
-    WebUiWorkspaceChangeDetail, WebUiWorkspaceChanges, WebUiWorkspaceGroup, WebUiWorkspaceSnapshot,
+    WebUiAgentHistory, WebUiAppearance, WebUiAttachmentAck, WebUiBootstrap, WebUiBranchList,
+    WebUiChangeStatus, WebUiCommand, WebUiCompletionItem, WebUiCompletions, WebUiComposer,
+    WebUiDevelopmentMode, WebUiError, WebUiErrorCode, WebUiFsEntry, WebUiFsListing, WebUiHost,
+    WebUiMcpServerEdit, WebUiMcpServerInfo, WebUiModelEdit, WebUiModelInfo, WebUiProviderEdit,
+    WebUiProviderInfo, WebUiReply, WebUiSessionMetadata, WebUiSessionPage, WebUiSessionScope,
+    WebUiSessionSummary, WebUiSettingsSnapshot, WebUiSkillInfo, WebUiSnapshot, WebUiSummaryState,
+    WebUiWorkspaceChange, WebUiWorkspaceChangeDetail, WebUiWorkspaceChanges, WebUiWorkspaceGroup,
+    WebUiWorkspaceSnapshot,
 };
 use neo_webui::relay::{
     ATTACHMENT_MAX_BYTES, ATTACHMENTS_PER_MESSAGE_MAX, Relay, SESSION_PAGE_LIMIT,
@@ -36,7 +37,10 @@ use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
-use crate::config::{AppConfig, ConfigOverrides, neo_home, workspace_sessions_dir};
+use crate::config::{
+    AppConfig, ConfigOverrides, WebUiAppearance as ConfigWebUiAppearance, neo_home,
+    workspace_sessions_dir,
+};
 use crate::modes::interactive::{TurnChannels, TurnOutcome, TurnRequest};
 use crate::modes::run::{run_prompt_in_session_streaming, run_prompt_streaming};
 use crate::modes::sessions;
@@ -1186,6 +1190,7 @@ impl WebUiHost for WebSessionHost {
                         WebUiDevelopmentMode::Plan,
                         WebUiDevelopmentMode::Goal,
                     ],
+                    appearance: self.appearance(),
                     sessions: sessions.items,
                 }))
             }
@@ -1374,11 +1379,20 @@ impl WebUiHost for WebSessionHost {
             WebUiCommand::FsList { path } => self.fs_list(path.as_deref()),
             WebUiCommand::SettingsSnapshot => self.settings_snapshot(),
             WebUiCommand::SetDefaultModel { alias } => self.set_default_model(&alias),
+            WebUiCommand::SetDefaultModelSelection { alias, reasoning } => {
+                self.set_default_model_selection(&alias, reasoning)
+            }
+            WebUiCommand::SetPermissionMode { mode } => self.set_permission_mode(&mode),
+            WebUiCommand::SetAppearance { appearance } => self.set_appearance(appearance),
             WebUiCommand::SetMcpServerEnabled { server_id, enabled } => {
                 self.set_mcp_server_enabled(&server_id, enabled)
             }
             WebUiCommand::RemoveMcpServer { server_id } => self.remove_mcp_server(&server_id),
             WebUiCommand::UpsertMcpServer { server } => self.upsert_mcp_server(server),
+            WebUiCommand::AddProvider { provider } => self.add_provider(provider),
+            WebUiCommand::RemoveProvider { provider_id } => self.remove_provider(&provider_id),
+            WebUiCommand::AddModel { model } => self.add_model(model),
+            WebUiCommand::RemoveModel { alias } => self.remove_model(&alias),
             WebUiCommand::ListBranches { workspace_id } => self.list_branches(&workspace_id).await,
             WebUiCommand::CheckoutBranch {
                 workspace_id,
@@ -1580,12 +1594,20 @@ impl WebSessionHost {
                 command: server.command.clone(),
                 url: server.url.clone(),
                 tool_count: server.enabled_tools.len(),
+                env_keys: server.env.keys().cloned().collect(),
+                header_keys: server.headers.keys().cloned().collect(),
             })
             .collect();
 
-        let mut models: Vec<WebUiModelInfo> = self
-            .config
-            .models
+        let base_models = persisted
+            .as_ref()
+            .and_then(|file| file.models.as_ref())
+            .unwrap_or(&self.config.models);
+        let base_providers = persisted
+            .as_ref()
+            .and_then(|file| file.providers.as_ref())
+            .unwrap_or(&self.config.providers);
+        let mut models: Vec<WebUiModelInfo> = base_models
             .iter()
             .map(|(alias, model)| WebUiModelInfo {
                 alias: alias.clone(),
@@ -1619,7 +1641,7 @@ impl WebSessionHost {
             known_aliases.insert(default_alias.clone());
         }
         let registry = neo_ai::registry::ModelRegistry::seeded();
-        for provider_id in self.config.providers.keys() {
+        for provider_id in base_providers.keys() {
             for spec in registry.list() {
                 if spec.provider.0 != *provider_id {
                     continue;
@@ -1638,9 +1660,7 @@ impl WebSessionHost {
             }
         }
         models.sort_by(|left, right| left.alias.cmp(&right.alias));
-        let providers: Vec<WebUiProviderInfo> = self
-            .config
-            .providers
+        let providers: Vec<WebUiProviderInfo> = base_providers
             .iter()
             .map(|(id, provider)| WebUiProviderInfo {
                 id: id.clone(),
@@ -1672,10 +1692,21 @@ impl WebSessionHost {
                 .collect()
         })
         .unwrap_or_default();
+        let default_reasoning = persisted
+            .as_ref()
+            .and_then(|file| file.runtime.as_ref())
+            .and_then(|runtime| runtime.reasoning.clone())
+            .unwrap_or_else(|| self.config.runtime.reasoning.clone());
+        let permission_mode = persisted
+            .as_ref()
+            .and_then(|file| file.permission_mode)
+            .unwrap_or(self.config.permission_mode);
         Ok(WebUiReply::Settings(WebUiSettingsSnapshot {
             default_model,
             default_provider: Some(default_provider),
-            permission_mode: self.config.permission_mode.label().to_owned(),
+            permission_mode: permission_mode.label().to_owned(),
+            default_reasoning,
+            appearance: self.appearance(),
             providers,
             models,
             mcp_servers,
@@ -1685,10 +1716,10 @@ impl WebSessionHost {
 
     fn set_default_model(&self, alias: &str) -> Result<WebUiReply, WebUiError> {
         let known = alias == self.config.default_model
-            || self.config.models.contains_key(alias)
+            || self.model_known(alias)
             || alias
                 .split_once('/')
-                .is_some_and(|(provider, _)| self.config.providers.contains_key(provider));
+                .is_some_and(|(provider, _)| self.provider_known(provider));
         if !known {
             return Err(WebUiError::new(WebUiErrorCode::InvalidRequest));
         }
@@ -1696,6 +1727,179 @@ impl WebSessionHost {
         crate::config::mutations::set_default_model(&config_path, alias)
             .map_err(|_| Self::internal())?;
         self.settings_snapshot()
+    }
+
+    /// Select the default model together with its reasoning intensity. Uses the
+    /// same validation as `set_default_model` and persists model/provider/
+    /// reasoning atomically.
+    fn set_default_model_selection(
+        &self,
+        alias: &str,
+        reasoning: neo_ai::ReasoningSelection,
+    ) -> Result<WebUiReply, WebUiError> {
+        let provider_id = self.provider_for_alias(alias)?;
+        let config_path = crate::config::default_config_path().ok_or_else(Self::internal)?;
+        crate::config::mutations::set_model_selection(
+            &config_path,
+            alias,
+            &provider_id,
+            &reasoning,
+        )
+        .map_err(|_| Self::internal())?;
+        self.settings_snapshot()
+    }
+
+    fn set_permission_mode(&self, mode: &str) -> Result<WebUiReply, WebUiError> {
+        let mode = match mode {
+            "ask" => neo_agent_core::PermissionMode::Ask,
+            "auto" => neo_agent_core::PermissionMode::Auto,
+            "yolo" => neo_agent_core::PermissionMode::Yolo,
+            _ => return Err(WebUiError::new(WebUiErrorCode::InvalidRequest)),
+        };
+        let config_path = crate::config::default_config_path().ok_or_else(Self::internal)?;
+        crate::config::mutations::set_permission_mode(&config_path, mode)
+            .map_err(|_| Self::internal())?;
+        self.settings_snapshot()
+    }
+
+    fn set_appearance(&self, appearance: WebUiAppearance) -> Result<WebUiReply, WebUiError> {
+        let config_path = crate::config::default_config_path().ok_or_else(Self::internal)?;
+        crate::config::mutations::set_appearance(
+            &config_path,
+            &ConfigWebUiAppearance {
+                theme: appearance.theme,
+                ui_font_size: appearance.ui_font_size,
+                code_font_size: appearance.code_font_size,
+                code_theme: appearance.code_theme,
+                show_line_numbers: appearance.show_line_numbers,
+                word_wrap: appearance.word_wrap,
+            },
+        )
+        .map_err(|_| Self::internal())?;
+        self.settings_snapshot()
+    }
+
+    fn add_provider(&self, edit: WebUiProviderEdit) -> Result<WebUiReply, WebUiError> {
+        if edit.id.trim().is_empty() {
+            return Err(WebUiError::new(WebUiErrorCode::InvalidRequest));
+        }
+        let provider_type = match edit.provider_type.as_deref() {
+            None => None,
+            Some(raw) => Some(
+                neo_ai::ApiType::from_config_str(raw)
+                    .ok_or_else(|| WebUiError::new(WebUiErrorCode::InvalidRequest))?,
+            ),
+        };
+        if edit.api_key.is_some() && edit.api_key_env.is_some() {
+            return Err(WebUiError::new(WebUiErrorCode::InvalidRequest));
+        }
+        let provider = crate::config::ProviderConfig {
+            display_name: edit.display_name,
+            provider_type,
+            base_url: edit.base_url,
+            api_key: edit.api_key,
+            api_key_env: edit.api_key_env,
+        };
+        let config_path = crate::config::default_config_path().ok_or_else(Self::internal)?;
+        crate::config::mutations::add_provider(&config_path, &edit.id, provider)
+            .map_err(|_| Self::internal())?;
+        self.settings_snapshot()
+    }
+
+    fn remove_provider(&self, provider_id: &str) -> Result<WebUiReply, WebUiError> {
+        let config_path = crate::config::default_config_path().ok_or_else(Self::internal)?;
+        crate::config::mutations::remove_provider(&config_path, provider_id)
+            .map_err(|_| Self::internal())?;
+        self.settings_snapshot()
+    }
+
+    fn add_model(&self, edit: WebUiModelEdit) -> Result<WebUiReply, WebUiError> {
+        if edit.alias.trim().is_empty()
+            || edit.model.trim().is_empty()
+            || !self.provider_known(&edit.provider)
+        {
+            return Err(WebUiError::new(WebUiErrorCode::InvalidRequest));
+        }
+        let model = crate::config::ModelConfig {
+            provider: edit.provider,
+            model: edit.model,
+            max_context_tokens: edit.max_context_tokens,
+            max_output_tokens: edit.max_output_tokens,
+            capabilities: edit.capabilities,
+            reasoning: edit.reasoning,
+            display_name: edit.display_name,
+        };
+        let config_path = crate::config::default_config_path().ok_or_else(Self::internal)?;
+        crate::config::mutations::add_model(&config_path, &edit.alias, model)
+            .map_err(|_| Self::internal())?;
+        self.settings_snapshot()
+    }
+
+    fn remove_model(&self, alias: &str) -> Result<WebUiReply, WebUiError> {
+        let config_path = crate::config::default_config_path().ok_or_else(Self::internal)?;
+        crate::config::mutations::remove_model(&config_path, alias)
+            .map_err(|_| Self::internal())?;
+        self.settings_snapshot()
+    }
+
+    /// Resolve the provider id that owns `alias` (inline model, `provider/model`,
+    /// or the default provider) for `set_model_selection`. Checks the persisted
+    /// config first so a model added through this service resolves immediately.
+    fn provider_for_alias(&self, alias: &str) -> Result<String, WebUiError> {
+        if let Some(file) = self.persisted_file()
+            && let Some(model) = file.models.as_ref().and_then(|models| models.get(alias))
+        {
+            return Ok(model.provider.clone());
+        }
+        if let Some(model) = self.config.models.get(alias) {
+            return Ok(model.provider.clone());
+        }
+        if let Some((provider, _)) = alias.split_once('/') {
+            return Ok(provider.to_owned());
+        }
+        Ok(self.config.default_provider.clone())
+    }
+
+    /// Read the persisted `config.toml` (the in-memory `AppConfig` is a
+    /// startup snapshot; mutations only touch the file).
+    fn persisted_file(&self) -> Option<crate::config::FileConfig> {
+        crate::config::default_config_path()
+            .and_then(|path| std::fs::read_to_string(path).ok())
+            .and_then(|text| toml::from_str::<crate::config::FileConfig>(&text).ok())
+    }
+
+    fn provider_known(&self, id: &str) -> bool {
+        self.config.providers.contains_key(id)
+            || self
+                .persisted_file()
+                .and_then(|file| file.providers)
+                .is_some_and(|providers| providers.contains_key(id))
+    }
+
+    fn model_known(&self, alias: &str) -> bool {
+        self.config.models.contains_key(alias)
+            || self
+                .persisted_file()
+                .and_then(|file| file.models)
+                .is_some_and(|models| models.contains_key(alias))
+    }
+
+    /// Persistent WebUI appearance from the `[webui]` config table, with
+    /// defaults applied. Reads the file directly so a write is reflected
+    /// immediately (the in-memory `AppConfig` is a startup snapshot).
+    fn appearance(&self) -> WebUiAppearance {
+        let persisted = self.persisted_file();
+        let cfg = ConfigWebUiAppearance::from_file(
+            persisted.as_ref().and_then(|file| file.webui.as_ref()),
+        );
+        WebUiAppearance {
+            theme: cfg.theme,
+            ui_font_size: cfg.ui_font_size,
+            code_font_size: cfg.code_font_size,
+            code_theme: cfg.code_theme,
+            show_line_numbers: cfg.show_line_numbers,
+            word_wrap: cfg.word_wrap,
+        }
     }
 
     fn set_mcp_server_enabled(
@@ -1730,8 +1934,8 @@ impl WebSessionHost {
             command: edit.command,
             url: edit.url,
             args: edit.args,
-            env: Default::default(),
-            headers: Default::default(),
+            env: edit.env,
+            headers: edit.headers,
             cwd: None,
             enabled_tools: Vec::new(),
             disabled_tools: Vec::new(),

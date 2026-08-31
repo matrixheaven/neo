@@ -16,6 +16,8 @@ import type {
 import type { TranscriptProjection } from "./transcript";
 import { emptyProjection } from "./transcript";
 import type { Theme } from "./theme";
+import { defaultAppearance } from "./theme";
+import type { WebUiAppearance } from "../protocol";
 
 // Design §3: sidebar 264px default, min 220, max 400 (drag + keyboard).
 export const SIDEBAR_DEFAULT = 264;
@@ -94,6 +96,9 @@ export type ConnectionState = "connecting" | "open" | "reconnecting";
 
 export type InformationPanelTab = "subagents" | "review";
 
+/** Which full-page surface the main area shows. */
+export type AppView = "chat" | "settings";
+
 export interface ReviewTarget {
   sessionId: string;
   messageId: string;
@@ -128,6 +133,10 @@ export interface AppState {
   sidebarCollapsed: boolean;
   /** Active color theme; mirrored onto document.documentElement[data-theme]. */
   theme: Theme;
+  /** Config-backed appearance ([webui]). Drives font sizes / code theme. */
+  appearance: WebUiAppearance;
+  /** Full-page surface the main area renders. */
+  view: AppView;
   /** Session id whose context menu is open, if any. */
   activeContextMenu: string | null;
   summaries: WebUiSessionSummary[];
@@ -156,6 +165,8 @@ export function initialAppState(sidebarWidth: number, theme: Theme): AppState {
     sidebarDrawerOpen: false,
     sidebarCollapsed: false,
     theme,
+    appearance: defaultAppearance(),
+    view: "chat",
     activeContextMenu: null,
     summaries: [],
     workspaces: [],
@@ -189,6 +200,8 @@ export type AppAction =
   | { type: "set_drawer_open"; open: boolean }
   | { type: "set_sidebar_collapsed"; collapsed: boolean }
   | { type: "theme_changed"; theme: Theme }
+  | { type: "appearance_applied"; appearance: WebUiAppearance; theme: Theme }
+  | { type: "set_view"; view: AppView }
   | { type: "set_context_menu"; sessionId: string | null }
   | { type: "draft_changed"; sessionId: string; text: string }
   | { type: "set_line_expanded"; sessionId: string; itemId: string; expanded: boolean }

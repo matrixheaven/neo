@@ -51,10 +51,13 @@ import {
 import { appReducer } from "./reducer";
 import {
   applyTheme,
+  applyAppearance,
   loadThemePreference,
   saveThemePreference,
+  watchSystemTheme,
   type Theme,
 } from "./theme";
+import type { WebUiAppearance } from "../protocol";
 
 const SIDEBAR_WIDTH_KEY = "neo-webui.sidebar-width";
 
@@ -89,6 +92,8 @@ export interface AppActions {
   setDrawerOpen(open: boolean): void;
   setSidebarCollapsed(collapsed: boolean): void;
   setTheme(theme: Theme): void;
+  applyAppearance(appearance: WebUiAppearance): void;
+  setView(view: import("./appState").AppView): void;
   setContextMenu(sessionId: string | null): void;
   setDraft(sessionId: string, text: string): void;
   setLineExpanded(sessionId: string, itemId: string, expanded: boolean): void;
@@ -161,6 +166,10 @@ export function AppProvider({ children }: { children: ReactNode }) {
         if (cancelled) return;
         dispatch({ type: "auth_result", ok: true });
         dispatch({ type: "bootstrap_loaded", bootstrap });
+        if (bootstrap.appearance) {
+          const theme = applyAppearance(bootstrap.appearance);
+          dispatch({ type: "appearance_applied", appearance: bootstrap.appearance, theme });
+        }
       } catch {
         if (cancelled) return;
         dispatch({ type: "auth_result", ok: false });
@@ -264,6 +273,20 @@ export function AppProvider({ children }: { children: ReactNode }) {
     }
   }, [state.auth, state.connection, state.selectedSessionId, state.sessions]);
 
+  // -- System-theme following ------------------------------------------------
+  useEffect(() => {
+    if (state.auth !== "ok") return;
+    const stop = watchSystemTheme(state.appearance, (theme) => {
+      applyTheme(theme);
+      dispatch({
+        type: "appearance_applied",
+        appearance: state.appearance,
+        theme,
+      });
+    });
+    return stop;
+  }, [state.auth, state.appearance]);
+
   // -- Error mapping ----------------------------------------------------------
   const handleApiError = useCallback((error: unknown, sessionId?: string) => {
     if (error instanceof ApiError) {
@@ -344,6 +367,13 @@ export function AppProvider({ children }: { children: ReactNode }) {
       saveThemePreference(theme);
       applyTheme(theme);
       dispatch({ type: "theme_changed", theme });
+    },
+    applyAppearance(appearance) {
+      const theme = applyAppearance(appearance);
+      dispatch({ type: "appearance_applied", appearance, theme });
+    },
+    setView(view) {
+      dispatch({ type: "set_view", view });
     },
     setContextMenu(sessionId) {
       dispatch({ type: "set_context_menu", sessionId });

@@ -407,6 +407,16 @@ export function appReducer(state: AppState, action: AppAction): AppState {
     case "theme_changed":
       return { ...state, theme: action.theme };
 
+    case "appearance_applied":
+      return {
+        ...state,
+        appearance: action.appearance,
+        theme: action.theme,
+      };
+
+    case "set_view":
+      return { ...state, view: action.view };
+
     case "set_context_menu":
       return { ...state, activeContextMenu: action.sessionId };
 

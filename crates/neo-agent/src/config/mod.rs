@@ -39,7 +39,10 @@ pub(crate) use loader::{
     update_file_config_with_writer,
 };
 pub(crate) use types::FileConfig;
-pub use types::{McpConfig, McpServerConfig, McpTransport, ModelConfig, ProviderConfig};
+pub(crate) use types::FileWebUiConfig;
+pub use types::{
+    McpConfig, McpServerConfig, McpTransport, ModelConfig, ProviderConfig, WebUiAppearance,
+};
 
 #[derive(Debug, Clone, Default)]
 pub struct ConfigOverrides {
