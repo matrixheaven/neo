@@ -715,8 +715,8 @@ pub(crate) fn list_branches_with_program(
     if branches.is_empty() {
         return None;
     }
-    let current = collect_workspace_status_with_program(program, workspace_root)
-        .map(|status| status.branch);
+    let current =
+        collect_workspace_status_with_program(program, workspace_root).map(|status| status.branch);
     Some(GitBranchList { current, branches })
 }
 
@@ -727,9 +727,9 @@ fn branch_name_is_acceptable(name: &str) -> bool {
     !name.is_empty()
         && !name.starts_with('-')
         && !name.contains("..")
-        && name
-            .chars()
-            .all(|character| character.is_ascii_alphanumeric() || matches!(character, '/' | '.' | '_' | '-' | '+'))
+        && name.chars().all(|character| {
+            character.is_ascii_alphanumeric() || matches!(character, '/' | '.' | '_' | '-' | '+')
+        })
 }
 
 /// Check out an existing branch (`create = false`) or create and check out a
@@ -771,7 +771,6 @@ pub(crate) fn checkout_branch_with_program(
         .to_owned();
     Err(tail)
 }
-
 
 #[cfg(test)]
 mod tests {

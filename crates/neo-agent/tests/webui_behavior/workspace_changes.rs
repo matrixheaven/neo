@@ -221,13 +221,17 @@ async fn branch_picker_lists_and_checks_out_workspace_branches() {
     // The current workspace is known to the service; discover its id through
     // the add route (re-adding a known directory is idempotent and returns
     // the group with its id).
-    let added = http::post_json(port, cookie, "/api/workspaces", &serde_json::json!({
-        "path": project_path.to_string_lossy()
-    }))
+    let added = http::post_json(
+        port,
+        cookie,
+        "/api/workspaces",
+        &serde_json::json!({
+            "path": project_path.to_string_lossy()
+        }),
+    )
     .await;
     assert_eq!(added.status, 201, "{}", added.body);
-    let workspace_id = serde_json::from_str::<Value>(&added.body)
-        .expect("group json")["id"]
+    let workspace_id = serde_json::from_str::<Value>(&added.body).expect("group json")["id"]
         .as_str()
         .expect("workspace id")
         .to_owned();
@@ -248,7 +252,9 @@ async fn branch_picker_lists_and_checks_out_workspace_branches() {
         .collect();
     assert!(names.contains(&"feature".to_owned()), "{names:?}");
     assert!(
-        branches["current"].as_str().is_some_and(|current| names.contains(&current.to_owned())),
+        branches["current"]
+            .as_str()
+            .is_some_and(|current| names.contains(&current.to_owned())),
         "{}",
         listed.body
     );

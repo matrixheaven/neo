@@ -91,20 +91,24 @@ fn queue_control_routes_like_input_and_rejects_stale_turns() {
     let running = test_state(&relay, "session_1", Some("turn_1"));
     // Queue a follow-up, then promote it: the control lands on the same
     // handle routing as text input (accepted, no degradations).
-    assert!(push_turn_input(
-        &running,
-        "turn_1",
-        neo_webui::protocol::WebUiInputDelivery::FollowUp,
-        "later",
-        Vec::new()
-    )
-    .expect("follow-up queued"));
-    assert!(push_queue_control(
-        &running,
-        "turn_1",
-        neo_webui::protocol::WebUiQueueControl::PromoteFollowUpToSteer
-    )
-    .expect("promote accepted"));
+    assert!(
+        push_turn_input(
+            &running,
+            "turn_1",
+            neo_webui::protocol::WebUiInputDelivery::FollowUp,
+            "later",
+            Vec::new()
+        )
+        .expect("follow-up queued")
+    );
+    assert!(
+        push_queue_control(
+            &running,
+            "turn_1",
+            neo_webui::protocol::WebUiQueueControl::PromoteFollowUpToSteer
+        )
+        .expect("promote accepted")
+    );
     let idle = test_state(&relay, "session_1", None);
     assert_eq!(
         push_queue_control(

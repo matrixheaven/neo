@@ -3,7 +3,9 @@
 //! projection is released, and buffered streaming events flush periodically
 //! while the model round is still running.
 
-use neo_agent_core::{ApprovalAction, ApprovalOption, ApprovalRequest, Content, PermissionOperation, StopReason};
+use neo_agent_core::{
+    ApprovalAction, ApprovalOption, ApprovalRequest, Content, PermissionOperation, StopReason,
+};
 use neo_webui::protocol::WebUiServerMessage;
 
 use super::state_fixtures::{test_state, user_message};
@@ -267,8 +269,9 @@ async fn drain_loop_flushes_buffered_streaming_events_before_the_round_boundary(
             _ => false,
         })
     };
-    let delta_index =
-        event_index(&|event| matches!(event, AgentEvent::TextDelta { text, .. } if text == "streaming"));
+    let delta_index = event_index(
+        &|event| matches!(event, AgentEvent::TextDelta { text, .. } if text == "streaming"),
+    );
     let appended_index = event_index(&|event| matches!(event, AgentEvent::MessageAppended { .. }));
     assert_eq!(
         delta_index.map(|index| index < appended_index.expect("appended event published")),
