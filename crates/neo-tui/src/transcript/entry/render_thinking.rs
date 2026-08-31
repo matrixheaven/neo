@@ -6,13 +6,21 @@ use neo_ai::ThinkingKind;
 /// compact preview. Matches Neo's `THINKING_PREVIEW_LINES = 2`.
 const THINKING_PREVIEW_LINES: usize = 2;
 
+/// Total rows of a live, unexpanded thinking window: one spinner header plus
+/// [`THINKING_PREVIEW_LINES`] tail rows.
+const THINKING_WINDOW_ROWS: usize = 1 + THINKING_PREVIEW_LINES;
+
 /// Render the thinking block as a fixed-height floating window.
 ///
-/// - **Streaming Summary**: a single braille-spinner title/status row. Summary
-///   body stays out of ordinary scrollback while the part is live.
-/// - **Streaming Full/Unknown**: a braille-spinner header followed by the *last*
-///   `THINKING_PREVIEW_LINES` wrapped rows, so the window shows a scrolling tail.
-/// - **Complete**: the *first* `THINKING_PREVIEW_LINES` rows prefixed with a
+/// - **Streaming Summary**: a braille-spinner title/status row plus reserved
+///   placeholder rows. Summary body stays out of ordinary scrollback while the
+///   part is live.
+/// - **Streaming Full/Unknown**: a height-reserved window: a braille-spinner
+///   header followed by the *last* [`THINKING_PREVIEW_LINES`] wrapped rows as a
+///   scrolling tail. Rows not yet filled by streamed text stay as placeholders,
+///   so the block keeps a constant height from the moment it goes live instead
+///   of growing line by line and shifting the transcript.
+/// - **Complete**: the *first* [`THINKING_PREVIEW_LINES`] rows prefixed with a
 ///   `●` bullet, followed by a `… N more lines (ctrl+o to expand)` hint when
 ///   the full text was longer. This keeps completed thinking compact instead
 ///   of unbounded.
@@ -35,10 +43,12 @@ fn render_thinking_parts(
                 || "thinking...".to_owned(),
                 |title| format!("thinking · {title}"),
             );
-            return vec![Line::styled(
+            let mut rows = vec![Line::styled(
                 format!("{} {label}", thinking_spinner(activity_frame)),
                 style,
             )];
+            reserve_streaming_rows(&mut rows, style);
+            return rows;
         }
 
         let wrapped = summary.wrapped_lines(body_width);
@@ -68,12 +78,11 @@ fn render_thinking_parts(
 
     let wrapped = wrap_thinking_parts(parts, body_width);
     let total = wrapped.len();
-    if total == 0 {
-        return Vec::new();
-    }
 
     if phase == ThinkingPhase::Streaming && !expanded {
-        // Streaming: spinner + tail window.
+        // Streaming: spinner + height-reserved tail window. The window keeps
+        // its full height even before any text arrives so the transcript does
+        // not jump while lines stream in.
         let mut rows = Vec::new();
         rows.push(Line::styled(
             format!("{} thinking...", thinking_spinner(activity_frame)),
@@ -83,7 +92,12 @@ fn render_thinking_parts(
         for line in wrapped.iter().skip(start) {
             rows.push(Line::styled(format!("  {line}"), style));
         }
+        reserve_streaming_rows(&mut rows, style);
         return rows;
+    }
+
+    if total == 0 {
+        return Vec::new();
     }
 
     if expanded {
@@ -110,6 +124,16 @@ fn render_thinking_parts(
         ));
     }
     rows
+}
+
+/// Pad a live streaming window with faint placeholder rows up to the reserved
+/// height. Placeholders must carry a visible character: the pane trims blank
+/// trailing rows from every entry block, so blank padding would collapse the
+/// reservation and reintroduce height jitter.
+fn reserve_streaming_rows(rows: &mut Vec<Line>, style: Style) {
+    while rows.len() < THINKING_WINDOW_ROWS {
+        rows.push(Line::styled("  ·", style));
+    }
 }
 
 /// Wrap one renderer-local display stream while retaining canonical part boundaries.

@@ -1,8 +1,9 @@
-//! Phase 6: thinking renders as a fixed 2-line floating window.
+//! Phase 6: thinking renders as a height-reserved 3-row floating window.
 //!
 //! Streaming thinking shows a `⠋ thinking...` header + the *last* 2 wrapped rows
-//! (scrolling tail). Completed thinking shows the *first* 2 rows + a collapse
-//! hint when the full text was longer.
+//! (scrolling tail); rows not yet filled by streamed text stay as placeholders,
+//! so the live window keeps a constant height. Completed thinking shows the
+//! *first* 2 rows + a collapse hint when the full text was longer.
 
 use neo_tui::primitive::strip_ansi;
 use neo_tui::transcript::TranscriptEntry;
@@ -57,6 +58,70 @@ fn live_thinking_spinner_advances_on_explicit_animation_tick() {
 
     assert!(first.contains("⠋ thinking..."), "first spinner: {first}");
     assert!(second.contains("⠙ thinking..."), "second spinner: {second}");
+}
+
+#[test]
+fn live_thinking_window_keeps_reserved_height_while_text_arrives() {
+    let cases = [
+        ("no_text_yet", "", [None, None]),
+        ("single_wrapped_line", "alpha", [Some("alpha"), None]),
+        (
+            "tail_window_filled",
+            "alpha\nbeta\ngamma\ndelta\nepsilon",
+            [Some("delta"), Some("epsilon")],
+        ),
+    ];
+    for (name, text, tail) in cases {
+        let mut runtime = TranscriptPane::new(40, 12);
+        runtime.push_transcript(TranscriptEntry::thinking_streaming(text));
+
+        let rows = plain_frame(&mut runtime, 40, 12);
+        let filled = rows.iter().take_while(|row| !row.trim().is_empty()).count();
+        assert_eq!(
+            filled, 3,
+            "{name}: live window stays reserved 3 rows: {rows:?}"
+        );
+        assert!(
+            rows[0].contains("thinking..."),
+            "{name}: spinner header first: {rows:?}"
+        );
+        for (offset, expected) in tail.iter().enumerate() {
+            match expected {
+                Some(line) => assert!(
+                    rows[1 + offset].contains(line),
+                    "{name}: tail row {offset} shows {line}: {rows:?}"
+                ),
+                None => assert_eq!(
+                    rows[1 + offset].trim(),
+                    "·",
+                    "{name}: unfilled tail row {offset} stays placeholder: {rows:?}"
+                ),
+            }
+        }
+    }
+}
+
+#[test]
+fn summary_thinking_reserves_window_height_while_live() {
+    let mut runtime = TranscriptPane::new(60, 12);
+    runtime.apply_agent_event(neo_agent_core::AgentEvent::ThinkingStarted {
+        turn: 1,
+        id: "summary".to_owned(),
+        kind: neo_ai::ThinkingKind::Summary,
+    });
+
+    let rows = plain_frame(&mut runtime, 60, 12);
+    let filled = rows.iter().take_while(|row| !row.trim().is_empty()).count();
+    assert_eq!(
+        filled, 3,
+        "live summary window stays reserved 3 rows: {rows:?}"
+    );
+    assert!(
+        rows[0].contains("thinking"),
+        "spinner title row first: {rows:?}"
+    );
+    assert_eq!(rows[1].trim(), "·", "placeholder tail row: {rows:?}");
+    assert_eq!(rows[2].trim(), "·", "placeholder tail row: {rows:?}");
 }
 
 #[test]
