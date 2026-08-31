@@ -1,11 +1,34 @@
 use crate::markdown::{highlight_code_lines, render_markdown, wrap_spans};
 use crate::primitive::theme::TuiTheme;
 use crate::primitive::{Line, Span, Style, truncate_to_width, visible_width};
+use std::collections::HashMap;
+use std::sync::{Mutex, OnceLock};
 
 /// Uniform left margin so the plan box aligns with other tool-card children.
 const LEFT_MARGIN: usize = 2;
 /// Space between the side border and the content on each side.
 const SIDE_PADDING: usize = 1;
+
+/// Bounded memo for [`PlanBoxComponent::render`]. A large plan's markdown
+/// parse plus per-line padding is far too slow to repeat on every frame; the
+/// key carries the full render input (component fields, width, theme) so a
+/// stale hit is impossible. Overflow evicts wholesale.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+struct PlanRenderKey {
+    content: String,
+    path: Option<String>,
+    status: Option<String>,
+    source_language: Option<&'static str>,
+    width: usize,
+    theme: TuiTheme,
+}
+
+static PLAN_RENDER_CACHE: OnceLock<Mutex<HashMap<PlanRenderKey, Vec<Line>>>> = OnceLock::new();
+const PLAN_RENDER_CACHE_CAP: usize = 16;
+
+fn plan_render_cache() -> &'static Mutex<HashMap<PlanRenderKey, Vec<Line>>> {
+    PLAN_RENDER_CACHE.get_or_init(|| Mutex::new(HashMap::new()))
+}
 
 /// Renders plan content inside a bordered box, displayed within the
 /// `ExitPlanMode` tool card.
@@ -47,12 +70,39 @@ impl PlanBoxComponent {
     }
 
     /// Render the plan box as styled lines, fitting within `width` columns.
+    /// Memoized per (content, path, status, language, width, theme).
     #[must_use]
     pub fn render(&self, width: usize, theme: &TuiTheme) -> Vec<Line> {
         if width < LEFT_MARGIN + 4 {
             return vec![];
         }
 
+        let key = PlanRenderKey {
+            content: self.content.clone(),
+            path: self.path.clone(),
+            status: self.status.clone(),
+            source_language: self.source_language,
+            width,
+            theme: *theme,
+        };
+        if let Ok(cache) = plan_render_cache().lock()
+            && let Some(cached) = cache.get(&key)
+        {
+            return cached.clone();
+        }
+
+        let lines = self.render_uncached(width, theme);
+
+        if let Ok(mut cache) = plan_render_cache().lock() {
+            if cache.len() >= PLAN_RENDER_CACHE_CAP {
+                cache.clear();
+            }
+            cache.insert(key, lines.clone());
+        }
+        lines
+    }
+
+    fn render_uncached(&self, width: usize, theme: &TuiTheme) -> Vec<Line> {
         let border_style = Style::default().fg(theme.status_ok);
         let content_style = Style::default().fg(theme.text_primary);
         let muted_style = Style::default().fg(theme.text_muted);

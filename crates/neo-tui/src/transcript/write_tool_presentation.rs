@@ -576,7 +576,6 @@ fn render_created_content(
     let total = lines.len();
     let collapsed = !expanded && total > 10;
     let content_width = framed_content_width(width);
-    let highlighted = highlight_code_lines(&content, path, theme);
     let number_width = total.to_string().len();
     let prefix_width = if width < 7 {
         0
@@ -585,6 +584,43 @@ fn render_created_content(
     };
     let code_width = content_width.saturating_sub(prefix_width).max(1);
     let mut rows = Vec::new();
+
+    // Collapsed previews show only the first and last five rows; highlighting
+    // just those slices keeps the one-time cost of a huge file proportional to
+    // what is on screen. The tail slice starts mid-file, so syntect's
+    // multi-line parse state is approximated there — acceptable for a 5-row
+    // preview; the expanded view always highlights the full content.
+    let plain = |line: &str| {
+        vec![Span::styled(
+            line.to_owned(),
+            Style::default().fg(theme.text_primary),
+        )]
+    };
+    let (head, tail) = if collapsed {
+        (
+            highlight_code_lines(&lines[..5].join("\n"), path, theme),
+            highlight_code_lines(&lines[total - 5..].join("\n"), path, theme),
+        )
+    } else {
+        (Vec::new(), highlight_code_lines(&content, path, theme))
+    };
+    let spans_for = |index: usize| -> Vec<Span> {
+        if collapsed {
+            if index < 5 {
+                head.get(index)
+                    .cloned()
+                    .unwrap_or_else(|| plain(lines[index]))
+            } else {
+                tail.get(index - (total - 5))
+                    .cloned()
+                    .unwrap_or_else(|| plain(lines[index]))
+            }
+        } else {
+            tail.get(index)
+                .cloned()
+                .unwrap_or_else(|| plain(lines[index]))
+        }
+    };
 
     let indices = if collapsed {
         (0..5).chain(total - 5..total).collect::<Vec<_>>()
@@ -601,13 +637,7 @@ fn render_created_content(
                 Style::default().fg(theme.text_muted),
             ));
         }
-        let line = lines[index];
-        let code_spans = highlighted.get(index).cloned().unwrap_or_else(|| {
-            vec![Span::styled(
-                line.to_owned(),
-                Style::default().fg(theme.text_primary),
-            )]
-        });
+        let code_spans = spans_for(index);
         for (visual_index, visual) in wrap_spans(&code_spans, code_width).into_iter().enumerate() {
             let prefix = if prefix_width == 0 {
                 String::new()

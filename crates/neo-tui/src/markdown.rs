@@ -972,16 +972,57 @@ pub fn lang_from_path(path: &str) -> Option<&'static str> {
     })
 }
 
+/// Global cache for tool-card per-line syntax highlighting
+/// ([`highlight_code_lines`]), keyed by (content hash, language token, theme).
+/// Distinct from [`highlight_code`], which caches whole markdown code blocks
+/// as ANSI strings. Bounded, cleared wholesale on overflow.
+type HighlightLinesCacheKey = (u64, &'static str, TuiTheme);
+type HighlightLinesCache = HashMap<HighlightLinesCacheKey, Vec<Vec<Span>>>;
+
+static HIGHLIGHT_LINES_CACHE: OnceLock<Mutex<HighlightLinesCache>> = OnceLock::new();
+const HIGHLIGHT_LINES_CACHE_CAP: usize = 64;
+
+fn highlight_lines_cache() -> &'static Mutex<HighlightLinesCache> {
+    HIGHLIGHT_LINES_CACHE.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
 /// Highlight a block of code into per-line spans, using the language inferred
-/// from `path`. Falls back to plain text if the language is unknown.
+/// from `path`. Falls back to plain text if the language is unknown. Results
+/// are cached per (content, language, theme): tool cards re-render on every
+/// frame, and syntect tokenization of a large file is far too slow for that.
 #[must_use]
 pub fn highlight_code_lines(content: &str, path: &str, theme: &TuiTheme) -> Vec<Vec<Span>> {
+    let Some(lang) = lang_from_path(path) else {
+        return plain_code_lines(content, theme);
+    };
+    let key = (quick_hash(content), lang, *theme);
+    if let Ok(cache) = highlight_lines_cache().lock()
+        && let Some(cached) = cache.get(&key)
+    {
+        return cached.clone();
+    }
+
+    let result = highlight_code_lines_uncached(content, lang, theme);
+
+    if let Ok(mut cache) = highlight_lines_cache().lock() {
+        if cache.len() >= HIGHLIGHT_LINES_CACHE_CAP {
+            cache.clear();
+        }
+        cache.insert(key, result.clone());
+    }
+    result
+}
+
+fn highlight_code_lines_uncached(
+    content: &str,
+    lang: &'static str,
+    theme: &TuiTheme,
+) -> Vec<Vec<Span>> {
     let ss = syntax_set();
     let ts = theme_set();
-    let syntax = lang_from_path(path).and_then(|lang| {
-        ss.find_syntax_by_token(lang)
-            .or_else(|| ss.find_syntax_by_extension(lang))
-    });
+    let syntax = ss
+        .find_syntax_by_token(lang)
+        .or_else(|| ss.find_syntax_by_extension(lang));
     let Some(syntax_theme) = ts.themes.get("base16-ocean.dark") else {
         return plain_code_lines(content, theme);
     };

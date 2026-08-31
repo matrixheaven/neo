@@ -1,7 +1,7 @@
 //! Color type for terminal rendering.
 
 /// A color value for rendering.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
 pub enum Color {
     #[default]
     Reset,

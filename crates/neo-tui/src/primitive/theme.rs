@@ -1,6 +1,6 @@
 use crate::primitive::Color;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct TuiTheme {
     pub background: Color,
     pub surface: Color,

@@ -11,5 +11,7 @@ mod cards_edit;
 mod cards_write;
 #[path = "tool_card_behavior/grouping.rs"]
 mod grouping;
+#[path = "tool_card_behavior/render_cache.rs"]
+mod render_cache;
 #[path = "tool_card_behavior/shell.rs"]
 mod shell;

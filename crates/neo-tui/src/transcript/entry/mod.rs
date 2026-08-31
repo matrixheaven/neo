@@ -1028,8 +1028,11 @@ impl TranscriptEntry {
     /// `activity_frame` or per-tick internal animation. Static entries can be
     /// render-cached; live entries must be re-rendered every frame.
     ///
-    /// `ToolRun` entries are excluded because they go through group rendering
-    /// (`render_ordered_tools`), not the per-entry cache path.
+    /// `ToolRun` entries render through group rendering (`render_ordered_tools`)
+    /// instead of this per-entry cache; their group blocks carry their own
+    /// pane-level cache keyed by member revisions (see `TranscriptPane`).
+    /// Non-cacheable entry kinds render row-count-invariant animation, so
+    /// their laid-out height only changes with their revision.
     #[must_use]
     #[allow(clippy::match_same_arms)]
     pub fn is_render_cacheable(&self) -> bool {

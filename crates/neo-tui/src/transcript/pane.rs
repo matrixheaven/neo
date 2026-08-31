@@ -1,4 +1,4 @@
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::path::{Path, PathBuf};
 use std::time::Instant;
 
@@ -42,6 +42,26 @@ const COMPACTION_TAU_ESTIMATING_MS: u64 = 1_000;
 const COMPACTION_TAU_SELECTING_MS: u64 = 1_500;
 const COMPACTION_TAU_SUMMARIZING_MS: u64 = 30_000;
 const COMPACTION_TAU_APPLYING_MS: u64 = 1_000;
+
+/// Bounded steady-state cache for rendered tool-run group blocks. Grouped
+/// tool cards are the heavy renderers excluded from the per-entry render
+/// cache (plan boxes re-parse markdown, Write previews re-highlight whole
+/// files); without this cache every visible card re-rendered on every frame.
+/// Overflow evicts wholesale — a cold re-render of one group is cheap
+/// relative to serving stale rows.
+const TOOL_GROUP_CACHE_CAP: usize = 32;
+
+/// One cached tool-run group block together with its full render input: the
+/// group's members (entry id + revision) and the width. Any member mutation,
+/// expansion toggle, suppression transition, or membership change touches the
+/// span's revisions (see `TranscriptStore::touch_tool_run_span`), so a
+/// matching fingerprint proves the block is current.
+#[derive(Debug, Clone)]
+struct CachedToolGroupBlock {
+    width: usize,
+    members: Vec<(TranscriptEntryId, u64)>,
+    block: Vec<String>,
+}
 
 #[derive(Debug, Clone, Copy)]
 struct CompactionDisplayState {
@@ -167,6 +187,10 @@ pub struct TranscriptPane {
     /// Rendered blocks for entries re-rendered during the current layout
     /// refresh, so composition reuses them instead of rendering twice.
     frame_blocks: BTreeMap<usize, Vec<String>>,
+    /// Steady-state render cache for tool-run group blocks (see
+    /// [`CachedToolGroupBlock`]). Cleared on theme/render-policy changes;
+    /// width and member revisions are part of the cached render input.
+    tool_group_cache: HashMap<usize, CachedToolGroupBlock>,
     dirty: bool,
     tool_output_expanded: bool,
     pub(super) streaming_tool_args: BTreeMap<String, String>,
@@ -188,6 +212,10 @@ pub struct TranscriptPane {
     last_frame: Vec<String>,
     #[cfg(test)]
     last_reused_prefix_rows: usize,
+    /// Rows served from the tool-group render cache in the current test, so
+    /// unit tests can prove the cache is actually hit (not just correct).
+    #[cfg(test)]
+    last_group_cache_hit_rows: usize,
     /// Theme used to color the live transcript body. Mirrors [`NeoChromeState`]'s
     /// theme; kept here (rather than borrowed) so the runtime can render
     /// without holding a reference to the app. The interactive mode keeps it
@@ -234,8 +262,11 @@ impl TranscriptPane {
             last_frame: Vec::new(),
             document: DocumentLayout::new(),
             frame_blocks: BTreeMap::new(),
+            tool_group_cache: HashMap::new(),
             #[cfg(test)]
             last_reused_prefix_rows: 0,
+            #[cfg(test)]
+            last_group_cache_hit_rows: 0,
             theme: TuiTheme::default(),
             image_render_policy: ImageRenderPolicy::default(),
             image_capabilities: TerminalImageCapabilities::default(),
@@ -262,6 +293,7 @@ impl TranscriptPane {
         self.theme = theme;
         self.document.rebuild();
         self.transcript.invalidate_render_cache();
+        self.tool_group_cache.clear();
         self.mark_dirty();
     }
 
@@ -272,6 +304,7 @@ impl TranscriptPane {
         self.image_render_policy = policy;
         self.document.rebuild();
         self.transcript.invalidate_render_cache();
+        self.tool_group_cache.clear();
         self.mark_dirty();
     }
 
@@ -282,6 +315,7 @@ impl TranscriptPane {
         self.image_capabilities = capabilities;
         self.document.rebuild();
         self.transcript.invalidate_render_cache();
+        self.tool_group_cache.clear();
         self.mark_dirty();
     }
 
@@ -2326,8 +2360,23 @@ impl TranscriptPane {
             if preceded_by_group {
                 return Vec::new();
             }
+            let span_end = self.tool_group_span_end(index);
+            if let Some(block) = self.cached_tool_group_block(index, span_end, width) {
+                #[cfg(test)]
+                {
+                    self.last_group_cache_hit_rows =
+                        self.last_group_cache_hit_rows.saturating_add(block.len());
+                }
+                return block;
+            }
             let mut group = Vec::new();
-            for entry in self.transcript.entries().iter().skip(index) {
+            for entry in self
+                .transcript
+                .entries()
+                .iter()
+                .skip(index)
+                .take(span_end - index + 1)
+            {
                 match entry {
                     TranscriptEntry::ToolRun { component }
                         if !self.transcript.is_tool_run_suppressed(component.id()) =>
@@ -2345,12 +2394,14 @@ impl TranscriptPane {
             let (Some(first), Some(last)) = (first, last) else {
                 return Vec::new();
             };
-            lines
+            let block: Vec<String> = lines
                 .into_iter()
                 .skip(first)
                 .take(last - first + 1)
                 .map(|line| line.to_ansi())
-                .collect()
+                .collect();
+            self.store_tool_group_block(index, span_end, width, &block);
+            block
         } else {
             let mut block = self.transcript.render_entry_ansi_cached(
                 index,
@@ -2366,6 +2417,97 @@ impl TranscriptPane {
             trim_ansi_transcript_block(&mut block);
             block
         }
+    }
+
+    /// Last index of the consecutive unsuppressed ToolRun span starting at
+    /// `first` (`first` itself is an unsuppressed ToolRun). Mirrors the group
+    /// collection in [`Self::entry_block_lines`] and the group boundaries the
+    /// composer uses.
+    fn tool_group_span_end(&self, first: usize) -> usize {
+        let entries = self.transcript.entries();
+        let mut last = first;
+        while last + 1 < entries.len()
+            && matches!(
+                entries.get(last + 1),
+                Some(TranscriptEntry::ToolRun { component })
+                    if !self.transcript.is_tool_run_suppressed(component.id())
+            )
+        {
+            last += 1;
+        }
+        last
+    }
+
+    /// The cached block for the tool-run group `[first, last]`, when its
+    /// render input is unchanged. Live (pending/queued/running) members are
+    /// never cached: their headers carry time-dependent chips (elapsed
+    /// seconds, queue waits) that must advance every frame.
+    fn cached_tool_group_block(
+        &self,
+        first: usize,
+        last: usize,
+        width: usize,
+    ) -> Option<Vec<String>> {
+        let any_live = self
+            .transcript
+            .entries()
+            .get(first..=last)?
+            .iter()
+            .any(|entry| {
+                matches!(
+                    entry,
+                    TranscriptEntry::ToolRun { component }
+                        if component.finalization() == Finalization::Live
+                )
+            });
+        if any_live {
+            return None;
+        }
+        let members = self.tool_group_fingerprint(first, last)?;
+        let cached = self.tool_group_cache.get(&first)?;
+        (cached.width == width && cached.members == members).then(|| cached.block.clone())
+    }
+
+    fn store_tool_group_block(
+        &mut self,
+        first: usize,
+        last: usize,
+        width: usize,
+        block: &[String],
+    ) {
+        let Some(members) = self.tool_group_fingerprint(first, last) else {
+            return;
+        };
+        if self.tool_group_cache.len() >= TOOL_GROUP_CACHE_CAP {
+            self.tool_group_cache.clear();
+        }
+        self.tool_group_cache.insert(
+            first,
+            CachedToolGroupBlock {
+                width,
+                members,
+                block: block.to_vec(),
+            },
+        );
+    }
+
+    /// Render-input fingerprint of a tool-run group: every member's stable
+    /// entry id and revision. Mutations, expansion toggles, suppression
+    /// transitions, and membership changes all touch the span's revisions
+    /// (`TranscriptStore::touch_tool_run_span`), so a matching fingerprint
+    /// proves the cached block is current.
+    fn tool_group_fingerprint(
+        &self,
+        first: usize,
+        last: usize,
+    ) -> Option<Vec<(TranscriptEntryId, u64)>> {
+        let ids = self.transcript.entry_ids();
+        let revisions = self.transcript.entry_revisions();
+        let mut members = Vec::with_capacity(last - first + 1);
+        for index in first..=last {
+            members.push((*ids.get(index)?, *revisions.get(index)?));
+        }
+        Some(members)
     }
 
     /// Append the grouped tool-card block for an accumulated tool run,
@@ -2401,6 +2543,11 @@ impl TranscriptPane {
     #[cfg(test)]
     fn cached_prefix_rows_reused_for_test(&self) -> usize {
         self.last_reused_prefix_rows
+    }
+
+    #[cfg(test)]
+    fn tool_group_cache_hit_rows_for_test(&self) -> usize {
+        self.last_group_cache_hit_rows
     }
 }
 
@@ -2819,3 +2966,7 @@ mod tests {
         );
     }
 }
+
+#[cfg(test)]
+#[path = "test_cases/pane_cache.rs"]
+mod pane_cache;
