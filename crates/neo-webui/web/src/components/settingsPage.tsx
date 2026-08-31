@@ -6,7 +6,9 @@
  */
 
 import { ArrowLeft, Pencil, Plus, Trash2 } from "lucide-react";
-import { useEffect, useState } from "react";
+import { useEffect, useState, type ReactNode } from "react";
+import * as Prism from "prismjs";
+import "prismjs/components/prism-typescript";
 import {
   addModel,
   addProvider,
@@ -85,11 +87,30 @@ const CODE_THEME_OPTIONS = [
   { value: "dark", label: "深色" },
 ];
 
-const SAMPLE_CODE = `const themePreview = ThemeConfig {
-  surface: "sidebar",
-  accent: "#7aa2f7",
-  contrast: 45,
-};`;
+const SAMPLE_LINES = [
+  'const themePreview = ThemeConfig {',
+  '  surface: "sidebar",',
+  '  accent: "#339CFF",',
+  '  contrast: 45,',
+  "};",
+];
+
+function tokenStream(line: string, keyPrefix: string): ReactNode {
+  const grammar = Prism.languages.typescript;
+  if (!grammar) return line;
+  return Prism.tokenize(line, grammar).map((token, index) => {
+    if (typeof token === "string") return token;
+    const content =
+      typeof token.content === "string"
+        ? token.content
+        : tokenStream(String(token.content), `${keyPrefix}-${index}`);
+    return (
+      <span key={`${keyPrefix}-${index}`} className={`token ${token.type}`}>
+        {content}
+      </span>
+    );
+  });
+}
 
 function numberInput(
   label: string,
@@ -339,17 +360,30 @@ function AppearanceSection({
               <div
                 key={theme}
                 className={`code-preview-card ${active ? "active" : ""}`}
-                data-preview-theme={theme}
-                data-code-theme={draft.code_theme === "auto" ? theme : draft.code_theme}
-                data-line-numbers={draft.show_line_numbers ? "on" : "off"}
-                data-word-wrap={draft.word_wrap ? "on" : "off"}
+                data-code-theme={theme}
               >
                 <div className="code-preview-card-head">
-                  <span className="code-preview-title">{theme === "light" ? "浅色预览" : "深色预览"}</span>
-                  <span className="code-preview-status">{active ? "当前生效" : "取消"}</span>
+                  <div className="code-preview-head-text">
+                    <span className="code-preview-title">{theme === "light" ? "浅色预览" : "深色预览"}</span>
+                    <span className="code-preview-theme">{theme === "light" ? "GitHub Light" : "GitHub Dark"}</span>
+                  </div>
+                  <span className={`code-preview-status ${active ? "active" : ""}`}>
+                    {active ? "当前生效" : "取消"}
+                  </span>
                 </div>
-                <pre className="code-preview-pre" style={{ fontSize: `${draft.code_font_size}px` }}>
-                  <code>{SAMPLE_CODE}</code>
+                <pre
+                  className="code-preview-pre"
+                  style={{ fontSize: `${draft.code_font_size}px` }}
+                  data-word-wrap={draft.word_wrap ? "on" : "off"}
+                >
+                  {SAMPLE_LINES.map((line, index) => (
+                    <div className="code-preview-line" key={index}>
+                      {draft.show_line_numbers ? (
+                        <span className="code-preview-lno">{index + 1}</span>
+                      ) : null}
+                      <code className="language-typescript">{tokenStream(line, `l${index}`)}</code>
+                    </div>
+                  ))}
                 </pre>
               </div>
             );

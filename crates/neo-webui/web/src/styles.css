@@ -5303,107 +5303,177 @@ textarea.settings-input {
 
 .code-preview-card {
   border: 1px solid var(--line);
-  border-radius: 8px;
+  border-radius: 10px;
   overflow: hidden;
-  background: var(--surface);
+  background: var(--surface-raised);
+  display: flex;
+  flex-direction: column;
 }
 
 .code-preview-card.active {
   border-color: var(--accent-dim);
+  box-shadow: 0 0 0 1px var(--accent-dim);
 }
 
 .code-preview-card-head {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  padding: 6px 10px;
+  gap: 10px;
+  padding: 8px 12px;
   border-bottom: 1px solid var(--line);
+}
+
+.code-preview-head-text {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
 }
 
 .code-preview-title {
   font-size: 12px;
-  color: var(--text-dim);
+  font-weight: 600;
+  color: var(--text);
+}
+
+.code-preview-theme {
+  font-size: 11px;
+  color: var(--text-faint);
 }
 
 .code-preview-status {
   font-size: 11px;
   color: var(--text-faint);
+  padding: 2px 8px;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  white-space: nowrap;
 }
 
-.code-preview-card.active .code-preview-status {
+.code-preview-status.active {
   color: var(--accent);
+  border-color: var(--accent-dim);
+  background: var(--accent-soft);
 }
 
 .code-preview-pre {
   margin: 0;
-  padding: 12px;
+  padding: 10px 0;
   overflow: auto;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  line-height: 1.5;
+  white-space: pre;
+}
+
+.code-preview-pre[data-word-wrap="on"] {
   white-space: pre-wrap;
   word-break: break-word;
 }
 
-/* Preview palettes: the card's own data-code-theme overrides the global. */
+.code-preview-line {
+  display: flex;
+}
+
+.code-preview-lno {
+  flex: 0 0 auto;
+  min-width: 2.4em;
+  padding-right: 12px;
+  text-align: right;
+  user-select: none;
+  border-right: 1px solid var(--line);
+  color: var(--text-faint);
+}
+
+.code-preview-line code {
+  flex: 1;
+  display: block;
+  padding: 0 12px;
+}
+
+/* GitHub Light palette */
 .code-preview-card[data-code-theme="light"] {
-  color: rgba(0, 0, 0, 0.9);
-  --code-text: rgba(0, 0, 0, 0.9);
-  --code-dim: rgba(0, 0, 0, 0.55);
-  --code-faint: rgba(0, 0, 0, 0.4);
-  --code-accent: #0969da;
-  --code-ok: #1a7f37;
-  --code-danger: #cf222e;
-  --code-bg: #f6f8fa;
+  background: #f6f8fa;
+  color: #1f2328;
+}
+.code-preview-card[data-code-theme="light"] .code-preview-card-head {
+  background: #eef1f4;
+  border-bottom-color: #d8dee4;
+}
+.code-preview-card[data-code-theme="light"] .code-preview-lno {
+  color: #8c959f;
+  border-right-color: #d8dee4;
+}
+.code-preview-card[data-code-theme="light"] .token {
+  color: #1f2328;
+}
+.code-preview-card[data-code-theme="light"] .token.keyword,
+.code-preview-card[data-code-theme="light"] .token.regex,
+.code-preview-card[data-code-theme="light"] .token.important {
+  color: #cf222e;
+}
+.code-preview-card[data-code-theme="light"] .token.string,
+.code-preview-card[data-code-theme="light"] .token.property,
+.code-preview-card[data-code-theme="light"] .token.attr-value,
+.code-preview-card[data-code-theme="light"] .token.attr-name,
+.code-preview-card[data-code-theme="light"] .token.selector {
+  color: #0a3069;
+}
+.code-preview-card[data-code-theme="light"] .token.function,
+.code-preview-card[data-code-theme="light"] .token.class-name,
+.code-preview-card[data-code-theme="light"] .token.builtin {
+  color: #8250df;
+}
+.code-preview-card[data-code-theme="light"] .token.number,
+.code-preview-card[data-code-theme="light"] .token.boolean,
+.code-preview-card[data-code-theme="light"] .token.parameter,
+.code-preview-card[data-code-theme="light"] .token.deleted {
+  color: #0550ae;
+}
+.code-preview-card[data-code-theme="light"] .token.comment {
+  color: #6e7781;
 }
 
+/* GitHub Dark palette */
 .code-preview-card[data-code-theme="dark"] {
-  color: #e4e6eb;
-  --code-text: #e4e6eb;
-  --code-dim: #9aa0ab;
-  --code-faint: #6c7280;
-  --code-accent: #7aa2f7;
-  --code-ok: #7ec699;
-  --code-danger: #e06c75;
-  --code-bg: #16181d;
+  background: #0d1117;
+  color: #e6edf3;
 }
-
-.code-preview-pre code {
-  color: var(--code-text);
+.code-preview-card[data-code-theme="dark"] .code-preview-card-head {
+  background: #161b22;
+  border-bottom-color: #30363d;
 }
-
-.code-preview-pre .token {
-  color: var(--code-dim);
+.code-preview-card[data-code-theme="dark"] .code-preview-lno {
+  color: #8b949e;
+  border-right-color: #30363d;
 }
-
-.code-preview-pre .token.keyword,
-.code-preview-pre .token.function,
-.code-preview-pre .token.boolean,
-.code-preview-pre .token.number,
-.code-preview-pre .token.class-name,
-.code-preview-pre .token.builtin {
-  color: var(--code-accent);
+.code-preview-card[data-code-theme="dark"] .token {
+  color: #e6edf3;
 }
-
-.code-preview-pre .token.string,
-.code-preview-pre .token.property,
-.code-preview-pre .token.attr-value,
-.code-preview-pre .token.attr-name,
-.code-preview-pre .token.selector {
-  color: var(--code-ok);
+.code-preview-card[data-code-theme="dark"] .token.keyword,
+.code-preview-card[data-code-theme="dark"] .token.regex,
+.code-preview-card[data-code-theme="dark"] .token.important {
+  color: #ff7b72;
 }
-
-.code-preview-pre .token.comment {
-  color: var(--code-faint);
+.code-preview-card[data-code-theme="dark"] .token.string,
+.code-preview-card[data-code-theme="dark"] .token.property,
+.code-preview-card[data-code-theme="dark"] .token.attr-value,
+.code-preview-card[data-code-theme="dark"] .token.attr-name,
+.code-preview-card[data-code-theme="dark"] .token.selector {
+  color: #a5d6ff;
 }
-
-.code-preview-pre .token.deleted,
-.code-preview-pre .token.regex,
-.code-preview-pre .token.tag,
-.code-preview-pre .token.important {
-  color: var(--code-danger);
+.code-preview-card[data-code-theme="dark"] .token.function,
+.code-preview-card[data-code-theme="dark"] .token.class-name,
+.code-preview-card[data-code-theme="dark"] .token.builtin {
+  color: #d2a8ff;
 }
-
-.code-preview-pre .token.operator,
-.code-preview-pre .token.punctuation {
-  color: var(--code-dim);
+.code-preview-card[data-code-theme="dark"] .token.number,
+.code-preview-card[data-code-theme="dark"] .token.boolean,
+.code-preview-card[data-code-theme="dark"] .token.parameter,
+.code-preview-card[data-code-theme="dark"] .token.deleted {
+  color: #79c0ff;
+}
+.code-preview-card[data-code-theme="dark"] .token.comment {
+  color: #8b949e;
 }
 
 /* Forced code theme scoped to a code block (independent of interface theme). */
