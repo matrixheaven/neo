@@ -111,6 +111,19 @@ pub(super) fn record_session_activity(config: &AppConfig, session_id: &str, prom
     );
 }
 
+/// Start initial title generation concurrently with the turn instead of
+/// blocking turn completion on an aux-model round trip. The metadata check
+/// inside `record_initial_session_title` keeps this idempotent for resumed
+/// sessions; a task lost to process exit only skips the title.
+pub(super) fn spawn_initial_session_title(config: &AppConfig, session_id: &str, prompt: &str) {
+    let config = config.clone();
+    let session_id = session_id.to_owned();
+    let prompt = prompt.to_owned();
+    tokio::spawn(async move {
+        record_initial_session_title(&config, &session_id, &prompt).await;
+    });
+}
+
 pub(super) async fn record_initial_session_title(
     config: &AppConfig,
     session_id: &str,

@@ -18,8 +18,8 @@ pub(crate) use models_cli::list_configured_models;
 
 // Re-export session helpers used within this module.
 use session_mgmt::{
-    latest_session_id, record_initial_session_title, record_session_activity,
-    session_root_from_wire_path,
+    latest_session_id, record_session_activity, session_root_from_wire_path,
+    spawn_initial_session_title,
 };
 
 use std::{
@@ -286,6 +286,7 @@ async fn run_prompt_streaming_with_retry_notices(
         .with_context(|| format!("failed to create session {}", session_path.display()))?;
     let user_message = user_message(content, MessageOrigin::User, None);
     record_session_activity(config, &session_id, &prompt_text);
+    spawn_initial_session_title(config, &session_id, &prompt_text);
     let runtime = match runtime_for_config(
         config,
         Some(session_root_from_wire_path(&session_path)?),
@@ -310,16 +311,14 @@ async fn run_prompt_streaming_with_retry_notices(
         session_id: session_id.clone(),
         cancel_token: CancellationToken::new(),
     };
-    let turn = finish_prompt_turn_streaming(
+    finish_prompt_turn_streaming(
         user_message,
         AgentContext::new(),
         &mut writer,
         runtime,
         streaming,
     )
-    .await?;
-    record_initial_session_title(config, &turn.session_id, &prompt_text).await;
-    Ok(turn)
+    .await
 }
 
 async fn run_prompt_with_retry_notices(
@@ -338,6 +337,7 @@ async fn run_prompt_with_retry_notices(
     let mut writer = SessionEventWriter::jsonl(&mut writer);
     let user_message = user_message(content, MessageOrigin::User, None);
     record_session_activity(config, &session_id, &prompt_text);
+    spawn_initial_session_title(config, &session_id, &prompt_text);
     let runtime = match runtime_for_config(
         config,
         Some(session_root_from_wire_path(&session_path)?),
@@ -370,7 +370,6 @@ async fn run_prompt_with_retry_notices(
         show_retry_notices,
     )
     .await?;
-    record_initial_session_title(config, &turn.session_id, &prompt_text).await;
     Ok(turn)
 }
 
@@ -417,6 +416,7 @@ async fn run_prompt_in_session(
     let mut writer = SessionEventWriter::jsonl(&mut writer);
     let user_message = user_message(user_content, MessageOrigin::User, None);
     record_session_activity(config, session_id, &prompt_text);
+    spawn_initial_session_title(config, session_id, &prompt_text);
     let runtime = runtime_for_config(config, Some(session_dir), None, None).await?;
     runtime.restore_plan_mode(&context);
     let turn = finish_prompt_turn(
@@ -429,7 +429,6 @@ async fn run_prompt_in_session(
         show_retry_notices,
     )
     .await?;
-    record_initial_session_title(config, &turn.session_id, &prompt_text).await;
     let notification_queue = config.workflow_runtime.notification_queue();
     let notification_ids =
         neo_agent_core::session::workflow_notification_projection_ids(&turn.events);
@@ -477,6 +476,9 @@ pub async fn run_prompt_streaming(
     )
     .await?;
     let compaction_only = request.compaction_only;
+    if !compaction_only {
+        spawn_initial_session_title(config, &prepared.session_id, &prompt);
+    }
     let turn = run_prepared_streaming_turn(
         prepared,
         runtime,
@@ -485,9 +487,6 @@ pub async fn run_prompt_streaming(
         compaction_only,
     )
     .await?;
-    if !compaction_only {
-        record_initial_session_title(config, &turn.session_id, &prompt).await;
-    }
     Ok(turn)
 }
 
@@ -523,6 +522,9 @@ pub async fn run_prompt_in_session_streaming(
     runtime.restore_plan_mode(&prepared.context);
     let prompt = prepared.prompt.clone();
     let compaction_only = request.compaction_only;
+    if !compaction_only {
+        spawn_initial_session_title(config, session_id, &prompt);
+    }
     let turn = run_prepared_streaming_turn(
         prepared,
         runtime,
@@ -531,9 +533,6 @@ pub async fn run_prompt_in_session_streaming(
         compaction_only,
     )
     .await?;
-    if !compaction_only {
-        record_initial_session_title(config, &turn.session_id, &prompt).await;
-    }
     Ok(turn)
 }
 
