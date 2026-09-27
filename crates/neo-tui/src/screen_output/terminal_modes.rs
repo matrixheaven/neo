@@ -1,15 +1,40 @@
 use std::io::{Write, stdout};
 
-use crossterm::event::{
-    DisableBracketedPaste, DisableMouseCapture, EnableBracketedPaste, EnableMouseCapture,
-    KeyboardEnhancementFlags, PopKeyboardEnhancementFlags, PushKeyboardEnhancementFlags,
-};
+use crossterm::event::{DisableBracketedPaste, EnableBracketedPaste, KeyboardEnhancementFlags};
 use crossterm::terminal::{
     EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode,
 };
 use crossterm::{execute, queue};
 
 use crate::terminal_capabilities::TerminalCapabilities;
+
+/// Mouse reporting is enabled with terminal escape sequences on every platform.
+///
+/// crossterm's Windows implementation of `EnableMouseCapture` is not an escape
+/// sequence: it replaces the whole console input mode with
+/// `ENABLE_MOUSE_INPUT | ENABLE_WINDOW_INPUT | ENABLE_EXTENDED_FLAGS`. That drops
+/// `ENABLE_VIRTUAL_TERMINAL_INPUT`, and a console without that bit stops handing
+/// arrow keys, Esc, Ctrl+J and mouse events to a byte-stream reader at all while
+/// plain characters keep working. Emitting the sequences enables the same
+/// terminal-side tracking without touching a single console mode bit.
+const MOUSE_REPORTING_ON: &[u8] = b"\x1b[?1000h\x1b[?1002h\x1b[?1003h\x1b[?1015h\x1b[?1006h";
+
+/// Reverse of [`MOUSE_REPORTING_ON`], in reverse order.
+const MOUSE_REPORTING_OFF: &[u8] = b"\x1b[?1006l\x1b[?1015l\x1b[?1003l\x1b[?1002l\x1b[?1000l";
+
+/// Progressive keyboard enhancement is a plain escape sequence too. crossterm's
+/// Windows implementation reports `Unsupported` instead, which would fail
+/// terminal entry whenever a kitty-like environment was detected.
+const KITTY_KEYBOARD_OFF: &[u8] = b"\x1b[<1u";
+
+/// The kitty keyboard push sequence, matching what crossterm writes on platforms
+/// that support the protocol.
+fn kitty_keyboard_on() -> String {
+    let flags = KeyboardEnhancementFlags::DISAMBIGUATE_ESCAPE_CODES
+        | KeyboardEnhancementFlags::REPORT_EVENT_TYPES
+        | KeyboardEnhancementFlags::REPORT_ALTERNATE_KEYS;
+    format!("\x1b[>{}u", flags.bits())
+}
 
 /// Enter the single fullscreen surface: alternate screen, mouse reporting,
 /// bracketed paste, and (when supported) kitty keyboard enhancement.
@@ -19,19 +44,12 @@ pub(super) fn write_enter_output(
 ) -> std::io::Result<()> {
     let mut output = output;
     queue!(&mut output, EnterAlternateScreen)?;
-    queue!(&mut output, EnableMouseCapture)?;
+    output.write_all(MOUSE_REPORTING_ON)?;
     if capabilities.ansi.bracketed_paste {
         queue!(&mut output, EnableBracketedPaste)?;
     }
     if capabilities.ansi.kitty_keyboard {
-        queue!(
-            &mut output,
-            PushKeyboardEnhancementFlags(
-                KeyboardEnhancementFlags::DISAMBIGUATE_ESCAPE_CODES
-                    | KeyboardEnhancementFlags::REPORT_EVENT_TYPES
-                    | KeyboardEnhancementFlags::REPORT_ALTERNATE_KEYS,
-            )
-        )?;
+        output.write_all(kitty_keyboard_on().as_bytes())?;
     }
     output.flush()
 }
@@ -44,7 +62,7 @@ pub(super) fn write_leave_output(
 ) -> std::io::Result<()> {
     let mut output = output;
     let mut result = output.write_all(b"\x1b[?25h");
-    if let Err(error) = execute!(&mut output, DisableMouseCapture)
+    if let Err(error) = output.write_all(MOUSE_REPORTING_OFF)
         && result.is_ok()
     {
         result = Err(error);
@@ -55,7 +73,7 @@ pub(super) fn write_leave_output(
         result = Err(error);
     }
     if capabilities.ansi.kitty_keyboard
-        && let Err(error) = execute!(&mut output, PopKeyboardEnhancementFlags)
+        && let Err(error) = output.write_all(KITTY_KEYBOARD_OFF)
         && result.is_ok()
     {
         result = Err(error);
@@ -384,12 +402,15 @@ mod tests {
         let enter = String::from_utf8_lossy(&enter);
         let leave = String::from_utf8_lossy(&leave);
 
-        // Exactly one alternate-screen enter and one mouse-capture enable.
+        // Exactly one alternate-screen enter and one mouse-reporting enable.
         assert_eq!(enter.matches("?1049h").count(), 1);
         assert_eq!(enter.matches("?1000h").count(), 1);
         assert_eq!(enter.matches("?2004h").count(), 1);
         assert!(!enter.contains("?1049l"));
         assert!(!enter.contains("?1000l"));
+        // Progressive keyboard enhancement is written as a sequence too: the
+        // cross-platform path is what keeps Windows terminal entry working.
+        assert_eq!(enter.matches("\x1b[>").count(), 1);
 
         // Exactly one leave sequence that restores every entered mode.
         assert_eq!(leave.matches("?1049l").count(), 1);
@@ -398,6 +419,7 @@ mod tests {
         assert!(leave.contains("\x1b[?25h"));
         assert!(!leave.contains("?1049h"));
         assert!(!leave.contains("?1000h"));
+        assert_eq!(leave.matches("\x1b[<1u").count(), 1);
         assert!(!enter.contains("\x1b[2J") && !leave.contains("\x1b[2J"));
         assert!(!enter.contains("\x1b[3J") && !leave.contains("\x1b[3J"));
     }
