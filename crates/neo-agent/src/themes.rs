@@ -19,7 +19,7 @@
 
 use std::{
     collections::BTreeMap,
-    fs::{self, File, OpenOptions},
+    fs::{self, OpenOptions},
     path::{Component, Path, PathBuf},
     sync::{Arc, Mutex, OnceLock},
 };
@@ -541,7 +541,7 @@ impl ThemeRepository {
         // Align with `config::atomic_file::write_with`: after an atomic
         // replacement the parent directory entry must be durable too.
         #[cfg(unix)]
-        File::open(parent)
+        fs::File::open(parent)
             .with_context(|| format!("failed to open theme directory {}", parent.display()))?
             .sync_all()
             .with_context(|| format!("failed to sync theme directory {}", parent.display()))?;

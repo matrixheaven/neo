@@ -115,10 +115,16 @@ pub(super) struct RawStdinEvents {
 /// CPR probe failure, distinguished from fatal I/O errors. The resume probe
 /// maps the recoverable variants to `Ok(None)` and falls back to the parked
 /// origin cursor; resize/startup probes keep them fatal.
+///
+/// `TimedOut` and `OutOfRange` describe the POSIX CPR round trip only: the
+/// Windows probe reads the console cursor position synchronously, so it can
+/// report `Io` alone.
 #[derive(Debug)]
 enum CursorProbeError {
     Io(anyhow::Error),
+    #[cfg(not(windows))]
     TimedOut,
+    #[cfg(not(windows))]
     OutOfRange {
         col: u16,
         row: u16,
@@ -131,7 +137,9 @@ impl std::fmt::Display for CursorProbeError {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::Io(error) => write!(formatter, "{error}"),
+            #[cfg(not(windows))]
             Self::TimedOut => write!(formatter, "timed out waiting for cursor position report"),
+            #[cfg(not(windows))]
             Self::OutOfRange {
                 col,
                 row,
@@ -324,6 +332,7 @@ impl RawStdinEvents {
         let Some((cursor_col, cursor_row)) = (match self.probe_cursor_position(cols, rows) {
             Ok(observed) => observed,
             Err(CursorProbeError::Io(error)) => return Err(error),
+            #[cfg(not(windows))]
             Err(CursorProbeError::TimedOut | CursorProbeError::OutOfRange { .. }) => {
                 return Ok(None);
             }
