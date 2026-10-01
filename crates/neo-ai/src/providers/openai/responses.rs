@@ -20,15 +20,20 @@ use crate::{
 pub struct OpenAiResponsesClient {
     base_url: String,
     api_key: String,
+    /// Gateway-required conversation header, resolved once from `base_url`.
+    session_header: Option<reqwest::header::HeaderName>,
     client: reqwest::Client,
 }
 
 impl OpenAiResponsesClient {
     #[must_use]
     pub fn new(base_url: impl Into<String>, api_key: impl Into<String>) -> Self {
+        let base_url = base_url.into().trim_end_matches('/').to_owned();
+        let session_header = crate::providers::common::http::gateway_session_header(&base_url);
         Self {
-            base_url: base_url.into().trim_end_matches('/').to_owned(),
+            base_url,
             api_key: api_key.into(),
+            session_header,
             client: reqwest::Client::new(),
         }
     }
@@ -52,6 +57,7 @@ impl OpenAiResponsesClient {
                 &self.api_key,
                 &request.options.headers,
                 request.options.session_id.as_deref(),
+                self.session_header.as_ref(),
             )?)
             .json(&body);
 

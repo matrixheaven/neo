@@ -19,15 +19,20 @@ use crate::{
 pub struct AnthropicMessagesClient {
     base_url: String,
     api_key: String,
+    /// Gateway-required conversation header, resolved once from `base_url`.
+    session_header: Option<HeaderName>,
     client: reqwest::Client,
 }
 
 impl AnthropicMessagesClient {
     #[must_use]
     pub fn new(base_url: impl Into<String>, api_key: impl Into<String>) -> Self {
+        let base_url = base_url.into().trim_end_matches('/').to_owned();
+        let session_header = super::common::http::gateway_session_header(&base_url);
         Self {
-            base_url: base_url.into().trim_end_matches('/').to_owned(),
+            base_url,
             api_key: api_key.into(),
+            session_header,
             client: reqwest::Client::new(),
         }
     }
@@ -47,7 +52,12 @@ impl AnthropicMessagesClient {
         let mut builder = self
             .client
             .post(url)
-            .headers(headers(&self.api_key, &request.options.headers)?)
+            .headers(headers(
+                &self.api_key,
+                &request.options.headers,
+                request.options.session_id.as_deref(),
+                self.session_header.as_ref(),
+            )?)
             .json(&body);
 
         if let Some(timeout) = request.options.timeout {
@@ -91,6 +101,8 @@ impl ModelClient for AnthropicMessagesClient {
 fn headers(
     api_key: &str,
     extra_headers: &BTreeMap<String, String>,
+    session_id: Option<&str>,
+    gateway_session_header: Option<&HeaderName>,
 ) -> Result<HeaderMap, ProviderError> {
     let mut headers = HeaderMap::new();
     let mut api_key = HeaderValue::from_str(api_key)
@@ -107,6 +119,11 @@ fn headers(
         .get_mut("x-api-key")
         .expect("x-api-key header is always present")
         .set_sensitive(true);
+    if let Some(name) = gateway_session_header {
+        let value = HeaderValue::from_str(&super::common::http::gateway_session_value(session_id))
+            .map_err(|err| ProviderError::Header(format!("invalid {name} header: {err}")))?;
+        headers.insert(name.clone(), value);
+    }
 
     Ok(headers)
 }
@@ -886,12 +903,26 @@ mod tests {
             ("x-test".to_owned(), "ordinary".to_owned()),
         ]);
 
-        let headers = headers("api-key", &extra_headers).unwrap();
+        let headers = headers("api-key", &extra_headers, None, None).unwrap();
         let api_key = headers.get("x-api-key").unwrap();
 
         assert_eq!(api_key, "override-key");
         assert!(api_key.is_sensitive());
         assert!(!headers.get("x-test").unwrap().is_sensitive());
+    }
+
+    #[test]
+    fn gateway_session_header_carries_the_conversation_id() {
+        let name = HeaderName::from_static("x-opencode-session");
+        let headers = headers(
+            "api-key",
+            &BTreeMap::new(),
+            Some("session_0001"),
+            Some(&name),
+        )
+        .expect("headers");
+
+        assert_eq!(headers.get(&name).unwrap(), "session_0001");
     }
 
     #[test]

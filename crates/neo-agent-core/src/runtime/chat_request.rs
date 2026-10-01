@@ -261,7 +261,7 @@ pub(super) async fn chat_request(
             without_reasoning_content(message.to_chat_message())
         });
     }
-    let session_id = session_directory_name(config);
+    let session_id = config.session_identity();
     Ok(ChatRequest {
         model: config.model.clone(),
         messages,
@@ -491,16 +491,6 @@ pub(super) fn workspace_context_message(config: &AgentConfig) -> Option<AgentMes
          - If an approval is denied, treat it as the user's decision and choose a different safe path instead of retrying the same request.",
         workspace_root.display()
     )))
-}
-
-fn session_directory_name(config: &AgentConfig) -> Option<String> {
-    config
-        .session_directory
-        .as_ref()?
-        .file_name()?
-        .to_str()
-        .filter(|value| !value.is_empty())
-        .map(str::to_owned)
 }
 
 /// Cache lane key: session directory identity + provider instance identity +

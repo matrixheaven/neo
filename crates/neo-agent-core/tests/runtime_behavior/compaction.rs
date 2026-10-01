@@ -925,3 +925,38 @@ async fn compaction_summary_request_honors_off_aux_reasoning_policy() {
         "off policy always sends the explicit disable"
     );
 }
+
+/// The summary call belongs to the conversation being compacted, so it carries
+/// the conversation's session identity like every other request in the session.
+/// Gateways that route on it (OpenCode Zen/Go) reject requests without one.
+#[tokio::test]
+async fn compaction_summary_request_carries_the_conversation_session_id() {
+    let harness = FakeHarness::from_events([
+        AiStreamEvent::TextDelta {
+            text: "summary".to_owned(),
+        },
+        AiStreamEvent::MessageEnd {
+            phase: MessagePhase::Unknown,
+            stop_reason: neo_ai::StopReason::EndTurn,
+            usage: None,
+        },
+    ]);
+    let config = AgentConfig::for_model(model_with_capabilities(ModelCapabilities::tool_chat()))
+        .with_session_directory("sessions/wd_example/session_00000000-0000-4000-8000-000000000001");
+
+    generate_compaction_summary(
+        &harness.client(),
+        &config,
+        &[AgentMessage::user_text("history")],
+        None,
+        &tokio_util::sync::CancellationToken::new(),
+        |_| {},
+    )
+    .await
+    .expect("summary call completes");
+
+    assert_eq!(
+        harness.requests()[0].options.session_id.as_deref(),
+        Some("session_00000000-0000-4000-8000-000000000001")
+    );
+}

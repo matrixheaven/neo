@@ -145,7 +145,7 @@ pub(super) async fn record_initial_session_title(
     }
 
     let fallback = one_line(prompt, 40);
-    let (title, model_label) = match generate_session_title(config, prompt).await {
+    let (title, model_label) = match generate_session_title(config, session_id, prompt).await {
         Ok((title, model_label)) if !title.is_empty() => (title, Some(model_label)),
         Ok((_, _)) => {
             tracing::warn!(
@@ -192,6 +192,7 @@ fn title_messages(prompt: &str) -> Vec<ChatMessage> {
 
 async fn generate_session_title(
     config: &AppConfig,
+    session_id: &str,
     prompt: &str,
 ) -> anyhow::Result<(String, String)> {
     let model = super::runtime::resolve_model(config)?;
@@ -209,6 +210,9 @@ async fn generate_session_title(
         neo_ai::RequestOptions {
             max_tokens: Some(512),
             temperature: Some(0.2),
+            // The title is auxiliary work for this conversation, so it carries
+            // the same session identity as the turn that requested it.
+            session_id: Some(session_id.to_owned()),
             ..neo_ai::RequestOptions::default()
         },
         &policy,

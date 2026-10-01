@@ -487,6 +487,15 @@ impl AgentConfig {
         self
     }
 
+    /// Stable conversation identity sent to providers with every request in
+    /// this session: the session directory name, which never changes while the
+    /// session lives. `None` for sessionless runs (`--no-session`).
+    #[must_use]
+    pub fn session_identity(&self) -> Option<String> {
+        let name = self.session_directory.as_ref()?.file_name()?.to_str()?;
+        (!name.is_empty()).then(|| name.to_owned())
+    }
+
     /// Set the runtime agent id used for agent-scoped session artifacts.
     #[must_use]
     pub fn with_agent_id(mut self, agent_id: impl Into<String>) -> Self {

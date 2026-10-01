@@ -268,6 +268,49 @@ fn run_text_uses_production_openai_responses_adapter_against_mock_provider() {
     assert!(!content.contains("placeholder"));
 }
 
+/// Gateways that route on the conversation id (OpenCode Zen/Go) reject any
+/// request without one. The auxiliary title call belongs to the same
+/// conversation as the turn that requested it, so it must carry the same id.
+#[test]
+fn session_title_request_reuses_the_turn_session_id() {
+    let temp = TempDir::new().expect("tempdir");
+    let server = MockSseServer::start(vec![
+        openai_response_sse("resp-turn", "reply"),
+        openai_response_sse("resp-title", "Title"),
+    ]);
+    write_config(&temp, &mock_responses_config(&server.url));
+
+    let mut command = neo();
+    command
+        .current_dir(temp.path())
+        .env("OPENAI_API_KEY", "test-key")
+        .args(["run", "hello"]);
+    run(command);
+
+    let requests = server.requests();
+    assert_eq!(requests.len(), 2, "main turn + title generation");
+    // The title call is tool-less auxiliary work, so it is the only request
+    // without a tool table.
+    let title = requests
+        .iter()
+        .find(|request| request.body.get("tools").is_none())
+        .expect("title request");
+    let conversation_id = title
+        .headers
+        .get("x-client-request-id")
+        .cloned()
+        .expect("the title request must carry the conversation session id");
+    assert!(conversation_id.starts_with("session_"), "{conversation_id}");
+    for request in &requests {
+        assert_eq!(
+            request.headers.get("x-client-request-id"),
+            Some(&conversation_id),
+            "every request of a conversation must carry its session id: {}",
+            request.body
+        );
+    }
+}
+
 #[test]
 fn run_output_json_emits_stable_typed_events_from_mock_provider() {
     let temp = TempDir::new().expect("tempdir");

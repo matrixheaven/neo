@@ -518,6 +518,9 @@ where
         chat_messages,
         RequestOptions {
             temperature: Some(0.0), // deterministic summary
+            // The summary belongs to the conversation being compacted, so it
+            // carries the same session identity as its chat requests.
+            session_id: config.session_identity(),
             ..RequestOptions::default()
         },
         &config.aux_reasoning,
