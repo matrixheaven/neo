@@ -342,7 +342,8 @@ fn expected_shape(action: Option<WorkflowAction>) -> Value {
 }
 
 fn workflow_input_schema() -> Value {
-    let properties = schema::<WorkflowInput>()["properties"].clone();
+    let generated = schema::<WorkflowInput>();
+    let properties = generated["properties"].clone();
     let branches = [
         WorkflowAction::List,
         WorkflowAction::Show,
@@ -376,7 +377,16 @@ fn workflow_input_schema() -> Value {
         })
     })
     .collect::<Vec<_>>();
-    json!({"type": "object", "oneOf": branches})
+    let mut schema = json!({"type": "object", "oneOf": branches});
+    // The branches above share `properties`, whose `$ref`s (`WorkflowScope`,
+    // `WorkflowPhase`) point into the generated root's `$defs` block. Keeping
+    // the block lets the provider-facing normalization inline them; dropping it
+    // leaves dangling pointers that a validating backend rejects with
+    // "Pointer '/$defs/WorkflowScope' does not exist".
+    if let Some(defs) = generated.get("$defs") {
+        schema["$defs"] = defs.clone();
+    }
+    schema
 }
 
 fn parse_cursor(action: WorkflowAction, cursor: Option<&str>) -> Result<usize, WorkflowInputError> {

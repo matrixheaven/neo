@@ -143,6 +143,53 @@ fn terminal_start_exposes_cwd_and_requires_it_for_nested_scope() {
     );
 }
 
+/// Providers receive each tool schema after `neo_ai::tool_schema::normalize_tool_schema`,
+/// which inlines `$ref` targets and then drops `$defs`/`definitions`. A tool
+/// that rebuilds its root and forgets the generated `$defs` block therefore
+/// ships `$ref`s whose targets no longer exist, and a validating backend
+/// rejects the whole request ("Pointer '/$defs/WorkflowScope' does not exist").
+/// Every built-in tool's sent schema must be self-contained.
+#[test]
+fn builtin_tool_schemas_ship_no_unresolved_refs() {
+    let registry = ToolRegistry::with_builtin_tools();
+    let mut failures = Vec::new();
+    for tool in registry.specs() {
+        let normalized = neo_ai::tool_schema::normalize_tool_schema(&tool.input_schema);
+        let mut refs = Vec::new();
+        collect_refs(&normalized, &tool.name, &mut refs);
+        if !refs.is_empty() {
+            failures.push(format!(
+                "{}: schema still references {:?} after normalization",
+                tool.name, refs
+            ));
+        }
+    }
+    assert!(
+        failures.is_empty(),
+        "tool schemas sent to providers must not contain dangling $refs:\n{}",
+        failures.join("\n")
+    );
+}
+
+fn collect_refs(node: &Value, path: &str, refs: &mut Vec<String>) {
+    match node {
+        Value::Object(object) => {
+            if let Some(reference) = object.get("$ref").and_then(Value::as_str) {
+                refs.push(format!("{path} -> {reference}"));
+            }
+            for (key, value) in object {
+                collect_refs(value, &format!("{path}.{key}"), refs);
+            }
+        }
+        Value::Array(items) => {
+            for (index, item) in items.iter().enumerate() {
+                collect_refs(item, &format!("{path}[{index}]"), refs);
+            }
+        }
+        Value::Null | Value::Bool(_) | Value::Number(_) | Value::String(_) => {}
+    }
+}
+
 /// Verifies that every built-in tool's input schema has a non-empty description
 /// on every object property (recursing into `$defs`/`definitions`).
 #[test]
